@@ -69,8 +69,14 @@ class FilesystemSwarmCommitView:
             raise SwarmFenceLostError("swarm execution fence mismatch")
         return current
 
-    async def create_run(self, run):
-        self._require_open(); return await asyncio.to_thread(self._store._create_run_sync, run)
+    async def create_run_if_absent(self, run):
+        self._require_open()
+        if run.id != self._swarm_run_id:
+            from ..commit import SwarmCommitIntegrityError
+            raise SwarmCommitIntegrityError(
+                "commit scope run id does not match created run"
+            )
+        return await asyncio.to_thread(self._store._create_run_if_absent_sync, run)
     async def create_task(self, task):
         self._require_open(); return await asyncio.to_thread(self._store._create_task_sync, task)
     async def complete_task(self, task_id, result, *, expected_version, active_run_id=None):
@@ -320,6 +326,47 @@ class FilesystemSwarmStore:
             self._run_path(run.id), json.dumps(_run_to_json(run)).encode("utf-8")
         )
         return run
+
+    def _create_run_if_absent_sync(self, run: SwarmRun) -> SwarmRun:
+        from ..commit import SwarmCommitIntegrityError
+        path = self._run_path(run.id)
+        if path.exists():
+            raise SwarmCommitIntegrityError(
+                f"swarm run {run.id!r} already exists without matching commit evidence"
+            )
+        return self._create_run_sync(run)
+
+    async def rotate_execution_token(
+        self, swarm_run_id: str, *, expected_token: str, new_token: str
+    ) -> SwarmRun:
+        if not expected_token or not new_token:
+            raise ValueError("execution tokens must be non-empty")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._rotate_execution_token_sync,
+                swarm_run_id,
+                expected_token=expected_token,
+                new_token=new_token,
+            )
+
+    def _rotate_execution_token_sync(
+        self, swarm_run_id: str, *, expected_token: str, new_token: str
+    ) -> SwarmRun:
+        from ..commit import SwarmFenceLostError
+        current = self._get_run_sync(swarm_run_id)
+        if current is None:
+            raise SwarmRunNotFoundError(swarm_run_id)
+        if current.execution_token != expected_token:
+            raise SwarmFenceLostError("swarm execution fence mismatch")
+        updated = SwarmRun(
+            id=current.id, run_id=current.run_id, round=current.round,
+            status=current.status, version=current.version + 1,
+            token_usage=current.token_usage, cost=current.cost,
+            created_at=current.created_at, updated_at=datetime.now(current.created_at.tzinfo),
+            metadata=current.metadata, execution_token=new_token,
+        )
+        _atomic_write(self._run_path(swarm_run_id), json.dumps(_run_to_json(updated)).encode("utf-8"))
+        return updated
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
         return await asyncio.to_thread(self._create_run_sync, run)

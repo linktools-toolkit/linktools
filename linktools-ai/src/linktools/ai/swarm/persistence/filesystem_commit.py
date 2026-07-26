@@ -26,7 +26,7 @@ import binascii
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
-from ..commit import SwarmCommitConflictError, SwarmCommitPolicy
+from ..commit import SwarmCommitConflictError, SwarmCommitIntegrityError, SwarmCommitPolicy
 from ...run.persistence._replay import canonical_request_hash
 from .codec import SwarmCommitCodec
 
@@ -139,40 +139,25 @@ class FilesystemSwarmCommitCoordinator:
                         "swarm journal has an invalid command payload"
                     ) from exc
 
-                if raw["state"] == "RESULT_READY":
-                    result_payload = base64.b64decode(
-                        raw.get("result_payload_b64") or "", validate=True
-                    )
-                    decoded = self._codec.decode_result(operation, result_payload)
-                    if not isinstance(decoded, Mapping):
-                        raise SwarmRecoveryError("swarm result payload is not a mapping")
-                    self._write_completion(
-                        commit_id, operation, request_hash, decoded, result_payload
-                    )
-                    self._clear_inflight(commit_id)
-                    continue
+                async with self._state_store.commit_scope(swarm_run_id) as state:
+                    if raw["state"] == "RESULT_READY":
+                        result_payload = base64.b64decode(raw.get("result_payload_b64") or "", validate=True)
+                        decoded = self._codec.decode_result(operation, result_payload)
+                        if not isinstance(decoded, Mapping):
+                            raise SwarmRecoveryError("swarm result payload is not a mapping")
+                        self._write_completion(commit_id, operation, request_hash, decoded, result_payload)
+                        self._clear_inflight(commit_id)
+                        continue
 
-                if raw["state"] == "PREPARED":
-                    try:
-                        current = await self._state_store.get_run(swarm_run_id)
-                        if current is not None and current.status in (
-                            SwarmStatus.PENDING,
-                            SwarmStatus.RUNNING,
-                            SwarmStatus.CANCELLING,
-                        ):
-                            await self._state_store.update_run(
-                                swarm_run_id,
-                                expected_version=current.version,
-                                status=SwarmStatus.FAILED,
-                            )
-                    except BaseException as exc:
-                        failures.append(exc)
-                    failures.append(
-                        SwarmRecoveryError(
-                            f"swarm journal {commit_id!r} stopped before durable completion"
-                        )
-                    )
-                    continue
+                    if raw["state"] == "PREPARED":
+                        try:
+                            current = await state.get_run()
+                            if current is not None and current.status in (SwarmStatus.PENDING, SwarmStatus.RUNNING, SwarmStatus.CANCELLING):
+                                await state.update_run(expected_version=current.version, status=SwarmStatus.FAILED)
+                        except BaseException as exc:
+                            failures.append(exc)
+                        failures.append(SwarmRecoveryError(f"swarm journal {commit_id!r} stopped before durable completion"))
+                        continue
                 raise SwarmRecoveryError(
                     f"unknown swarm journal state {raw['state']!r}"
                 )
@@ -285,6 +270,20 @@ class FilesystemSwarmCommitCoordinator:
         else:
             _fsync_parent(path.parent)
 
+    def _matching_inflight(self, commit_id: str, request_hash: bytes) -> bool:
+        path = self._inflight_dir / f"{_hash_segment(commit_id)}.json"
+        if not path.exists():
+            return False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        return (
+            raw.get("commit_id") == commit_id
+            and raw.get("state") in {"PREPARED", "RESULT_READY"}
+            and raw.get("request_hash") == request_hash.hex()
+        )
+
     def _record_inflight_result(self, commit_id: str, operation: str, result: Mapping[str, Any]) -> bytes:
         payload = self._codec.encode_result(operation, result)
         path = self._inflight_dir / f"{_hash_segment(commit_id)}.json"
@@ -346,6 +345,15 @@ class FilesystemSwarmCommitCoordinator:
         if replay is not None:
             return replay
         async with self._state_store.commit_scope(swarm_run_id) as state:
+            reuse_inflight = False
+            if establish_run_owner:
+                existing = await state.get_run()
+                if existing is not None:
+                    reuse_inflight = self._matching_inflight(commit_id, request_hash)
+                    if not reuse_inflight:
+                        raise SwarmCommitIntegrityError(
+                            f"swarm run {swarm_run_id!r} already exists without matching commit evidence"
+                        )
             if not establish_run_owner:
                 current = await state.assert_execution_fence(
                     command.fence.token
@@ -353,13 +361,14 @@ class FilesystemSwarmCommitCoordinator:
                 self._policy.validate(
                     supplied=command.fence, stored_token=current.execution_token
                 )
-            self._write_inflight(
-                commit_id,
-                operation,
-                swarm_run_id,
-                request_hash,
-                self._codec.encode_request(operation, command),
-            )
+            if not reuse_inflight:
+                self._write_inflight(
+                    commit_id,
+                    operation,
+                    swarm_run_id,
+                    request_hash,
+                    self._codec.encode_request(operation, command),
+                )
             result = await run_business(state)
             payload = getattr(command, "payload", None)
             event_context = getattr(payload, "event_context", None)
@@ -382,7 +391,14 @@ class FilesystemSwarmCommitCoordinator:
             run_to_create = _replace(
                 command.payload.run, execution_token=command.fence.token
             )
-            created = await state.create_run(run_to_create)
+            current = await state.get_run()
+            if current is not None:
+                if current != run_to_create:
+                    raise SwarmCommitIntegrityError(
+                        "matching Start evidence does not match persisted run"
+                    )
+                return {"swarm_run_id": current.id, "version": current.version}
+            created = await state.create_run_if_absent(run_to_create)
             return {"swarm_run_id": created.id, "version": created.version}
 
         return await self._run_commit(

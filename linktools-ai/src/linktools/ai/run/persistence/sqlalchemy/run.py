@@ -22,6 +22,11 @@ from ...models import (
     RunResult,
     RunStatus,
 )
+from ....storage.features import ComponentCapabilities
+
+_SQL_RUN_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, optimistic_concurrency=True
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -80,8 +85,7 @@ class SqlAlchemyRunStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ....storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_RUN_CAPABILITIES
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

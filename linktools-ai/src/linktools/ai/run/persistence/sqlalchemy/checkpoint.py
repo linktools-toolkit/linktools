@@ -19,6 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from linktools.ai.storage.sqlalchemy.models import RunCheckpointCounterRow, RunCheckpointRow
 from ...models import NewRunCheckpoint, RunCheckpoint
+from ....storage.features import ComponentCapabilities
+
+_SQL_CHECKPOINT_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, append_only=True
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -62,8 +67,7 @@ class SqlAlchemyCheckpointStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ....storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_CHECKPOINT_CAPABILITIES
 
     def _append_lock_for(self, run_id: str) -> asyncio.Lock:
         lock = self._append_locks.get(run_id)

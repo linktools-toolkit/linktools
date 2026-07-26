@@ -52,11 +52,8 @@ def test_file_storage_features_match_spec(tmp_path):
     # transaction_scope=NONE: each file store is independently durable, but
     # there is NO general cross-store transaction (Storage.transaction()
     # raises). transactional_components is empty -- no components are grouped.
-    # Features are DERIVED from real wired objects: only the ObjectStore
-    # (assets) declares optimistic concurrency (versioning/CAS); the other
-    # stores do not. append_only_events is False (the FS event store is not
-    # declared append-only). This is the CORRECT derivation -- the old
-    # hand-maintained FILE_STORAGE_FEATURES constant over-claimed.
+    # Filesystem remains process-local and does not participate in a database
+    # transaction; only its asset store exposes optimistic concurrency.
     _assets_only = frozenset({StorageComponent.ASSETS})
     assert features == StorageFeatures(
         transaction_scope=TransactionScope.NONE,
@@ -75,19 +72,24 @@ def test_file_storage_features_match_spec(tmp_path):
 def test_sqlalchemy_storage_features_match_spec(tmp_path):
     storage = _sql_storage(tmp_path)
     features = storage.features
-    # The in-repo SqlAlchemy reference ships the process-local coordinator,
-    # so it declares PROCESS_LOCAL coordination. One AsyncSession groups every
-    # store, so every component is transactional.
-    # DERIVED: only ASSETS + ARTIFACT_RECORDS participate in the cross-store
-    # UoW transaction (the other stores are not session-bound). The old
-    # SQLALCHEMY_STORAGE_FEATURES constant claimed _ALL for both -- wrong.
-    _txn = frozenset({StorageComponent.ASSETS, StorageComponent.ARTIFACT_RECORDS})
+    # SQL UoW binds every listed SQL Store to the same AsyncSession.
+    _txn = frozenset({
+        StorageComponent.ASSETS, StorageComponent.ARTIFACT_RECORDS,
+        StorageComponent.RUNS, StorageComponent.SESSIONS,
+        StorageComponent.EVENTS, StorageComponent.APPROVALS,
+        StorageComponent.CHECKPOINTS, StorageComponent.JOBS,
+    })
+    _optimistic = frozenset({
+        StorageComponent.ASSETS, StorageComponent.ARTIFACT_RECORDS,
+        StorageComponent.RUNS, StorageComponent.APPROVALS,
+        StorageComponent.JOBS,
+    })
     assert features == StorageFeatures(
         transaction_scope=TransactionScope.DATABASE,
         transactional_components=_txn,
         coordination_scope=CoordinationScope.PROCESS_LOCAL,
-        optimistic_concurrency=_txn,
-        append_only_events=False,
+        optimistic_concurrency=_optimistic,
+        append_only_events=True,
         leasing=True,
         fencing=True,
         idempotency=True,

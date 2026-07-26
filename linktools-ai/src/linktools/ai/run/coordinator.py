@@ -1168,7 +1168,7 @@ class RunCoordinator:
                     run_id=run_id,
                     expected_version=expected_version,
                     approval_request=ApprovalRequestData(
-                        tenant_id=context.tenant_id or "",
+                        tenant_id=context.tenant_id or "local",
                         approval_id=outcome.request.approval_id,
                         tool_call_id=outcome.request.tool_call_id,
                         tool_name=outcome.request.tool_name or "",

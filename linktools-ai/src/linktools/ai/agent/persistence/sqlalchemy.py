@@ -34,6 +34,11 @@ from ...errors import (
     ApprovalNotFoundError,
     InvalidApprovalTransitionError,
 )
+from ...storage.features import ComponentCapabilities
+
+_SQL_APPROVAL_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, optimistic_concurrency=True, idempotency=True
+)
 
 #: Key under which ``reject(reason=...)`` is recorded in the request's metadata.
 REJECTION_REASON_METADATA_KEY = "rejection_reason"
@@ -119,8 +124,7 @@ class SqlAlchemyApprovalStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ...storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_APPROVAL_CAPABILITIES
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

@@ -43,6 +43,11 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from linktools.ai.storage.sqlalchemy.models import SessionMessageRow, SessionRow
+from ...storage.features import ComponentCapabilities
+
+_SQL_SESSION_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, idempotency=True
+)
 from ...errors import SessionError, SessionSequenceConflictError
 from ..models import (
     MessageRole,
@@ -105,8 +110,7 @@ class SqlAlchemySessionStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ...storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_SESSION_CAPABILITIES
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

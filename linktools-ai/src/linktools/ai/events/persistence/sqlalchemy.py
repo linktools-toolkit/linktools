@@ -24,6 +24,11 @@ from ..envelope import EventEnvelope
 from ..payloads import EventPayload
 from ..registry import EventCodec, default_codec
 from ..store import EventPage
+from ...storage.features import ComponentCapabilities
+
+_SQL_EVENT_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, idempotency=True, append_only=True
+)
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -54,8 +59,7 @@ class SqlAlchemyEventStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ...storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_EVENT_CAPABILITIES
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

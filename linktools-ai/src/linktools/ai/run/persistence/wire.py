@@ -9,15 +9,16 @@ from __future__ import annotations
 import base64
 import json
 import math
+import binascii
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from hashlib import sha256
-from typing import Any, Mapping, TypeVar
+from typing import Any, Mapping, TypeVar, Annotated
 from typing import Literal
 from typing_extensions import TypeAliasType
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from ...events.context import EventStreamContext
 from ...events.payloads import (
@@ -58,6 +59,12 @@ class RunCommitIntegrityError(Exception):
 
 JsonScalar = str | int | float | bool | None
 JsonValue = TypeAliasType("JsonValue", JsonScalar | list["JsonValue"] | dict[str, "JsonValue"])
+DecodedRunCommand = (StartRunCommand | PauseRunCommand | ResumeRunCommand |
+                     CompleteRunCommand | FailRunCommand | RequestCancelRunCommand |
+                     AcknowledgeCancelRunCommand)
+DecodedRunResult = (StartedRunCommit | PausedRunCommit | ResumedRunCommit |
+                    CompletedRunCommit | FailedRunCommit | CancellingRunCommit |
+                    CancelledRunCommit)
 
 
 class _WireModel(BaseModel):
@@ -114,6 +121,173 @@ class EventWire(_WireModel):
     payload: dict[str, JsonValue]
 
 
+NonEmptyId = Annotated[str, Field(min_length=1, max_length=512)]
+CommitIdValue = Annotated[str, Field(min_length=1, max_length=200)]
+NonEmptyFence = Annotated[str, Field(min_length=1)]
+NonNegativeVersion = Annotated[int, Field(ge=0)]
+
+
+class RunRecordWire(_WireModel):
+    id: NonEmptyId
+    root_run_id: NonEmptyId
+    parent_run_id: str | None
+    session_id: NonEmptyId
+    runnable_id: NonEmptyId
+    runnable_type: str
+    status: str
+    input: RunInputWire
+    result: RunResultWire | None
+    error: RunErrorWire | None
+    version: NonNegativeVersion
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    metadata: dict[str, JsonValue]
+    cancel_requested_at: str | None
+    cancel_requested_by: str | None
+    cancel_reason: str | None
+    worker_id: str | None
+    execution_token: str | None
+    heartbeat_at: str | None
+    manifest_id: str | None
+    resumability: str | None
+
+
+class ApprovalRequestWire(_WireModel):
+    approval_id: NonEmptyId
+    tool_name: NonEmptyId
+    reason: str
+    arguments: dict[str, JsonValue]
+    tenant_id: NonEmptyId
+    tool_call_id: str | None
+    binding: dict[str, JsonValue]
+
+
+class _CheckpointWire(_WireModel):
+    checkpoint_payload_b64: str
+
+    @field_validator("checkpoint_payload_b64")
+    @classmethod
+    def validate_checkpoint_base64(cls, value: str) -> str:
+        try:
+            base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("invalid base64") from exc
+        return value
+
+
+def _json_message_sequence(value: Any) -> tuple[NewSessionMessageWire, ...]:
+    if not isinstance(value, list):
+        raise ValueError("messages must be a JSON array")
+    return tuple(NewSessionMessageWire.model_validate(item) for item in value)
+
+
+class StartRunRequestWire(_WireModel):
+    record: RunRecordWire
+    started_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+
+
+class PauseRunRequestWire(_CheckpointWire):
+    run_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    approval_request: ApprovalRequestWire
+    paused_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+    execution_fence: NonEmptyFence | None
+    messages: tuple[NewSessionMessageWire, ...]
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def validate_messages(cls, value: Any) -> tuple[NewSessionMessageWire, ...]:
+        return _json_message_sequence(value)
+
+
+class ResumeRunRequestWire(_WireModel):
+    run_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    approval_id: NonEmptyId
+    resumed_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+
+
+class CompleteRunRequestWire(_CheckpointWire):
+    run_id: NonEmptyId
+    session_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    messages: tuple[NewSessionMessageWire, ...]
+    result: RunResultWire
+    completed_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+    execution_fence: NonEmptyFence | None
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def validate_messages(cls, value: Any) -> tuple[NewSessionMessageWire, ...]:
+        return _json_message_sequence(value)
+
+
+class FailRunRequestWire(_WireModel):
+    run_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    error: RunErrorWire
+    failed_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+    execution_fence: NonEmptyFence | None
+
+
+class RequestCancelRunRequestWire(_WireModel):
+    run_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    requested_by: NonEmptyId
+    reason: str | None
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+
+
+class AcknowledgeCancelRunRequestWire(_WireModel):
+    run_id: NonEmptyId
+    expected_version: NonNegativeVersion
+    cancelled_event: EventWire
+    event_context: EventContextWire
+    commit_id: CommitIdValue
+    execution_fence: NonEmptyFence | None
+
+
+class StartedRunResultWire(_WireModel):
+    record: RunRecordWire
+
+
+class PausedRunResultWire(_WireModel):
+    approval_id: NonEmptyId
+    checkpoint_id: NonEmptyId
+
+
+class ResumedRunResultWire(_WireModel):
+    run_id: NonEmptyId
+
+
+class CompletedRunResultWire(_WireModel):
+    result: RunResultWire
+
+
+class FailedRunResultWire(_WireModel):
+    run_id: NonEmptyId
+
+
+class CancellingRunResultWire(_WireModel):
+    run_id: NonEmptyId
+
+
+class CancelledRunResultWire(_WireModel):
+    run_id: NonEmptyId
+
+
 def require_json_value(value: Any, path: str = "value") -> JsonValue:
     """Validate the boundary used by free-form domain values."""
     if value is None or isinstance(value, (str, bool, int)):
@@ -168,37 +342,19 @@ def _unb64(value: Any, path: str) -> bytes:
         raise RunCommitCodecError(f"{path}: invalid base64") from exc
 
 
-def _obj(value: Any, path: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise RunCommitCodecError(f"{path}: expected object")
-    return value
-
-
-def _exact(value: Any, fields: set[str], path: str) -> dict[str, Any]:
-    obj = _obj(value, path)
-    extra = set(obj) - fields
-    missing = fields - set(obj)
-    if extra:
-        raise RunCommitCodecError(f"{path}: unknown fields {sorted(extra)!r}")
-    if missing:
-        raise RunCommitCodecError(f"{path}: missing fields {sorted(missing)!r}")
-    return obj
-
-
 def _ctx(value: EventStreamContext) -> dict[str, Any]:
     return {"stream_id": value.stream_id, "run_id": value.run_id,
             "root_run_id": value.root_run_id, "parent_run_id": value.parent_run_id,
             "session_id": value.session_id, "runnable_id": value.runnable_id}
 
 
-def _ctx_from(value: Any) -> EventStreamContext:
-    o = _exact(value, {"stream_id", "run_id", "root_run_id", "parent_run_id", "session_id", "runnable_id"}, "event_context")
-    return EventStreamContext(**o)
+def _ctx_from(value: EventContextWire) -> EventStreamContext:
+    return EventStreamContext(**value.model_dump())
 
 
-_EVENTS = {RunStarted: ("started", ("run_id", "runnable_id")), RunPaused: ("paused", ("run_id", "reason")),
-           RunResumed: ("resumed", ("run_id",)), RunCompleted: ("completed", ("run_id", "result_summary")),
-           RunFailed: ("failed", ("run_id", "error_type", "message")), RunCancelled: ("cancelled", ("run_id", "reason"))}
+_EVENTS = {RunStarted: ("run.started", ("run_id", "runnable_id")), RunPaused: ("run.paused", ("run_id", "reason")),
+           RunResumed: ("run.resumed", ("run_id",)), RunCompleted: ("run.completed", ("run_id", "result_summary")),
+           RunFailed: ("run.failed", ("run_id", "error_type", "message")), RunCancelled: ("run.cancelled", ("run_id", "reason"))}
 _EVENT_BY_NAME = {name: cls for cls, (name, _) in _EVENTS.items()}
 
 
@@ -209,14 +365,14 @@ def _event(value: Any) -> dict[str, Any]:
     raise RunCommitCodecError(f"event: unsupported lifecycle event {type(value).__name__}")
 
 
-def _event_from(value: Any) -> Any:
-    o = _exact(value, {"event_type", "schema_version", "payload"}, "event")
-    if o["schema_version"] != 1 or o["event_type"] not in _EVENT_BY_NAME:
+def _event_from(value: EventWire) -> Any:
+    if value.schema_version != 1 or value.event_type not in _EVENT_BY_NAME:
         raise RunCommitCodecError("event: unknown type or schema")
-    cls = _EVENT_BY_NAME[o["event_type"]]
+    cls = _EVENT_BY_NAME[value.event_type]
     fields = _EVENTS[cls][1]
-    p = _exact(o["payload"], set(fields), "event.payload")
-    return cls(**p)
+    if set(value.payload) != set(fields):
+        raise RunCommitCodecError("event.payload: fields do not match event type")
+    return cls(**value.payload)
 
 
 def _message(value: NewSessionMessage) -> dict[str, Any]:
@@ -224,20 +380,18 @@ def _message(value: NewSessionMessage) -> dict[str, Any]:
             "run_id": value.run_id, "metadata": _json(value.metadata, "message.metadata")}
 
 
-def _message_from(value: Any) -> NewSessionMessage:
-    o = _exact(value, {"role", "content", "run_id", "metadata"}, "message")
-    try: role = MessageRole(o["role"])
+def _message_from(value: NewSessionMessageWire) -> NewSessionMessage:
+    try: role = MessageRole(value.role)
     except ValueError as exc: raise RunCommitCodecError("message.role: unknown role") from exc
-    return NewSessionMessage(role=role, content=o["content"], run_id=o["run_id"], metadata=o["metadata"])
+    return NewSessionMessage(role=role, content=value.content, run_id=value.run_id, metadata=value.metadata)
 
 
 def _input(value: RunInput) -> dict[str, Any]:
     return {"prompt": value.prompt, "metadata": _json(value.metadata, "input.metadata")}
 
 
-def _input_from(value: Any) -> RunInput:
-    o = _exact(value, {"prompt", "metadata"}, "input")
-    return RunInput(prompt=o["prompt"], metadata=o["metadata"])
+def _input_from(value: RunInputWire) -> RunInput:
+    return RunInput(prompt=value.prompt, metadata=value.metadata)
 
 
 def _result(value: RunResult | None) -> dict[str, Any] | None:
@@ -245,10 +399,8 @@ def _result(value: RunResult | None) -> dict[str, Any] | None:
     return {"output": _json(value.output, "result.output"), "token_usage": _json(value.token_usage, "result.token_usage"), "metadata": _json(value.metadata, "result.metadata")}
 
 
-def _result_from(value: Any) -> RunResult | None:
-    if value is None: return None
-    o = _exact(value, {"output", "token_usage", "metadata"}, "result")
-    return RunResult(output=o["output"], token_usage=o["token_usage"], metadata=o["metadata"])
+def run_result_from_wire(value: RunResultWire) -> RunResult:
+    return RunResult(output=value.output, token_usage=value.token_usage, metadata=value.metadata)
 
 
 def _error(value: RunErrorInfo | None) -> dict[str, Any] | None:
@@ -256,10 +408,8 @@ def _error(value: RunErrorInfo | None) -> dict[str, Any] | None:
     return {"error_type": value.error_type, "message": value.message, "detail": _json(value.detail, "error.detail")}
 
 
-def _error_from(value: Any) -> RunErrorInfo | None:
-    if value is None: return None
-    o = _exact(value, {"error_type", "message", "detail"}, "error")
-    return RunErrorInfo(error_type=o["error_type"], message=o["message"], detail=o["detail"])
+def run_error_from_wire(value: RunErrorWire) -> RunErrorInfo:
+    return RunErrorInfo(error_type=value.error_type, message=value.message, detail=value.detail)
 
 
 def run_record_to_wire(value: RunRecord) -> dict[str, Any]:
@@ -275,17 +425,34 @@ def run_record_to_wire(value: RunRecord) -> dict[str, Any]:
             "manifest_id": value.manifest_id, "resumability": value.resumability}
 
 
-def run_record_from_wire(value: Any) -> RunRecord:
-    fields = {"id", "root_run_id", "parent_run_id", "session_id", "runnable_id", "runnable_type", "status", "input", "result", "error", "version", "created_at", "started_at", "finished_at", "metadata", "cancel_requested_at", "cancel_requested_by", "cancel_reason", "worker_id", "execution_token", "heartbeat_at", "manifest_id", "resumability"}
-    o = _exact(value, fields, "record")
-    return RunRecord(id=o["id"], root_run_id=o["root_run_id"], parent_run_id=o["parent_run_id"], session_id=o["session_id"], runnable_id=o["runnable_id"], runnable_type=RunnableType(o["runnable_type"]), status=RunStatus(o["status"]), input=_input_from(o["input"]), result=_result_from(o["result"]), error=_error_from(o["error"]), version=o["version"], created_at=_parse_dt(o["created_at"], "record.created_at"), started_at=_parse_dt(o["started_at"], "record.started_at") if o["started_at"] else None, finished_at=_parse_dt(o["finished_at"], "record.finished_at") if o["finished_at"] else None, metadata=o["metadata"], cancel_requested_at=_parse_dt(o["cancel_requested_at"], "record.cancel_requested_at") if o["cancel_requested_at"] else None, cancel_requested_by=o["cancel_requested_by"], cancel_reason=o["cancel_reason"], worker_id=o["worker_id"], execution_token=o["execution_token"], heartbeat_at=_parse_dt(o["heartbeat_at"], "record.heartbeat_at") if o["heartbeat_at"] else None, manifest_id=o["manifest_id"], resumability=o["resumability"])
+def run_record_from_wire(value: RunRecordWire) -> RunRecord:
+    try:
+        return RunRecord(
+            id=value.id, root_run_id=value.root_run_id, parent_run_id=value.parent_run_id,
+            session_id=value.session_id, runnable_id=value.runnable_id,
+            runnable_type=RunnableType(value.runnable_type), status=RunStatus(value.status),
+            input=_input_from(value.input),
+            result=None if value.result is None else run_result_from_wire(value.result),
+            error=None if value.error is None else run_error_from_wire(value.error),
+            version=value.version, created_at=_parse_dt(value.created_at, "record.created_at"),
+            started_at=_parse_dt(value.started_at, "record.started_at") if value.started_at else None,
+            finished_at=_parse_dt(value.finished_at, "record.finished_at") if value.finished_at else None,
+            metadata=value.metadata,
+            cancel_requested_at=_parse_dt(value.cancel_requested_at, "record.cancel_requested_at") if value.cancel_requested_at else None,
+            cancel_requested_by=value.cancel_requested_by, cancel_reason=value.cancel_reason,
+            worker_id=value.worker_id, execution_token=value.execution_token,
+            heartbeat_at=_parse_dt(value.heartbeat_at, "record.heartbeat_at") if value.heartbeat_at else None,
+            manifest_id=value.manifest_id, resumability=value.resumability,
+        )
+    except (ValueError, TypeError) as exc:
+        raise RunCommitCodecError("record contains invalid domain values") from exc
 
 
 def _fence(value: ExecutionFence | None) -> str | None:
     return value.token if value else None
 
 
-def _fence_from(value: Any) -> ExecutionFence | None:
+def _fence_from(value: str | None) -> ExecutionFence | None:
     return ExecutionFence(value) if value is not None else None
 
 
@@ -293,68 +460,122 @@ def _approval(value: ApprovalRequestData) -> dict[str, Any]:
     return {"approval_id": value.approval_id, "tool_name": value.tool_name, "reason": value.reason, "arguments": _json(value.arguments, "approval.arguments"), "tenant_id": value.tenant_id, "tool_call_id": value.tool_call_id, "binding": _json(value.binding, "approval.binding")}
 
 
-def _approval_from(value: Any) -> ApprovalRequestData:
-    o = _exact(value, {"approval_id", "tool_name", "reason", "arguments", "tenant_id", "tool_call_id", "binding"}, "approval")
-    return ApprovalRequestData(**o)
+def _approval_from(value: ApprovalRequestWire) -> ApprovalRequestData:
+    return ApprovalRequestData(**value.model_dump())
 
 
-def _command(value: Any, operation: RunCommitOperation) -> dict[str, Any]:
+def _request_wire(value: Any, operation: RunCommitOperation) -> _WireModel:
     common = {"commit_id": value.commit_id.value}
-    if operation is RunCommitOperation.START: return {**common, "record": run_record_to_wire(value.record), "started_event": _event(value.started_event), "event_context": _ctx(value.event_context)}
-    if operation is RunCommitOperation.PAUSE: return {**common, "run_id": value.run_id, "expected_version": value.expected_version, "approval_request": _approval(value.approval_request), "checkpoint_payload_b64": _b64(value.checkpoint_payload, "checkpoint_payload"), "paused_event": _event(value.paused_event), "event_context": _ctx(value.event_context), "execution_fence": _fence(value.execution_fence), "messages": [_message(x) for x in value.messages]}
-    if operation is RunCommitOperation.RESUME: return {**common, "run_id": value.run_id, "expected_version": value.expected_version, "approval_id": value.approval_id, "resumed_event": _event(value.resumed_event), "event_context": _ctx(value.event_context)}
-    if operation is RunCommitOperation.COMPLETE: return {**common, "run_id": value.run_id, "session_id": value.session_id, "expected_version": value.expected_version, "messages": [_message(x) for x in value.messages], "checkpoint_payload_b64": _b64(value.checkpoint_payload, "checkpoint_payload"), "result": _result(value.result), "completed_event": _event(value.completed_event), "event_context": _ctx(value.event_context), "execution_fence": _fence(value.execution_fence)}
-    if operation is RunCommitOperation.FAIL: return {**common, "run_id": value.run_id, "expected_version": value.expected_version, "error": _error(value.error), "failed_event": _event(value.failed_event), "event_context": _ctx(value.event_context), "execution_fence": _fence(value.execution_fence)}
-    if operation is RunCommitOperation.REQUEST_CANCEL: return {**common, "run_id": value.run_id, "expected_version": value.expected_version, "requested_by": value.requested_by, "reason": value.reason, "event_context": _ctx(value.event_context)}
-    if operation is RunCommitOperation.ACKNOWLEDGE_CANCEL: return {**common, "run_id": value.run_id, "expected_version": value.expected_version, "cancelled_event": _event(value.cancelled_event), "event_context": _ctx(value.event_context), "execution_fence": _fence(value.execution_fence)}
+    if operation is RunCommitOperation.START:
+        return StartRunRequestWire(record=RunRecordWire.model_validate(run_record_to_wire(value.record)), started_event=EventWire.model_validate(_event(value.started_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), **common)
+    if operation is RunCommitOperation.PAUSE:
+        return PauseRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, approval_request=ApprovalRequestWire.model_validate(_approval(value.approval_request)), checkpoint_payload_b64=_b64(value.checkpoint_payload, "checkpoint_payload"), paused_event=EventWire.model_validate(_event(value.paused_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), execution_fence=_fence(value.execution_fence), messages=[NewSessionMessageWire.model_validate(_message(x)) for x in value.messages], **common)
+    if operation is RunCommitOperation.RESUME:
+        return ResumeRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, approval_id=value.approval_id, resumed_event=EventWire.model_validate(_event(value.resumed_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), **common)
+    if operation is RunCommitOperation.COMPLETE:
+        return CompleteRunRequestWire(run_id=value.run_id, session_id=value.session_id, expected_version=value.expected_version, messages=[NewSessionMessageWire.model_validate(_message(x)) for x in value.messages], checkpoint_payload_b64=_b64(value.checkpoint_payload, "checkpoint_payload"), result=RunResultWire.model_validate(_result(value.result)), completed_event=EventWire.model_validate(_event(value.completed_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), execution_fence=_fence(value.execution_fence), **common)
+    if operation is RunCommitOperation.FAIL:
+        return FailRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, error=RunErrorWire.model_validate(_error(value.error)), failed_event=EventWire.model_validate(_event(value.failed_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), execution_fence=_fence(value.execution_fence), **common)
+    if operation is RunCommitOperation.REQUEST_CANCEL:
+        return RequestCancelRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, requested_by=value.requested_by, reason=value.reason, event_context=EventContextWire.model_validate(_ctx(value.event_context)), **common)
+    if operation is RunCommitOperation.ACKNOWLEDGE_CANCEL:
+        return AcknowledgeCancelRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, cancelled_event=EventWire.model_validate(_event(value.cancelled_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), execution_fence=_fence(value.execution_fence), **common)
     raise RunCommitCodecError(f"unsupported operation {operation!r}")
 
 
-def _result_wire(value: Any, operation: RunCommitOperation) -> dict[str, Any]:
-    if operation is RunCommitOperation.START: return {"record": run_record_to_wire(value.record)}
-    if operation is RunCommitOperation.PAUSE: return {"approval_id": value.approval_id, "checkpoint_id": value.checkpoint_id}
-    if operation is RunCommitOperation.COMPLETE: return {"result": _result(value.result)}
-    return {"run_id": value.run_id}
+REQUEST_WIRE_MODELS = {
+    RunCommitOperation.START: StartRunRequestWire,
+    RunCommitOperation.PAUSE: PauseRunRequestWire,
+    RunCommitOperation.RESUME: ResumeRunRequestWire,
+    RunCommitOperation.COMPLETE: CompleteRunRequestWire,
+    RunCommitOperation.FAIL: FailRunRequestWire,
+    RunCommitOperation.REQUEST_CANCEL: RequestCancelRunRequestWire,
+    RunCommitOperation.ACKNOWLEDGE_CANCEL: AcknowledgeCancelRunRequestWire,
+}
+RESULT_WIRE_MODELS = {
+    RunCommitOperation.START: StartedRunResultWire,
+    RunCommitOperation.PAUSE: PausedRunResultWire,
+    RunCommitOperation.RESUME: ResumedRunResultWire,
+    RunCommitOperation.COMPLETE: CompletedRunResultWire,
+    RunCommitOperation.FAIL: FailedRunResultWire,
+    RunCommitOperation.REQUEST_CANCEL: CancellingRunResultWire,
+    RunCommitOperation.ACKNOWLEDGE_CANCEL: CancelledRunResultWire,
+}
 
 
-def _parse_common(o: dict[str, Any]) -> RunCommitId:
-    return RunCommitId(o["commit_id"])
+def _require_event_type(value: EventWire, expected: str, path: str) -> None:
+    if value.event_type != expected:
+        raise RunCommitCodecError(f"{path}.event_type must be {expected!r}")
 
 
-def _command_from(value: Any, operation: RunCommitOperation) -> Any:
-    o = _obj(value, "payload")
+def _request_from_wire(value: _WireModel, operation: RunCommitOperation) -> DecodedRunCommand:
     if operation is RunCommitOperation.START:
-        _exact(o, {"commit_id", "record", "started_event", "event_context"}, "payload")
-        return StartRunCommand(run_record_from_wire(o["record"]), _event_from(o["started_event"]), _ctx_from(o["event_context"]), _parse_common(o))
-    base = {"commit_id": _parse_common(o), "run_id": o["run_id"], "expected_version": o["expected_version"], "event_context": _ctx_from(o["event_context"])}
+        wire = value
+        assert isinstance(wire, StartRunRequestWire)
+        _require_event_type(wire.started_event, "run.started", "start.started_event")
+        return StartRunCommand(run_record_from_wire(wire.record), _event_from(wire.started_event), _ctx_from(wire.event_context), RunCommitId(wire.commit_id))
     if operation is RunCommitOperation.PAUSE:
-        _exact(o, {"commit_id", "run_id", "expected_version", "approval_request", "checkpoint_payload_b64", "paused_event", "event_context", "execution_fence", "messages"}, "payload")
-        return PauseRunCommand(**base, approval_request=_approval_from(o["approval_request"]), checkpoint_payload=_unb64(o["checkpoint_payload_b64"], "checkpoint_payload"), paused_event=_event_from(o["paused_event"]), execution_fence=_fence_from(o["execution_fence"]), messages=tuple(_message_from(x) for x in o["messages"]))
+        wire = value
+        assert isinstance(wire, PauseRunRequestWire)
+        _require_event_type(wire.paused_event, "run.paused", "pause.paused_event")
+        return PauseRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, approval_request=_approval_from(wire.approval_request), checkpoint_payload=_unb64(wire.checkpoint_payload_b64, "pause.checkpoint_payload_b64"), paused_event=_event_from(wire.paused_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id), execution_fence=_fence_from(wire.execution_fence), messages=tuple(_message_from(item) for item in wire.messages))
     if operation is RunCommitOperation.RESUME:
-        _exact(o, {"commit_id", "run_id", "expected_version", "approval_id", "resumed_event", "event_context"}, "payload")
-        return ResumeRunCommand(**base, approval_id=o["approval_id"], resumed_event=_event_from(o["resumed_event"]))
+        wire = value
+        assert isinstance(wire, ResumeRunRequestWire)
+        _require_event_type(wire.resumed_event, "run.resumed", "resume.resumed_event")
+        return ResumeRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, approval_id=wire.approval_id, resumed_event=_event_from(wire.resumed_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id))
     if operation is RunCommitOperation.COMPLETE:
-        _exact(o, {"commit_id", "run_id", "session_id", "expected_version", "messages", "checkpoint_payload_b64", "result", "completed_event", "event_context", "execution_fence"}, "payload")
-        return CompleteRunCommand(**base, session_id=o["session_id"], messages=tuple(_message_from(x) for x in o["messages"]), checkpoint_payload=_unb64(o["checkpoint_payload_b64"], "checkpoint_payload"), result=_result_from(o["result"]), completed_event=_event_from(o["completed_event"]), execution_fence=_fence_from(o["execution_fence"]))
+        wire = value
+        assert isinstance(wire, CompleteRunRequestWire)
+        _require_event_type(wire.completed_event, "run.completed", "complete.completed_event")
+        return CompleteRunCommand(run_id=wire.run_id, session_id=wire.session_id, expected_version=wire.expected_version, messages=tuple(_message_from(item) for item in wire.messages), checkpoint_payload=_unb64(wire.checkpoint_payload_b64, "complete.checkpoint_payload_b64"), result=run_result_from_wire(wire.result), completed_event=_event_from(wire.completed_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id), execution_fence=_fence_from(wire.execution_fence))
     if operation is RunCommitOperation.FAIL:
-        _exact(o, {"commit_id", "run_id", "expected_version", "error", "failed_event", "event_context", "execution_fence"}, "payload")
-        return FailRunCommand(**base, error=_error_from(o["error"]), failed_event=_event_from(o["failed_event"]), execution_fence=_fence_from(o["execution_fence"]))
+        wire = value
+        assert isinstance(wire, FailRunRequestWire)
+        _require_event_type(wire.failed_event, "run.failed", "fail.failed_event")
+        return FailRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, error=run_error_from_wire(wire.error), failed_event=_event_from(wire.failed_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id), execution_fence=_fence_from(wire.execution_fence))
     if operation is RunCommitOperation.REQUEST_CANCEL:
-        _exact(o, {"commit_id", "run_id", "expected_version", "requested_by", "reason", "event_context"}, "payload")
-        return RequestCancelRunCommand(**base, requested_by=o["requested_by"], reason=o["reason"])
-    _exact(o, {"commit_id", "run_id", "expected_version", "cancelled_event", "event_context", "execution_fence"}, "payload")
-    return AcknowledgeCancelRunCommand(**base, cancelled_event=_event_from(o["cancelled_event"]), execution_fence=_fence_from(o["execution_fence"]))
+        wire = value
+        assert isinstance(wire, RequestCancelRunRequestWire)
+        return RequestCancelRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, requested_by=wire.requested_by, reason=wire.reason, event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id))
+    wire = value
+    assert isinstance(wire, AcknowledgeCancelRunRequestWire)
+    _require_event_type(wire.cancelled_event, "run.cancelled", "acknowledge_cancel.cancelled_event")
+    return AcknowledgeCancelRunCommand(run_id=wire.run_id, expected_version=wire.expected_version, cancelled_event=_event_from(wire.cancelled_event), event_context=_ctx_from(wire.event_context), commit_id=RunCommitId(wire.commit_id), execution_fence=_fence_from(wire.execution_fence))
 
 
-def _result_from_wire(value: Any, operation: RunCommitOperation) -> Any:
-    o = _obj(value, "payload")
-    if operation is RunCommitOperation.START: return StartedRunCommit(run_record_from_wire(_exact(o, {"record"}, "payload")["record"]))
-    if operation is RunCommitOperation.PAUSE: _exact(o, {"approval_id", "checkpoint_id"}, "payload"); return PausedRunCommit(**o)
-    if operation is RunCommitOperation.RESUME: _exact(o, {"run_id"}, "payload"); return ResumedRunCommit(**o)
-    if operation is RunCommitOperation.COMPLETE: _exact(o, {"result"}, "payload"); return CompletedRunCommit(result=_result_from(o["result"]))
-    if operation is RunCommitOperation.FAIL: _exact(o, {"run_id"}, "payload"); return FailedRunCommit(**o)
-    if operation is RunCommitOperation.REQUEST_CANCEL: _exact(o, {"run_id"}, "payload"); return CancellingRunCommit(**o)
-    _exact(o, {"run_id"}, "payload"); return CancelledRunCommit(**o)
+def _decode_result_model(value: _WireModel, operation: RunCommitOperation) -> DecodedRunResult:
+    if operation is RunCommitOperation.START:
+        assert isinstance(value, StartedRunResultWire)
+        return StartedRunCommit(run_record_from_wire(value.record))
+    if operation is RunCommitOperation.PAUSE:
+        assert isinstance(value, PausedRunResultWire)
+        return PausedRunCommit(approval_id=value.approval_id, checkpoint_id=value.checkpoint_id)
+    if operation is RunCommitOperation.RESUME:
+        assert isinstance(value, ResumedRunResultWire)
+        return ResumedRunCommit(run_id=value.run_id)
+    if operation is RunCommitOperation.COMPLETE:
+        assert isinstance(value, CompletedRunResultWire)
+        return CompletedRunCommit(result=run_result_from_wire(value.result))
+    if operation is RunCommitOperation.FAIL:
+        assert isinstance(value, FailedRunResultWire)
+        return FailedRunCommit(run_id=value.run_id)
+    if operation is RunCommitOperation.REQUEST_CANCEL:
+        assert isinstance(value, CancellingRunResultWire)
+        return CancellingRunCommit(run_id=value.run_id)
+    assert isinstance(value, CancelledRunResultWire)
+    return CancelledRunCommit(run_id=value.run_id)
+
+
+def _result_wire(value: Any, operation: RunCommitOperation) -> _WireModel:
+    if operation is RunCommitOperation.START:
+        return StartedRunResultWire(record=RunRecordWire.model_validate(run_record_to_wire(value.record)))
+    if operation is RunCommitOperation.PAUSE:
+        return PausedRunResultWire(approval_id=value.approval_id, checkpoint_id=value.checkpoint_id)
+    if operation is RunCommitOperation.COMPLETE:
+        return CompletedRunResultWire(result=RunResultWire.model_validate(_result(value.result)))
+    model = RESULT_WIRE_MODELS[operation]
+    return model(run_id=value.run_id)
 
 
 def _canonical(model: Mapping[str, Any]) -> bytes:
@@ -363,30 +584,39 @@ def _canonical(model: Mapping[str, Any]) -> bytes:
 
 def encode_envelope(operation: RunCommitOperation | str, payload: Any, *, kind: str = "request") -> bytes:
     """Encode a validated request or result envelope canonically."""
-    try: op = RunCommitOperation(operation)
-    except ValueError as exc: raise RunCommitCodecError(f"unknown operation {operation!r}") from exc
-    if kind not in ("request", "result"): raise RunCommitCodecError("unknown envelope kind")
-    body = _command(payload, op) if kind == "request" else _result_wire(payload, op)
-    envelope = RunCommitWireEnvelope(
-        schema_version=SCHEMA_VERSION, operation=op, kind=kind, payload=body
-    )
-    return _canonical(envelope.model_dump(mode="json"))
+    try:
+        op = RunCommitOperation(operation)
+        if kind not in ("request", "result"):
+            raise RunCommitCodecError("unknown envelope kind")
+        body = (_request_wire(payload, op) if kind == "request" else _result_wire(payload, op)).model_dump(mode="json")
+        envelope = RunCommitWireEnvelope(
+            schema_version=SCHEMA_VERSION, operation=op, kind=kind, payload=body
+        )
+        return _canonical(envelope.model_dump(mode="json"))
+    except RunCommitCodecError:
+        raise
+    except (ValidationError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise RunCommitCodecError("cannot encode malformed Run payload") from exc
 
 
 def decode_envelope(payload: bytes, *, expected_operation: RunCommitOperation | str | None = None, expected_kind: str = "request") -> Any:
     """Decode and strictly validate one expected operation and payload kind."""
-    try: raw = json.loads(payload)
-    except (TypeError, ValueError) as exc: raise RunCommitCodecError("wire payload is not valid JSON") from exc
     try:
-        envelope = RunCommitWireEnvelope.model_validate(raw)
-    except Exception as exc:
-        raise RunCommitCodecError("malformed wire envelope") from exc
-    o = envelope.model_dump(mode="json")
-    if o["schema_version"] != SCHEMA_VERSION or o["kind"] != expected_kind: raise RunCommitCodecError("unsupported schema or envelope kind")
-    try: op = RunCommitOperation(o["operation"])
-    except ValueError as exc: raise RunCommitCodecError("unknown operation") from exc
-    if expected_operation is not None and op is not RunCommitOperation(expected_operation): raise RunCommitCodecError("operation mismatch")
-    return (_command_from(o["payload"], op) if expected_kind == "request" else _result_from_wire(o["payload"], op))
+        envelope = RunCommitWireEnvelope.model_validate_json(payload)
+        if envelope.schema_version != SCHEMA_VERSION or envelope.kind != expected_kind:
+            raise RunCommitCodecError("unsupported schema or envelope kind")
+        operation = RunCommitOperation(envelope.operation)
+        if expected_operation is not None and operation is not RunCommitOperation(expected_operation):
+            raise RunCommitCodecError("operation mismatch")
+        model_type = (REQUEST_WIRE_MODELS if expected_kind == "request" else RESULT_WIRE_MODELS)[operation]
+        wire = model_type.model_validate(envelope.payload)
+        return (_request_from_wire(wire, operation) if expected_kind == "request" else _decode_result_model(wire, operation))
+    except RunCommitCodecError:
+        raise
+    except (ValidationError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+        raise RunCommitCodecError(
+            f"invalid {expected_kind} Run payload"
+        ) from exc
 
 
-__all__ = ["JsonValue", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "require_json_value", "run_record_to_wire", "run_record_from_wire", "encode_envelope", "decode_envelope"]
+__all__ = ["JsonValue", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "RunRecordWire", "ApprovalRequestWire", "StartRunRequestWire", "PauseRunRequestWire", "ResumeRunRequestWire", "CompleteRunRequestWire", "FailRunRequestWire", "RequestCancelRunRequestWire", "AcknowledgeCancelRunRequestWire", "StartedRunResultWire", "PausedRunResultWire", "ResumedRunResultWire", "CompletedRunResultWire", "FailedRunResultWire", "CancellingRunResultWire", "CancelledRunResultWire", "REQUEST_WIRE_MODELS", "RESULT_WIRE_MODELS", "require_json_value", "run_record_to_wire", "run_record_from_wire", "run_result_from_wire", "run_error_from_wire", "encode_envelope", "decode_envelope"]

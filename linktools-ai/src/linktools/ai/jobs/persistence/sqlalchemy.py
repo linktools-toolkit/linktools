@@ -86,6 +86,11 @@ from linktools.ai.storage.sqlalchemy.models import (
     TaskSignalRow,
     TaskTransitionRow,
 )
+from ...storage.features import ComponentCapabilities
+
+_SQL_JOB_CAPABILITIES = ComponentCapabilities(
+    transaction_participation=True, optimistic_concurrency=True
+)
 
 
 def _as_utc(value: "datetime | None") -> "datetime | None":
@@ -349,8 +354,7 @@ class SqlAlchemyJobStore:
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
-        from ...storage.features import ComponentCapabilities
-        return ComponentCapabilities()
+        return _SQL_JOB_CAPABILITIES
 
     async def _in_session(self, action):
         if self._session is not None:

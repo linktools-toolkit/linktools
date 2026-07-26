@@ -287,6 +287,10 @@ class SwarmCommitConflictError(Exception):
     silently collapse."""
 
 
+class SwarmCommitIntegrityError(Exception):
+    """A commit would violate the durable swarm state machine."""
+
+
 __all__: "list[str]" = [
     "CancelSwarmCommand",
     "CompleteSwarmCommand",
@@ -296,6 +300,7 @@ __all__: "list[str]" = [
     "StartSwarmCommand",
     "StartSwarmStepCommand",
     "SwarmCommitConflictError",
+    "SwarmCommitIntegrityError",
     "SwarmCommitCoordinator",
     "SwarmCommitId",
     "SwarmCommitPolicy",
