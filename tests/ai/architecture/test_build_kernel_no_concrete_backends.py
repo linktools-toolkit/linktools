@@ -178,6 +178,8 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
     # its concrete Storage and injects them. The build kernel never branches
     # on Storage type.
     coordinator = FilesystemRunCommitCoordinator.from_storage(storage)
+    from linktools.ai.swarm.commit import SwarmCommitPolicy
+    from linktools.ai.swarm.persistence.codec import SwarmCommitCodec
     from linktools.ai.swarm.persistence.filesystem_commit import (
         FilesystemSwarmCommitCoordinator,
     )
@@ -190,7 +192,11 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
     _ = storage.swarms
     _ = storage.events
     swarm_coordinator = FilesystemSwarmCommitCoordinator(
-        storage.swarms, transactions_root=storage.root / "transactions"
+        storage.swarms,
+        event_store=storage.events,
+        transactions_root=storage.root / "transactions",
+        policy=SwarmCommitPolicy(fencing_required=False),
+        codec=SwarmCommitCodec(),
     )
     # Re-snapshot AFTER the test's own setup imports so the diff isolates the
     # build kernel's footprint, not the test's.

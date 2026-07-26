@@ -33,7 +33,6 @@ def test_execute_returns_swarm_completed_without_creating_driving_run(tmp_path):
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -91,7 +90,6 @@ def test_execute_returns_swarm_failed_on_strategy_error(tmp_path):
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -134,7 +132,6 @@ def test_execute_propagates_swarm_conflict_error_instead_of_swarm_failed(tmp_pat
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -189,7 +186,6 @@ def test_execute_child_run_runnable_id_is_the_agent_ref_key_not_spec_id(tmp_path
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -227,14 +223,13 @@ def test_execute_child_run_runnable_id_is_the_agent_ref_key_not_spec_id(tmp_path
 
 
 def test_execute_emits_swarm_lifecycle_events_via_the_injected_sink(tmp_path):
-    """execute() emits SwarmStarted + SwarmCompleted through the
-    Coordinator-owned swarm_event_sink, NOT by appending its own EventStore.
-    A direct caller passing no sink gets a null audit trail (NullSwarmEventSink)."""
+    """execute() emits SwarmStarted + SwarmCompleted through the commit
+    coordinator's event_store (the events are persisted as part of the
+    swarm's commit lifecycle, not appended by the engine directly)."""
     compiler = _build_compiler("coord-out", "alpha-out")
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -251,11 +246,6 @@ def test_execute_emits_swarm_lifecycle_events_via_the_injected_sink(tmp_path):
         "worker-a": _agent_spec("worker-a", "model-1"),
     }
     context = _driving_context("drive-exec-sink", "shared-session")
-    emitted: "list" = []
-
-    class _CapturingSink:
-        async def emit(self, event):
-            emitted.append(event)
 
     async def _run():
         return await runner.execute(
@@ -264,24 +254,24 @@ def test_execute_emits_swarm_lifecycle_events_via_the_injected_sink(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
-            swarm_event_sink=_CapturingSink(),
         )
 
     outcome = asyncio.run(_run())
     assert isinstance(outcome, SwarmCompleted)
-    emitted_types = [type(e).__name__ for e in emitted]
+    # Events were persisted through the coordinator's event_store.
+    events = asyncio.run(stores.event_store.list(context.run_id))
+    emitted_types = [type(e.payload).__name__ for e in events.items]
     assert "SwarmStarted" in emitted_types
     assert "SwarmCompleted" in emitted_types
 
 
 def test_execute_emits_swarm_failed_via_the_injected_sink(tmp_path):
-    """On an expected strategy failure, execute() emits SwarmStarted then
-    SwarmFailed through the injected sink (never its own EventStore)."""
+    """On an expected strategy failure, execute() emits SwarmFailed through the
+    commit coordinator's event_store."""
     compiler = _build_compiler("coord-out")
     stores = _Stores(tmp_path)
     stores.seed_shared_session("shared-session")
     runner = SwarmEngine(
-        swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
         swarm_commit_coordinator=stores.swarm_commit_coordinator,
@@ -299,11 +289,6 @@ def test_execute_emits_swarm_failed_via_the_injected_sink(tmp_path):
         "worker-x": _agent_spec("worker-x", "model-missing"),
     }
     context = _driving_context("drive-exec-sink-fail", "shared-session")
-    emitted: "list" = []
-
-    class _CapturingSink:
-        async def emit(self, event):
-            emitted.append(event)
 
     async def _run():
         return await runner.execute(
@@ -312,12 +297,13 @@ def test_execute_emits_swarm_failed_via_the_injected_sink(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
-            swarm_event_sink=_CapturingSink(),
         )
 
     outcome = asyncio.run(_run())
     assert isinstance(outcome, SwarmFailed)
-    emitted_types = [type(e).__name__ for e in emitted]
     # The model-resolution failure surfaces during _compile_members, BEFORE the
-    # swarm starts -- so only SwarmFailed is emitted (no SwarmStarted).
-    assert "SwarmFailed" in emitted_types
+    # swarm run is created -- so no swarm lifecycle events are persisted (the
+    # SwarmFailed outcome is returned directly without a coordinator commit).
+    events = asyncio.run(stores.event_store.list(context.run_id))
+    emitted_types = [type(e.payload).__name__ for e in events.items]
+    assert "SwarmStarted" not in emitted_types

@@ -32,7 +32,7 @@ def _run(coro):
 
 @pytest.fixture
 def storage(tmp_path):
-    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition as SqlAlchemyStorage
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'fenced.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

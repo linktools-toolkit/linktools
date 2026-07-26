@@ -8,6 +8,7 @@ that consume it."""
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from ...storage.features import ComponentCapabilities
     from ..models import ArtifactRecord
 
 
@@ -17,7 +18,13 @@ class ArtifactRecordStore(Protocol):
 
     Every read loads the record by artifact id and checks tenant ownership
     first; a digest alone is never enough to fetch bytes.
-    """
+
+    ``capabilities`` declares the store's real transaction/CAS/idempotency
+    contract so StorageFeatures is derived from the wired object (not a
+    caller-supplied bool) and the consistency gate can cross-check it."""
+
+    @property
+    def capabilities(self) -> "ComponentCapabilities": ...
 
     async def put(self, record: "ArtifactRecord") -> "ArtifactRecord": ...
 

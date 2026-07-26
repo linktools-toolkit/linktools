@@ -367,6 +367,10 @@ class _StubStore:
 
     async def get_run(self, swarm_run_id): ...
 
+    async def assert_execution_fence(
+        self, swarm_run_id, *, expected_token
+    ): ...
+
     async def update_run(
         self,
         swarm_run_id,

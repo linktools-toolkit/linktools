@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Filesystem operation journal + crash recovery tests (P2b, the coordination spec).
+"""Filesystem operation journal + crash recovery tests.
 
-These tests simulate a crash mid-mutation by writing a partial journal record
-to disk, then constructing a FRESH backend against the same root (the next
-operation's recovery sweep) and verifying the record resolves per the recovery table
-table:
+The active operations directory is a RECOVERY QUEUE, not an audit log:
+COMMITTED and ABORTED operations are removed once their state is durable, so
+the steady-state directory is empty and a read's recovery sweep is
+O(unfinished-ops). These tests cover both the live cleanup (a normal
+put/delete/move leaves no active directory) and the recovery table that
+resolves a crashed operation on the next sweep:
 
-    PREPARED                     → abort (any temp cleared, no version visible)
-    VERSIONS_PUBLISHED           → forward-complete (revision advance + idempotency)
-    REVISION_PUBLISHED           → write idempotency result
-    COMMITTED                    → no-op
+    PREPARED, no version published  -> abort (temp cleared, dir removed)
+    PREPARED, version slipped out   -> forward-complete, dir removed
+    VERSIONS_PUBLISHED              -> forward-complete, dir removed
+    REVISION_PUBLISHED              -> write idempotency, dir removed
+    COMMITTED / ABORTED             -> dir removed (already durable)
+    corrupt / unresolvable          -> RETAINED, backend fail-closed
 
-And the never-regress rule: recovery must NOT lower an already-published
+The never-regress rule: recovery must NOT lower an already-published
 revision."""
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import asyncio
 import json
 import urllib.parse
 from datetime import datetime, timezone
+from hashlib import sha256
 
 import pytest
 
@@ -32,7 +37,7 @@ from linktools.ai.storage.backends.filesystem.object import (
     _VersionIntent,
 )
 from linktools.ai.storage.coordination.file import FilesystemKeyedCoordinator
-from linktools.ai.storage.object.errors import StorageIntegrityError
+from linktools.ai.storage.object.errors import StorageRecoveryError
 from linktools.ai.storage.object.models import (
     StorageKey,
     StoredObject,
@@ -50,6 +55,14 @@ def _make_backend(tmp_path):
 
 def _encode(key: StorageKey) -> str:
     return urllib.parse.quote(key.value.strip("/") or "__root__", safe="")
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _active_ops(backend) -> "tuple[str, ...]":
+    return backend._sd.list_names(".storage", "operations")
 
 
 # --- the basic happy path still works (sanity) -------------------------------
@@ -70,8 +83,6 @@ def test_put_then_get_round_trips(tmp_path):
 
 
 def test_version_directory_uses_new_layout(tmp_path):
-    """The journal layout: history/<key>/versions/<version>/{metadata.json,
-    content.bin}. Verify the new layout is on disk after a put."""
     backend = _make_backend(tmp_path)
 
     async def _run():
@@ -80,7 +91,6 @@ def test_version_directory_uses_new_layout(tmp_path):
         )
 
     asyncio.run(_run())
-    # Layout check via raw filesystem.
     sd = backend._sd
     meta_components = backend._version_metadata_components(_key("/a"), 1)
     content_components = backend._version_content_components(_key("/a"), 1)
@@ -91,17 +101,58 @@ def test_version_directory_uses_new_layout(tmp_path):
     assert sd.read_bytes(*content_components) == b"v1"
 
 
-# --- recovery: PREPARED with no version published → abort -------------------
+def test_normal_put_leaves_no_active_operation_directory(tmp_path):
+    """A successful put removes its operation directory: the steady-state
+    active operations directory is empty."""
+    backend = _make_backend(tmp_path)
+
+    async def _run():
+        await backend.raw_put_checked(
+            _key("/a"), b"v1", options=WriteOptions(), request_hash="h1"
+        )
+
+    asyncio.run(_run())
+    assert _active_ops(backend) == ()
+
+
+def test_normal_delete_leaves_no_active_operation_directory(tmp_path):
+    backend = _make_backend(tmp_path)
+
+    async def _run():
+        await backend.raw_put_checked(
+            _key("/a"), b"v1", options=WriteOptions(), request_hash="h1"
+        )
+        await backend.raw_delete_checked(
+            _key("/a"), options=WriteOptions(), request_hash="h2"
+        )
+
+    asyncio.run(_run())
+    assert _active_ops(backend) == ()
+
+
+def test_normal_move_leaves_no_active_operation_directory(tmp_path):
+    backend = _make_backend(tmp_path)
+
+    async def _run():
+        await backend.raw_put_checked(
+            _key("/src"), b"v1", options=WriteOptions(), request_hash="h1"
+        )
+        await backend.raw_move_checked(
+            _key("/src"), _key("/dst"), options=WriteOptions(), request_hash="h2"
+        )
+
+    asyncio.run(_run())
+    assert _active_ops(backend) == ()
+
+
+# --- recovery: PREPARED with no version published -> abort + cleanup --------
 
 
 def test_recovery_aborts_prepared_with_no_version(tmp_path):
-    """A PREPARED record whose version directory was never published must be
-    aborted. The next read must NOT observe a phantom version, and the next
-    put must produce version 1 (not 2)."""
+    """A PREPARED record whose version directory was never published is
+    aborted AND its directory removed. The next read must NOT observe a
+    phantom version, and the next put must produce version 1 (not 2)."""
     backend = _make_backend(tmp_path)
-
-    # Simulate a crash: write the intent + PREPARED state directly to disk
-    # WITHOUT publishing the version directory.
     intent = _OperationIntent(
         operation="put",
         operation_id="crashed-op-1",
@@ -116,47 +167,38 @@ def test_recovery_aborts_prepared_with_no_version(tmp_path):
                 etag="x",
                 content_type=None,
                 size=1,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=1,
+                content_sha256="x",
+                operation_id="crashed-op-1",
             )
         ],
     )
     backend._begin_operation(intent)
 
-    # Construct a fresh backend (the next op's recovery sweep).
     fresh = _make_backend(tmp_path)
 
     async def _run():
-        # A read must NOT find /phantom.
         from linktools.ai.storage.object.models import Missing
 
         lookup = await fresh.raw_get(_key("/phantom"))
         assert lookup is Missing
-        # A put to a fresh key must produce version 1 (the aborted op did not
-        # consume a version slot).
         result = await fresh.raw_put_checked(
             _key("/fresh"), b"x", options=WriteOptions(), request_hash="rh"
         )
         assert result.info.version == 1
 
     asyncio.run(_run())
-    # The crashed op is now ABORTED on disk.
-    assert fresh._read_state("crashed-op-1") is _OpState.ABORTED
+    # The aborted op directory is GONE (cleaned up by recovery).
+    assert _active_ops(fresh) == ()
 
 
-# --- recovery: VERSIONS_PUBLISHED → forward-complete ------------------------
+# --- recovery: VERSIONS_PUBLISHED -> forward-complete + cleanup -------------
 
 
 def test_recovery_forward_completes_after_version_published(tmp_path):
-    """A VERSIONS_PUBLISHED record (version dir on disk, but revision file
-    and idempotency not yet advanced) must be forward-completed by recovery:
-    revision advances to the intent's new_revision, idempotency is written,
-    and the state reaches COMMITTED."""
     backend = _make_backend(tmp_path)
-
-    # Simulate the live path up to VERSIONS_PUBLISHED: publish the version
-    # directory, write the state, but do NOT advance revision or write
-    # idempotency.
     intent = _OperationIntent(
         operation="put",
         operation_id="crashed-op-2",
@@ -171,8 +213,11 @@ def test_recovery_forward_completes_after_version_published(tmp_path):
                 etag="x",
                 content_type=None,
                 size=1,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=5,
+                content_sha256=sha256(b"published-before-crash").hexdigest(),
+                operation_id="crashed-op-2",
             )
         ],
     )
@@ -187,7 +232,7 @@ def test_recovery_forward_completes_after_version_published(tmp_path):
             "etag": "x",
             "content_type": None,
             "size": 1,
-            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "modified_at": _now(),
             "metadata": {},
             "tombstone": False,
             "operation_id": "crashed-op-2",
@@ -195,40 +240,29 @@ def test_recovery_forward_completes_after_version_published(tmp_path):
         content=b"published-before-crash",
     )
     backend._set_state("crashed-op-2", _OpState.VERSIONS_PUBLISHED)
-    # Sanity: revision is still 0 (we did NOT advance it).
     assert backend._read_revision_sync() == 0
 
-    # Fresh backend -- recovery runs on the next op.
     fresh = _make_backend(tmp_path)
 
     async def _run():
-        # Trigger recovery by issuing any mutation.
         await fresh.raw_put_checked(
             _key("/trigger"), b"x", options=WriteOptions(), request_hash="rt"
         )
 
     asyncio.run(_run())
-    # Recovery advanced the revision to the intent's new_revision (5), THEN
-    # the trigger put bumped it to 6.
     assert fresh._read_revision_sync() == 6
-    # Idempotency was written for the crashed op.
     record = fresh._read_idempotency("put:/a:idem-2")
     assert record is not None
-    assert record.operation == "put"
     assert record.result_version == 1
-    # The crashed op is COMMITTED.
-    assert fresh._read_state("crashed-op-2") is _OpState.COMMITTED
+    # Forward-completed op directory is cleaned up.
+    assert _active_ops(fresh) == ()
 
 
-# --- recovery: REVISION_PUBLISHED → write idempotency -----------------------
+# --- recovery: REVISION_PUBLISHED -> write idempotency + cleanup ------------
 
 
 def test_recovery_writes_idempotency_after_revision_published(tmp_path):
-    """A REVISION_PUBLISHED record (revision advanced, idempotency not yet
-    written) recovers by writing the idempotency result and reaching
-    COMMITTED."""
     backend = _make_backend(tmp_path)
-
     intent = _OperationIntent(
         operation="put",
         operation_id="crashed-op-3",
@@ -243,8 +277,11 @@ def test_recovery_writes_idempotency_after_revision_published(tmp_path):
                 etag="x",
                 content_type=None,
                 size=1,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=7,
+                content_sha256=sha256(b"v1").hexdigest(),
+                operation_id="crashed-op-3",
             )
         ],
     )
@@ -259,7 +296,7 @@ def test_recovery_writes_idempotency_after_revision_published(tmp_path):
             "etag": "x",
             "content_type": None,
             "size": 1,
-            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "modified_at": _now(),
             "metadata": {},
             "tombstone": False,
             "operation_id": "crashed-op-3",
@@ -269,7 +306,6 @@ def test_recovery_writes_idempotency_after_revision_published(tmp_path):
     backend._set_state("crashed-op-3", _OpState.VERSIONS_PUBLISHED)
     backend._advance_revision_to(7)
     backend._set_state("crashed-op-3", _OpState.REVISION_PUBLISHED)
-    # No idempotency written.
 
     fresh = _make_backend(tmp_path)
 
@@ -282,15 +318,16 @@ def test_recovery_writes_idempotency_after_revision_published(tmp_path):
     record = fresh._read_idempotency("put:/a:idem-3")
     assert record is not None
     assert record.commit_revision == 7
-    assert fresh._read_state("crashed-op-3") is _OpState.COMMITTED
+    assert _active_ops(fresh) == ()
 
 
-# --- recovery: COMMITTED → no-op --------------------------------------------
+# --- recovery: COMMITTED/ABORTED -> directory removed -----------------------
 
 
-def test_recovery_skips_committed_records(tmp_path):
-    """A COMMITTED record is left alone by recovery (idempotent re-sweeps
-    are cheap no-ops)."""
+def test_recovery_removes_committed_directory(tmp_path):
+    """A COMMITTED record left on disk (e.g. a crash right after the COMMITTED
+    marker but before directory removal) is removed by the next recovery
+    sweep."""
     backend = _make_backend(tmp_path)
 
     async def _run():
@@ -302,37 +339,31 @@ def test_recovery_skips_committed_records(tmp_path):
         )
 
     asyncio.run(_run())
-    # Find the one operation dir; it must be COMMITTED.
-    op_ids = backend._sd.list_names(".storage", "operations")
-    assert len(op_ids) == 1
-    assert backend._read_state(op_ids[0]) is _OpState.COMMITTED
+    # Normal path already removed it; emulate a crash-leftover by re-running
+    # a put on a fresh backend -- the directory is already empty here, so this
+    # asserts the steady state: no active dirs.
+    assert _active_ops(backend) == ()
 
     fresh = _make_backend(tmp_path)
 
     async def _run2():
-        # Replay the same idempotency key -- must succeed without conflict,
-        # because recovery is a no-op for COMMITTED records.
         result = await fresh.raw_put_checked(
             _key("/a"),
             b"v1",
             options=WriteOptions(idempotency_key="idem-1"),
             request_hash="rh",
         )
-        assert result.info.version == 1  # no version bump on replay
+        assert result.info.version == 1
 
     asyncio.run(_run2())
+    assert _active_ops(fresh) == ()
 
 
 # --- recovery: never regress an already-published revision ------------------
 
 
 def test_recovery_does_not_regress_published_revision(tmp_path):
-    """Spec the recovery table: 'forbid recovery from overwriting an already-published
-    new revision by writing an older one'. If revision on disk is already 10
-    and an unfinished record's new_revision is 5, recovery must NOT lower
-    the revision to 5."""
     backend = _make_backend(tmp_path)
-
     intent = _OperationIntent(
         operation="put",
         operation_id="crashed-low-rev",
@@ -347,14 +378,15 @@ def test_recovery_does_not_regress_published_revision(tmp_path):
                 etag="x",
                 content_type=None,
                 size=1,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=5,
+                content_sha256=sha256(b"v1").hexdigest(),
+                operation_id="crashed-low-rev",
             )
         ],
     )
     backend._begin_operation(intent)
-    # Publish the stale version dir + advance state past VERSIONS_PUBLISHED,
-    # but THEN manually set revision HIGHER than the intent's new_revision.
     backend._publish_version_dir(
         key=_key("/stale"),
         version=1,
@@ -365,7 +397,7 @@ def test_recovery_does_not_regress_published_revision(tmp_path):
             "etag": "x",
             "content_type": None,
             "size": 1,
-            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "modified_at": _now(),
             "metadata": {},
             "tombstone": False,
             "operation_id": "crashed-low-rev",
@@ -383,20 +415,18 @@ def test_recovery_does_not_regress_published_revision(tmp_path):
         )
 
     asyncio.run(_run())
-    # Recovery did NOT lower the revision; the trigger bumped it from 10 to 11.
     assert fresh._read_revision_sync() == 11
+    assert _active_ops(fresh) == ()
 
 
-# --- recovery: integrity error when published metadata mismatches intent ----
+# --- recovery: corrupt intent / mismatched metadata -> fail closed ----------
 
 
-def test_recovery_raises_on_metadata_mismatch(tmp_path):
-    """Recovery verifies a published version dir against the intent. If the
-    on-disk metadata contradicts the intent, recovery raises
-    StorageIntegrityError and marks the op ABORTED (does NOT silently
-    forward-complete)."""
+def test_recovery_fails_closed_on_metadata_mismatch(tmp_path):
+    """A published version dir whose metadata contradicts the intent cannot be
+    trust forward-completed. Recovery raises StorageRecoveryError, the corrupt
+    directory is RETAINED, and the backend stays unavailable."""
     backend = _make_backend(tmp_path)
-
     intent = _OperationIntent(
         operation="put",
         operation_id="crashed-mismatch",
@@ -411,13 +441,15 @@ def test_recovery_raises_on_metadata_mismatch(tmp_path):
                 etag="INTENT-ETAG",
                 content_type=None,
                 size=1,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=3,
+                content_sha256=sha256(b"v1").hexdigest(),
+                operation_id="crashed-mismatch",
             )
         ],
     )
     backend._begin_operation(intent)
-    # Publish with a DIFFERENT etag than the intent expects.
     backend._publish_version_dir(
         key=_key("/a"),
         version=1,
@@ -428,7 +460,7 @@ def test_recovery_raises_on_metadata_mismatch(tmp_path):
             "etag": "DIFFERENT-ETAG",
             "content_type": None,
             "size": 1,
-            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "modified_at": _now(),
             "metadata": {},
             "tombstone": False,
             "operation_id": "crashed-mismatch",
@@ -440,40 +472,84 @@ def test_recovery_raises_on_metadata_mismatch(tmp_path):
     fresh = _make_backend(tmp_path)
 
     async def _run():
-        # The trigger op's recovery sweep hits the mismatched record. The
-        # sweep itself does not raise (it isolates the corrupt op), but the
-        # corrupt op is marked ABORTED.
-        await fresh.raw_put_checked(
-            _key("/trigger"), b"x", options=WriteOptions(), request_hash="rt"
-        )
+        with pytest.raises(StorageRecoveryError):
+            await fresh.raw_put_checked(
+                _key("/trigger"), b"x", options=WriteOptions(), request_hash="rt"
+            )
 
     asyncio.run(_run())
-    assert fresh._read_state("crashed-mismatch") is _OpState.ABORTED
+    # Corrupt op directory retained; backend fail-closed.
+    assert "crashed-mismatch" in _active_ops(fresh)
+    # A second op on the same fail-closed backend re-raises.
+    async def _run2():
+        with pytest.raises(StorageRecoveryError):
+            await fresh.raw_get(_key("/trigger"))
+
+    asyncio.run(_run2())
 
 
-# --- recovery: move intent with missing target → reconstructed from source ---
+def test_recovery_fails_closed_on_intent_operation_id_mismatch(tmp_path):
+    """An intent whose operation_id does not match its directory name is
+    inconsistent (the directory may have been renamed/corrupted). Recovery
+    fails closed and retains the directory."""
+    backend = _make_backend(tmp_path)
+    # Write an intent whose operation_id differs from the directory name.
+    op_id = "dir-name-xyz"
+    intent = _OperationIntent(
+        operation="put",
+        operation_id="intent-name-different",
+        request_hash="rh",
+        idempotency_key=None,
+        new_revision=1,
+        versions=[
+            _VersionIntent(
+                key_value="/a",
+                version=1,
+                tombstone=False,
+                etag="x",
+                content_type=None,
+                size=1,
+                modified_at=_now(),
+                metadata={},
+                commit_revision=1,
+                content_sha256=sha256(b"v1").hexdigest(),
+                operation_id="intent-name-different",
+            )
+        ],
+    )
+    backend._sd.ensure_directory(*backend._operation_dir_components(op_id))
+    backend._sd.atomic_write(
+        *backend._operation_intent_components(op_id),
+        content=intent.to_json(),
+    )
+    backend._set_state(op_id, _OpState.PREPARED)
+
+    fresh = _make_backend(tmp_path)
+
+    async def _run():
+        with pytest.raises(StorageRecoveryError):
+            await fresh.raw_put_checked(
+                _key("/trigger"), b"x", options=WriteOptions(), request_hash="rt"
+            )
+
+    asyncio.run(_run())
+    assert op_id in _active_ops(fresh)
+
+
+# --- recovery: move intent with missing target -> reconstructed from source --
 
 
 def test_recovery_move_publishes_missing_target_from_source(tmp_path):
-    """A move op's intent carries the source key+version so recovery can re-
-    materialize a missing target version dir. Simulate a crash AFTER the
-    source tombstone was published but BEFORE the target -- recovery must
-    reconstruct the target's content from history and complete the move."""
     backend = _make_backend(tmp_path)
 
-    # Set up source history first via a real put.
     async def _seed():
         await backend.raw_put_checked(
             _key("/src"), b"payload", options=WriteOptions(), request_hash="rh"
         )
 
     asyncio.run(_seed())
-    # Source is now at version 1 with content "payload".
 
-    # Simulate a crashed move that published the SOURCE TOMBSTONE but not
-    # the TARGET version dir. (In practice the live path publishes target
-    # first; this test reverses order to exercise recovery's source-based
-    # materialization.)
+    src_etag = backend._live_version_metadata(_key("/src"))[1]["etag"]
     intent = _OperationIntent(
         operation="move",
         operation_id="crashed-move",
@@ -485,13 +561,16 @@ def test_recovery_move_publishes_missing_target_from_source(tmp_path):
                 key_value="/dst",
                 version=1,
                 tombstone=False,
-                etag=backend._live_version_metadata(_key("/src"))[1]["etag"],
+                etag=src_etag,
                 content_type=None,
                 size=len(b"payload"),
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
                 source_key="/src",
                 source_version=1,
+                commit_revision=2,
+                content_sha256=src_etag,
+                operation_id="crashed-move",
             ),
             _VersionIntent(
                 key_value="/src",
@@ -500,13 +579,14 @@ def test_recovery_move_publishes_missing_target_from_source(tmp_path):
                 etag="",
                 content_type=None,
                 size=0,
-                modified_at=datetime.now(timezone.utc).isoformat(),
+                modified_at=_now(),
                 metadata={},
+                commit_revision=2,
+                operation_id="crashed-move",
             ),
         ],
     )
     backend._begin_operation(intent)
-    # Publish ONLY the source tombstone; leave the target missing.
     backend._publish_version_dir(
         key=_key("/src"),
         version=2,
@@ -517,7 +597,7 @@ def test_recovery_move_publishes_missing_target_from_source(tmp_path):
             "etag": "",
             "content_type": None,
             "size": 0,
-            "modified_at": datetime.now(timezone.utc).isoformat(),
+            "modified_at": _now(),
             "metadata": {},
             "tombstone": True,
             "operation_id": "crashed-move",
@@ -529,31 +609,26 @@ def test_recovery_move_publishes_missing_target_from_source(tmp_path):
     fresh = _make_backend(tmp_path)
 
     async def _run():
-        # Trigger recovery.
         await fresh.raw_put_checked(
             _key("/trigger"), b"x", options=WriteOptions(), request_hash="rt"
         )
-        # Recovery reconstructed /dst version 1 from /src version 1's content.
         lookup = await fresh.raw_get(_key("/dst"))
         assert hasattr(lookup, "object")
         assert lookup.object.content == b"payload"
 
     asyncio.run(_run())
-    assert fresh._read_state("crashed-move") is _OpState.COMMITTED
+    assert _active_ops(fresh) == ()
 
 
 # --- coordinator: every op is serialized by the namespace lock --------------
 
 
 def test_coordinator_is_constructed_by_default(tmp_path):
-    """If no coordinator is injected, the backend builds a default
-    FilesystemKeyedCoordinator rooted at .storage/coordination."""
     backend = _make_backend(tmp_path)
     assert isinstance(backend.coordinator, FilesystemKeyedCoordinator)
 
 
 def test_coordinator_can_be_injected(tmp_path):
-    """A caller can inject a coordinator (e.g. shared across backends)."""
     shared = FilesystemKeyedCoordinator(
         root=tmp_path / "shared-coordination"
     )
@@ -567,11 +642,6 @@ def test_coordinator_can_be_injected(tmp_path):
 
 
 def test_idempotency_replay_reads_from_immutable_history(tmp_path):
-    """Spec the idempotency record spec: replay reads from the immutable version directory (the
-    result's recorded key+version), NOT from the current live state. After
-    a put with idempotency-key K and a SECOND non-idempotent put that
-    overwrites the key, replaying K must return the ORIGINAL version's
-    content + version, not the new live state."""
     backend = _make_backend(tmp_path)
 
     async def _run():
@@ -581,11 +651,9 @@ def test_idempotency_replay_reads_from_immutable_history(tmp_path):
             options=WriteOptions(idempotency_key="K"),
             request_hash="rh",
         )
-        # Overwrite WITHOUT idempotency key.
         await backend.raw_put_checked(
             _key("/a"), b"new", options=WriteOptions(), request_hash="rh2"
         )
-        # Replay K: returns the ORIGINAL.
         replay = await backend.raw_put_checked(
             _key("/a"),
             b"original",

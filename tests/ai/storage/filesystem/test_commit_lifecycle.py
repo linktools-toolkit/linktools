@@ -9,7 +9,7 @@ complete to close out the full RunCommitCoordinator Protocol."""
 import asyncio
 from datetime import datetime, timezone
 
-from linktools.ai.errors import RunConflictError
+from linktools.ai.run.commit import RunFenceLostError
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import (
     RunCancelled as RunCancelledEvent,
@@ -25,10 +25,12 @@ from linktools.ai.run.commit import (
     StartRunCommand,
     ExecutionFence,
     RunCommitId,
+    RunCommitPolicy,
 )
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunErrorInfo, RunInput, RunRecord, RunStatus
 from linktools.ai.run.models import RunnableType
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
@@ -75,6 +77,8 @@ def _coordinator(storage: FilesystemStorage) -> FilesystemRunCommitCoordinator:
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
+        policy=RunCommitPolicy(fencing_required=False),
+        codec=RunCommitCodec(),
     )
 
 
@@ -198,7 +202,15 @@ def test_fail_rejects_stale_execution_token(tmp_path):
 
     async def _run():
         storage = FilesystemStorage(root=tmp_path)
-        coordinator = _coordinator(storage)
+        coordinator = FilesystemRunCommitCoordinator(
+            approval_store=storage.approvals,
+            checkpoint_store=storage.checkpoints,
+            run_store=storage.runs,
+            session_store=storage.sessions,
+            event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=True),
+            codec=RunCommitCodec(),
+        )
         await storage.runs.create(
             _record(
                 "run-f2", "sess-f2", RunStatus.RUNNING, 1, execution_token="current-token"
@@ -220,7 +232,7 @@ def test_fail_rejects_stale_execution_token(tmp_path):
                     commit_id=RunCommitId(f"fail:run-f2"),)
             )
             raised = False
-        except RunConflictError:
+        except RunFenceLostError:
             raised = True
         assert raised
 
@@ -276,6 +288,8 @@ def test_request_cancel_recovery_does_not_fail_the_run(tmp_path):
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
             transactions_root=tmp_path / "transactions",
         )
         await storage.runs.create(_record("run-c2", "sess-c2", RunStatus.RUNNING, 1))
@@ -286,7 +300,9 @@ def test_request_cancel_recovery_does_not_fail_the_run(tmp_path):
             target_run_status="cancelling",
             command={},
             commit_id="recovery:tx:run-c2",
-            request_hash="",)
+            request_hash="",
+            command_payload=b"{}",
+        )
 
         await coordinator.recover_incomplete_commits()
 
@@ -343,6 +359,8 @@ def test_recovery_reappends_started_event_when_start_reached_commit_point(tmp_pa
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
             transactions_root=tmp_path / "transactions",
         )
         await storage.runs.create(_record("run-s3", "sess-s3", RunStatus.RUNNING, 1))
@@ -363,7 +381,9 @@ def test_recovery_reappends_started_event_when_start_reached_commit_point(tmp_pa
                 }
             },
             commit_id="recovery:tx:run-s3",
-            request_hash="",)
+            request_hash="",
+            command_payload=b"{}",
+        )
 
         await coordinator.recover_incomplete_commits()
 

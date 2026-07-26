@@ -18,10 +18,7 @@ from linktools.ai.storage.features import (
     StorageComponent,
     TransactionScope,
 )
-from linktools.ai.runtime.persistence.features import (
-    FILE_STORAGE_FEATURES,
-    StorageFeatures,
-)
+from linktools.ai.runtime.persistence.features import StorageFeatures
 
 
 def _features(**overrides) -> StorageFeatures:
@@ -35,6 +32,7 @@ def _features(**overrides) -> StorageFeatures:
         fencing=True,
         idempotency=True,
         streaming_artifacts=True,
+        artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
     )
     base.update(overrides)
     return StorageFeatures(**base)
@@ -43,8 +41,8 @@ def _features(**overrides) -> StorageFeatures:
 def test_no_requirements_is_a_noop():
     # The default path (requirements=None) imposes no gate -- existing callers
     # are unaffected.
-    enforce_storage_capability_gate(FILE_STORAGE_FEATURES, None)
-    enforce_storage_capability_gate(FILE_STORAGE_FEATURES, RuntimeRequirements())
+    enforce_storage_capability_gate(_features(), None)
+    enforce_storage_capability_gate(_features(), RuntimeRequirements())
 
 
 def test_scope_meet_or_exceed_passes():
@@ -187,14 +185,23 @@ def test_feature_consistency_rejects_declared_transactional_component_without_st
     from types import SimpleNamespace
 
     from linktools.ai.run.requirements import enforce_storage_feature_consistency
-    from linktools.ai.storage.features import StorageComponent
+    from linktools.ai.storage.features import CoordinationScope, StorageComponent
 
     bogus = SimpleNamespace(
         features=_features(transactional_components=frozenset({StorageComponent.ASSETS})),
-        _transaction_manager=object(),
+        transaction_manager=SimpleNamespace(scope=TransactionScope.DATABASE),
         coordination=object(),
-        artifacts=object(),
+        artifacts=SimpleNamespace(
+            coordination_scope=CoordinationScope.PROCESS_LOCAL,
+            supports_streaming=True,
+            record_store=object(),
+        ),
         assets=None,  # declared transactional, but no wired store
+        runs=object(),
+        sessions=object(),
+        events=object(),
+        approvals=object(),
+        checkpoints=object(),
         jobs=object(),
     )
     with pytest.raises(StorageRequirementsNotMetError, match="not wired"):
@@ -251,7 +258,7 @@ def test_feature_consistency_rejects_streaming_artifacts_without_artifact_store(
 
     bogus = SimpleNamespace(
         features=_features(streaming_artifacts=True),
-        _transaction_manager=object(),  # present
+        transaction_manager=SimpleNamespace(scope=TransactionScope.DATABASE),  # present
         coordination=object(),  # present
         artifacts=None,  # MISSING despite streaming_artifacts=True
         assets=None,
@@ -270,7 +277,7 @@ def test_feature_consistency_rejects_artifact_store_without_streaming_flag():
 
     bogus = SimpleNamespace(
         features=_features(streaming_artifacts=False),
-        _transaction_manager=object(),
+        transaction_manager=SimpleNamespace(scope=TransactionScope.DATABASE),
         coordination=object(),
         artifacts=object(),  # WIRED despite streaming_artifacts=False
         assets=None,
@@ -288,7 +295,7 @@ def test_feature_consistency_rejects_distributed_coordination_without_coordinato
 
     bogus = SimpleNamespace(
         features=_features(coordination_scope=CoordinationScope.DISTRIBUTED),
-        _transaction_manager=object(),
+        transaction_manager=SimpleNamespace(scope=TransactionScope.DATABASE),
         coordination=None,  # MISSING despite DISTRIBUTED
         artifacts=object(),
         assets=object(),

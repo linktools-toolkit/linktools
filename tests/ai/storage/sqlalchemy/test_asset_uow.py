@@ -12,7 +12,7 @@ import asyncio
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition
 from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
 from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
@@ -30,7 +30,7 @@ def _storage(tmp_path):
     asyncio.run(_create())
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/asset.db")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(
+    return _ReferenceSqlAlchemyComposition(
         session_factory=session_factory, blobs_root=tmp_path / "blobs"
     )
 

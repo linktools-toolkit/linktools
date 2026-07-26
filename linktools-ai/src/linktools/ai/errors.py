@@ -94,6 +94,14 @@ class StorageRequirementsNotMetError(StorageCapabilityError):
     declared it needs distributed). Fail-fast, never a silent degradation."""
 
 
+class StorageCapabilityDeclarationError(StorageCapabilityError):
+    """A wired component does not expose the public capability properties the
+    Storage's feature derivation requires (e.g. an ArtifactStore stand-in
+    missing ``record_store`` / ``supports_streaming`` / ``coordination_scope``).
+    Fail-closed at construction: a Storage cannot declare a capability none of
+    its wired objects actually provides."""
+
+
 class StorageFeatureError(StorageCapabilityError):
     """Raised when a Storage's declared StorageFeatures do not match its wired
     objects -- a declared capability that has no backing object (e.g.

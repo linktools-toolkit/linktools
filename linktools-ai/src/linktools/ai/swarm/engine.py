@@ -393,7 +393,7 @@ class SwarmEngine:
                 expected_version=swarm_version,
                 target=SwarmStatus.SUCCEEDED,
                 commit_id_suffix="complete",
-                result=result.result,
+                result=result,
                 event_context=swarm_event_context,
             )
             aggregate_messages: "tuple[NewSessionMessage, ...]" = ()

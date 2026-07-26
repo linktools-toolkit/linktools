@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.errors import RunConflictError
+from linktools.ai.run.commit import RunFenceLostError
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import (
     RunCancelled as RunCancelledEvent,
@@ -28,6 +28,7 @@ from linktools.ai.run.commit import (
     StartRunCommand,
     ExecutionFence,
     RunCommitId,
+    RunCommitPolicy,
 )
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -37,7 +38,8 @@ from linktools.ai.run.models import (
     RunRecord,
     RunStatus,
 )
-from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition as SqlAlchemyStorage
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.run.persistence.sqlalchemy.commit import SqlAlchemyRunCommitCoordinator
 from linktools.ai.storage.sqlalchemy.models import Base
 
@@ -101,7 +103,7 @@ def test_start_creates_running_record_and_started_event(tmp_path):
     storage = _storage(tmp_path)
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         record = _record("run-s1", "sess-s1", RunStatus.RUNNING)
         commit = await coordinator.start(
             StartRunCommand(
@@ -127,7 +129,7 @@ def test_resume_commits_atomically_running(tmp_path):
     _seed(storage, "run-r1", "sess-r1", status=RunStatus.WAITING_APPROVAL)
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         commit = await coordinator.resume(
             ResumeRunCommand(
                 run_id="run-r1",
@@ -154,7 +156,7 @@ def test_fail_commits_atomically_failed_with_error_and_event(tmp_path):
     _seed(storage, "run-f1", "sess-f1")
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         commit = await coordinator.fail(
             FailRunCommand(
                 run_id="run-f1",
@@ -189,8 +191,8 @@ def test_fail_rejects_stale_execution_token(tmp_path):
     _seed(storage, "run-f2", "sess-f2", execution_token="current-token")
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
-        with pytest.raises(RunConflictError):
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=True), codec=RunCommitCodec())
+        with pytest.raises(RunFenceLostError):
             await coordinator.fail(
                 FailRunCommand(
                     run_id="run-f2",
@@ -218,7 +220,7 @@ def test_request_cancel_commits_atomically_cancelling(tmp_path):
     _seed(storage, "run-c1", "sess-c1")
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         commit = await coordinator.request_cancel(
             RequestCancelRunCommand(
                 run_id="run-c1",
@@ -244,7 +246,7 @@ def test_acknowledge_cancel_commits_atomically_cancelled(tmp_path):
     _seed(storage, "run-a1", "sess-a1", status=RunStatus.CANCELLING)
 
     async def _run():
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         commit = await coordinator.acknowledge_cancel(
             AcknowledgeCancelRunCommand(
                 run_id="run-a1",

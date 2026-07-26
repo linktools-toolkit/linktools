@@ -285,13 +285,13 @@ def test_fs_commit_coordinator_threads_request_hash_through_every_commit():
     a silent overwrite."""
     source = _read(FS_COMMIT)
     for required in (
-        "canonical_request_hash(\"pause\"",
-        "canonical_request_hash(\"complete\"",
-        "canonical_request_hash(\"start\"",
-        "canonical_request_hash(\"resume\"",
-        "canonical_request_hash(\"fail\"",
-        "canonical_request_hash(\"request_cancel\"",
-        "canonical_request_hash(\"acknowledge_cancel\"",
+        'self._codec.request_hash("pause"',
+        'self._codec.request_hash("complete"',
+        'self._codec.request_hash("start"',
+        'self._codec.request_hash("resume"',
+        'self._codec.request_hash("fail"',
+        'self._codec.request_hash("request_cancel"',
+        'self._codec.request_hash("acknowledge_cancel"',
         "find_completion(",
         "request_hash=request_hash",
     ):
@@ -418,8 +418,9 @@ def test_agent_engine_does_not_publish_state_events():
 
 def test_agent_engine_assertion_error_catch_is_narrowed():
     """the AssertionError-narrowing spec: the blanket ``except AssertionError: pass`` must be gone.
-    The narrowed catch absorbs ONLY the streaming-not-supported message so
-    an unexpected AssertionError propagates as the invariant error it is."""
+    The engine may either narrow the catch to the streaming-not-supported
+    message or (preferred) let AssertionError propagate entirely as the
+    invariant error it is."""
     source = _read(AGENT_ENGINE)
     # The forbidden blanket form: ``except AssertionError:\n    pass``
     assert re.search(
@@ -428,12 +429,6 @@ def test_agent_engine_assertion_error_catch_is_narrowed():
         "AgentEngine still has a blanket `except AssertionError: pass` -- "
         "the AssertionError-narrowing spec requires either catching only the streaming-not-supported "
         "message or letting AssertionError propagate"
-    )
-    # The narrowed form keys on the streaming-not-supported message substring.
-    assert "support streamed" in source, (
-        "AgentEngine's narrowed AssertionError catch must key on the "
-        "'support streamed' message substring (no typed pydantic-ai "
-        "StreamNotSupportedError exists yet)"
     )
 
 

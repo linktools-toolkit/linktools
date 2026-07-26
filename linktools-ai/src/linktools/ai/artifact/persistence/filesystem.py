@@ -10,7 +10,7 @@ Lives in the artifact domain (the storage kernel's only consumers are the
 Protocol itself + the shared filesystem async-I/O helpers it composes over)."""
 
 import json
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 from pathlib import Path
 
 from ..digest import ArtifactDigest
@@ -22,6 +22,9 @@ from ..models import (
 from ..store import record_from_jsonable, record_to_jsonable
 from ...storage.filesystem._util import _atomic_write, _validate_id_segment
 from ...storage.filesystem import _io
+
+if TYPE_CHECKING:
+    from ...storage.features import ComponentCapabilities
 
 _DIGEST_HEX_LEN = 64
 
@@ -52,6 +55,22 @@ class FilesystemArtifactRecordStore:
     ``ArtifactRecordStore`` Protocol defined in ``artifact.persistence``); the
     composition root injects this concrete backend into the ArtifactStore
     facade."""
+
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        # Filesystem records are independent files: there is NO cross-store
+        # transaction (a Run write and a record write do not commit together).
+        # optimistic_concurrency is False: an exclusive create either lands or
+        # is reconciled, but there is no versioned CAS token exposed.
+        # idempotency is True: identical re-put is a no-op.
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=False,
+            optimistic_concurrency=False,
+            idempotency=True,
+            append_only=False,
+        )
 
     def __init__(self, *, records_root: Path) -> None:
         self._root = Path(records_root)

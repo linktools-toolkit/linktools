@@ -14,12 +14,13 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
+from linktools.ai.run.commit import ApprovalRequestData, CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId, RunCommitPolicy
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus
 from linktools.ai.run.models import RunnableType
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
@@ -102,6 +103,8 @@ def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
         )
         result = RunResult(output={"response": {"message": "done"}})
         commit = await coordinator.complete(
@@ -162,19 +165,22 @@ def test_pause_persists_approval_checkpoint_and_transition(tmp_path):
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
         )
         commit = await coordinator.pause(
             PauseRunCommand(
                 run_id="run-2",
                 expected_version=created.version,
-                approval_request={
-                    "approval_id": "appr-1",
-                    "tool_call_id": "call-1",
-                    "tool_name": "shell",
-                    "reason": "needs review",
-                    "arguments": {"cmd": "ls"},
-                    **_APPROVAL_BINDING,
-                },
+                approval_request=ApprovalRequestData(
+                    approval_id="appr-1",
+                    tool_call_id="call-1",
+                    tool_name="shell",
+                    reason="needs review",
+                    arguments={"cmd": "ls"},
+                    tenant_id="tenant-test",
+                    binding=_APPROVAL_BINDING,
+                ),
                 checkpoint_payload=b'{"messages": []}',
                 paused_event=RunPaused(run_id="run-2", reason="needs review"),
                 event_context=EventStreamContext.from_run_context(
@@ -219,6 +225,8 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
             transactions_root=tmp_path / "transactions",
         )
         await coordinator.complete(
@@ -268,6 +276,8 @@ def test_recovery_marks_run_failed_when_complete_did_not_reach_commit_point(tmp_
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
             transactions_root=tmp_path / "transactions",
         )
         await storage.runs.create(_record("run-c", "sess-c", RunStatus.RUNNING, 1))
@@ -279,6 +289,7 @@ def test_recovery_marks_run_failed_when_complete_did_not_reach_commit_point(tmp_
             run_id="run-c",
             target_run_status="succeeded",
             command={"event_context": {}},
+            command_payload=b"{}",
         )
         # (the journal file is now PREPARED -- the lowest state.)
         assert journal.list_incomplete()
@@ -314,6 +325,8 @@ def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
             run_store=storage.runs,
             session_store=storage.sessions,
             event_store=storage.events,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
             transactions_root=tmp_path / "transactions",
         )
         # Run is already WAITING_APPROVAL (the transition landed before crash).
@@ -326,6 +339,7 @@ def test_recovery_completes_when_pause_reached_commit_point(tmp_path):
             run_id="run-p",
             target_run_status="waiting_approval",
             command={"event_context": {}},
+            command_payload=b"{}",
         )
 
         await coordinator.recover_incomplete_commits()

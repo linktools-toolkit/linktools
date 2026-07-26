@@ -98,9 +98,6 @@ class SqliteReferenceSchemaProvider:
 
         from .models import Base
         from ...sqlalchemy.models import Base as DomainBase
-        # Register commit-log tables before the reference DDL is emitted.
-        from ....run.persistence.sqlalchemy import commit_log as _run_commit_log
-        from ....swarm.persistence import sqlalchemy_commit as _swarm_commit_log
 
         async with session_factory() as session:
             conn = await session.connection()

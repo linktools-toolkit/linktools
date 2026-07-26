@@ -1,68 +1,84 @@
-"""Single canonical wire codec for Run durable commit requests/results."""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Single canonical wire codec for Run durable commit requests/results.
+
+The codec is a thin, operation-validated dispatcher over the typed wire
+engine in :mod:`linktools.ai.run.persistence.wire`. Every request and result
+is encoded as a self-describing, type-tagged envelope that decodes back into
+the EXACT domain dataclass (StartedRunCommit / CompletedRunCommit / ...), so
+a replay returns the first persisted typed result rather than a bare dict or
+a freshly-rebuilt value from the current command.
+
+Bytes stability (and therefore ``request_hash``) is identical across the
+Filesystem and SQL backends and across ``PYTHONHASHSEED`` values: the wire
+engine canonicalises dict key order and set iteration order before hashing."""
 
 from __future__ import annotations
 
-import base64
-import dataclasses
-import json
-from collections.abc import Mapping
-from datetime import date, datetime, timezone
-from enum import Enum
 from hashlib import sha256
 from typing import Any
 
+from .wire import (
+    SCHEMA_VERSION,
+    RunCommitCodecError,
+    RunCommitIntegrityError,
+    RunCommitOperation,
+    decode_envelope,
+    encode_envelope,
+)
+
+__all__ = [
+    "RunCommitCodec",
+    "RunCommitCodecError",
+    "RunCommitIntegrityError",
+    "RunCommitOperation",
+]
+
 
 class RunCommitCodec:
-    schema_version = 1
+    """Encode/decode the seven Run commit operations' request and result
+    payloads. Stateless and safe to share across coordinators."""
 
-    def _value(self, value: Any) -> Any:
-        if dataclasses.is_dataclass(value):
-            return {f.name: self._value(getattr(value, f.name)) for f in dataclasses.fields(value)}
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, bytes):
-            return {"__bytes__": base64.b64encode(value).decode("ascii")}
-        if isinstance(value, datetime):
-            return {"__datetime__": value.astimezone(timezone.utc).isoformat()}
-        if isinstance(value, date):
-            return {"__date__": value.isoformat()}
-        if isinstance(value, tuple):
-            return [self._value(item) for item in value]
-        if isinstance(value, dict):
-            return {str(k): self._value(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
-        if isinstance(value, Mapping):
-            return {str(k): self._value(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
-        if isinstance(value, (list, set, frozenset)):
-            return [self._value(item) for item in value]
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        model_dump = getattr(value, "model_dump", None)
-        if callable(model_dump):
-            return self._value(model_dump(mode="python"))
-        if hasattr(value, "__dict__") and not value.__class__.__module__.startswith("builtins"):
-            return self._value(vars(value))
-        raise TypeError(f"unsupported durable commit value: {type(value)!r}")
+    schema_version = SCHEMA_VERSION
 
-    def _bytes(self, operation: Any, command: Any) -> bytes:
-        return json.dumps({"schema_version": self.schema_version, "operation": str(operation), "command": self._value(command)}, separators=(",", ":"), ensure_ascii=False, sort_keys=True).encode()
+    def encode_request(
+        self,
+        operation: "RunCommitOperation | str",
+        command: Any,
+    ) -> bytes:
+        return encode_envelope(operation, command)
 
-    def encode_request(self, operation: Any, command: Any) -> bytes:
-        return self._bytes(operation, command)
+    def decode_request(
+        self,
+        operation: "RunCommitOperation | str",
+        payload: bytes,
+    ) -> Any:
+        return decode_envelope(payload, expected_operation=operation)
 
-    def encode_result(self, operation: Any, result: Any) -> bytes:
-        return self._bytes(operation, result)
+    def encode_result(
+        self,
+        operation: "RunCommitOperation | str",
+        result: Any,
+    ) -> bytes:
+        return encode_envelope(operation, result)
 
-    def decode_result(self, operation: Any, payload: bytes) -> Any:
-        data = json.loads(payload)
-        if data.get("schema_version") != self.schema_version or data.get("operation") != str(operation):
-            raise ValueError("unsupported Run commit result payload")
-        return data["command"]
+    def decode_result(
+        self,
+        operation: "RunCommitOperation | str",
+        payload: bytes,
+    ) -> Any:
+        return decode_envelope(payload, expected_operation=operation)
 
-    def request_hash(self, operation: Any, command: Any) -> bytes:
+    def request_hash(
+        self,
+        operation: "RunCommitOperation | str",
+        command: Any,
+    ) -> bytes:
         return sha256(self.encode_request(operation, command)).digest()
 
-    def result_hash(self, operation: Any, result: Any) -> bytes:
+    def result_hash(
+        self,
+        operation: "RunCommitOperation | str",
+        result: Any,
+    ) -> bytes:
         return sha256(self.encode_result(operation, result)).digest()
-
-
-__all__ = ["RunCommitCodec"]

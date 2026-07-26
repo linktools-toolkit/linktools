@@ -35,17 +35,17 @@ _SUBPROCESS = textwrap.dedent(
     import linktools.ai.storage      # noqa
     from linktools.ai.runtime.persistence import Storage, FilesystemStorage  # noqa
 
-    # 4: SqlAlchemyStorage access must raise ImportError carrying an install hint.
+    # 4: SqlAlchemyStorageAdapter access must raise ImportError carrying an install hint.
     try:
-        linktools.ai.runtime.persistence.SqlAlchemyStorage
-        raise SystemExit("FAIL: no ImportError when accessing SqlAlchemyStorage")
+        linktools.ai.runtime.persistence.SqlAlchemyStorageAdapter
+        raise SystemExit("FAIL: no ImportError when accessing SqlAlchemyStorageAdapter")
     except ImportError as exc:
         msg = str(exc)
         if "linktools-ai[" not in msg:
             raise SystemExit(f"FAIL: missing install hint in: {msg!r}")
 
-    # 5: root must not re-export SqlAlchemyStorage (optional dependency).
-    assert not hasattr(linktools.ai, "SqlAlchemyStorage"), "root exported SA storage"
+    # 5: root must not re-export SqlAlchemyStorageAdapter (optional dependency).
+    assert not hasattr(linktools.ai, "SqlAlchemyStorageAdapter"), "root exported SA storage"
 
     print("OK")
     """

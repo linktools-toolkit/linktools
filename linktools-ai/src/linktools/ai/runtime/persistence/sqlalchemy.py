@@ -202,12 +202,12 @@ class SqlAlchemyStorageAdapter(Storage):
             artifact_blobs=artifact_blobs,
             coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_scope=TransactionScope.DATABASE,
-                coordination_scope=coordination.scope if coordination is not None else CoordinationScope.NONE,
-                artifact_coordination_scope=artifact_coordinator.scope,
-                leasing=True,
-                fencing=True,
-                streaming_artifacts=True,
+                # Placeholder: Storage.__post_init__ re-derives from the REAL
+                # wired objects (transaction manager / coordination / artifacts)
+                # once they are set on the instance.
+                transaction_manager=None,
+                coordination=coordination,
+                artifacts=None,
                 components={},
             ),
             artifact_coordinator=artifact_coordinator,
@@ -236,16 +236,25 @@ class _ReferenceSqlAlchemyComposition(SqlAlchemyStorageAdapter):
         from ...storage.filesystem.artifact import FilesystemArtifactBlobStore
         from ...storage.sqlalchemy.dialects import SqliteObjectDialect
         from ...storage.backends.sqlalchemy.schema import SqliteReferenceSchemaProvider
+        # The commit-log ORM models (run_commit_log, swarm_commit_log) are
+        # domain-owned and must be registered on the shared DomainBase metadata
+        # BEFORE the schema provider runs CREATE TABLE. Importing them here
+        # (the composition root, where domain imports are legal) triggers that
+        # registration; the storage kernel's schema provider does NOT import
+        # domain packages (architecture boundary: storage never depends on
+        # run/swarm).
+        from ...run.persistence.sqlalchemy import commit_log as _  # noqa: F401
+        from ...swarm.persistence import sqlalchemy_commit as _sw  # noqa: F401
 
+        coordination = ProcessLocalLeaseCoordinator()
         self._initialize(
             session_factory=session_factory,
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
-            coordination=ProcessLocalLeaseCoordinator(),
+            coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_scope=TransactionScope.DATABASE,
-                coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                leasing=True, fencing=True, streaming_artifacts=True,
+                transaction_manager=None,
+                coordination=coordination,
+                artifacts=None,
                 components={},
             ),
             # Blobs live on the shared filesystem, so the per-digest lock must

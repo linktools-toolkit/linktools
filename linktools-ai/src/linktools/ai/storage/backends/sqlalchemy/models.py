@@ -33,7 +33,7 @@ class StorageObjectRow(Base):
     __table_args__ = (
         UniqueConstraint("key_hash", name=STORAGE_OBJECT_KEY_CONSTRAINT),
         Index("ix_storage_objects_key_hash", "key_hash"),
-        Index("ix_storage_objects_key_prefix", "key", mysql_length={"key": 191}),
+        Index("ix_storage_objects_key_prefix", "key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -84,11 +84,7 @@ class StorageObjectIdempotencyRow(Base):
             "key_hash", name=STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT
         ),
         Index("ix_storage_object_idempotency_key_hash", "key_hash"),
-        Index(
-            "ix_storage_object_idempotency_key_prefix",
-            "key",
-            mysql_length={"key": 191},
-        ),
+        Index("ix_storage_object_idempotency_key_prefix", "key"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)

@@ -11,7 +11,7 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition
 from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
 from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
@@ -27,7 +27,7 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture(params=_DIALECTS)
 async def sql_storage(request, tmp_path):
     engine, session_factory = await _build(request.param, tmp_path)
-    storage = SqlAlchemyStorage(
+    storage = _ReferenceSqlAlchemyComposition(
         session_factory=session_factory, blobs_root=tmp_path / "blobs"
     )
     yield storage

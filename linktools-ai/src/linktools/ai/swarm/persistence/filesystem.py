@@ -54,6 +54,7 @@ def _run_to_json(run: SwarmRun) -> dict:
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
         "metadata": dict(run.metadata),
+        "execution_token": run.execution_token,
     }
 
 
@@ -74,6 +75,7 @@ def _run_from_json(raw: dict) -> SwarmRun:
         created_at=datetime.fromisoformat(raw["created_at"]),
         updated_at=datetime.fromisoformat(raw["updated_at"]),
         metadata=raw["metadata"],
+        execution_token=raw.get("execution_token"),
     )
 
 
@@ -277,6 +279,33 @@ class FilesystemSwarmStore:
     async def get_run(self, swarm_run_id: str) -> "SwarmRun | None":
         return await asyncio.to_thread(self._get_run_sync, swarm_run_id)
 
+    async def assert_execution_fence(
+        self,
+        swarm_run_id: str,
+        *,
+        expected_token: str,
+    ) -> SwarmRun:
+        """Run-level owner fence: under the same per-store lock the mutations
+        hold, read the run and require its persisted ``execution_token`` to
+        equal ``expected_token``. Acquires the lock so the check+mutation in
+        a commit coordinator is atomic with respect to other in-process
+        commits/reclaims."""
+        from ..commit import SwarmFenceLostError, SwarmFenceStateError
+
+        async with self._lock:
+            current = await asyncio.to_thread(self._get_run_sync, swarm_run_id)
+            if current is None:
+                raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
+            if not current.execution_token:
+                raise SwarmFenceStateError(
+                    f"swarm run {swarm_run_id!r} has no persisted execution token"
+                )
+            if current.execution_token != expected_token:
+                raise SwarmFenceLostError(
+                    f"swarm run {swarm_run_id!r} fence token mismatch"
+                )
+            return current
+
     def _update_run_sync(
         self,
         swarm_run_id: str,
@@ -316,6 +345,7 @@ class FilesystemSwarmStore:
             created_at=current.created_at,
             updated_at=datetime.now(current.created_at.tzinfo),
             metadata=new_metadata,
+            execution_token=current.execution_token,
         )
         _atomic_write(
             self._run_path(swarm_run_id),

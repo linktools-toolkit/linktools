@@ -17,7 +17,7 @@ Record serialization goes through the public codec
 owned in one place."""
 
 import json
-from typing import AsyncIterator, Callable
+from typing import TYPE_CHECKING, AsyncIterator, Callable
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -28,6 +28,9 @@ from ..models import ArtifactRecord
 from ..store import record_from_jsonable, record_to_jsonable
 from ...errors import ArtifactRecordConflictError
 from linktools.ai.storage.sqlalchemy.models import ArtifactRecordRow
+
+if TYPE_CHECKING:
+    from ...storage.features import ComponentCapabilities
 
 
 def _row_to_record(row: ArtifactRecordRow) -> ArtifactRecord:
@@ -44,6 +47,23 @@ class SqlAlchemyArtifactRecordStore:
     reconciled -- byte-identical content is idempotent, any field change raises
     :class:`ArtifactRecordConflictError`. There is no UPDATE path; the lineage
     of a prior write can never be overwritten."""
+
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        # transaction_participation: shares the UoW AsyncSession (session=...),
+        #   so a Run + ArtifactRecord written in one tx commit/roll back together.
+        # optimistic_concurrency: the create-only INSERT + conflict reconciliation
+        #   is the CAS-equivalent contract (a field change is rejected, not
+        #   silently overwritten).
+        # idempotency: byte-identical re-put is a no-op (reconciled).
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+            idempotency=True,
+            append_only=False,
+        )
 
     def __init__(
         self,

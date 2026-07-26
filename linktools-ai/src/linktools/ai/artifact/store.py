@@ -239,6 +239,20 @@ class ArtifactStore:
         # without reaching into the private ``_coordinator`` attribute.
         return self._coordinator.scope
 
+    @property
+    def record_store(self) -> ArtifactRecordStore:
+        # Public read on the wired record store so Storage can surface it as
+        # the ARTIFACT_RECORDS component (capability derivation + UoW
+        # participation) without reaching into the private ``_records``.
+        return self._records
+
+    @property
+    def supports_streaming(self) -> bool:
+        # ArtifactStore always implements put_stream/open_stream; the property
+        # exists so StorageFeatures is derived from the real object rather
+        # than a caller-supplied bool.
+        return True
+
     async def put(
         self,
         *,

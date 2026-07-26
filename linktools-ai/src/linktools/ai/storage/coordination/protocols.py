@@ -60,6 +60,13 @@ class LeaseCoordinator(Protocol):
 
     scope: "CoordinationScope"
 
+    # Whether THIS coordinator actually provides leasing / fencing. A real
+    # LeaseCoordinator sets both True; a degenerate / read-only stand-in may
+    # decline one, and StorageFeatures is derived from these rather than from
+    # a caller-supplied bool.
+    supports_leasing: bool
+    supports_fencing: bool
+
     async def acquire(
         self, *, key: str, owner_id: str, ttl: timedelta
     ) -> "LeaseToken | None": ...

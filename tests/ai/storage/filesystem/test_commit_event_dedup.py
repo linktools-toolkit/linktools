@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
+from linktools.ai.run.commit import ApprovalRequestData, CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId, RunCommitPolicy
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -34,6 +34,7 @@ from linktools.ai.run.models import (
 )
 from linktools.ai.session.models import MessageRole, NewSessionMessage
 from linktools.ai.session.models import SessionRecord, SessionStatus
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.runtime.persistence.facade import FilesystemStorage
 
 
@@ -90,6 +91,8 @@ def _make_coordinator(storage, tmp_path):
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
+        policy=RunCommitPolicy(fencing_required=False),
+        codec=RunCommitCodec(),
         transactions_root=tmp_path / "transactions",
     )
 
@@ -182,7 +185,9 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
                     "runnable_id": "agent-1",
                 }
             },
-            request_hash="",)
+            request_hash="",
+            command_payload=b"{}",
+        )
         await coordinator.recover_incomplete_commits()
 
         assert await _count(storage, "run-c", "RunCompleted") == 1
@@ -207,14 +212,15 @@ def test_two_distinct_approvals_each_persist_their_events(tmp_path):
                 PauseRunCommand(
                     run_id="run-d",
                     expected_version=expected_version,
-                    approval_request={
-                        "approval_id": approval_id,
-                        "tool_call_id": tool_call_id,
-                        "tool_name": "shell",
-                        "reason": "needs review",
-                        "arguments": {"cmd": "ls"},
-                        **_APPROVAL_BINDING,
-                    },
+                    approval_request=ApprovalRequestData(
+                        approval_id=approval_id,
+                        tool_call_id=tool_call_id,
+                        tool_name="shell",
+                        reason="needs review",
+                        arguments={"cmd": "ls"},
+                        tenant_id="tenant-test",
+                        binding=_APPROVAL_BINDING,
+                    ),
                     checkpoint_payload=b'{"m":[]}',
                     paused_event=RunPaused(run_id="run-d", reason="needs review"),
                     event_context=_event_ctx("run-d", "sess-d"),
@@ -258,14 +264,15 @@ def test_retried_identical_pause_command_does_not_duplicate(tmp_path):
                 PauseRunCommand(
                     run_id="run-e",
                     expected_version=1,
-                    approval_request={
-                        "approval_id": "appr-1",
-                        "tool_call_id": "call-1",
-                        "tool_name": "shell",
-                        "reason": "needs review",
-                        "arguments": {"cmd": "ls"},
-                        **_APPROVAL_BINDING,
-                    },
+                    approval_request=ApprovalRequestData(
+                        approval_id="appr-1",
+                        tool_call_id="call-1",
+                        tool_name="shell",
+                        reason="needs review",
+                        arguments={"cmd": "ls"},
+                        tenant_id="tenant-test",
+                        binding=_APPROVAL_BINDING,
+                    ),
                     checkpoint_payload=b'{"m":[]}',
                     paused_event=RunPaused(run_id="run-e", reason="needs review"),
                     event_context=_event_ctx("run-e", "sess-e"),

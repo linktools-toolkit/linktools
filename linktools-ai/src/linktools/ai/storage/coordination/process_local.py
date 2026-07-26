@@ -48,6 +48,14 @@ class ProcessLocalLeaseCoordinator:
     another owner returns ``None``.
     """
 
+    # Declares PROCESS_LOCAL scope (coordinates within a single process only) +
+    # both capabilities: acquire/renew/release with monotonic fencing tokens.
+    # StorageFeatures is derived from these rather than from caller-supplied
+    # bools.
+    scope = CoordinationScope.PROCESS_LOCAL
+    supports_leasing = True
+    supports_fencing = True
+
     def __init__(self) -> None:
         # key -> the LeaseToken currently held (or None after release/expiry).
         self._holders: "dict[str, LeaseToken]" = {}
@@ -143,6 +151,10 @@ class InProcessKeyedCoordinator:
     through many unique keys does not accumulate stale entries."""
 
     scope = CoordinationScope.PROCESS_LOCAL
+    # The process-local coordinator fully implements acquire/renew/release with
+    # monotonic fencing tokens, so it declares both capabilities.
+    supports_leasing = True
+    supports_fencing = True
 
     def __init__(self) -> None:
         self._entries: "dict[str, _LockEntry]" = {}

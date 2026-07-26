@@ -69,24 +69,58 @@ class StorageFeatures:
     def from_components(
         cls,
         *,
-        transaction_scope: "TransactionScope",
-        coordination_scope: "CoordinationScope",
-        artifact_coordination_scope: "CoordinationScope",
-        leasing: bool,
-        fencing: bool,
-        streaming_artifacts: bool,
-        components: "Mapping[StorageComponent, object]",
+        transaction_manager: "object | None",
+        coordination: "object | None",
+        artifacts: "object | None",
+        components: "Mapping[StorageComponent, object | None]",
     ) -> "StorageFeatures":
-        """Build features by inspecting each wired store's ``capabilities``
-        rather than optimistically declaring every component. The
-        transactional_components / optimistic_concurrency / idempotency /
-        append_only_events frozensets are derived: a component appears in a
-        set iff its wired store's capabilities say so."""
+        """Build features by inspecting the REAL wired objects -- the
+        transaction manager, the lease coordinator, the artifact store, and
+        each component store's ``capabilities``. Callers supply objects, never
+        ``leasing=True`` / ``fencing=True`` style bool declarations, so a
+        Storage cannot claim a capability none of its wired objects provide.
+
+        - transaction_scope/coordination_scope/artifact_coordination_scope are
+          read off the wired objects (NONE when the object is absent);
+        - leasing/fencing are True iff a coordinator is wired AND it declares
+          supports_leasing / supports_fencing;
+        - streaming_artifacts is True iff an ArtifactStore is wired AND it
+          declares supports_streaming;
+        - transactional_components / optimistic_concurrency / idempotency /
+          append_only_events are derived from each component store's
+          ``capabilities`` (a component appears in a set iff its wired store
+          declares the corresponding capability)."""
+        transaction_scope = (
+            transaction_manager.scope
+            if transaction_manager is not None and hasattr(transaction_manager, "scope")
+            else TransactionScope.NONE
+        )
+        coordination_scope = (
+            coordination.scope
+            if coordination is not None and hasattr(coordination, "scope")
+            else CoordinationScope.NONE
+        )
+        artifact_coordination_scope = (
+            artifacts.coordination_scope
+            if artifacts is not None and hasattr(artifacts, "coordination_scope")
+            else CoordinationScope.NONE
+        )
+        leasing = coordination is not None and bool(
+            getattr(coordination, "supports_leasing", False)
+        )
+        fencing = coordination is not None and bool(
+            getattr(coordination, "supports_fencing", False)
+        )
+        streaming_artifacts = artifacts is not None and bool(
+            getattr(artifacts, "supports_streaming", False)
+        )
         transactional: "set[StorageComponent]" = set()
         optimistic: "set[StorageComponent]" = set()
         idempotency_seen = False
         append_only_seen = False
         for component, store in components.items():
+            if store is None:
+                continue
             caps = _capabilities_of(store)
             if caps.transaction_participation:
                 transactional.add(component)

@@ -33,9 +33,10 @@ slots=True, which would also forbid per-subclass attributes."""
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator, Mapping
 
 if TYPE_CHECKING:
+    from ...artifact.persistence.protocols import ArtifactRecordStore
     from ...artifact.store import ArtifactStore
     from ...evaluation.store import EvalStore
     from ...jobs.store import JobStore
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
         StorageUnitOfWork,
     )
 
+from ...errors import StorageCapabilityError
 from ...agent.approval import ApprovalStore
 from ...events.store import EventStore
 from ...memory.store import MemoryStore
@@ -58,6 +60,31 @@ from ...tool.idempotency import IdempotencyStore
 from .features import StorageFeatures
 from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
 from .transaction import NoCrossStoreTransactions
+
+
+def storage_component_map(storage: "Storage") -> "Mapping[StorageComponent, object | None]":
+    """The single source of truth for which wired object backs each
+    StorageComponent. Used by both ``Storage.__post_init__`` (to derive
+    features) and the consistency gate (to cross-check declared vs wired) so
+    the two lists cannot drift. Optional components (jobs / artifacts) are
+    omitted when their object is None -- a derived feature set never contains
+    a capability for an unwired component."""
+    components: "dict[StorageComponent, object | None]" = {
+        StorageComponent.ASSETS: storage.assets,
+        StorageComponent.RUNS: storage.runs,
+        StorageComponent.SESSIONS: storage.sessions,
+        StorageComponent.EVENTS: storage.events,
+        StorageComponent.APPROVALS: storage.approvals,
+        StorageComponent.CHECKPOINTS: storage.checkpoints,
+    }
+    if storage.jobs is not None:
+        components[StorageComponent.JOBS] = storage.jobs
+    if storage.artifacts is not None:
+        # ARTIFACT_RECORDS is the artifact domain's record store, surfaced
+        # through the ArtifactStore facade. Its capabilities feed
+        # transactional_components (SQL shares the UoW session).
+        components[StorageComponent.ARTIFACT_RECORDS] = storage.artifacts.record_store
+    return components
 
 
 @dataclass(frozen=True)
@@ -118,29 +145,37 @@ class Storage:
     artifacts: "ArtifactStore | None" = None
 
     def __post_init__(self) -> None:
-        """Derive public capabilities from the stores actually wired."""
-        components = {
-            StorageComponent.ASSETS: self.assets,
-            StorageComponent.RUNS: self.runs,
-            StorageComponent.SESSIONS: self.sessions,
-            StorageComponent.EVENTS: self.events,
-            StorageComponent.APPROVALS: self.approvals,
-            StorageComponent.CHECKPOINTS: self.checkpoints,
-            StorageComponent.JOBS: self.jobs,
-        }
+        """Derive public capabilities from the REAL wired objects (transaction
+        manager, coordinator, artifact store, each component store). A Storage
+        that is not self-consistent (declares a capability none of its wired
+        objects provides) fails construction -- the consistency gate runs
+        immediately, not only in RuntimeBuilder."""
+        components = storage_component_map(self)
         object.__setattr__(
             self,
             "features",
             StorageFeatures.from_components(
-                transaction_scope=self.features.transaction_scope,
-                coordination_scope=self.features.coordination_scope,
-                artifact_coordination_scope=self.features.artifact_coordination_scope,
-                leasing=self.features.leasing,
-                fencing=self.features.fencing,
-                streaming_artifacts=self.features.streaming_artifacts,
+                transaction_manager=self._transaction_manager,
+                coordination=self.coordination,
+                artifacts=self.artifacts,
                 components=components,
             ),
         )
+        from .validation import validate_storage_feature_consistency
+
+        validate_storage_feature_consistency(self)
+
+    @property
+    def artifact_records(self) -> "ArtifactRecordStore":
+        """The wired ArtifactRecordStore (the ARTIFACT_RECORDS component),
+        surfaced through the ArtifactStore facade. Raises if no ArtifactStore
+        is wired -- callers branch on ``features.streaming_artifacts`` first."""
+        if self.artifacts is None:
+            raise StorageCapabilityError(
+                "this Storage has no ArtifactStore wired; artifact_records "
+                "is unavailable"
+            )
+        return self.artifacts.record_store
 
     def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         """Cross-store transactional scope -- the single public entry. A backend
@@ -201,6 +236,17 @@ class FilesystemStorage(Storage):
                 mode=mode or FilesystemSecurityMode.SECURE_POSIX,
             )
         )
+        artifact_store = ArtifactStore(
+            FilesystemArtifactBlobStore(
+                blobs_root=root_path / "artifacts" / "blobs"
+            ),
+            FilesystemArtifactRecordStore(
+                records_root=root_path / "artifacts" / "records"
+            ),
+            InProcessKeyedCoordinator(),
+        )
+        coordination = ProcessLocalLeaseCoordinator()
+        transaction_manager = NoCrossStoreTransactions("FilesystemStorage")
         super().__init__(
             assets=assets,
             sessions=FilesystemSessionStore(root=root_path / "sessions"),
@@ -213,25 +259,16 @@ class FilesystemStorage(Storage):
             idempotency=FilesystemIdempotencyStore(root=root_path / "idempotency"),
             run_definitions=FilesystemRunDefinitionStore(root=root_path / "definitions"),
             features=StorageFeatures.from_components(
-                transaction_scope=TransactionScope.NONE,
-                coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                leasing=True, fencing=True, streaming_artifacts=True,
+                transaction_manager=transaction_manager,
+                coordination=coordination,
+                artifacts=artifact_store,
                 components={StorageComponent.ASSETS: assets},
             ),
-            coordination=ProcessLocalLeaseCoordinator(),
-            _transaction_manager=NoCrossStoreTransactions("FilesystemStorage"),
+            coordination=coordination,
+            _transaction_manager=transaction_manager,
             jobs=FilesystemJobStore(root_path / "jobs"),
             evaluations=FilesystemEvaluationStore(root=root_path / "evaluations"),
-            artifacts=ArtifactStore(
-                FilesystemArtifactBlobStore(
-                    blobs_root=root_path / "artifacts" / "blobs"
-                ),
-                FilesystemArtifactRecordStore(
-                    records_root=root_path / "artifacts" / "records"
-                ),
-                InProcessKeyedCoordinator(),
-            ),
+            artifacts=artifact_store,
         )
         # Stash the root so the FilesystemRunCommitCoordinator can place its crash-
         # recovery journal under {root}/transactions (frozen dataclass -> bypass).

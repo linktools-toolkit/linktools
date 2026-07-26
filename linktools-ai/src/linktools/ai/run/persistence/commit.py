@@ -56,6 +56,7 @@ from .journal import (
     TransactionState,
 )
 from .codec import RunCommitCodec
+from .wire import RunCommitIntegrityError, RunCommitOperation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -133,9 +134,8 @@ class FilesystemRunCommitCoordinator:
         # Completion log first: O(1) replay of an already-committed pause.
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return PausedRunCommit(
-                approval_id=replay.get("approval_id", approval_id),
-                checkpoint_id=replay.get("checkpoint_id", ""),
+            return self._decode_completion_result(
+                RunCommitOperation.PAUSE, replay
             )
         record = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         if (
@@ -253,11 +253,15 @@ class FilesystemRunCommitCoordinator:
                 )
             record = self._journal.update(record, state="EVENTS_WRITTEN")
 
+        paused = PausedRunCommit(approval_id=approval_id, checkpoint_id=persisted.id)
         self._journal.commit(
             record,
             result={"approval_id": approval_id, "checkpoint_id": persisted.id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.PAUSE, paused
+            ),
         )
-        return PausedRunCommit(approval_id=approval_id, checkpoint_id=persisted.id)
+        return paused
 
     async def complete(self, command: CompleteRunCommand) -> CompletedRunCommit:
         """Persist session messages + checkpoint + SUCCEEDED transition + event,
@@ -276,12 +280,9 @@ class FilesystemRunCommitCoordinator:
         # Completion log first: O(1) replay of an already-committed complete.
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            encoded = replay.get("__result_payload_b64")
-            if encoded:
-                decoded = self._codec.decode_result(base64.b64decode(encoded))
-                from ..models import RunResult
-                return CompletedRunCommit(result=RunResult(**decoded))
-            return CompletedRunCommit(result=command.result)
+            return self._decode_completion_result(
+                RunCommitOperation.COMPLETE, replay
+            )
         record = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         if (
             record is None
@@ -372,12 +373,16 @@ class FilesystemRunCommitCoordinator:
             )
             record = self._journal.update(record, state="EVENTS_WRITTEN")
 
+        run_result = command.result
+        completed = CompletedRunCommit(result=run_result)
         self._journal.commit(
             record,
             result={"run_id": command.run_id},
-            result_payload=self._codec.encode_result("complete", command.result),
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.COMPLETE, completed
+            ),
         )
-        return CompletedRunCommit(result=command.result)
+        return completed
 
     def _check_execution_token(self, existing: "RunRecord | None", token: str) -> None:
         """Terminal-commit fencing: a non-empty stored ``execution_token``
@@ -390,6 +395,26 @@ class FilesystemRunCommitCoordinator:
         self._policy.validate(
             supplied=ExecutionFence(token) if token else None,
             stored_token=existing.execution_token if existing is not None else None,
+        )
+
+    def _decode_completion_result(
+        self,
+        operation: "RunCommitOperation | str",
+        replay: Mapping,
+    ) -> Any:
+        """Decode the FIRST persisted typed result for a completed commit. The
+        completion log is the source of truth for a replay: a stored payload
+        MUST exist and is decoded into its typed dataclass -- there is no
+        fallback to the current command, so a replay always returns the
+        originally-persisted result (the response-loss / restart contract)."""
+        encoded = replay.get("__result_payload_b64")
+        if not isinstance(encoded, str):
+            raise RunCommitIntegrityError(
+                f"completion log for operation {operation!r} has no result payload"
+            )
+        return self._codec.decode_result(
+            operation,
+            base64.b64decode(encoded, validate=True),
         )
 
     async def start(self, command: StartRunCommand) -> StartedRunCommit:
@@ -405,7 +430,9 @@ class FilesystemRunCommitCoordinator:
         request_hash = self._codec.request_hash("start", command).hex()
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return StartedRunCommit(record=command.record)
+            return self._decode_completion_result(
+                RunCommitOperation.START, replay
+            )
         tx = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         existing = await self._runs.get(command.record.id)
         if tx is None and existing is not None:
@@ -437,8 +464,15 @@ class FilesystemRunCommitCoordinator:
             )
             tx = self._journal.update(tx, state="EVENTS_WRITTEN")
 
-        self._journal.commit(tx, result={"run_id": command.record.id})
-        return StartedRunCommit(record=created)
+        started = StartedRunCommit(record=created)
+        self._journal.commit(
+            tx,
+            result={"run_id": command.record.id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.START, started
+            ),
+        )
+        return started
 
     async def resume(self, command: ResumeRunCommand) -> ResumedRunCommit:
         """Transition WAITING_APPROVAL -> RUNNING + append RunResumed,
@@ -450,7 +484,9 @@ class FilesystemRunCommitCoordinator:
         request_hash = self._codec.request_hash("resume", command).hex()
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return ResumedRunCommit(run_id=command.run_id)
+            return self._decode_completion_result(
+                RunCommitOperation.RESUME, replay
+            )
         tx = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         existing = await self._runs.get(command.run_id)
         if tx is None and existing is not None and existing.status is RunStatus.RUNNING:
@@ -482,8 +518,15 @@ class FilesystemRunCommitCoordinator:
             )
             tx = self._journal.update(tx, state="EVENTS_WRITTEN")
 
-        self._journal.commit(tx, result={"run_id": command.run_id})
-        return ResumedRunCommit(run_id=command.run_id)
+        resumed = ResumedRunCommit(run_id=command.run_id)
+        self._journal.commit(
+            tx,
+            result={"run_id": command.run_id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.RESUME, resumed
+            ),
+        )
+        return resumed
 
     async def fail(self, command: FailRunCommand) -> FailedRunCommit:
         """Transition -> FAILED (with error) + append RunFailed, advancing
@@ -495,7 +538,9 @@ class FilesystemRunCommitCoordinator:
         request_hash = self._codec.request_hash("fail", command).hex()
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return FailedRunCommit(run_id=command.run_id)
+            return self._decode_completion_result(
+                RunCommitOperation.FAIL, replay
+            )
         tx = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         existing = await self._runs.get(command.run_id)
         if tx is None and existing is not None and existing.status is RunStatus.FAILED:
@@ -533,8 +578,15 @@ class FilesystemRunCommitCoordinator:
             )
             tx = self._journal.update(tx, state="EVENTS_WRITTEN")
 
-        self._journal.commit(tx, result={"run_id": command.run_id})
-        return FailedRunCommit(run_id=command.run_id)
+        failed = FailedRunCommit(run_id=command.run_id)
+        self._journal.commit(
+            tx,
+            result={"run_id": command.run_id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.FAIL, failed
+            ),
+        )
+        return failed
 
     async def request_cancel(
         self, command: RequestCancelRunCommand
@@ -554,7 +606,9 @@ class FilesystemRunCommitCoordinator:
         request_hash = self._codec.request_hash("request_cancel", command).hex()
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return CancellingRunCommit(run_id=command.run_id)
+            return self._decode_completion_result(
+                RunCommitOperation.REQUEST_CANCEL, replay
+            )
         tx = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         existing = await self._runs.get(command.run_id)
         if (
@@ -587,8 +641,15 @@ class FilesystemRunCommitCoordinator:
             )
             tx = self._journal.update(tx, state="RUN_TRANSITIONED")
 
-        self._journal.commit(tx, result={"run_id": command.run_id})
-        return CancellingRunCommit(run_id=command.run_id)
+        cancelling = CancellingRunCommit(run_id=command.run_id)
+        self._journal.commit(
+            tx,
+            result={"run_id": command.run_id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.REQUEST_CANCEL, cancelling
+            ),
+        )
+        return cancelling
 
     async def acknowledge_cancel(
         self, command: AcknowledgeCancelRunCommand
@@ -602,7 +663,9 @@ class FilesystemRunCommitCoordinator:
         request_hash = self._codec.request_hash("acknowledge_cancel", command).hex()
         replay = self._journal.find_completion(commit_id, request_hash=request_hash)
         if replay:
-            return CancelledRunCommit(run_id=command.run_id)
+            return self._decode_completion_result(
+                RunCommitOperation.ACKNOWLEDGE_CANCEL, replay
+            )
         tx = self._journal.find_incomplete(commit_id, request_hash=request_hash)
         existing = await self._runs.get(command.run_id)
         if (
@@ -642,8 +705,15 @@ class FilesystemRunCommitCoordinator:
             )
             tx = self._journal.update(tx, state="EVENTS_WRITTEN")
 
-        self._journal.commit(tx, result={"run_id": command.run_id})
-        return CancelledRunCommit(run_id=command.run_id)
+        cancelled = CancelledRunCommit(run_id=command.run_id)
+        self._journal.commit(
+            tx,
+            result={"run_id": command.run_id},
+            result_payload=self._codec.encode_result(
+                RunCommitOperation.ACKNOWLEDGE_CANCEL, cancelled
+            ),
+        )
+        return cancelled
 
     async def _append_critical_event_once(
         self, *, context: EventStreamContext, commit_id: str, payload: Any
@@ -714,9 +784,19 @@ class FilesystemRunCommitCoordinator:
           FAILED (fail-closed) -- orphan approval/checkpoint/session writes may
           remain on disk but are not surfaced as a successful run. We never
           re-drive non-idempotent writes (checkpoint/session append) because that
-          would create duplicates."""
+          would create duplicates.
+
+        Each incomplete journal recovers independently: a record whose
+        recovery raises (critical-event re-append failure, fail-closed
+        mark-FAILED) does not stop the remaining records from being
+        recovered on this same pass -- ``_recover_one`` already logs the
+        failure before raising, so the retained journal is a persisted,
+        visible signal that a future recovery pass must retry it."""
         for record in self._journal.list_incomplete():
-            await self._recover_one(record)
+            try:
+                await self._recover_one(record)
+            except RunRecoveryError:
+                continue
 
     async def _recover_one(self, record: Any) -> None:
         run = await self._runs.get(record.run_id)
@@ -771,9 +851,10 @@ class FilesystemRunCommitCoordinator:
             raise RunRecoveryError(
                 f"recovery could not mark run {record.run_id!r} FAILED"
             ) from exc
-        raise RunRecoveryError(
-            f"incomplete run journal {record.id!r} retained after fail-closed recovery"
-        )
+        # The run is now durably FAILED -- the incomplete commit is resolved,
+        # so the journal is discarded (it is a recovery queue, not an audit
+        # log; the FAILED transition + its event are the durable record).
+        self._discard(record)
 
     def _discard(self, record: Any) -> None:
         """Remove the journal once recovery has handled it (the commit is either

@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunPaused
-from linktools.ai.run.commit import ExecutionFence, PauseRunCommand, PausedRunCommit, RunCommitId
+from linktools.ai.run.commit import ApprovalRequestData, ExecutionFence, PauseRunCommand, PausedRunCommit, RunCommitId, RunCommitPolicy
 from linktools.ai.run.models import RunInput, RunRecord, RunnableType, RunStatus
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.run.persistence.sqlalchemy.commit import (
     SqlAlchemyRunCommitCoordinator,
 )
@@ -61,7 +62,7 @@ def _ctx(run_id, session_id):
 @pytest.fixture
 def coordinator(tmp_path):
     """A real SqlAlchemyRunCommitCoordinator against a fresh sqlite DB."""
-    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition as SqlAlchemyStorage
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'replay.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -77,7 +78,7 @@ def coordinator(tmp_path):
         return storage
 
     storage = _run(_setup())
-    return SqlAlchemyRunCommitCoordinator(storage), session_factory
+    return SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec()), session_factory
 
 
 def _seed_run(session_factory, run_id, session_id):
@@ -108,14 +109,15 @@ def _pause_command(*, run_id, approval_id, payload, commit_id):
     return PauseRunCommand(
         run_id=run_id,
         expected_version=1,
-        approval_request={
-            "approval_id": approval_id,
-            "tool_call_id": f"tc-{approval_id}",
-            "tool_name": "shell",
-            "reason": "review",
-            "arguments": {"cmd": "ls"},
-            **_APPROVAL_BINDING,
-        },
+        approval_request=ApprovalRequestData(
+            approval_id=approval_id,
+            tool_call_id=f"tc-{approval_id}",
+            tool_name="shell",
+            reason="review",
+            arguments={"cmd": "ls"},
+            tenant_id="tenant-test",
+            binding=_APPROVAL_BINDING,
+        ),
         checkpoint_payload=payload,
         paused_event=RunPaused(run_id=run_id, reason="review"),
         event_context=EventStreamContext.from_run_context(_ctx(run_id, "sess-1")),

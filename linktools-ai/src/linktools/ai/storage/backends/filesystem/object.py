@@ -60,6 +60,7 @@ from ...object.errors import (
     StorageIntegrityError,
     StorageObjectNotFoundError,
     StoragePreconditionFailedError,
+    StorageRecoveryError,
 )
 from ...object.models import (
     Depth,
@@ -132,16 +133,19 @@ class _VersionIntent:
     # recovery reads source content from history/<src>/versions/<v>/content.bin.
     source_key: "str | None" = None
     source_version: "int | None" = None
-    commit_revision: "int | None" = None
+    # Non-nullable on the wire: every persisted version records the operation
+    # revision it belongs to and the operation that produced it, so recovery
+    # can cross-check the published metadata without ambiguity.
+    commit_revision: int = 0
     content_sha256: "str | None" = None
-    operation_id: "str | None" = None
+    operation_id: str = ""
 
 
 @dataclass
 class _OperationIntent:
     operation: str  # "put" | "delete" | "move"
     operation_id: str
-    request_hash: "str | None"
+    request_hash: str
     idempotency_key: "str | None"
     new_revision: int
     versions: "list[_VersionIntent]"
@@ -161,14 +165,111 @@ class _OperationIntent:
 
     @classmethod
     def from_json(cls, raw: bytes) -> "_OperationIntent":
-        data = json.loads(raw)
+        """Strictly validate the intent before trusting it for recovery. A
+        malformed intent is a fail-closed condition, not a best-effort guess:
+        recovery raises StorageRecoveryError so the corrupt operation is
+        retained and the backend stays unavailable rather than silently
+        forward-completing from contradictory data."""
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise StorageRecoveryError(
+                f"operation intent is not valid JSON: {exc}"
+            ) from exc
+        operation = data.get("operation")
+        operation_id = data.get("operation_id")
+        if operation not in ("put", "delete", "move"):
+            raise StorageRecoveryError(
+                f"intent has invalid operation {operation!r}"
+            )
+        if not isinstance(operation_id, str) or not operation_id:
+            raise StorageRecoveryError("intent has invalid operation_id")
+        request_hash = data.get("request_hash")
+        if not isinstance(request_hash, str) or not request_hash:
+            raise StorageRecoveryError("intent has invalid request_hash")
+        new_revision = data.get("new_revision")
+        if not isinstance(new_revision, int) or new_revision < 1:
+            raise StorageRecoveryError(
+                f"intent has invalid new_revision {new_revision!r}"
+            )
+        raw_versions = data.get("versions")
+        if not isinstance(raw_versions, list) or not raw_versions:
+            raise StorageRecoveryError("intent has empty versions")
+        versions: "list[_VersionIntent]" = []
+        seen_pairs: "set[tuple[str, int]]" = set()
+        for entry in raw_versions:
+            if not isinstance(entry, dict):
+                raise StorageRecoveryError("intent version is not an object")
+            try:
+                v = _VersionIntent(
+                    key_value=entry["key_value"],
+                    version=int(entry["version"]),
+                    tombstone=bool(entry["tombstone"]),
+                    etag=entry["etag"],
+                    content_type=entry.get("content_type"),
+                    size=int(entry["size"]),
+                    modified_at=entry["modified_at"],
+                    metadata=dict(entry.get("metadata") or {}),
+                    source_key=entry.get("source_key"),
+                    source_version=entry.get("source_version"),
+                    commit_revision=int(entry["commit_revision"]),
+                    content_sha256=entry.get("content_sha256"),
+                    operation_id=entry["operation_id"],
+                )
+            except (KeyError, ValueError, TypeError) as exc:
+                raise StorageRecoveryError(
+                    f"intent version is malformed: {exc}"
+                ) from exc
+            if v.commit_revision != new_revision:
+                raise StorageRecoveryError(
+                    f"version commit_revision {v.commit_revision} != "
+                    f"operation new_revision {new_revision}"
+                )
+            if v.operation_id != operation_id:
+                raise StorageRecoveryError(
+                    "version operation_id does not match operation"
+                )
+            pair = (v.key_value, v.version)
+            if pair in seen_pairs:
+                raise StorageRecoveryError(
+                    f"duplicate (key, version) in intent: {pair!r}"
+                )
+            seen_pairs.add(pair)
+            if v.tombstone:
+                if v.content_sha256:
+                    raise StorageRecoveryError(
+                        "tombstone version carries a content_sha256"
+                    )
+            else:
+                if not v.content_sha256:
+                    raise StorageRecoveryError(
+                        "non-tombstone version has no content_sha256"
+                    )
+            versions.append(v)
+        # Operation-specific shape contract.
+        if operation in ("put", "delete"):
+            if len(versions) != 1:
+                raise StorageRecoveryError(
+                    f"{operation} intent must have exactly one version"
+                )
+        else:  # move
+            if len(versions) != 2:
+                raise StorageRecoveryError(
+                    "move intent must have exactly two versions"
+                )
+            non_tombstone = [v for v in versions if not v.tombstone]
+            tombstones = [v for v in versions if v.tombstone]
+            if len(non_tombstone) != 1 or len(tombstones) != 1:
+                raise StorageRecoveryError(
+                    "move intent must have one target + one source tombstone"
+                )
         return cls(
-            operation=data["operation"],
-            operation_id=data["operation_id"],
-            request_hash=data.get("request_hash"),
+            operation=operation,
+            operation_id=operation_id,
+            request_hash=request_hash,
             idempotency_key=data.get("idempotency_key"),
-            new_revision=int(data["new_revision"]),
-            versions=[_VersionIntent(**v) for v in data.get("versions", [])],
+            new_revision=new_revision,
+            versions=versions,
         )
 
 
@@ -243,7 +344,6 @@ class FilesystemObjectBackend:
             coordinator = self._build_default_coordinator()
         self._coordinator = coordinator
         self._recovery_error: BaseException | None = None
-        self._last_generation = -1
         # Lazy: created on first writer that needs them.
         self._sd.ensure_directory(".storage", "history")
         self._sd.ensure_directory(".storage", "operations")
@@ -319,10 +419,6 @@ class FilesystemObjectBackend:
     @staticmethod
     def _revision_components() -> "tuple[str, ...]":
         return (".storage", "revision")
-
-    @staticmethod
-    def _generation_components() -> "tuple[str, ...]":
-        return (".storage", "operations_generation")
 
     # --- public ops (all wrapped in coordinator.hold) ----------------------
 
@@ -400,51 +496,133 @@ class FilesystemObjectBackend:
 
     # --- recovery (the never-regress state machine) --------------------------------------------
 
+    # --- journal lifecycle: committed / aborted cleanup -------------------
+
+    def _remove_operation_directory(self, op_id: str) -> None:
+        """Durably remove a finished operation directory. The state file is
+        fsync'd (so the COMMITTED/ABORTED marker is durable across a crash
+        BEFORE the directory disappears), then the tree is removed and the
+        operations parent is fsync'd. A crash mid-removal leaves the directory
+        on disk for the next recovery sweep to retry. A cleanup failure raises
+        StorageRecoveryError -- the backend goes fail-closed rather than
+        reporting success with a leftover active journal."""
+        components = self._operation_dir_components(op_id)
+        self._sd.fsync_directory(*components)
+        self._sd.remove_tree(*components)
+        self._sd.fsync_directory(".storage", "operations")
+
+    def _finish_committed_operation(self, op_id: str) -> None:
+        """Mark an operation COMMITTED and remove its journal directory. The
+        committed result lives in history/ + idempotency/ (the sources of
+        truth); the operation directory is only the recovery queue and is
+        empty in the steady state."""
+        self._set_state(op_id, _OpState.COMMITTED)
+        self._remove_operation_directory(op_id)
+
+    def _finish_aborted_operation(
+        self,
+        op_id: str,
+        intent: _OperationIntent,
+    ) -> None:
+        """Abort an operation that never published a formal version: discard
+        any staged temp payload, mark ABORTED, and remove the directory. If a
+        published version already exists the operation MUST forward-complete,
+        not abort -- aborting would hide a published write."""
+        if any(self._version_exists(v) for v in intent.versions):
+            raise StorageRecoveryError(
+                "published version exists; operation must forward-complete"
+            )
+        self._cleanup_operation_temps(op_id)
+        self._set_state(op_id, _OpState.ABORTED)
+        self._remove_operation_directory(op_id)
+
+    def _cleanup_operation_temps(self, op_id: str) -> None:
+        """Remove any staged payload content staged under the operation
+        directory (``payloads/``). Lives under the operation dir, so it is
+        removed with the directory on abort; this only zeroes it before the
+        ABORTED marker is written so the marker is the last durable fact."""
+        payloads_components = self._operation_dir_components(op_id) + ("payloads",)
+        if self._sd.stat(*payloads_components) is None:
+            return
+        self._sd.remove_tree(*payloads_components)
+
+    # --- recovery (the never-regress state machine) --------------------------------------------
+
     def _recover(self) -> None:
-        """Strictly recover every unfinished operation before serving work."""
+        """Strictly recover every unfinished operation before serving work.
+
+        The active operations directory is a RECOVERY QUEUE, not an audit log:
+        COMMITTED and ABORTED entries are removed as soon as their state is
+        durable. The steady-state directory is empty, so a read's recovery
+        sweep is O(unfinished-ops) ~= O(1). A CORRUPT or unresolvable entry is
+        RETAINED and the backend goes fail-closed (subsequent ops re-raise)."""
         if self._recovery_error is not None:
-            raise self._recovery_error
+            raise StorageRecoveryError(
+                "filesystem object backend is unavailable after recovery failure"
+            ) from self._recovery_error
         operations_components = (".storage", "operations")
         if self._sd.stat(*operations_components) is None:
             return
-        try:
-            for op_id in self._sd.list_names(*operations_components):
+        for op_id in self._sd.list_names(*operations_components):
+            try:
                 self._recover_one(op_id)
-        except BaseException as exc:
-            self._recovery_error = exc
-            raise
+            except BaseException as exc:
+                self._recovery_error = exc
+                raise StorageRecoveryError(
+                    f"filesystem object recovery failed for operation {op_id}"
+                ) from exc
 
     def _recover_one(self, op_id: str) -> None:
         intent_components = self._operation_intent_components(op_id)
         if self._sd.stat(*intent_components) is None:
-            raise StorageIntegrityError(f"operation {op_id!r} has no intent")
+            raise StorageRecoveryError(f"operation {op_id!r} has no intent")
         intent = _OperationIntent.from_json(self._sd.read_bytes(*intent_components))
+        if intent.operation_id != op_id:
+            raise StorageRecoveryError(
+                f"operation {op_id!r} intent operation_id mismatch "
+                f"({intent.operation_id!r})"
+            )
         state = self._read_state(op_id)
         if state is None:
-            raise StorageIntegrityError(f"operation {op_id!r} has invalid state")
-        if state in (_OpState.COMMITTED, _OpState.ABORTED):
+            raise StorageRecoveryError(f"operation {op_id!r} has invalid state")
+        if state is _OpState.COMMITTED:
+            # Already durable in history/+idempotency; drop the recovery entry.
+            self._remove_operation_directory(op_id)
+            return
+        if state is _OpState.ABORTED:
+            # Defensive: an aborted op must not have leaked a published version.
+            if any(self._version_exists(v) for v in intent.versions):
+                raise StorageRecoveryError(
+                    f"aborted operation {op_id!r} has a published version"
+                )
+            self._remove_operation_directory(op_id)
             return
         if state is _OpState.PREPARED:
-            # The intent was written but no version directory was ever
-            # published (the rename in step 7 hadn't run). Clean up any
-            # half-built temp dir and mark ABORTED. We DO NOT delete an
-            # already-published version dir here -- if it exists, the rename
-            # won the race against the state write, so forward-complete
-            # instead (see below).
+            # No version dir published yet (the rename in step 7 hadn't run).
+            # If a version slipped through anyway, the rename won the race
+            # against the state write -- forward-complete instead of aborting.
             if any(self._version_exists(v) for v in intent.versions):
                 self._finalize_after_versions_published(op_id, intent)
+                self._finish_committed_operation(op_id)
             else:
-                self._abort_operation(op_id, intent)
+                self._finish_aborted_operation(op_id, intent)
             return
-        if state in (_OpState.TARGET_PUBLISHED, _OpState.SOURCE_PUBLISHED, _OpState.VERSIONS_PUBLISHED):
+        if state in (
+            _OpState.TARGET_PUBLISHED,
+            _OpState.SOURCE_PUBLISHED,
+            _OpState.VERSIONS_PUBLISHED,
+        ):
             self._finalize_after_versions_published(op_id, intent)
+            self._finish_committed_operation(op_id)
             return
         if state is _OpState.REVISION_PUBLISHED:
             # Revision already advanced; only idempotency remains.
             self._write_idempotency_from_intent(intent)
-            self._set_state(op_id, _OpState.COMMITTED)
+            self._finish_committed_operation(op_id)
             return
-        raise StorageIntegrityError(f"unknown recovery state for operation {op_id!r}")
+        raise StorageRecoveryError(
+            f"unknown recovery state for operation {op_id!r}"
+        )
 
     def _version_exists(self, v: _VersionIntent) -> bool:
         key = StorageKey(v.key_value)
@@ -557,22 +735,6 @@ class FilesystemObjectBackend:
             sort_keys=True,
         ).encode("utf-8")
 
-    def _abort_operation(self, op_id: str, intent: _OperationIntent) -> None:
-        """A PREPARED op that did NOT finish publishing its versions: discard
-        any temp artifacts and mark ABORTED. The published versions (there
-        should be none at PREPARED) stay; live state is unchanged."""
-        # Nothing temp to clean here in our atomic_publish_directory flow --
-        # a half-built temp dir lives under versions/ with a .NAME.tmp prefix
-        # and is removed by atomic_publish_directory itself on its own
-        # exception path. We could sweep them here as defense-in-depth.
-        self._set_state(op_id, _OpState.ABORTED)
-
-    def _try_mark_aborted(self, op_id: str) -> None:
-        try:
-            self._set_state(op_id, _OpState.ABORTED)
-        except Exception:
-            pass
-
     def _write_idempotency_from_intent(self, intent: _OperationIntent) -> None:
         if intent.idempotency_key is None:
             return
@@ -645,10 +807,6 @@ class FilesystemObjectBackend:
             content=intent.to_json(),
         )
         self._set_state(intent.operation_id, _OpState.PREPARED)
-        generation = 0
-        if self._sd.stat(*self._generation_components()) is not None:
-            generation = int(self._sd.read_bytes(*self._generation_components()) or b"0")
-        self._sd.atomic_write(*self._generation_components(), content=str(generation + 1).encode())
 
     def _read_revision_sync(self) -> int:
         components = self._revision_components()
@@ -1004,7 +1162,7 @@ class FilesystemObjectBackend:
                 ),
             )
         # 12. state=COMMITTED
-        self._set_state(operation_id, _OpState.COMMITTED)
+        self._finish_committed_operation(operation_id)
         return StoredObject(
             info=self._info_from_metadata(key, metadata), content=content
         )
@@ -1099,7 +1257,7 @@ class FilesystemObjectBackend:
                     commit_revision=new_revision,
                 ),
             )
-        self._set_state(operation_id, _OpState.COMMITTED)
+        self._finish_committed_operation(operation_id)
 
     def _raw_move_checked_sync(
         self,
@@ -1250,7 +1408,7 @@ class FilesystemObjectBackend:
                     commit_revision=new_revision,
                 ),
             )
-        self._set_state(operation_id, _OpState.COMMITTED)
+        self._finish_committed_operation(operation_id)
         return StoredObject(
             info=self._info_from_metadata(target, target_metadata), content=content
         )

@@ -71,6 +71,7 @@ def _row_to_run(row: SwarmRunRow) -> SwarmRun:
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
         metadata=json.loads(row.metadata_json),
+        execution_token=row.execution_token,
     )
 
 
@@ -189,6 +190,7 @@ class SqlAlchemySwarmStore:
                     created_at=run.created_at,
                     updated_at=run.updated_at,
                     metadata_json=json.dumps(dict(run.metadata)),
+                    execution_token=run.execution_token,
                 )
             )
 
@@ -202,6 +204,39 @@ class SqlAlchemySwarmStore:
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_run(row)
+
+        return await self._execute_in_session(_do)
+
+    async def assert_execution_fence(
+        self,
+        swarm_run_id: str,
+        *,
+        expected_token: str,
+    ) -> SwarmRun:
+        """Lock the run row (FOR UPDATE within the UoW session) and verify the
+        supplied token equals the persisted ``execution_token``. The run-level
+        owner fence -- runs inside the same transaction/lock as the mutation
+        so a concurrent reclaim cannot win between the check and the write."""
+        from ..commit import SwarmFenceLostError, SwarmFenceStateError
+
+        async def _do(session):
+            result = await session.execute(
+                select(SwarmRunRow)
+                .where(SwarmRunRow.id == swarm_run_id)
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
+            if not row.execution_token:
+                raise SwarmFenceStateError(
+                    f"swarm run {swarm_run_id!r} has no persisted execution token"
+                )
+            if row.execution_token != expected_token:
+                raise SwarmFenceLostError(
+                    f"swarm run {swarm_run_id!r} fence token mismatch"
+                )
+            return _row_to_run(row)
 
         return await self._execute_in_session(_do)
 

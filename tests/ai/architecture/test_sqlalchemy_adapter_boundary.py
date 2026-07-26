@@ -172,7 +172,7 @@ def test_sqlalchemy_storage_constructor_takes_session_factory_not_url() -> None:
     accept a url/dsn/engine argument."""
     import inspect
 
-    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorageAdapter as SqlAlchemyStorage
 
     sig = inspect.signature(SqlAlchemyStorage.__init__)
     params = set(sig.parameters) - {"self"}
@@ -192,7 +192,7 @@ def test_sqlalchemy_storage_adapter_has_frozen_constructor() -> None:
     blob/coordination/features, not construct them internally."""
     import inspect
 
-    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorageAdapter
+    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorageAdapter as SqlAlchemyStorageAdapter
 
     sig = inspect.signature(SqlAlchemyStorageAdapter.__init__)
     params = set(sig.parameters) - {"self"}

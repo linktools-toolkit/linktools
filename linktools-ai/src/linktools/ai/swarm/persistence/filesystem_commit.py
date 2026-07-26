@@ -147,7 +147,7 @@ class FilesystemSwarmCommitCoordinator:
                     if not isinstance(decoded, Mapping):
                         raise SwarmRecoveryError("swarm result payload is not a mapping")
                     self._write_completion(
-                        commit_id, request_hash, decoded, result_payload
+                        commit_id, operation, request_hash, decoded, result_payload
                     )
                     self._clear_inflight(commit_id)
                     continue
@@ -224,6 +224,7 @@ class FilesystemSwarmCommitCoordinator:
     def _write_completion(
         self,
         commit_id: str,
+        operation: str,
         request_hash: bytes,
         result: Mapping[str, Any],
         result_payload: bytes | None = None,
@@ -231,6 +232,7 @@ class FilesystemSwarmCommitCoordinator:
         path = self._completed_dir / f"{_hash_segment(commit_id)}.json"
         payload = {
             "commit_id": commit_id,
+            "operation": operation,
             "request_hash": request_hash.hex(),
             "result": dict(result),
         }
@@ -314,7 +316,7 @@ class FilesystemSwarmCommitCoordinator:
         result: Mapping[str, Any],
     ) -> None:
         request_hash = self._codec.request_hash(operation, request_payload)
-        self._write_completion(commit_id, request_hash, result)
+        self._write_completion(commit_id, operation, request_hash, result)
         self._clear_inflight(commit_id)
 
     async def _run_commit(
@@ -322,17 +324,34 @@ class FilesystemSwarmCommitCoordinator:
         operation: str,
         command: Any,
         run_business: Any,
+        *,
+        establish_run_owner: bool = False,
     ) -> "SwarmCommitResult":
         """Wrap a business-write closure with replay detection + inflight
         journaling + completion-log recording. ``run_business`` is a sync or
         async callable that performs the actual swarm_store op and returns
-        the result dict to record."""
+        the result dict to record.
+
+        Fencing order: replay first (an already-completed commit returns even
+        after the token rotates), THEN -- for a fresh commit on an existing
+        run -- the run-level owner fence (assert_execution_fence + policy
+        validate) BEFORE the inflight journal or any business write.
+        ``establish_run_owner=True`` (start) skips the fence (the run is being
+        created) and instead stamps the supplied token as the persisted
+        execution_token."""
         commit_id = str(command.commit_id)
         swarm_run_id = command.swarm_run_id
         request_hash = self._codec.request_hash(operation, command)
         replay = self._read_completion(commit_id, request_hash)
         if replay is not None:
             return replay
+        if not establish_run_owner:
+            current = await self._state_store.assert_execution_fence(
+                swarm_run_id, expected_token=command.fence.token
+            )
+            self._policy.validate(
+                supplied=command.fence, stored_token=current.execution_token
+            )
         # Journal the intent BEFORE the business write so a crash mid-write
         # is reconcilable (recovery marks the swarm_run FAILED).
         self._write_inflight(
@@ -368,6 +387,7 @@ class FilesystemSwarmCommitCoordinator:
         result_payload = self._record_inflight_result(commit_id, operation, result)
         self._write_completion(
             commit_id,
+            operation,
             request_hash,
             result,
             result_payload,
@@ -376,17 +396,23 @@ class FilesystemSwarmCommitCoordinator:
         return result
 
     async def start(self, command: "StartSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
+            from dataclasses import replace as _replace
             from ..models import SwarmRun
 
-            created = await self._state_store.create_run(command.payload.run)
+            # start ESTABLISHES the run-level owner: stamp the supplied
+            # fence token as the persisted execution_token.
+            run_to_create = _replace(
+                command.payload.run, execution_token=command.fence.token
+            )
+            created = await self._state_store.create_run(run_to_create)
             return {"swarm_run_id": created.id, "version": created.version}
 
-        return await self._run_commit("start", command, _business)
+        return await self._run_commit(
+            "start", command, _business, establish_run_owner=True
+        )
 
     async def start_step(self, command: "StartSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ..models import SwarmStep
 
@@ -398,7 +424,6 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def complete_step(self, command: "CompleteSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ...run.models import RunResult
 
@@ -417,7 +442,6 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def fail_step(self, command: "FailSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ...run.models import RunErrorInfo
 
@@ -436,7 +460,6 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def complete(self, command: "CompleteSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ..models import SwarmStatus
 
@@ -452,7 +475,6 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def fail(self, command: "FailSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ..models import SwarmStatus
 
@@ -468,7 +490,6 @@ class FilesystemSwarmCommitCoordinator:
         )
 
     async def cancel(self, command: "CancelSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         async def _business():
             from ..models import SwarmStatus
 

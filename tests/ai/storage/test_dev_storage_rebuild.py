@@ -84,7 +84,9 @@ def test_sqlite_rebuild_wipes_and_reconstructs(tmp_path):
     pytest.importorskip("aiosqlite")
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from linktools.ai.runtime.persistence.sqlalchemy import SqlAlchemyStorage
+    from linktools.ai.runtime.persistence.sqlalchemy import (
+        _ReferenceSqlAlchemyComposition as SqlAlchemyStorage,
+    )
 
     db_path = tmp_path / "dev.db"
 

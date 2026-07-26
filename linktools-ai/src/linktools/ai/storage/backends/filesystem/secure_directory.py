@@ -332,6 +332,22 @@ class SecureDirectory:
             self._remove_tree_at(parent_fd, name)
             os.fsync(parent_fd)
 
+    def fsync_directory(self, *components: str) -> None:
+        """Fsync the directory at ``root/components`` so any prior rename /
+        unlink / atomic_write landing inside it is durable. Idempotent; a
+        missing directory is a no-op (the caller's prior write already failed
+        or never happened)."""
+        if not components:
+            with self._open_root() as fd:
+                os.fsync(fd)
+                return
+        _validate_components(components)
+        try:
+            with self._open_dir_chain(*components) as dir_fd:
+                os.fsync(dir_fd)
+        except FileNotFoundError:
+            return
+
     # --- low-level helpers --------------------------------------------------
 
     def _create_temp(
@@ -452,3 +468,13 @@ class TrustedLocalDirectory(DirectoryIO):
     def remove_tree(self, *parts: str) -> None:
         import shutil
         shutil.rmtree(self._path(parts), ignore_errors=True)
+    def fsync_directory(self, *parts: str) -> None:
+        import os as _os
+        path = self._path(parts)
+        if not path.exists():
+            return
+        fd = _os.open(str(path), _os.O_RDONLY)
+        try:
+            _os.fsync(fd)
+        finally:
+            _os.close(fd)

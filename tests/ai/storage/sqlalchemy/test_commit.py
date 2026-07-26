@@ -18,10 +18,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
+from linktools.ai.run.commit import ApprovalRequestData, CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId, RunCommitPolicy
 # Eager import: registers RunCommitLogRow with Base.metadata BEFORE the
 # per-test _storage() helper runs Base.metadata.create_all, so the
 # run_commit_log table is present for the coordinator's replay lookup.
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.run.persistence.sqlalchemy.commit import (
     SqlAlchemyRunCommitCoordinator,
 )
@@ -39,7 +40,7 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
-from linktools.ai.runtime.persistence import SqlAlchemyStorage
+from linktools.ai.runtime.persistence.sqlalchemy import _ReferenceSqlAlchemyComposition as SqlAlchemyStorage
 from linktools.ai.storage.sqlalchemy.models import Base
 
 
@@ -138,7 +139,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
             SqlAlchemyRunCommitCoordinator,
         )
 
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         result = RunResult(output={"response": "ok"})
         commit = await coordinator.complete(
             CompleteRunCommand(
@@ -179,19 +180,20 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
             SqlAlchemyRunCommitCoordinator,
         )
 
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
         commit = await coordinator.pause(
             PauseRunCommand(
                 run_id="run-2",
                 expected_version=1,
-                approval_request={
-                    "approval_id": "appr-2",
-                    "tool_call_id": "call-2",
-                    "tool_name": "shell",
-                    "reason": "review",
-                    "arguments": {"cmd": "ls"},
-                    **_APPROVAL_BINDING,
-                },
+                approval_request=ApprovalRequestData(
+                    approval_id="appr-2",
+                    tool_call_id="call-2",
+                    tool_name="shell",
+                    reason="review",
+                    arguments={"cmd": "ls"},
+                    tenant_id="tenant-test",
+                    binding=_APPROVAL_BINDING,
+                ),
                 checkpoint_payload=b'{"messages": []}',
                 paused_event=RunPaused(run_id="run-2", reason="review"),
                 event_context=EventStreamContext.from_run_context(_ctx("run-2", "sess-2")),
@@ -228,7 +230,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
             SqlAlchemyRunCommitCoordinator,
         )
 
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
 
         # Wrap the UoW runs store so the SUCCEEDED transition raises while
         # leaving the real store usable for the post-condition reads. We
@@ -318,7 +320,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
             SqlAlchemyRunCommitCoordinator,
         )
 
-        coordinator = SqlAlchemyRunCommitCoordinator(storage)
+        coordinator = SqlAlchemyRunCommitCoordinator(storage, policy=RunCommitPolicy(fencing_required=False), codec=RunCommitCodec())
 
         class _FailingCheckpoints:
             def __init__(self, real):
@@ -358,14 +360,15 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                 PauseRunCommand(
                     run_id="run-4",
                     expected_version=1,
-                    approval_request={
-                        "approval_id": "appr-4",
-                        "tool_call_id": "call-4",
-                        "tool_name": "shell",
-                        "reason": "review",
-                        "arguments": {"cmd": "ls"},
-                        **_APPROVAL_BINDING,
-                    },
+                    approval_request=ApprovalRequestData(
+                        approval_id="appr-4",
+                        tool_call_id="call-4",
+                        tool_name="shell",
+                        reason="review",
+                        arguments={"cmd": "ls"},
+                        tenant_id="tenant-test",
+                        binding=_APPROVAL_BINDING,
+                    ),
                     checkpoint_payload=b'{"messages": []}',
                     paused_event=RunPaused(run_id="run-4", reason="review"),
                     event_context=EventStreamContext.from_run_context(

@@ -114,15 +114,15 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         self._artifact_root = resolved_root
         from ...storage.sqlalchemy.dialects import SqliteObjectDialect
 
+        coordination = ProcessLocalLeaseCoordinator()
         self._initialize(
             session_factory=session_factory,
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
-            coordination=ProcessLocalLeaseCoordinator(),
+            coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_scope=TransactionScope.DATABASE,
-                coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
-                leasing=True, fencing=True, streaming_artifacts=True,
+                transaction_manager=None,
+                coordination=coordination,
+                artifacts=None,
                 components={},
             ),
             # Blobs live on the shared filesystem, so the per-digest lock must

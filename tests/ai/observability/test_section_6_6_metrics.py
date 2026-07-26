@@ -64,6 +64,8 @@ def test_runtime_build_failure_total_fires_on_capability_gate_shortfall(tmp_path
     from linktools.ai.run.requirements import RuntimeRequirements
     from linktools.ai.runtime.persistence.facade import FilesystemStorage
     from linktools.ai.storage.features import CoordinationScope
+    from linktools.ai.run.commit import RunCommitPolicy
+    from linktools.ai.run.persistence.codec import RunCommitCodec
     from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
 
     metrics = InMemoryMetrics()
@@ -149,6 +151,8 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
     from linktools.ai.session.models import MessageRole, NewSessionMessage
     from linktools.ai.session.models import SessionRecord, SessionStatus
     from linktools.ai.runtime.persistence.facade import FilesystemStorage
+    from linktools.ai.run.commit import RunCommitPolicy
+    from linktools.ai.run.persistence.codec import RunCommitCodec
     from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
     from linktools.ai.run.persistence.journal import (
         TransactionJournal,
@@ -201,6 +205,8 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
             event_store=failing_events,
             transactions_root=tmp_path / "transactions",
             metrics=metrics,
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
         )
         # Land the complete commit through the REAL event store first so the
         # run reaches its commit point (SUCCEEDED) and recovery treats only
@@ -212,6 +218,8 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
             session_store=storage.sessions,
             event_store=storage.events,
             transactions_root=tmp_path / "transactions-real",
+            policy=RunCommitPolicy(fencing_required=False),
+            codec=RunCommitCodec(),
         )
         await real_coordinator.complete(
             CompleteRunCommand(
@@ -265,7 +273,8 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                     "runnable_id": "agent-1",
                 },
             },
-            request_hash="",)
+            request_hash="",
+            command_payload=b"{}",)
         await coordinator.recover_incomplete_commits()
         assert metrics.counters.get("critical_event_persist_failure_total") == 1
 

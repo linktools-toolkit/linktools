@@ -28,8 +28,6 @@ from linktools.ai.storage.sqlalchemy.models import Base
 from ..commit import SwarmCommitConflictError, SwarmCommitPolicy
 from .codec import SwarmCommitCodec
 
-_CODEC = SwarmCommitCodec()
-
 
 async def _append_lifecycle_event(tx: object, command: object, commit_id: str) -> None:
     """Append the typed lifecycle event inside the same SQL UoW when supplied."""
@@ -129,7 +127,7 @@ class SqlAlchemySwarmCommitLog:
         swarm_run_id: str,
         request_hash: bytes,
         result: Mapping[str, Any],
-        result_payload: bytes | None = None,
+        result_payload: bytes,
     ) -> None:
         session.add(
             SwarmCommitLogRow(
@@ -138,7 +136,7 @@ class SqlAlchemySwarmCommitLog:
                 swarm_run_id=swarm_run_id,
                 request_hash=request_hash,
                 result_json=json.dumps(result, sort_keys=True),
-                result_payload=result_payload or _CODEC.encode_result(operation, result),
+                result_payload=result_payload,
             )
         )
         await session.flush()
@@ -148,6 +146,7 @@ async def _check_replay(
     log: SqlAlchemySwarmCommitLog,
     session: AsyncSession,
     *,
+    codec: SwarmCommitCodec,
     commit_id: str,
     operation: str,
     request_payload: Mapping[str, Any],
@@ -156,8 +155,9 @@ async def _check_replay(
     Return the recorded result dict if this is an idempotent replay (same id
     + same request_hash); raise SwarmCommitConflictError on a hash mismatch;
     return None on a fresh commit so the caller proceeds with the business
-    writes and then records the result itself."""
-    request_hash = _CODEC.request_hash(operation, request_payload)
+    writes and then records the result itself. Uses the coordinator's OWN
+    codec instance -- no module-global codec remains."""
+    request_hash = codec.request_hash(operation, request_payload)
     existing = await log.find(session, commit_id)
     if existing is None:
         return None
@@ -165,7 +165,7 @@ async def _check_replay(
         raise SwarmCommitConflictError(
             f"swarm commit {commit_id!r} replayed with a different request"
         )
-    return _CODEC.decode_result(operation, existing["result_payload"])
+    return codec.decode_result(operation, existing["result_payload"])
 
 
 class SqlAlchemySwarmCommitCoordinator:
@@ -207,73 +207,98 @@ class SqlAlchemySwarmCommitCoordinator:
         is the Filesystem coordinator's concern."""
         return None
 
+    async def _assert_fence(self, tx: Any, command: Any) -> None:
+        """The run-level owner fence for a FRESH commit (not a replay):
+        lock the run row (FOR UPDATE) inside the UoW and require the supplied
+        token to equal the persisted ``execution_token``. Ordered AFTER replay
+        so an already-completed commit still replays after the token rotates."""
+        current = await tx.swarms.assert_execution_fence(
+            command.swarm_run_id, expected_token=command.fence.token
+        )
+        self._policy.validate(
+            supplied=command.fence, stored_token=current.execution_token
+        )
+
     async def start(self, command: "StartSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="start",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            from dataclasses import replace as _replace
             from ..models import SwarmRun
 
-            created = await tx.swarms.create_run(command.payload.run)
+            # start ESTABLISHES the run-level owner: stamp the supplied fence
+            # token as the persisted execution_token. Subsequent commits fence
+            # against this value (until a reclaim rotates it).
+            run_to_create = _replace(
+                command.payload.run, execution_token=command.fence.token
+            )
+            created = await tx.swarms.create_run(run_to_create)
             await _append_lifecycle_event(tx, command, commit_id)
+            result = {"swarm_run_id": created.id, "version": created.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="start",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("start", command),
-                result={"swarm_run_id": created.id, "version": created.version},
+                result=result,
+                result_payload=self._codec.encode_result("start", result),
             )
-            return {"swarm_run_id": created.id, "version": created.version}
+            return result
 
     async def start_step(self, command: "StartSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="start_step",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ..models import SwarmStep
 
             created = await tx.swarms.create_task(command.payload.step)
             await _append_lifecycle_event(tx, command, commit_id)
+            result = {"task_id": created.id, "version": created.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="start_step",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("start_step", command),
-                result={"task_id": created.id, "version": created.version},
+                result=result,
+                result_payload=self._codec.encode_result("start_step", result),
             )
-            return {"task_id": created.id, "version": created.version}
+            return result
 
     async def complete_step(self, command: "CompleteSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="complete_step",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ...run.models import RunResult
 
             task_id = command.payload.task_id
@@ -285,29 +310,32 @@ class SqlAlchemySwarmCommitCoordinator:
                 active_run_id=command.payload.active_run_id,
             )
             await _append_lifecycle_event(tx, command, commit_id)
+            commit_result = {"task_id": updated.id, "version": updated.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="complete_step",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("complete_step", command),
-                result={"task_id": updated.id, "version": updated.version},
+                result=commit_result,
+                result_payload=self._codec.encode_result("complete_step", commit_result),
             )
-            return {"task_id": updated.id, "version": updated.version}
+            return commit_result
 
     async def fail_step(self, command: "FailSwarmStepCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="fail_step",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ...run.models import RunErrorInfo
 
             task_id = command.payload.task_id
@@ -319,29 +347,32 @@ class SqlAlchemySwarmCommitCoordinator:
                 active_run_id=command.payload.active_run_id,
             )
             await _append_lifecycle_event(tx, command, commit_id)
+            commit_result = {"task_id": updated.id, "version": updated.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="fail_step",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("fail_step", command),
-                result={"task_id": updated.id, "version": updated.version},
+                result=commit_result,
+                result_payload=self._codec.encode_result("fail_step", commit_result),
             )
-            return {"task_id": updated.id, "version": updated.version}
+            return commit_result
 
     async def complete(self, command: "CompleteSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="complete",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ..models import SwarmStatus
 
             updated = await tx.swarms.update_run(
@@ -350,29 +381,32 @@ class SqlAlchemySwarmCommitCoordinator:
                 status=SwarmStatus.SUCCEEDED,
             )
             await _append_lifecycle_event(tx, command, commit_id)
+            result = {"swarm_run_id": updated.id, "version": updated.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="complete",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("complete", command),
-                result={"swarm_run_id": updated.id, "version": updated.version},
+                result=result,
+                result_payload=self._codec.encode_result("complete", result),
             )
-            return {"swarm_run_id": updated.id, "version": updated.version}
+            return result
 
     async def fail(self, command: "FailSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="fail",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ..models import SwarmStatus
 
             updated = await tx.swarms.update_run(
@@ -381,29 +415,32 @@ class SqlAlchemySwarmCommitCoordinator:
                 status=SwarmStatus.FAILED,
             )
             await _append_lifecycle_event(tx, command, commit_id)
+            result = {"swarm_run_id": updated.id, "version": updated.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="fail",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("fail", command),
-                result={"swarm_run_id": updated.id, "version": updated.version},
+                result=result,
+                result_payload=self._codec.encode_result("fail", result),
             )
-            return {"swarm_run_id": updated.id, "version": updated.version}
+            return result
 
     async def cancel(self, command: "CancelSwarmCommand") -> "SwarmCommitResult":
-        self._policy.validate(command.fence)
         commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
+                codec=self._codec,
                 commit_id=commit_id,
                 operation="cancel",
                 request_payload=command,
             )
             if replay is not None:
                 return replay
+            await self._assert_fence(tx, command)
             from ..models import SwarmStatus
 
             updated = await tx.swarms.update_run(
@@ -412,15 +449,17 @@ class SqlAlchemySwarmCommitCoordinator:
                 status=SwarmStatus.CANCELLED,
             )
             await _append_lifecycle_event(tx, command, commit_id)
+            result = {"swarm_run_id": updated.id, "version": updated.version}
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="cancel",
                 swarm_run_id=command.swarm_run_id,
                 request_hash=self._codec.request_hash("cancel", command),
-                result={"swarm_run_id": updated.id, "version": updated.version},
+                result=result,
+                result_payload=self._codec.encode_result("cancel", result),
             )
-            return {"swarm_run_id": updated.id, "version": updated.version}
+            return result
 
 
 __all__: "list[str]" = [

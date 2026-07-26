@@ -12,11 +12,9 @@ from linktools.ai.session.models import SessionRecord, SessionStatus
 from linktools.ai.storage.features import (
     TransactionScope,
 )
-from linktools.ai.runtime.persistence.features import (
-    FILE_STORAGE_FEATURES,
-    SQLALCHEMY_STORAGE_FEATURES,
+from linktools.ai.runtime.persistence.sqlalchemy import (
+    _ReferenceSqlAlchemyComposition as SqlAlchemyStorage,
 )
-from linktools.ai.runtime.persistence import SqlAlchemyStorage
 from linktools.ai.runtime.persistence.facade import FilesystemStorage, Storage
 from linktools.ai.storage.object.models import StorageKey, WriteOptions
 from linktools.ai.storage.sqlalchemy.models import Base
@@ -76,7 +74,7 @@ def _can_acquire_a_lease(coordinator) -> bool:
 def test_file_storage_constructs_full_facade_with_file_capabilities(tmp_path):
     storage = FilesystemStorage(root=tmp_path)
     assert isinstance(storage, Storage)
-    assert storage.features is FILE_STORAGE_FEATURES
+    assert storage.features.transaction_scope is TransactionScope.NONE
     assert storage.assets is not None
     assert storage.sessions is not None
     assert storage.runs is not None
@@ -162,7 +160,7 @@ def _sqlalchemy_storage(tmp_path):
 def test_sqlalchemy_storage_constructs_full_facade_with_sql_capabilities(tmp_path):
     storage, _ = _sqlalchemy_storage(tmp_path)
     assert isinstance(storage, Storage)
-    assert storage.features is SQLALCHEMY_STORAGE_FEATURES
+    assert storage.features.transaction_scope is TransactionScope.DATABASE
     assert storage.assets is not None
     assert storage.sessions is not None
     assert storage.runs is not None

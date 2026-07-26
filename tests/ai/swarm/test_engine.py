@@ -195,12 +195,22 @@ class _Stores:
         self.event_store = FilesystemEventStore(root=tmp_path / "events")
         self.checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
         self.swarm_store = FilesystemSwarmStore(root=tmp_path / "swarm")
+        from linktools.ai.swarm.commit import SwarmCommitPolicy
+        from linktools.ai.swarm.persistence.codec import SwarmCommitCodec
         from linktools.ai.swarm.persistence.filesystem_commit import (
             FilesystemSwarmCommitCoordinator,
         )
 
         self.swarm_commit_coordinator = FilesystemSwarmCommitCoordinator(
-            self.swarm_store, transactions_root=tmp_path / "transactions"
+            self.swarm_store,
+            event_store=self.event_store,
+            transactions_root=tmp_path / "transactions",
+            # The engine ALWAYS supplies SwarmExecutionFence(f"swarm:{run_id}")
+            # on every commit, so the policy must accept fenced commits
+            # (fencing_required=False would reject the supplied fence under
+            # validate()).
+            policy=SwarmCommitPolicy(fencing_required=True),
+            codec=SwarmCommitCodec(),
         )
         self.run_definitions = FilesystemRunDefinitionStore(root=tmp_path / "definitions")
         self.run_controller = RunController()

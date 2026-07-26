@@ -48,6 +48,7 @@ from .commit_log import (
     SqlAlchemyRunCommitLog,
 )
 from ..codec import RunCommitCodec
+from ..wire import RunCommitIntegrityError, RunCommitOperation
 
 if TYPE_CHECKING:
     from ....runtime.persistence.facade import Storage
@@ -92,14 +93,17 @@ class SqlAlchemyRunCommitCoordinator:
         session,
         *,
         commit_id: str,
-        operation: str,
+        operation: "RunCommitOperation | str",
         request_payload: object,
-    ) -> "Mapping[str, Any] | None":
-        """Within the UoW's session, look up commit_id. Return the recorded
-        result dict if this is an idempotent replay (same id + same
+    ) -> Any:
+        """Within the UoW's session, look up commit_id. Return the decoded
+        typed result if this is an idempotent replay (same id + same
         request_hash); raise RunCommitConflictError on a hash mismatch;
         return None on a fresh commit so the caller proceeds with the
-        business writes and then records the result itself."""
+        business writes and then records the result itself.
+
+        A replay ALWAYS returns the first persisted typed result decoded from
+        ``result_payload`` -- never a value rebuilt from the current command."""
         request_hash = self._codec.request_hash(operation, request_payload)
         existing = await self._commit_log.find(session, commit_id)
         if existing is None:
@@ -108,10 +112,11 @@ class SqlAlchemyRunCommitCoordinator:
             raise RunCommitConflictError(
                 f"commit {commit_id!r} replayed with a different request"
             )
-        result = dict(existing.result)
-        if existing.result_payload is not None:
-            result["result_payload"] = base64.b64encode(existing.result_payload).decode("ascii")
-        return result
+        if existing.result_payload is None:
+            raise RunCommitIntegrityError(
+                f"commit {commit_id!r} replay has no persisted result payload"
+            )
+        return self._codec.decode_result(operation, existing.result_payload)
 
     async def pause(self, command: PauseRunCommand) -> PausedRunCommit:
         """Persist approval + checkpoint + transition + events in one txn.
@@ -129,14 +134,11 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="pause",
+                operation=RunCommitOperation.PAUSE,
                 request_payload=command,
             )
             if replay is not None:
-                return PausedRunCommit(
-                    approval_id=replay.get("approval_id", approval_id),
-                    checkpoint_id=replay.get("checkpoint_id", ""),
-                )
+                return replay
 
             if command.approval_request.tool_call_id is not None:
                 approval = await tx.approvals.create_or_get_pending(
@@ -187,19 +189,21 @@ class SqlAlchemyRunCommitCoordinator:
 
             # Record the commit in the SAME UoW so a future replay is
             # idempotent. Business writes + commit-log row commit together.
+            paused = PausedRunCommit(approval_id=approval_id, checkpoint_id=persisted.id)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="pause",
+                operation=RunCommitOperation.PAUSE.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("pause", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.PAUSE, command),
                 result={
                     "approval_id": approval_id,
                     "checkpoint_id": persisted.id,
                 },
+                result_payload=self._codec.encode_result(RunCommitOperation.PAUSE, paused),
             )
 
-        return PausedRunCommit(approval_id=approval_id, checkpoint_id=persisted.id)
+        return paused
 
     async def complete(self, command: CompleteRunCommand) -> CompletedRunCommit:
         """Persist session messages + checkpoint + SUCCEEDED transition +
@@ -219,41 +223,36 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="complete",
+                operation=RunCommitOperation.COMPLETE,
                 request_payload=command,
             )
             if replay is not None:
-                encoded = replay.get("result_payload")
-                if not isinstance(encoded, str):
-                    raise RunCommitConflictError("complete replay has no persisted result payload")
-                decoded = self._codec.decode_result(
-                    "complete", base64.b64decode(encoded.encode("ascii"))
-                )
-                from ...models import RunResult
-                return CompletedRunCommit(result=RunResult(**decoded))
+                return replay
 
             await tx.sessions.append_messages(command.session_id, command.messages)
             await tx.checkpoints.append(checkpoint)
             # SUCCEEDED transition persists command.result -- inside the txn so
             # a failure here rolls back the session/checkpoint writes above.
+            run_result = command.result
             await tx.runs.transition(
                 command.run_id,
                 RunStatus.SUCCEEDED,
                 expected_version=command.expected_version,
-                result=command.result,
+                result=run_result,
             )
             await append_event(tx.events, command.event_context, command.completed_event)
+            completed = CompletedRunCommit(result=run_result)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="complete",
+                operation=RunCommitOperation.COMPLETE.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("complete", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.COMPLETE, command),
                 result={"run_id": command.run_id},
-                result_payload=self._codec.encode_result("complete", command.result),
+                result_payload=self._codec.encode_result(RunCommitOperation.COMPLETE, completed),
             )
 
-        return CompletedRunCommit(result=command.result)
+        return completed
 
     async def start(self, command: StartRunCommand) -> StartedRunCommit:
         """Create the RunRecord (already RUNNING -- callers no longer create
@@ -267,24 +266,24 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="start",
+                operation=RunCommitOperation.START,
                 request_payload=command,
             )
             if replay is not None:
-                # The original commit returned the created record; the
-                # caller's command carries the canonical record, so re-use it.
-                return StartedRunCommit(record=command.record)
+                return replay
             created = await tx.runs.create(command.record)
             await append_event(tx.events, command.event_context, command.started_event)
+            started = StartedRunCommit(record=created)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="start",
+                operation=RunCommitOperation.START.value,
                 run_id=command.record.id,
-                request_hash=self._codec.request_hash("start", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.START, command),
                 result={"run_id": command.record.id},
+                result_payload=self._codec.encode_result(RunCommitOperation.START, started),
             )
-        return StartedRunCommit(record=created)
+        return started
 
     async def resume(self, command: ResumeRunCommand) -> ResumedRunCommit:
         """Transition WAITING_APPROVAL -> RUNNING + append RunResumed in one
@@ -294,26 +293,28 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="resume",
+                operation=RunCommitOperation.RESUME,
                 request_payload=command,
             )
             if replay is not None:
-                return ResumedRunCommit(run_id=command.run_id)
+                return replay
             await tx.runs.transition(
                 command.run_id,
                 RunStatus.RUNNING,
                 expected_version=command.expected_version,
             )
             await append_event(tx.events, command.event_context, command.resumed_event)
+            resumed = ResumedRunCommit(run_id=command.run_id)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="resume",
+                operation=RunCommitOperation.RESUME.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("resume", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.RESUME, command),
                 result={"run_id": command.run_id},
+                result_payload=self._codec.encode_result(RunCommitOperation.RESUME, resumed),
             )
-        return ResumedRunCommit(run_id=command.run_id)
+        return resumed
 
     async def fail(self, command: FailRunCommand) -> FailedRunCommit:
         """Transition -> FAILED (with error) + append RunFailed in one txn.
@@ -323,11 +324,11 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="fail",
+                operation=RunCommitOperation.FAIL,
                 request_payload=command,
             )
             if replay is not None:
-                return FailedRunCommit(run_id=command.run_id)
+                return replay
             self._check_execution_token(
                 await tx.runs.get(command.run_id), (command.execution_fence.token if command.execution_fence else '')
             )
@@ -338,15 +339,17 @@ class SqlAlchemyRunCommitCoordinator:
                 error=command.error,
             )
             await append_event(tx.events, command.event_context, command.failed_event)
+            failed = FailedRunCommit(run_id=command.run_id)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="fail",
+                operation=RunCommitOperation.FAIL.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("fail", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.FAIL, command),
                 result={"run_id": command.run_id},
+                result_payload=self._codec.encode_result(RunCommitOperation.FAIL, failed),
             )
-        return FailedRunCommit(run_id=command.run_id)
+        return failed
 
     async def request_cancel(
         self, command: RequestCancelRunCommand
@@ -361,11 +364,11 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="request_cancel",
+                operation=RunCommitOperation.REQUEST_CANCEL,
                 request_payload=command,
             )
             if replay is not None:
-                return CancellingRunCommit(run_id=command.run_id)
+                return replay
             await tx.runs.transition(
                 command.run_id,
                 RunStatus.CANCELLING,
@@ -374,15 +377,17 @@ class SqlAlchemyRunCommitCoordinator:
                 cancel_requested_by=command.requested_by,
                 cancel_reason=command.reason,
             )
+            cancelling = CancellingRunCommit(run_id=command.run_id)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="request_cancel",
+                operation=RunCommitOperation.REQUEST_CANCEL.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("request_cancel", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.REQUEST_CANCEL, command),
                 result={"run_id": command.run_id},
+                result_payload=self._codec.encode_result(RunCommitOperation.REQUEST_CANCEL, cancelling),
             )
-        return CancellingRunCommit(run_id=command.run_id)
+        return cancelling
 
     async def acknowledge_cancel(
         self, command: AcknowledgeCancelRunCommand
@@ -394,11 +399,11 @@ class SqlAlchemyRunCommitCoordinator:
             replay = await self._check_replay(
                 tx.session,
                 commit_id=commit_id,
-                operation="acknowledge_cancel",
+                operation=RunCommitOperation.ACKNOWLEDGE_CANCEL,
                 request_payload=command,
             )
             if replay is not None:
-                return CancelledRunCommit(run_id=command.run_id)
+                return replay
             self._check_execution_token(
                 await tx.runs.get(command.run_id), (command.execution_fence.token if command.execution_fence else '')
             )
@@ -410,12 +415,14 @@ class SqlAlchemyRunCommitCoordinator:
             await append_event(
                 tx.events, command.event_context, command.cancelled_event
             )
+            cancelled = CancelledRunCommit(run_id=command.run_id)
             await self._commit_log.record(
                 tx.session,
                 commit_id=commit_id,
-                operation="acknowledge_cancel",
+                operation=RunCommitOperation.ACKNOWLEDGE_CANCEL.value,
                 run_id=command.run_id,
-                request_hash=self._codec.request_hash("acknowledge_cancel", command),
+                request_hash=self._codec.request_hash(RunCommitOperation.ACKNOWLEDGE_CANCEL, command),
                 result={"run_id": command.run_id},
+                result_payload=self._codec.encode_result(RunCommitOperation.ACKNOWLEDGE_CANCEL, cancelled),
             )
-        return CancelledRunCommit(run_id=command.run_id)
+        return cancelled

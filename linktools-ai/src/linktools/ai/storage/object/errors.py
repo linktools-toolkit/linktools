@@ -64,3 +64,11 @@ class StorageTransactionClosedError(StorageObjectError):
     """A transaction-bound child backend was used AFTER its context manager
     exited. The child owns transaction-local state that is no longer valid;
     callers must issue all reads/writes inside the ``async with`` block."""
+
+
+class StorageRecoveryError(StorageObjectError):
+    """Recovery could not resolve an operation journal entry, or a journal
+    cleanup failed. The backend enters a fail-closed state: subsequent
+    operations re-raise this error rather than serving potentially-inconsistent
+    state. A corrupt or unresolvable operation directory is RETAINED on disk
+    so it can be inspected, never silently dropped."""

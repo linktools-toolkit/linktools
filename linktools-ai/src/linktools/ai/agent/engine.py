@@ -525,7 +525,17 @@ class AgentEngine:
                                     await cancellation.raise_if_cancelled()
 
                                     model = iter_model or agent.pydantic_agent.model
-                                    if not model_supports_streaming(model) and hasattr(node, "run"):
+                                    # Only skip streaming for MODEL REQUEST nodes when
+                                    # the model itself cannot stream. Tool-execution
+                                    # nodes (CallToolsNode) always stream -- their
+                                    # event stream (FunctionToolCallEvent /
+                                    # FunctionToolResultEvent) does not depend on
+                                    # the model's streaming capability, only on
+                                    # pydantic-ai's graph iteration.
+                                    if (
+                                        not model_supports_streaming(model)
+                                        and PydanticAgent.is_model_request_node(node)
+                                    ):
                                         node = await node.run(run.ctx)
                                         continue
 

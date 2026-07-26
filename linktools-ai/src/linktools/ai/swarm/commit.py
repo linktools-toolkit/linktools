@@ -63,11 +63,66 @@ class SwarmExecutionFence:
 class SwarmCommitPolicy:
     fencing_required: bool = True
 
-    def validate(self, fence: SwarmExecutionFence | None) -> None:
-        if self.fencing_required and fence is None:
-            raise ValueError("swarm execution fence is required")
-        if not self.fencing_required and fence is not None:
-            raise ValueError("swarm execution fence is disabled")
+    def validate(
+        self,
+        *,
+        supplied: SwarmExecutionFence | None,
+        stored_token: str | None,
+    ) -> None:
+        """Validate the supplied fence against the persisted
+        ``SwarmRun.execution_token`` (the run-level owner).
+
+        fencing_required=True (the multi-worker default): a commit MUST carry
+        a fence whose token EQUALS the persisted execution_token. A missing
+        fence is ``SwarmFenceRequiredError``; a run with no persisted token is
+        ``SwarmFenceStateError`` (the run was never claimed/started under
+        fencing); a mismatched token is ``SwarmFenceLostError`` (a later
+        reclaim owns this run now).
+
+        fencing_required=False: a fence must NOT be supplied and the run must
+        have no stored token; otherwise ``SwarmFenceConfigurationError``."""
+        if self.fencing_required:
+            if supplied is None:
+                raise SwarmFenceRequiredError(
+                    "swarm execution fence is required for this commit"
+                )
+            if not stored_token:
+                raise SwarmFenceStateError(
+                    "swarm run has no persisted execution token to fence against"
+                )
+            if supplied.token != stored_token:
+                raise SwarmFenceLostError(
+                    "swarm execution fence token does not match the persisted "
+                    "owner; a later reclaim may own this run"
+                )
+            return
+        if supplied is not None or stored_token:
+            raise SwarmFenceConfigurationError(
+                "swarm execution fencing is disabled for this deployment but a "
+                "fence or stored token is present"
+            )
+
+
+class SwarmFenceRequiredError(Exception):
+    """A commit that requires an execution fence was issued without one."""
+
+
+class SwarmFenceStateError(Exception):
+    """The persisted SwarmRun has no execution_token to fence against (e.g. it
+    was created under a no-fencing deployment), so a fenced commit cannot
+    prove ownership."""
+
+
+class SwarmFenceLostError(Exception):
+    """The supplied fence token does not match the persisted
+    ``SwarmRun.execution_token`` -- a later reclaim/claim owns this run now,
+    so the caller's commit is rejected rather than clobbering the current
+    owner's progress."""
+
+
+class SwarmFenceConfigurationError(Exception):
+    """Fencing is disabled for this deployment but a fence (or a stored token)
+    is present -- a deployment/configuration inconsistency."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +300,10 @@ __all__: "list[str]" = [
     "SwarmCommitId",
     "SwarmCommitPolicy",
     "SwarmExecutionFence",
+    "SwarmFenceConfigurationError",
+    "SwarmFenceLostError",
+    "SwarmFenceRequiredError",
+    "SwarmFenceStateError",
     "CancelSwarmPayload",
     "CompleteSwarmPayload",
     "CompleteSwarmStepPayload",

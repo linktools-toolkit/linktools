@@ -16,6 +16,25 @@ class SwarmStore(Protocol):
 
     async def get_run(self, swarm_run_id: str) -> "SwarmRun | None": ...
 
+    async def assert_execution_fence(
+        self,
+        swarm_run_id: str,
+        *,
+        expected_token: str,
+    ) -> SwarmRun:
+        """Validate and lock the persisted SwarmRun owner for this transaction.
+
+        The run-level fence: the supplied token MUST equal the persisted
+        ``SwarmRun.execution_token``. On the SQL backend this is a
+        ``SELECT ... FOR UPDATE`` inside the UoW session so the row is locked
+        for the duration of the commit; on the Filesystem backend it runs
+        inside the per-run lock the mutation also holds. Raises
+        ``SwarmRunNotFoundError`` if the run is missing,
+        ``SwarmFenceStateError`` if the run has no stored token, and
+        ``SwarmFenceLostError`` on a token mismatch. Does NOT mutate the run
+        or bump its version."""
+        ...
+
     async def update_run(
         self,
         swarm_run_id: str,

@@ -30,8 +30,14 @@ class ModelStreamCapability(Protocol):
 
 
 def model_supports_streaming(model: object) -> bool:
-    capability = getattr(model, "supports_streaming", False)
-    return capability is True
+    # Explicit flag for custom model wrappers that declare their capability.
+    if getattr(model, "supports_streaming", False) is True:
+        return True
+    # FunctionModel: stream only when a stream_function was provided.
+    if hasattr(model, "stream_function"):
+        return getattr(model, "stream_function") is not None
+    # Real models (OpenAI, Anthropic, etc.) support streaming natively.
+    return True
 
 if TYPE_CHECKING:
     from ..middleware.capability import MiddlewareCapability

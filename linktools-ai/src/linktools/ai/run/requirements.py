@@ -286,131 +286,16 @@ def enforce_storage_capability_gate(
 
 def enforce_storage_feature_consistency(storage: "Storage") -> None:
     """Verify a Storage's declared :class:`StorageFeatures` match its WIRED
-    objects. This catches a backend that DECLARES a capability on its features
-    but did not actually wire the object backing it -- a silent degradation the
-    requirements-vs-features gate cannot see (it only reads the feature flags).
+    objects.
 
-    Checks:
-    * transaction_scope != NONE  -> _transaction_manager must be a real manager
-      (not NoCrossStoreTransactions), and a DATABASE scope must not use a
-      NoCrossStoreTransactions manager (which cannot group stores).
-    * coordination_scope != NONE  -> storage.coordination must be a real coordinator.
-    * streaming_artifacts=True  -> storage.artifacts must be a real ArtifactStore
-      (and the reverse: an ArtifactStore wired but streaming_artifacts=False is a
-      flag that disagrees with the wired store).
-    * leasing=True          -> coordination present.
-    * transactional_components -> each declared component must have a real wired
-      store on the Storage (a declared-but-unwired component is a false claim).
-    * JOBS in transactional_components -> storage.jobs must be non-None.
+    Thin re-export of the canonical check in
+    :mod:`linktools.ai.runtime.persistence.validation`, so RuntimeBuilder and
+    ``Storage.__post_init__`` run the SAME gate (the two lists cannot drift).
+    The canonical implementation fails closed on a wired ArtifactStore that
+    does not expose its public capability properties -- no ``getattr`` skip."""
+    from ..runtime.persistence.validation import validate_storage_feature_consistency
 
-    Run this at build_runtime alongside the requirements gate so a
-    misconfigured Storage fails fast instead of producing an AttributeError at
-    the first use."""
-    from ..errors import StorageRequirementsNotMetError
-    from ..storage.features import StorageComponent
-
-    f = storage.features
-    if f.transaction_scope is not TransactionScope.NONE:
-        manager = storage.transaction_manager
-        if manager is None:
-            raise StorageRequirementsNotMetError(
-                f"Storage declares transaction_scope={f.transaction_scope.value!r} "
-                "but its transaction manager is None"
-            )
-        if (
-            f.transaction_scope is TransactionScope.DATABASE
-            and getattr(manager, "scope", TransactionScope.NONE) is not TransactionScope.DATABASE
-        ):
-            raise StorageRequirementsNotMetError(
-                "Storage declares transaction_scope=DATABASE but its transaction "
-                "manager is NoCrossStoreTransactions (cannot group stores)"
-            )
-    if (
-        f.coordination_scope is not CoordinationScope.NONE
-        and storage.coordination is None
-    ):
-        raise StorageRequirementsNotMetError(
-            f"Storage declares coordination_scope={f.coordination_scope.value!r} "
-            "but its LeaseCoordinator is None"
-        )
-    if f.streaming_artifacts and storage.artifacts is None:
-        raise StorageRequirementsNotMetError(
-            "Storage declares streaming_artifacts=True but its ArtifactStore "
-            "(storage.artifacts) is None"
-        )
-    if storage.artifacts is not None and not f.streaming_artifacts:
-        # The reverse direction: an ArtifactStore is wired (it can stream) but
-        # the flag says it cannot. The flag must agree with the wired store.
-        raise StorageRequirementsNotMetError(
-            "Storage wires an ArtifactStore (storage.artifacts) but declares "
-            "streaming_artifacts=False -- the flag must agree with the wired store"
-        )
-    if storage.artifacts is not None:
-        # The declared artifact_coordination_scope must match the ACTUAL wired
-        # coordinator's own scope -- a mismatch here is a Storage that claims one
-        # capability but wired a coordinator providing a different one (the
-        # topology gate above only sees the claim, not the real object). Read the
-        # scope through the ArtifactStore's public ``coordination_scope``
-        # property rather than reaching into its private ``_coordinator``. The
-        # default covers a non-ArtifactStore stand-in used by narrow unit tests;
-        # a real ArtifactStore always exposes the property.
-        wired_scope = getattr(storage.artifacts, "coordination_scope", None)
-        if wired_scope is not None and wired_scope != f.artifact_coordination_scope:
-            raise StorageRequirementsNotMetError(
-                f"Storage declares artifact_coordination_scope="
-                f"{f.artifact_coordination_scope.value!r} but its wired "
-                f"ArtifactDigestCoordinator scope is {wired_scope.value!r}"
-            )
-    if f.leasing and storage.coordination is None:
-        raise StorageRequirementsNotMetError(
-            "Storage declares leasing=True but its LeaseCoordinator is None "
-            "(acquire/renew/release need a coordinator)"
-        )
-    if f.fencing and storage.coordination is None:
-        # Fencing tokens are minted by the coordinator; a fencing=True
-        # declaration with no coordinator is a capability with no backing.
-        raise StorageRequirementsNotMetError(
-            "Storage declares fencing=True but its LeaseCoordinator is None "
-            "(fencing tokens are minted by the coordinator)"
-        )
-    # Each declared transactional component must be backed by a real wired
-    # store; a declared component with no store is a capability the Storage
-    # cannot actually deliver inside a transaction.
-    wired = _wired_components(storage)
-    missing = f.transactional_components - wired
-    if missing:
-        names = ", ".join(sorted(c.value for c in missing))
-        raise StorageRequirementsNotMetError(
-            f"Storage declares transactional_components that are not wired: {names}"
-        )
-    if (
-        StorageComponent.JOBS in f.transactional_components
-        and storage.jobs is None
-    ):
-        raise StorageRequirementsNotMetError(
-            "Storage declares JOBS transactional but storage.jobs is None"
-        )
-
-
-def _wired_components(storage: "Storage") -> "frozenset[StorageComponent]":
-    """The set of StorageComponents that have a non-None wired store on this
-    Storage. ``assets`` / ``jobs`` are optional on the Storage facade and read
-    through their accessors; the core stores are always present."""
-    from ..storage.features import StorageComponent
-
-    wired: "set[StorageComponent]" = {
-        StorageComponent.RUNS,
-        StorageComponent.SESSIONS,
-        StorageComponent.EVENTS,
-        StorageComponent.APPROVALS,
-        StorageComponent.CHECKPOINTS,
-        StorageComponent.ARTIFACT_RECORDS,
-    }
-    if storage.assets is not None:
-        wired.add(StorageComponent.ASSETS)
-    if storage.jobs is not None:
-        wired.add(StorageComponent.JOBS)
-    return frozenset(wired)
+    validate_storage_feature_consistency(storage)
 
 
 __all__: "list[str]" = [

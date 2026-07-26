@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted
-from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, RunCommitId
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, RunCommitId, RunCommitPolicy
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -31,6 +31,7 @@ from linktools.ai.session.models import (
     SessionRecord,
     SessionStatus,
 )
+from linktools.ai.run.persistence.codec import RunCommitCodec
 from linktools.ai.runtime.persistence.facade import FilesystemStorage
 from linktools.ai.run.persistence.journal import TransactionJournal, TransactionKind
 
@@ -79,6 +80,8 @@ def _coordinator(storage, tmp_path):
         run_store=storage.runs,
         session_store=storage.sessions,
         event_store=storage.events,
+        policy=RunCommitPolicy(fencing_required=False),
+        codec=RunCommitCodec(),
         transactions_root=tmp_path / "transactions",
     )
 
@@ -159,7 +162,9 @@ def test_pre_commit_crash_publishes_no_session_messages(tmp_path):
             ],
             "event_context": {},
         },
-        request_hash="",)
+        request_hash="",
+        command_payload=b"{}",
+    )
 
     asyncio.run(coordinator.recover_incomplete_commits())
 
@@ -205,7 +210,9 @@ def test_post_commit_crash_recovery_republishes_messages(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-        request_hash="",)
+        request_hash="",
+        command_payload=b"{}",
+    )
 
     asyncio.run(coordinator.recover_incomplete_commits())
 
@@ -326,7 +333,9 @@ def test_recovery_event_failure_retains_journal_for_retry(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-        request_hash="",)
+        request_hash="",
+        command_payload=b"{}",
+    )
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)
     asyncio.run(coordinator.recover_incomplete_commits())
@@ -370,7 +379,9 @@ def test_recovery_pause_event_failure_retains_journal(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-        request_hash="",)
+        request_hash="",
+        command_payload=b"{}",
+    )
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)
     asyncio.run(coordinator.recover_incomplete_commits())

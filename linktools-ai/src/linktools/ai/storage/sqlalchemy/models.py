@@ -251,6 +251,10 @@ class SwarmRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)
     metadata_json: Mapped[str] = mapped_column(Text)
+    # The run-level owner fence (SwarmCommitPolicy compares a commit's supplied
+    # token against this persisted value). None until the swarm's `start`
+    # commit stamps it; a reclaim rotates it to the new owner's token.
+    execution_token: Mapped["str | None"] = mapped_column(String(256), nullable=True)
 
 
 class SwarmStepRow(Base):
