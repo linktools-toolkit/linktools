@@ -66,6 +66,8 @@ def make_run(
         updated_at=now,
         metadata={"k": "v"} if metadata is None else metadata,
         execution_token=_EXECUTION_TOKEN,
+        execution_owner_id="store-contract-owner",
+        execution_generation=1,
     )
 
 

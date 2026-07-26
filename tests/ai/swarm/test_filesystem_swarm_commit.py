@@ -72,6 +72,9 @@ def _swarm_run(swarm_run_id: str, run_id: str) -> SwarmRun:
         cost=Decimal("0"),
         created_at=_now(),
         updated_at=_now(),
+        execution_token=_FENCE_TOKEN,
+        execution_owner_id="filesystem-commit-test-owner",
+        execution_generation=1,
     )
 
 

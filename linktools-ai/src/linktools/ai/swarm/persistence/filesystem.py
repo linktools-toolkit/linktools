@@ -91,7 +91,40 @@ class FilesystemSwarmCommitView:
         self._open = False
 
 
+def _validate_execution_ownership(
+    *,
+    token: "str | None",
+    owner_id: "str | None",
+    generation: int,
+) -> None:
+    from ..commit import SwarmCommitIntegrityError
+
+    if type(generation) is not int or generation < 0:
+        raise SwarmCommitIntegrityError(
+            "execution_generation must be a non-negative integer"
+        )
+    if generation == 0:
+        if token is not None or owner_id is not None:
+            raise SwarmCommitIntegrityError(
+                "unclaimed SwarmRun must not contain owner or token"
+            )
+        return
+    if not isinstance(token, str) or not token:
+        raise SwarmCommitIntegrityError(
+            "claimed SwarmRun must contain execution_token"
+        )
+    if not isinstance(owner_id, str) or not owner_id:
+        raise SwarmCommitIntegrityError(
+            "claimed SwarmRun must contain execution_owner_id"
+        )
+
+
 def _run_to_json(run: SwarmRun) -> dict:
+    _validate_execution_ownership(
+        token=run.execution_token,
+        owner_id=run.execution_owner_id,
+        generation=run.execution_generation,
+    )
     return {
         "id": run.id,
         "run_id": run.run_id,
@@ -124,16 +157,11 @@ def _run_from_json(raw: dict) -> SwarmRun:
         raise SwarmCommitIntegrityError(
             f"SwarmRun ownership field is missing: {exc.args[0]}"
         ) from exc
-    if execution_token is not None and (
-        not isinstance(execution_token, str) or not execution_token
-    ):
-        raise SwarmCommitIntegrityError("SwarmRun execution_token is invalid")
-    if execution_owner_id is not None and (
-        not isinstance(execution_owner_id, str) or not execution_owner_id
-    ):
-        raise SwarmCommitIntegrityError("SwarmRun execution_owner_id is invalid")
-    if type(execution_generation) is not int or execution_generation < 0:
-        raise SwarmCommitIntegrityError("SwarmRun execution_generation is invalid")
+    _validate_execution_ownership(
+        token=execution_token,
+        owner_id=execution_owner_id,
+        generation=execution_generation,
+    )
     tu = raw["token_usage"]
     return SwarmRun(
         id=raw["id"],
@@ -361,6 +389,11 @@ class FilesystemSwarmStore:
 
     def _create_run_if_absent_sync(self, run: SwarmRun) -> SwarmRun:
         from ..commit import SwarmCommitIntegrityError
+        _validate_execution_ownership(
+            token=run.execution_token,
+            owner_id=run.execution_owner_id,
+            generation=run.execution_generation,
+        )
         path = self._run_path(run.id)
         if path.exists():
             raise SwarmCommitIntegrityError(
@@ -425,6 +458,11 @@ class FilesystemSwarmStore:
             execution_owner_id=lease.owner_id,
             execution_generation=lease.generation,
         )
+        _validate_execution_ownership(
+            token=updated.execution_token,
+            owner_id=updated.execution_owner_id,
+            generation=updated.execution_generation,
+        )
         _atomic_write(
             self._run_path(swarm_run_id),
             json.dumps(_run_to_json(updated)).encode("utf-8"),
@@ -432,7 +470,8 @@ class FilesystemSwarmStore:
         return lease
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
-        return await asyncio.to_thread(self._create_run_sync, run)
+        async with self._lock:
+            return await asyncio.to_thread(self._create_run_if_absent_sync, run)
 
     def _get_run_sync(self, swarm_run_id: str) -> "SwarmRun | None":
         path = self._run_path(swarm_run_id)

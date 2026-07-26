@@ -7,6 +7,7 @@ config is needed."""
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
@@ -63,6 +64,8 @@ def _run(
         updated_at=now,
         metadata={"k": "v"},
         execution_token=_EXECUTION_TOKEN,
+        execution_owner_id="filesystem-test-owner",
+        execution_generation=1,
     )
 
 
@@ -663,7 +666,14 @@ def test_renew_lease_non_claimed_raises_invalid_transition(tmp_path):
 def test_claim_execution_rotates_and_persists_complete_ownership(tmp_path):
     async def _run_case():
         store = FilesystemSwarmStore(root=tmp_path)
-        await store.create_run(_run())
+        await store.create_run(
+            replace(
+                _run(),
+                execution_token=None,
+                execution_owner_id=None,
+                execution_generation=0,
+            )
+        )
 
         first = await store.claim_execution(
             "swarm-1", owner_id="worker-a", expected_generation=0
@@ -702,6 +712,84 @@ def test_run_reader_rejects_missing_ownership_fields(tmp_path, missing_field):
     path = store._run_path("swarm-1")
     raw = json.loads(path.read_text())
     del raw[missing_field]
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(SwarmCommitIntegrityError):
+        asyncio.run(FilesystemSwarmStore(root=tmp_path).get_run("swarm-1"))
+
+
+def test_create_run_duplicate_preserves_existing_ownership_and_state(tmp_path):
+    async def _run_case():
+        store = FilesystemSwarmStore(root=tmp_path)
+        original = _run(status=SwarmStatus.RUNNING, version=3, round=2)
+        await store.create_run(original)
+        replacement = replace(
+            original,
+            status=SwarmStatus.FAILED,
+            version=99,
+            round=9,
+            execution_token="replacement-token",
+            execution_owner_id="replacement-owner",
+            execution_generation=8,
+        )
+
+        with pytest.raises(SwarmCommitIntegrityError):
+            await store.create_run(replacement)
+
+        persisted = await store.get_run(original.id)
+        assert persisted == original
+
+    asyncio.run(_run_case())
+
+
+@pytest.mark.parametrize(
+    ("token", "owner_id", "generation"),
+    [
+        (None, None, 5),
+        ("token-a", None, 3),
+        ("token-a", "worker-a", 0),
+    ],
+)
+def test_create_run_rejects_inconsistent_ownership(
+    tmp_path, token, owner_id, generation
+):
+    invalid = replace(
+        _run(),
+        execution_token=token,
+        execution_owner_id=owner_id,
+        execution_generation=generation,
+    )
+    store = FilesystemSwarmStore(root=tmp_path)
+
+    with pytest.raises(SwarmCommitIntegrityError):
+        asyncio.run(store.create_run(invalid))
+    assert not store._run_path(invalid.id).exists()
+
+
+@pytest.mark.parametrize(
+    ("token", "owner_id", "generation"),
+    [
+        (None, None, 5),
+        ("token-a", None, 3),
+        ("token-a", "worker-a", 0),
+    ],
+)
+def test_run_reader_rejects_inconsistent_ownership(
+    tmp_path, token, owner_id, generation
+):
+    async def _seed():
+        store = FilesystemSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        return store
+
+    store = asyncio.run(_seed())
+    path = store._run_path("swarm-1")
+    raw = json.loads(path.read_text())
+    raw.update({
+        "execution_token": token,
+        "execution_owner_id": owner_id,
+        "execution_generation": generation,
+    })
     path.write_text(json.dumps(raw))
 
     with pytest.raises(SwarmCommitIntegrityError):

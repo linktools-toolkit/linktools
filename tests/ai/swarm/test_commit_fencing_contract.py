@@ -79,6 +79,8 @@ def _run(
         created_at=_now(),
         updated_at=_now(),
         execution_token=execution_token,
+        execution_owner_id=None if execution_token is None else "test-owner",
+        execution_generation=0 if execution_token is None else 1,
     )
 
 
@@ -114,7 +116,7 @@ def _start_command(swarm_run_id: str, token: str, *, run=None) -> StartSwarmComm
         swarm_run_id=swarm_run_id,
         expected_version=1,
         payload=StartSwarmPayload(
-            run=run or _run(swarm_run_id),
+            run=run or _run(swarm_run_id, execution_token=token),
             started_event=SwarmStarted(swarm_run_id="swarm-1", swarm_id="swarm-1"),
             event_context=_ctx(),
         ),
