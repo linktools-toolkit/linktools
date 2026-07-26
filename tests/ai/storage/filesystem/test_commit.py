@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus
 from linktools.ai.run.models import RunnableType
@@ -127,7 +127,7 @@ def test_complete_imports_mark_completed_and_transitions_succeeded(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _context("run-1", "sess-1")
                 ),
-            )
+                commit_id=RunCommitId(f"complete:run-1"),)
         )
         assert commit.result is result
         final = await storage.runs.get("run-1")
@@ -180,7 +180,7 @@ def test_pause_persists_approval_checkpoint_and_transition(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _context("run-2", "sess-2")
                 ),
-            )
+                commit_id=RunCommitId(f"pause:run-2"),)
         )
         assert commit.checkpoint_id
         final = await storage.runs.get("run-2")
@@ -240,7 +240,7 @@ def test_complete_journal_is_discarded_on_success(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _context("run-j", "sess-j")
                 ),
-            )
+                commit_id=RunCommitId(f"complete:run-j"),)
         )
         # No leftover journal files (COMMITTED journals are deleted).
         assert not list((tmp_path / "transactions").glob("*.json"))

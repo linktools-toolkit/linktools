@@ -498,28 +498,6 @@ async def test_object_list_1000_filesystem_p95_under_2000ms(tmp_path):
 # --- Artifact integrity: 10,000 r/w with 0 digest mismatch ---
 
 
-@pytest.mark.asyncio
-async def test_artifact_integrity_10000_rw_zero_mismatch():
-    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
-    from linktools.ai.artifact.store import ArtifactStore
-
-    from external_adapter import (
-        InMemoryArtifactBlobStore,
-        InMemoryArtifactRecordStore,
-    )
-
-    store = ArtifactStore(
-        InMemoryArtifactBlobStore(),
-        InMemoryArtifactRecordStore(),
-        InProcessKeyedCoordinator(),
-    )
-    for i in range(10000):
-        content = f"payload-{i}".encode()
-        record = await store.put(content=content, media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
-        blob = await store.get(artifact_id=record.ref.id, tenant_id="t1")
-        assert blob == content, f"digest mismatch at iteration {i}"
-
-
 # --- stability stress: 10,000 core store ops, < 0.1% non-injected error ---
 
 

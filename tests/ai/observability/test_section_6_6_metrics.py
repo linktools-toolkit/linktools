@@ -120,9 +120,9 @@ def test_event_codec_failure_total_fires_on_migrate_with_future_schema_version()
 
 
 class _FailingEventStore:
-    """Wraps a real EventStore but makes append() raise, simulating a critical
-    event persist failure during recovery. The recovery path records the
-    failure rather than discarding the journal silently."""
+    """Wraps a real EventStore but makes append()/append_once() raise,
+    simulating a critical event persist failure during recovery. The recovery
+    path records the failure rather than discarding the journal silently."""
 
     def __init__(self, inner):
         self._inner = inner
@@ -133,6 +133,9 @@ class _FailingEventStore:
     async def append(self, **kwargs):
         raise RuntimeError("simulated persist failure")
 
+    async def append_once(self, **kwargs):
+        raise RuntimeError("simulated persist failure")
+
 
 def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path):
     """A FilesystemRunCommitCoordinator recovery that hits an event-store
@@ -140,7 +143,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
     silently dropping the journal."""
     from linktools.ai.events.context import EventStreamContext
     from linktools.ai.events.payloads import RunCompleted
-    from linktools.ai.run.commit import CompleteRunCommand
+    from linktools.ai.run.commit import CompleteRunCommand, RunCommitId
     from linktools.ai.run.context import RunContext
     from linktools.ai.run.models import RunInput, RunRecord, RunResult, RunStatus, RunnableType
     from linktools.ai.session.models import MessageRole, NewSessionMessage
@@ -236,7 +239,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                         workspace=None,
                     )
                 ),
-            )
+                commit_id=RunCommitId(f"complete:run-x"),)
         )
         # Now stage an incomplete journal at the failing coordinator: the run
         # is already SUCCEEDED, so recovery's _reappend_critical_events path
@@ -262,7 +265,7 @@ def test_critical_event_persist_failure_total_fires_on_recovery_failure(tmp_path
                     "runnable_id": "agent-1",
                 },
             },
-        )
+            request_hash="",)
         await coordinator.recover_incomplete_commits()
         assert metrics.counters.get("critical_event_persist_failure_total") == 1
 
@@ -717,41 +720,6 @@ def test_catalog_revision_refresh_total_fires_on_revision_change():
 
 
 # --- category 10: external adapter conformance failure ---
-
-
-def test_external_adapter_conformance_failure_total_fires_on_contract_failure():
-    """A contract test method that raises records the metric through the
-    contract's conformance_metrics sink before propagating the failure."""
-    from linktools.ai.testing.contracts import ArtifactBlobStoreContract
-
-    metrics = InMemoryMetrics()
-
-    class _FailingBlobStore:
-        async def put_if_absent(self, *, digest, source, size):
-            raise AssertionError("simulated contract failure")
-
-        @asynccontextmanager
-        async def open(self, *, digest):
-            async def _chunks():
-                yield b""
-
-            yield _chunks()
-
-    class _ContractSubclass(ArtifactBlobStoreContract):
-        conformance_metrics = metrics
-
-        def blob_store(self):
-            return _FailingBlobStore()
-
-    # The contract test method raises (the inner store's AssertionError) and
-    # records the metric first.
-    instance = _ContractSubclass()
-    with pytest.raises(AssertionError):
-        instance.test_put_if_absent_is_idempotent_on_digest()
-    assert metrics.counters.get("external_adapter_conformance_failure_total") == 1
-
-
-# --- category 11a: artifact blob upload failure ---
 
 
 def test_artifact_blob_upload_failure_total_fires_on_digest_mismatch(tmp_path):

@@ -26,11 +26,28 @@ groups Runs+Events atomically but leaves Assets out. The consistency gate
 cross-checks each declared component against the wired store, so a
 declared-but-unwired component fails fast at build time."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Mapping
 
-from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
+from ...storage.features import (
+    ComponentCapabilities,
+    CoordinationScope,
+    StorageComponent,
+    TransactionScope,
+)
 
 _ALL_COMPONENTS: "frozenset[StorageComponent]" = frozenset(StorageComponent)
+
+
+def _capabilities_of(store: object) -> ComponentCapabilities:
+    """Read a store's declared capabilities, defaulting to the empty
+    ComponentCapabilities if the store does not expose the property (so an
+    exotic adapter that predates the property is treated as offering nothing
+    rather than everything)."""
+    caps = getattr(store, "capabilities", None)
+    if isinstance(caps, ComponentCapabilities):
+        return caps
+    return ComponentCapabilities()
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +67,50 @@ class StorageFeatures:
     # declares NONE here; one with an ArtifactStore declares whatever its
     # injected KeyedCoordinator's own ``.scope`` is.
     artifact_coordination_scope: CoordinationScope = CoordinationScope.NONE
+
+    @classmethod
+    def from_components(
+        cls,
+        *,
+        transaction_scope: "TransactionScope",
+        coordination_scope: "CoordinationScope",
+        artifact_coordination_scope: "CoordinationScope",
+        leasing: bool,
+        fencing: bool,
+        streaming_artifacts: bool,
+        components: "Mapping[StorageComponent, object]",
+    ) -> "StorageFeatures":
+        """Build features by inspecting each wired store's ``capabilities``
+        rather than optimistically declaring ``_ALL_COMPONENTS``. The
+        transactional_components / optimistic_concurrency / idempotency /
+        append_only_events frozensets are derived: a component appears in a
+        set iff its wired store's capabilities say so."""
+        transactional: "set[StorageComponent]" = set()
+        optimistic: "set[StorageComponent]" = set()
+        idempotency_seen = False
+        append_only_seen = False
+        for component, store in components.items():
+            caps = _capabilities_of(store)
+            if caps.transaction_participation:
+                transactional.add(component)
+            if caps.optimistic_concurrency:
+                optimistic.add(component)
+            if caps.idempotency:
+                idempotency_seen = True
+            if caps.append_only:
+                append_only_seen = True
+        return cls(
+            transaction_scope=transaction_scope,
+            transactional_components=frozenset(transactional),
+            coordination_scope=coordination_scope,
+            optimistic_concurrency=frozenset(optimistic),
+            leasing=leasing,
+            fencing=fencing,
+            idempotency=idempotency_seen,
+            streaming_artifacts=streaming_artifacts,
+            append_only_events=append_only_seen,
+            artifact_coordination_scope=artifact_coordination_scope,
+        )
 
 
 # Coordination note: the in-repo reference Storage instances (FilesystemStorage
@@ -99,6 +160,7 @@ SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
 
 
 __all__: "list[str]" = [
+    "ComponentCapabilities",
     "FILE_STORAGE_FEATURES",
     "SQLALCHEMY_STORAGE_FEATURES",
     "StorageFeatures",

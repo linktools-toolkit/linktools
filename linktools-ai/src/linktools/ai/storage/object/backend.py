@@ -16,6 +16,7 @@ Protocols (protocols.py), never on these backend Protocols directly."""
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 from typing import Protocol, runtime_checkable
 
 from .models import (
@@ -100,9 +101,19 @@ class ObjectWriterBackend(ObjectReaderBackend, Protocol):
 class TransactionalObjectBackend(Protocol):
     """Multi-object transaction capability. A backend WITHOUT this Protocol
     (e.g. the filesystem backend, which is process-local checked-write only)
-    refuses multi-object transactions rather than faking atomicity."""
+    refuses multi-object transactions rather than faking atomicity.
 
-    def transaction(self): ...
+    ``transaction()`` yields a transaction-bound ``ObjectWriterBackend``: the
+    child owns all transaction-local state (staged writes, session, revision).
+    The reusable parent backend remains free of active session or staged
+    mutation state. Reads through the child see staged writes (read-your-
+    writes); writes through the child are committed atomically on clean
+    context exit and dropped on exception."""
+
+    def transaction(
+        self,
+    ) -> "AbstractAsyncContextManager[ObjectWriterBackend]":
+        ...
 
 
 @runtime_checkable

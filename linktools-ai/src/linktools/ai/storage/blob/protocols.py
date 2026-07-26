@@ -6,8 +6,21 @@ Protocol carries no artifact-domain type. ``digest`` is the plain SHA-256 hex
 digest string (64 lowercase hex chars); the caller validates it (the artifact
 domain's ``ArtifactDigest`` value object) before it ever reaches this layer."""
 
+import hashlib
 from dataclasses import dataclass
 from typing import AsyncContextManager, AsyncIterator, Protocol, runtime_checkable
+
+
+def digest_of(content: bytes) -> str:
+    """The SHA-256 hex digest of ``content`` -- the content-addressed key a
+    BlobStore indexes by. 64 lowercase hex chars. Pure standard-library so
+    callers (tests, the artifact domain's value-object validator, a
+    downloader re-verifying a stream) all agree on the digest format."""
+    if not isinstance(content, (bytes, bytearray, memoryview)):
+        raise TypeError(
+            f"digest_of expects bytes, got {type(content).__name__}"
+        )
+    return hashlib.sha256(content).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,4 +57,4 @@ class BlobStore(Protocol):
     async def delete(self, *, digest: str) -> None: ...
 
 
-__all__: "list[str]" = ["BlobInfo", "BlobStore"]
+__all__: "list[str]" = ["BlobInfo", "BlobStore", "digest_of"]

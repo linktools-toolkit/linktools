@@ -23,6 +23,8 @@ from linktools.ai.run.commit import (
     RequestCancelRunCommand,
     ResumeRunCommand,
     StartRunCommand,
+    ExecutionFence,
+    RunCommitId,
 )
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import RunErrorInfo, RunInput, RunRecord, RunStatus
@@ -88,7 +90,7 @@ def test_start_creates_running_record_and_started_event(tmp_path):
                 record=record,
                 started_event=RunStartedEvent(run_id="run-s1", runnable_id="agent-1"),
                 event_context=ctx,
-            )
+                commit_id=RunCommitId(f"start:rec"),)
         )
         assert commit.record.status is RunStatus.RUNNING
 
@@ -114,8 +116,7 @@ def test_start_is_idempotent_on_retry(tmp_path):
             record=record,
             started_event=RunStartedEvent(run_id="run-s2", runnable_id="agent-1"),
             event_context=ctx,
-            commit_id="start:run-s2",
-        )
+            commit_id=RunCommitId("start:run-s2"),)
 
         first = await coordinator.start(command)
         second = await coordinator.start(command)
@@ -144,7 +145,7 @@ def test_resume_transitions_waiting_approval_to_running(tmp_path):
                 approval_id="appr-1",
                 resumed_event=RunResumedEvent(run_id="run-r1"),
                 event_context=ctx,
-            )
+                commit_id=RunCommitId(f"resume:run-r1"),)
         )
         assert commit.run_id == "run-r1"
 
@@ -169,13 +170,13 @@ def test_fail_transitions_to_failed_with_error_and_event(tmp_path):
             FailRunCommand(
                 run_id="run-f1",
                 expected_version=1,
-                execution_token="",
+                execution_fence=None,
                 error=error,
                 failed_event=RunFailedEvent(
                     run_id="run-f1", error_type="RuntimeError", message="boom"
                 ),
                 event_context=ctx,
-            )
+                commit_id=RunCommitId(f"fail:run-f1"),)
         )
         assert commit.run_id == "run-f1"
 
@@ -210,13 +211,13 @@ def test_fail_rejects_stale_execution_token(tmp_path):
                 FailRunCommand(
                     run_id="run-f2",
                     expected_version=1,
-                    execution_token="stale-token",
+                    execution_fence=ExecutionFence("stale-token"),
                     error=RunErrorInfo(error_type="RuntimeError", message="boom"),
                     failed_event=RunFailedEvent(
                         run_id="run-f2", error_type="RuntimeError", message="boom"
                     ),
                     event_context=ctx,
-                )
+                    commit_id=RunCommitId(f"fail:run-f2"),)
             )
             raised = False
         except RunConflictError:
@@ -244,7 +245,7 @@ def test_request_cancel_transitions_to_cancelling(tmp_path):
                 requested_by="user-1",
                 reason="no longer needed",
                 event_context=ctx,
-            )
+                commit_id=RunCommitId(f"request-cancel:run-c1"),)
         )
         assert commit.run_id == "run-c1"
 
@@ -284,7 +285,8 @@ def test_request_cancel_recovery_does_not_fail_the_run(tmp_path):
             run_id="run-c2",
             target_run_status="cancelling",
             command={},
-        )
+            commit_id="recovery:tx:run-c2",
+            request_hash="",)
 
         await coordinator.recover_incomplete_commits()
 
@@ -307,10 +309,10 @@ def test_acknowledge_cancel_transitions_cancelling_to_cancelled(tmp_path):
             AcknowledgeCancelRunCommand(
                 run_id="run-a1",
                 expected_version=1,
-                execution_token="",
+                execution_fence=None,
                 cancelled_event=RunCancelledEvent(run_id="run-a1", reason="stopped"),
                 event_context=ctx,
-            )
+                commit_id=RunCommitId(f"ack-cancel:run-a1"),)
         )
         assert commit.run_id == "run-a1"
 
@@ -360,7 +362,8 @@ def test_recovery_reappends_started_event_when_start_reached_commit_point(tmp_pa
                     "runnable_id": ctx.runnable_id,
                 }
             },
-        )
+            commit_id="recovery:tx:run-s3",
+            request_hash="",)
 
         await coordinator.recover_incomplete_commits()
 

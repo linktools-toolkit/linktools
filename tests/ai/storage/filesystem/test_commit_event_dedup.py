@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -149,7 +149,7 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
                 result=RunResult(output="ok"),
                 completed_event=RunCompleted(run_id="run-c"),
                 event_context=_event_ctx("run-c", "sess-c"),
-            )
+                commit_id=RunCommitId("complete:run-c:1"),)
         )
         # RunCompleted was written and tagged with the complete commit_id.
         assert await _count(storage, "run-c", "RunCompleted") == 1
@@ -182,7 +182,7 @@ def test_recovery_does_not_duplicate_run_completed(tmp_path):
                     "runnable_id": "agent-1",
                 }
             },
-        )
+            request_hash="",)
         await coordinator.recover_incomplete_commits()
 
         assert await _count(storage, "run-c", "RunCompleted") == 1
@@ -218,8 +218,7 @@ def test_two_distinct_approvals_each_persist_their_events(tmp_path):
                     checkpoint_payload=b'{"m":[]}',
                     paused_event=RunPaused(run_id="run-d", reason="needs review"),
                     event_context=_event_ctx("run-d", "sess-d"),
-                    commit_id=commit_id,
-                )
+                    commit_id=RunCommitId(commit_id),)
             )
 
         # First pause -> commit-a.
@@ -270,8 +269,7 @@ def test_retried_identical_pause_command_does_not_duplicate(tmp_path):
                     checkpoint_payload=b'{"m":[]}',
                     paused_event=RunPaused(run_id="run-e", reason="needs review"),
                     event_context=_event_ctx("run-e", "sess-e"),
-                    commit_id="commit-same",
-                )
+                    commit_id=RunCommitId("commit-same"),)
             )
 
         first = await _pause()

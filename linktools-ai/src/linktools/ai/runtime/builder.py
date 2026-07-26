@@ -124,6 +124,17 @@ class RuntimeBuildConfig:
     # coordinator and injects it. ``build_runtime_components`` fail-closes if
     # this is None rather than silently degrading.
     commit_coordinator: "RunCommitCoordinator | None"
+    # Optional FencedRunEventWriter. When None, build_runtime_components
+    # constructs the backend-appropriate writer from the Storage if the
+    # Storage exposes one (FilesystemStorage / SqlAlchemyStorage do); callers
+    # that want to disable fenced security-event appending pass None
+    # explicitly via a sentinel (rare -- tests/local mode).
+    fenced_event_writer: Any = None
+    # REQUIRED SwarmCommitCoordinator. The composition root (build_runtime or
+    # the direct caller of build_runtime_components) constructs the concrete
+    # coordinator from its concrete Storage and injects it; the build kernel
+    # never branches on Storage type to dispatch a backend.
+    swarm_commit_coordinator: Any = None
     # Typed skill-private-subagent wiring (was 5 Any fields on RuntimeDependencies).
     # Injected straight into the SubagentProvider / SkillProvider; never flows
     # through RuntimeDependencies (which would cycle providers <-> skill/subagent).
@@ -223,6 +234,28 @@ def _build_capability_registry(
         for provider in bundle.capabilities:
             registry.replace(provider)
     return registry or None
+
+
+def _resolve_swarm_commit_coordinator(config: "RuntimeBuildConfig") -> Any:
+    """Return the SwarmCommitCoordinator to wire into SwarmEngine. The
+    composition root constructs the concrete coordinator from its concrete
+    Storage and passes it via RuntimeBuildConfig.swarm_commit_coordinator;
+    this resolver just reads that field. The build kernel never branches on
+    Storage type -- doing so would import concrete backend modules as a side
+    effect of assembly, breaking the no-concrete-backends invariant.
+
+    Fails the build if no coordinator was injected: SwarmEngine requires one
+    and a silent None would defeat commit-log idempotency."""
+    if config.swarm_commit_coordinator is None:
+        from ..errors import SwarmCommitCoordinatorUnavailableError
+
+        raise SwarmCommitCoordinatorUnavailableError(
+            "RuntimeBuildConfig.swarm_commit_coordinator is None -- the "
+            "composition root must construct the backend-appropriate "
+            "SwarmCommitCoordinator from its Storage and inject it. The "
+            "build kernel never dispatches a backend itself."
+        )
+    return config.swarm_commit_coordinator
 
 
 def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
@@ -430,6 +463,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         swarm_store=config.storage.swarms,
         compiler=compiler,
         dispatcher=dispatcher_handle,
+        swarm_commit_coordinator=_resolve_swarm_commit_coordinator(config),
     )
 
     if config.authorization is None:
@@ -468,6 +502,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         schema_registry=schema_registry,
         metrics=metrics,
         model_resolver=model_resolver,
+        fenced_event_writer=config.fenced_event_writer,
     )
     dispatcher_handle.bind(CoordinatorRunDispatcher(run_coordinator))
 

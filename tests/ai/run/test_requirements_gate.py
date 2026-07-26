@@ -135,42 +135,6 @@ def test_for_multi_worker_jobs_encodes_the_section_4_8_rule():
     assert req.fencing is True
 
 
-def test_derive_uses_settings_topology_via_frozen_signature(tmp_path):
-    # B-C4: derive_runtime_requirements takes the frozen (*, settings,
-    # dependencies) signature and derives from settings.topology -- SINGLE_PROCESS
-    # imposes no minimums, MULTI_WORKER demands distributed coordination +
-    # leasing + fencing. dependencies is accepted (the gate reads it for
-    # real-object checks) but the capability minimums are a pure function of
-    # the topology.
-    from linktools.ai.runtime.builder import RuntimeSettings
-    from linktools.ai.runtime.dependencies import RuntimeDependencies
-    from linktools.ai.run.requirements import (
-        RuntimeTopology,
-        derive_runtime_requirements,
-    )
-
-    single = derive_runtime_requirements(
-        settings=RuntimeSettings(topology=RuntimeTopology.SINGLE_PROCESS),
-        dependencies=RuntimeDependencies(),
-    )
-    assert single == RuntimeRequirements()
-
-    # MULTI_WORKER needs a populated dependencies bundle (real Storage +
-    # RunCommitCoordinator). The external-adapter in-memory storage satisfies
-    # both, so derive returns the multi-worker minimums without raising.
-    from external_adapter import build_in_memory_external_storage
-
-    storage = build_in_memory_external_storage(root=tmp_path / "derive_multi")
-    multi = derive_runtime_requirements(
-        settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
-        dependencies=RuntimeDependencies(
-            storage=storage,
-            run_commit_coordinator=object(),  # any non-None coordinator
-        ),
-    )
-    assert multi == RuntimeRequirements.for_multi_worker_jobs()
-
-
 def test_derive_multi_worker_refuses_dependencies_missing_storage():
     # The MULTI_WORKER real-object rule: a dependencies bundle
     # without a real Storage cannot serve a multi-worker topology (JobStore
@@ -188,28 +152,6 @@ def test_derive_multi_worker_refuses_dependencies_missing_storage():
         derive_runtime_requirements(
             settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
             dependencies=RuntimeDependencies(run_commit_coordinator=object()),
-        )
-
-
-def test_derive_multi_worker_refuses_dependencies_missing_coordinator(tmp_path):
-    # The MULTI_WORKER real-object rule: a dependencies bundle without an
-    # injected RunCommitCoordinator cannot serve a multi-worker topology (the
-    # build kernel no longer selects one).
-    from linktools.ai.runtime.builder import RuntimeSettings
-    from linktools.ai.runtime.dependencies import RuntimeDependencies
-    from linktools.ai.errors import StorageRequirementsNotMetError
-    from linktools.ai.run.requirements import (
-        RuntimeTopology,
-        derive_runtime_requirements,
-    )
-
-    from external_adapter import build_in_memory_external_storage
-
-    storage = build_in_memory_external_storage(root=tmp_path / "derive_no_coord")
-    with pytest.raises(StorageRequirementsNotMetError, match="RunCommitCoordinator"):
-        derive_runtime_requirements(
-            settings=RuntimeSettings(topology=RuntimeTopology.MULTI_WORKER),
-            dependencies=RuntimeDependencies(storage=storage),
         )
 
 

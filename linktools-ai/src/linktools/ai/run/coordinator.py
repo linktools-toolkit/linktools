@@ -19,8 +19,10 @@ from .cancellation import CancellationToken
 from .commit import (
     AcknowledgeCancelRunCommand,
     CompleteRunCommand,
+    ExecutionFence,
     FailRunCommand,
     PauseRunCommand,
+    RunCommitId,
     StartRunCommand,
 )
 from .dispatch import ChildRunHandle
@@ -96,6 +98,30 @@ class _EventStoreEventSink:
         )
 
 
+class _FencedSecurityEventSink:
+    """Per-execution SecurityEventSink that delegates to a FencedRunEventWriter.
+
+    Every emit verifies (within the writer's storage-specific UoW) that the
+    presented ExecutionFence still matches the RunRecord's stored
+    execution_token. A stale/empty/missing fence raises RunFenceLostError
+    BEFORE the event lands; that error propagates back through AgentEngine to
+    the Coordinator, which routes the run into fail/fencing-loss convergence
+    rather than letting the security-sensitive action that triggered the emit
+    proceed."""
+
+    def __init__(self, writer: Any, context: Any, fence: "ExecutionFence") -> None:
+        self._writer = writer
+        self._context = context
+        self._fence = fence
+
+    async def emit(self, event: Any) -> None:
+        await self._writer.append_security(
+            context=self._context,
+            fence=self._fence,
+            event=event,
+        )
+
+
 class RunCoordinator:
     def __init__(
         self,
@@ -115,6 +141,7 @@ class RunCoordinator:
         schema_registry: Any = None,
         metrics: "ObservabilityMetrics | None" = None,
         model_resolver: Any = None,
+        fenced_event_writer: Any = None,
     ) -> None:
         self._storage = storage
         self._compiler = compiler
@@ -130,6 +157,13 @@ class RunCoordinator:
         self._settings = settings
         self._schema_registry = schema_registry
         self._metrics = metrics
+        # FencedRunEventWriter (Protocol) -- when supplied, every security
+        # event the Coordinator forwards to AgentEngine routes through a
+        # per-execution sink that verifies the claiming execution's fence
+        # BEFORE appending, so a stale worker cannot land a security event
+        # after losing its lease. None keeps the legacy unfenced sink for
+        # tests/local-mode single-process runs.
+        self._fenced_event_writer = fenced_event_writer
         self._model_resolver = model_resolver
         # One-time crash-recovery guard: the File coordinator's journal is
         # replayed before the first run/resume so an interrupted pause/complete
@@ -625,7 +659,7 @@ class RunCoordinator:
                     run_id=context.run_id, runnable_id=context.runnable_id
                 ),
                 event_context=EventStreamContext.from_run_context(context),
-                commit_id=f"start:{context.run_id}",
+                commit_id=RunCommitId(f"start:{context.run_id}"),
             )
         )
         return commit.record
@@ -821,13 +855,13 @@ class RunCoordinator:
                     run_id=run_id,
                     session_id=context.session_id,
                     expected_version=expected_version,
-                    execution_token=token,
+                    execution_fence=ExecutionFence(token) if token else None,
                     messages=tuple(outcome.aggregate_messages),
                     checkpoint_payload=b"",
                     result=outcome.result,
                     completed_event=RunCompletedEvent(run_id=run_id),
                     event_context=event_ctx,
-                    commit_id=f"swarm-complete:{run_id}",
+                    commit_id=RunCommitId(f"swarm-complete:{run_id}"),
                 )
             )
         elif isinstance(outcome, SwarmFailedType):
@@ -835,7 +869,7 @@ class RunCoordinator:
                 FailRunCommand(
                     run_id=run_id,
                     expected_version=expected_version,
-                    execution_token=token,
+                    execution_fence=ExecutionFence(token) if token else None,
                     error=outcome.error,
                     failed_event=RunFailedEvent(
                         run_id=run_id,
@@ -843,7 +877,7 @@ class RunCoordinator:
                         message=outcome.error.message,
                     ),
                     event_context=event_ctx,
-                    commit_id=f"swarm-fail:{run_id}",
+                    commit_id=RunCommitId(f"swarm-fail:{run_id}"),
                 )
             )
 
@@ -867,10 +901,10 @@ class RunCoordinator:
                 AcknowledgeCancelRunCommand(
                     run_id=run_id,
                     expected_version=current.version,
-                    execution_token=token,
+                    execution_fence=ExecutionFence(token) if token else None,
                     cancelled_event=RunCancelledEvent(run_id=run_id),
                     event_context=EventStreamContext.from_run_context(context),
-                    commit_id=f"swarm-ack-cancel:{run_id}",
+                    commit_id=RunCommitId(f"swarm-ack-cancel:{run_id}"),
                 )
             )
         except (RunConflictError, InvalidRunTransitionError):
@@ -975,7 +1009,7 @@ class RunCoordinator:
                     token=token,
                     live_events=handle,
                 )
-            await handle.publish(self._terminal_event(outcome))
+            await handle.publish(self._terminal_event(outcome, context.run_id))
         finally:
             await handle.close()
 
@@ -1057,7 +1091,7 @@ class RunCoordinator:
         execute_pure, and commit the resulting outcome via commit_coordinator
         (complete/pause/fail/cancel). The fencing token is carried on every
         terminal command so a stale worker's commit is rejected."""
-        security_events = _EventStoreEventSink(self._storage.events, context)
+        security_events = self._build_security_event_sink(context, token)
         if not resuming:
             message_history = await self._session_reader.load_message_history(
                 context.session_id
@@ -1079,6 +1113,24 @@ class RunCoordinator:
         )
         await self._commit_outcome(context, outcome, token, running_version)
         return outcome
+
+    def _build_security_event_sink(self, context: Any, token: str) -> Any:
+        """Construct the per-execution SecurityEventSink the engine consumes.
+
+        When a FencedRunEventWriter is wired (production), every event routes
+        through it -- the writer reads the RunRecord, verifies the presented
+        fence matches the stored execution_token, and only then appends. A
+        stale fence raises RunFenceLostError BEFORE the event lands, so the
+        security-sensitive action that triggered the emit does NOT proceed.
+
+        When no writer is wired (local-mode / tests), the sink appends
+        directly without fencing -- the unfenced legacy path."""
+        ctx = EventStreamContext.from_run_context(context)
+        if self._fenced_event_writer is None or not token:
+            return _EventStoreEventSink(self._storage.events, context)
+        return _FencedSecurityEventSink(
+            self._fenced_event_writer, ctx, ExecutionFence(token)
+        )
 
     async def _commit_outcome(
         self,
@@ -1109,8 +1161,8 @@ class RunCoordinator:
                     result=outcome.result,
                     completed_event=RunCompletedEvent(run_id=run_id),
                     event_context=event_ctx,
-                    execution_token=token,
-                    commit_id=f"complete:{run_id}",
+                    execution_fence=ExecutionFence(token) if token else None,
+                    commit_id=RunCommitId(f"complete:{run_id}"),
                 )
             )
         elif isinstance(outcome, AgentPaused):
@@ -1136,8 +1188,8 @@ class RunCoordinator:
                         ),
                     ),
                     event_context=event_ctx,
-                    execution_token=token,
-                    commit_id=f"pause:{run_id}:{outcome.request.approval_id}",
+                    execution_fence=ExecutionFence(token) if token else None,
+                    commit_id=RunCommitId(f"pause:{run_id}:{outcome.request.approval_id}"),
                 )
             )
         elif isinstance(outcome, AgentFailed):
@@ -1145,7 +1197,7 @@ class RunCoordinator:
                 FailRunCommand(
                     run_id=run_id,
                     expected_version=expected_version,
-                    execution_token=token,
+                    execution_fence=ExecutionFence(token) if token else None,
                     error=outcome.error,
                     failed_event=RunFailedEvent(
                         run_id=run_id,
@@ -1153,7 +1205,7 @@ class RunCoordinator:
                         message=outcome.error.message,
                     ),
                     event_context=event_ctx,
-                    commit_id=f"fail:{run_id}",
+                    commit_id=RunCommitId(f"fail:{run_id}"),
                 )
             )
         elif isinstance(outcome, AgentCancelled):
@@ -1161,10 +1213,10 @@ class RunCoordinator:
                 AcknowledgeCancelRunCommand(
                     run_id=run_id,
                     expected_version=expected_version,
-                    execution_token=token,
+                    execution_fence=ExecutionFence(token) if token else None,
                     cancelled_event=RunCancelledEvent(run_id=run_id),
                     event_context=event_ctx,
-                    commit_id=f"ack-cancel:{run_id}",
+                    commit_id=RunCommitId(f"ack-cancel:{run_id}"),
                 )
             )
         else:  # pragma: no cover - discriminated union is exhaustive
@@ -1204,18 +1256,20 @@ class RunCoordinator:
         )
 
     @staticmethod
-    def _terminal_event(outcome: AgentExecutionOutcome) -> dict:
+    def _terminal_event(outcome: AgentExecutionOutcome, run_id: str = "") -> dict:
         if isinstance(outcome, AgentCompleted):
-            return {"type": "completed"}
+            return {"type": "completed", "run_id": run_id}
         if isinstance(outcome, AgentPaused):
             return {
                 "type": "paused",
+                "run_id": run_id,
                 "approval_id": outcome.request.approval_id,
             }
         if isinstance(outcome, AgentFailed):
             return {
                 "type": "failed",
+                "run_id": run_id,
                 "error_type": outcome.error.error_type,
                 "message": outcome.error.message,
             }
-        return {"type": "cancelled"}
+        return {"type": "cancelled", "run_id": run_id}

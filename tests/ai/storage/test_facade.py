@@ -214,7 +214,7 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
             return {
                 "session": tx.session,
                 "assets": tx.assets,
-                "assets_session": tx.assets._primary._tx_session,
+                "assets_session": tx.assets._primary._session,
                 "artifact_records": tx.artifact_records,
                 "artifact_records_session": tx.artifact_records._session,
                 "runs": tx.runs._session,
@@ -229,10 +229,16 @@ def test_sqlalchemy_storage_transaction_uow_stores_share_one_session(tmp_path):
     bound = asyncio.run(_run())
     # assets IS session-bound now; its backend must share the UoW session.
     from linktools.ai.storage.object.store import ObjectStore
-    from linktools.ai.storage.backends.sqlalchemy.object import SqlAlchemyObjectBackend
+    from linktools.ai.storage.backends.sqlalchemy.object import (
+        SqlAlchemyObjectBackend,
+        _SqlAlchemyTransactionBackend,
+    )
 
     assert isinstance(bound["assets"], ObjectStore)
+    # The UoW's asset backend is the session-bound transaction child, which IS
+    # a SqlAlchemyObjectBackend (subclass).
     assert isinstance(bound["assets"]._primary, SqlAlchemyObjectBackend)
+    assert isinstance(bound["assets"]._primary, _SqlAlchemyTransactionBackend)
     shared = bound["session"]
     assert bound["assets_session"] is shared, (
         "tx.assets backend must bind to the UoW's shared session"

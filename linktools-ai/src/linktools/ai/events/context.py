@@ -78,3 +78,34 @@ async def append_event(
         payload=payload,
         metadata=metadata,
     )
+
+
+async def append_event_once(
+    store: "EventStore",
+    context: EventStreamContext,
+    payload: Any,
+    *,
+    commit_id: str,
+    metadata: "Mapping[str, Any] | None" = None,
+) -> None:
+    """Commit-scoped idempotent append: the store atomically reserves
+    ``(stream_id, commit_id)`` and a retried call with the same commit_id
+    returns the original envelope instead of re-appending. Use this for the
+    state-critical events a Run commit records (RunPaused, RunCompleted,
+    RunFailed, RunCancelled, RunStarted, RunResumed, ApprovalRequested) so a
+    retry does not duplicate them. The store owns the dedup via its
+    stable-id/commit-id index -- callers MUST NOT pre-scan events.list() to
+    decide whether to append."""
+    merged = dict(metadata) if metadata else {}
+    merged.setdefault("commit_id", commit_id)
+    await store.append_once(
+        stream_id=context.stream_id,
+        run_id=context.run_id,
+        root_run_id=context.root_run_id,
+        parent_run_id=context.parent_run_id,
+        session_id=context.session_id,
+        runnable_id=context.runnable_id,
+        payload=payload,
+        metadata=merged,
+        commit_id=commit_id,
+    )

@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.errors import RunLiveStreamAlreadyOpenError
+from linktools.ai.errors import RunLiveStreamAlreadyOpenError, RunLiveStreamClosedError
 from linktools.ai.run.live_events import (
     NullRunLiveEventSink,
     NullSecurityEventSink,
@@ -150,5 +150,121 @@ def test_null_sinks_are_no_ops():
     async def _run():
         await NullRunLiveEventSink().publish({"type": "text", "text": "x"})
         await NullSecurityEventSink().emit(object())
+
+    asyncio.run(_run())
+
+
+# --- P6 cancellation-safe close (no blocking sentinel) ----------------
+
+
+def test_close_does_not_block_on_a_full_queue():
+    """The old design pushed a sentinel into the queue on close, which blocked
+    on a full buffer. The new design signals close via asyncio.Event and never
+    touches the queue -- close returns even when the buffer is full."""
+    async def _run():
+        hub = RunLiveEventHub()
+        handle = await hub.open("run-close-full", capacity=1)
+        await handle.publish({"type": "text", "text": "first"})  # fills the queue
+        # close must not block waiting to push a sentinel into the full queue.
+        await asyncio.wait_for(handle.close(), timeout=1.0)
+        assert handle.is_closed
+
+    asyncio.run(_run())
+
+
+def test_publish_racing_close_raises_closed():
+    """A publish that loses the race against close raises
+    RunLiveStreamClosedError rather than silently dropping or deadlocking."""
+    async def _run():
+        hub = RunLiveEventHub()
+        handle = await hub.open("run-race", capacity=1)
+        await handle.publish({"type": "text", "text": "first"})  # fill the queue
+
+        publish_started = asyncio.Event()
+        publish_done = {}
+
+        async def _blocked_publish():
+            publish_started.set()
+            try:
+                await handle.publish({"type": "text", "text": "second"})
+                publish_done["outcome"] = "delivered"
+            except RunLiveStreamClosedError:
+                publish_done["outcome"] = "closed"
+
+        task = asyncio.create_task(_blocked_publish())
+        await publish_started.wait()
+        # The publish is blocked on the full queue. Close mid-publish.
+        await handle.close()
+        await task
+        return publish_done.get("outcome")
+
+    assert asyncio.run(_run()) == "closed"
+
+
+def test_publish_on_already_closed_raises():
+    async def _run():
+        hub = RunLiveEventHub()
+        handle = await hub.open("run-closed")
+        await handle.close()
+        with pytest.raises(RunLiveStreamClosedError):
+            await handle.publish({"type": "text", "text": "late"})
+
+    asyncio.run(_run())
+
+
+def test_events_drains_pre_close_enqueued_events_then_returns():
+    """Events enqueued BEFORE close are still delivered; the iterator returns
+    once the queue drains + close is signaled."""
+    async def _run():
+        hub = RunLiveEventHub()
+        handle = await hub.open("run-drain")
+        await handle.publish({"type": "text", "text": "a"})
+        await handle.publish({"type": "text", "text": "b"})
+        await handle.publish({"type": "text", "text": "c"})
+        await handle.close()
+        return [event async for event in handle.events()]
+
+    assert asyncio.run(_run()) == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+        {"type": "text", "text": "c"},
+    ]
+
+
+def test_close_is_idempotent():
+    """Closing an already-closed handle is a no-op (never raises, never
+    double-signals)."""
+    async def _run():
+        hub = RunLiveEventHub()
+        handle = await hub.open("run-idempotent")
+        await handle.close()
+        await handle.close()  # no exception
+        await handle.close()  # still no exception
+        assert handle.is_closed
+        assert hub.active_stream_count == 0
+
+    asyncio.run(_run())
+
+
+def test_concurrent_open_close_are_serialized():
+    """Hub lock: a concurrent open + close pair cannot race a stale handle's
+    identity check against a fresh open's slot claim."""
+    async def _run():
+        hub = RunLiveEventHub()
+        # Open + immediately close in concurrent tasks; the lock guarantees
+        # at most one handle per run_id at a time, so the second open either
+        # sees the slot empty (and succeeds) or occupied (and raises), never
+        # a partial-state write.
+        async def _open_close(run_id):
+            try:
+                h = await hub.open(run_id)
+                await h.close()
+            except RunLiveStreamAlreadyOpenError:
+                pass
+
+        await asyncio.gather(*[_open_close("run-A") for _ in range(8)])
+        # Every opener either closed cleanly or bailed on AlreadyOpen; the
+        # active map ends up empty.
+        assert hub.active_stream_count == 0
 
     asyncio.run(_run())

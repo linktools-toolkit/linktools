@@ -33,6 +33,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ...errors import StorageTransactionNotSupportedError
+from ...storage.features import TransactionScope
 
 if TYPE_CHECKING:
     from .protocols import StorageUnitOfWork
@@ -45,6 +46,8 @@ class NoCrossStoreTransactions:
     than yielding a fake atomic scope. This matches
     ``features.transaction_scope = TransactionScope.NONE`` (each store
     independently durable, but no general cross-store UoW)."""
+
+    scope = TransactionScope.NONE
 
     def __init__(self, backend_name: str = "FilesystemStorage") -> None:
         self._backend_name = backend_name

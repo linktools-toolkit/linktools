@@ -51,7 +51,14 @@ class LeaseCoordinator(Protocol):
     not exceed ``min(1 second, lease_ttl / 3)``; adapters must support
     cancellation and return a concrete error on timeout (never a fake
     success).
+
+    ``scope`` declares the coordination range the implementation actually
+    provides (PROCESS_LOCAL: this process only; DISTRIBUTED: spans workers/
+    processes). The capability gate reads it to refuse a process-local
+    coordinator under a topology that shares state across workers.
     """
+
+    scope: "CoordinationScope"
 
     async def acquire(
         self, *, key: str, owner_id: str, ttl: timedelta

@@ -4,8 +4,7 @@
 
 A blob store is content-addressed by digest: put_if_absent is idempotent on the
 digest (a repeat returns the existing blob, no duplicate), a streaming read
-re-verifies the digest as it goes, and stat/delete operate on the digest key.
-xfail(strict=True) until the blob Protocol + a backend exist."""
+re-verifies the digest as it goes, and stat/delete operate on the digest key."""
 
 from __future__ import annotations
 
@@ -14,10 +13,6 @@ import asyncio
 import pytest
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="storage.blob Protocol is not yet implemented",
-)
 class TestBlobStore:
     def test_put_if_absent_is_idempotent_on_digest(self) -> None:
         async def _run() -> None:
@@ -68,13 +63,22 @@ class TestBlobStore:
 
 
 class _MemBlobStore:
-    """Minimal in-memory blob store the contract drives once the real type
-    exists; tests import the real Protocol, so this stays a local stand-in."""
+    """Minimal in-memory blob store the contract drives. Verifies content
+    matches the supplied digest on put_if_absent (a mismatched content under
+    the same digest is an integrity error, not a silent overwrite)."""
 
     def __init__(self) -> None:
         self._blobs: "dict[str, bytes]" = {}
 
     async def put_if_absent(self, digest: str, content: bytes) -> str:
+        from linktools.ai.storage.blob.protocols import digest_of
+
+        # Verify the content actually hashes to the claimed digest -- a
+        # mismatched content under the same digest key is an integrity error.
+        if digest_of(content) != digest:
+            raise ValueError(
+                f"content digest does not match the supplied digest {digest!r}"
+            )
         if digest in self._blobs:
             return digest
         self._blobs[digest] = content

@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted
-from linktools.ai.run.commit import CompleteRunCommand
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, RunCommitId
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -126,7 +126,7 @@ def test_normal_complete_publishes_session_messages(tmp_path):
                 result=RunResult(output="answer"),
                 completed_event=RunCompleted(run_id="run-h"),
                 event_context=_ctx("run-h", "sess-h"),
-            )
+                commit_id=RunCommitId(f"complete:run-h"),)
         )
     )
 
@@ -159,7 +159,7 @@ def test_pre_commit_crash_publishes_no_session_messages(tmp_path):
             ],
             "event_context": {},
         },
-    )
+        request_hash="",)
 
     asyncio.run(coordinator.recover_incomplete_commits())
 
@@ -205,7 +205,7 @@ def test_post_commit_crash_recovery_republishes_messages(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-    )
+        request_hash="",)
 
     asyncio.run(coordinator.recover_incomplete_commits())
 
@@ -221,8 +221,9 @@ def test_post_commit_crash_recovery_republishes_messages(tmp_path):
 
 
 class _FlakyEvents:
-    """Wraps a real EventStore but makes the first ``fail_times`` append calls
-    raise, so a critical-event write failure (and its retry) is deterministic."""
+    """Wraps a real EventStore but makes the first ``fail_times`` append /
+    append_once calls raise, so a critical-event write failure (and its retry)
+    is deterministic."""
 
     def __init__(self, real, fail_times: int) -> None:
         self._real = real
@@ -237,6 +238,12 @@ class _FlakyEvents:
         if self.append_calls <= self._fail_times:
             raise RuntimeError("injected event store failure")
         return await self._real.append(**kwargs)
+
+    async def append_once(self, **kwargs):
+        self.append_calls += 1
+        if self.append_calls <= self._fail_times:
+            raise RuntimeError("injected event store failure")
+        return await self._real.append_once(**kwargs)
 
 
 def _count_events(storage, run_id, payload_type) -> int:
@@ -272,7 +279,7 @@ def test_complete_event_failure_retains_journal_then_retry_writes_once(tmp_path)
         result=RunResult(output="answer"),
         completed_event=RunCompleted(run_id="run-e"),
         event_context=_ctx("run-e", "sess-e"),
-    )
+        commit_id=RunCommitId(f"complete:run-e"),)
 
     with pytest.raises(RuntimeError):
         asyncio.run(coordinator.complete(cmd))
@@ -319,7 +326,7 @@ def test_recovery_event_failure_retains_journal_for_retry(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-    )
+        request_hash="",)
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)
     asyncio.run(coordinator.recover_incomplete_commits())
@@ -363,7 +370,7 @@ def test_recovery_pause_event_failure_retains_journal(tmp_path):
                 "runnable_id": "agent-1",
             },
         },
-    )
+        request_hash="",)
 
     coordinator._events = _FlakyEvents(storage.events, fail_times=1)
     asyncio.run(coordinator.recover_incomplete_commits())

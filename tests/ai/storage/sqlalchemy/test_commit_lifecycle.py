@@ -26,6 +26,8 @@ from linktools.ai.run.commit import (
     RequestCancelRunCommand,
     ResumeRunCommand,
     StartRunCommand,
+    ExecutionFence,
+    RunCommitId,
 )
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
@@ -108,7 +110,7 @@ def test_start_creates_running_record_and_started_event(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _ctx("run-s1", "sess-s1")
                 ),
-            )
+                commit_id=RunCommitId(f"start:rec"),)
         )
         assert commit.record.status is RunStatus.RUNNING
         persisted = await storage.runs.get("run-s1")
@@ -135,7 +137,7 @@ def test_resume_commits_atomically_running(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _ctx("run-r1", "sess-r1")
                 ),
-            )
+                commit_id=RunCommitId(f"resume:run-r1"),)
         )
         assert commit.run_id == "run-r1"
         record = await storage.runs.get("run-r1")
@@ -157,7 +159,7 @@ def test_fail_commits_atomically_failed_with_error_and_event(tmp_path):
             FailRunCommand(
                 run_id="run-f1",
                 expected_version=1,
-                execution_token="",
+                execution_fence=None,
                 error=RunErrorInfo(error_type="RuntimeError", message="boom"),
                 failed_event=RunFailedEvent(
                     run_id="run-f1", error_type="RuntimeError", message="boom"
@@ -165,7 +167,7 @@ def test_fail_commits_atomically_failed_with_error_and_event(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _ctx("run-f1", "sess-f1")
                 ),
-            )
+                commit_id=RunCommitId(f"fail:run-f1"),)
         )
         assert commit.run_id == "run-f1"
         record = await storage.runs.get("run-f1")
@@ -193,7 +195,7 @@ def test_fail_rejects_stale_execution_token(tmp_path):
                 FailRunCommand(
                     run_id="run-f2",
                     expected_version=1,
-                    execution_token="stale-token",
+                    execution_fence=ExecutionFence("stale-token"),
                     error=RunErrorInfo(error_type="RuntimeError", message="boom"),
                     failed_event=RunFailedEvent(
                         run_id="run-f2", error_type="RuntimeError", message="boom"
@@ -201,7 +203,7 @@ def test_fail_rejects_stale_execution_token(tmp_path):
                     event_context=EventStreamContext.from_run_context(
                         _ctx("run-f2", "sess-f2")
                     ),
-                )
+                    commit_id=RunCommitId(f"fail:run-f2"),)
             )
         record = await storage.runs.get("run-f2")
         assert record.status is RunStatus.RUNNING
@@ -226,7 +228,7 @@ def test_request_cancel_commits_atomically_cancelling(tmp_path):
                 event_context=EventStreamContext.from_run_context(
                     _ctx("run-c1", "sess-c1")
                 ),
-            )
+                commit_id=RunCommitId(f"request-cancel:run-c1"),)
         )
         assert commit.run_id == "run-c1"
         record = await storage.runs.get("run-c1")
@@ -247,12 +249,12 @@ def test_acknowledge_cancel_commits_atomically_cancelled(tmp_path):
             AcknowledgeCancelRunCommand(
                 run_id="run-a1",
                 expected_version=1,
-                execution_token="",
+                execution_fence=None,
                 cancelled_event=RunCancelledEvent(run_id="run-a1", reason="stopped"),
                 event_context=EventStreamContext.from_run_context(
                     _ctx("run-a1", "sess-a1")
                 ),
-            )
+                commit_id=RunCommitId(f"ack-cancel:run-a1"),)
         )
         assert commit.run_id == "run-a1"
         record = await storage.runs.get("run-a1")

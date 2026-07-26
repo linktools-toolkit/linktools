@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
-from .backend import ObjectWriterBackend
-from .errors import StorageObjectError
+from .backend import ObjectWriterBackend, TransactionalObjectBackend
+from .errors import StorageObjectError, StorageTransactionNotSupportedError
 from .models import Depth, Found, ObjectInfo, ObjectPage, StorageKey, StoredObject, WriteOptions
 
 
@@ -98,13 +99,69 @@ class ObjectStore:
                 "the ObjectStore primary must be an ObjectWriterBackend; a "
                 "read-only backend cannot be a primary"
             )
-        primary.backend_id = "primary"
         self._primary = primary
         self._metrics = metrics
+
+    @classmethod
+    def _from_transaction_backend(
+        cls,
+        backend: ObjectWriterBackend,
+        *,
+        metrics: Any = None,
+    ) -> "ObjectStore":
+        """Build a lightweight ObjectStore wrapper around a transaction-bound
+        child backend. The child is NOT re-validated (it was already validated
+        by the parent's constructor); ``backend_id`` is whatever the child
+        declares."""
+        instance = object.__new__(cls)
+        instance._primary = backend
+        instance._metrics = metrics
+        return instance
 
     @property
     def primary(self) -> ObjectWriterBackend:
         return self._primary
+
+    @property
+    def supports_optimistic_concurrency(self) -> bool:
+        """True iff the primary backend enforces CAS preconditions
+        atomically (``raw_put_checked``/``raw_delete_checked``/``raw_move_
+        checked`` apply if_match / if_none_match inside the same atomic step
+        as the mutate). Every backend that implements ObjectWriterBackend
+        does this by contract; the property exists so a caller can read the
+        capability without resorting to isinstance against a concrete class
+        (P4 capability self-consistency)."""
+        return isinstance(self._primary, ObjectWriterBackend)
+
+    @property
+    def transaction_scope(self) -> "TransactionScope":
+        """The multi-object transaction range the backing backend actually
+        provides: DATABASE when the primary implements TransactionalObjectBackend
+        (real transaction child backend), NONE otherwise (single-key checked
+        writes only)."""
+        from ...storage.features import TransactionScope
+
+        if isinstance(self._primary, TransactionalObjectBackend):
+            return TransactionScope.DATABASE
+        return TransactionScope.NONE
+
+    @property
+    def capabilities(self) -> "ComponentCapabilities":
+        """Per-component capabilities derived from what the backing backend
+        ACTUALLY does (P4 capability self-consistency). The object store
+        participates in a transaction when its backend implements
+        TransactionalObjectBackend; it offers optimistic concurrency iff it
+        implements ObjectWriterBackend (CAS enforced atomically); it always
+        supports idempotency keys via WriteOptions; it is not append-only
+        (objects can be overwritten)."""
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=isinstance(self._primary, TransactionalObjectBackend),
+            optimistic_concurrency=isinstance(self._primary, ObjectWriterBackend),
+            idempotency=True,
+            append_only=False,
+        )
 
     # --- read ----------------------------------------------------------------
 
@@ -168,3 +225,24 @@ class ObjectStore:
             options=options,
             request_hash=_move_request_hash(source, target, options),
         )
+
+    # --- transaction ---------------------------------------------------------
+
+    @asynccontextmanager
+    async def transaction(self) -> "AsyncIterator[ObjectStore]":
+        """Yield a transaction-bound ObjectStore. Reads through the child see
+        staged writes (read-your-writes); writes through the child commit
+        atomically on clean context exit and roll back on exception.
+
+        The parent store remains stateless and safe for concurrent use. A
+        backend without ``TransactionalObjectBackend`` raises
+        ``StorageTransactionNotSupportedError``."""
+        if not isinstance(self._primary, TransactionalObjectBackend):
+            raise StorageTransactionNotSupportedError(
+                f"{type(self._primary).__name__} does not support object transactions"
+            )
+        async with self._primary.transaction() as tx_backend:
+            yield ObjectStore._from_transaction_backend(
+                tx_backend,
+                metrics=self._metrics,
+            )

@@ -292,6 +292,130 @@ class FilesystemSessionStore:
                 self._append_messages_sync, session_id, messages
             )
 
+    def _commit_index_dir(self, session_id: str) -> Path:
+        # Per-session commit-id index. ``append_messages_once`` writes one
+        # marker per (session_id, commit_id) recording the sequence range it
+        # reserved, so a retried call is an O(1) marker lookup instead of a
+        # full session scan. The dedup lives inside the store, not the
+        # application layer.
+        d = (
+            self._root
+            / _validate_id_segment(session_id, kind="session_id")
+            / "_commit_index"
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _commit_index_path(self, session_id: str, commit_id: str) -> Path:
+        import hashlib
+
+        digest = hashlib.sha256(commit_id.encode("utf-8")).hexdigest()
+        return self._commit_index_dir(session_id) / f"{digest}.json"
+
+    def _read_commit_index(
+        self, session_id: str, commit_id: str
+    ) -> "dict[str, int] | None":
+        path = self._commit_index_path(session_id, commit_id)
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text())
+            return {
+                "start_sequence": int(raw["start_sequence"]),
+                "end_sequence": int(raw["end_sequence"]),
+            }
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+
+    def _write_commit_index(
+        self,
+        session_id: str,
+        commit_id: str,
+        *,
+        start_sequence: int,
+        end_sequence: int,
+    ) -> None:
+        path = self._commit_index_path(session_id, commit_id)
+        path.write_text(
+            json.dumps(
+                {
+                    "commit_id": commit_id,
+                    "start_sequence": start_sequence,
+                    "end_sequence": end_sequence,
+                }
+            )
+        )
+
+    def _append_messages_once_sync(
+        self,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
+        *,
+        commit_id: str,
+    ) -> "tuple[SessionMessage, ...]":
+        # Idempotent replay: O(1) marker lookup by (session_id, commit_id).
+        existing = self._read_commit_index(session_id, commit_id)
+        if existing is not None:
+            # Replay: re-read the persisted messages in the recorded range.
+            # A torn marker (file missing) falls through to re-append so the
+            # index self-heals.
+            messages_dir = (
+                self._root
+                / _validate_id_segment(session_id, kind="session_id")
+                / "messages"
+            )
+            replayed = []
+            ok = True
+            for seq in range(
+                existing["start_sequence"], existing["end_sequence"] + 1
+            ):
+                p = messages_dir / f"{seq:010d}.json"
+                if not p.exists():
+                    ok = False
+                    break
+                replayed.append(_message_from_json(_load_json(p)))
+            if ok and len(replayed) == len(messages):
+                return tuple(replayed)
+        persisted = self._append_messages_sync(session_id, messages)
+        if persisted:
+            self._write_commit_index(
+                session_id,
+                commit_id,
+                start_sequence=persisted[0].sequence,
+                end_sequence=persisted[-1].sequence,
+            )
+        else:
+            self._write_commit_index(
+                session_id,
+                commit_id,
+                start_sequence=0,
+                end_sequence=0,
+            )
+        return tuple(persisted)
+
+    async def append_messages_once(
+        self,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
+        *,
+        commit_id: str,
+    ) -> "tuple[SessionMessage, ...]":
+        """Commit-scoped idempotent batch append. Within the per-session lock,
+        look up the (session_id, commit_id) marker FIRST; if present, return
+        the originally-appended messages. Otherwise append and write the
+        marker atomically. The store never dedupes via a full
+        list-then-filter."""
+        if not commit_id:
+            raise ValueError("append_messages_once requires a non-empty commit_id")
+        lock = await self._session_lock(session_id)
+        async with lock:
+            return await asyncio.to_thread(
+                self._append_messages_once_sync,
+                session_id,
+                messages,
+                commit_id=commit_id,
+            )
+
     def _list_messages_sync(
         self, session_id: str, *, after_sequence: int, limit: int
     ) -> "tuple[SessionMessage, ...]":

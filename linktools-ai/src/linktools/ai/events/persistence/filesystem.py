@@ -58,6 +58,68 @@ class FilesystemEventStore:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _commit_index_dir(self, stream_id: str) -> Path:
+        # Per-stream commit-id index. ``append_once`` writes one marker file
+        # per (stream_id, commit_id, event_type) recording the sequence it
+        # reserved, so a retried call is an O(1) marker lookup instead of a
+        # full stream scan -- the dedup lives inside the store (not the
+        # application layer). The event_type is part of the key because one
+        # commit may legitimately append several distinct events (pause emits
+        # ApprovalRequested + RunPaused); deduping by (commit_id) alone would
+        # wrongly collapse the second event onto the first.
+        d = (
+            self._root
+            / _validate_id_segment(stream_id, kind="stream_id")
+            / "_commit_index"
+        )
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _commit_index_path(
+        self, stream_id: str, commit_id: str, event_type: str
+    ) -> Path:
+        # commit_id + event_type are opaque caller text; hash to a stable,
+        # filesystem-safe segment so any character set works without collision
+        # or path escape.
+        import hashlib
+
+        digest = hashlib.sha256(
+            f"{commit_id}\x1f{event_type}".encode("utf-8")
+        ).hexdigest()
+        return self._commit_index_dir(stream_id) / f"{digest}.json"
+
+    def _event_type_for(self, payload: EventPayload) -> str:
+        return self._codec.registry.event_type_for(payload)
+
+    def _read_commit_index(
+        self, stream_id: str, commit_id: str, event_type: str
+    ) -> "int | None":
+        path = self._commit_index_path(stream_id, commit_id, event_type)
+        if not path.exists():
+            return None
+        try:
+            return int(json.loads(path.read_text()).get("sequence"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _write_commit_index(
+        self,
+        stream_id: str,
+        commit_id: str,
+        event_type: str,
+        *,
+        sequence: int,
+    ) -> None:
+        path = self._commit_index_path(stream_id, commit_id, event_type)
+        # atomic_write would be ideal, but this index lives next to the event
+        # file we just wrote; a torn write is recoverable (the next retry will
+        # re-reserve) and never produces a false-positive dedup.
+        path.write_text(
+            json.dumps(
+                {"commit_id": commit_id, "event_type": event_type, "sequence": sequence}
+            )
+        )
+
     def _append_sync(
         self,
         *,
@@ -130,6 +192,83 @@ class FilesystemEventStore:
         async with lock:
             return await asyncio.to_thread(
                 self._append_sync,
+                stream_id=stream_id,
+                run_id=run_id,
+                root_run_id=root_run_id,
+                parent_run_id=parent_run_id,
+                session_id=session_id,
+                runnable_id=runnable_id,
+                payload=payload,
+                metadata=metadata,
+            )
+
+    def _append_once_sync(
+        self,
+        *,
+        commit_id: str,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> EventEnvelope:
+        # Idempotent replay: O(1) marker lookup by
+        # (stream_id, commit_id, event_type).
+        event_type = self._event_type_for(payload)
+        existing_seq = self._read_commit_index(stream_id, commit_id, event_type)
+        if existing_seq is not None:
+            envelope_path = (
+                self._stream_dir(stream_id) / f"{existing_seq:010d}.json"
+            )
+            if envelope_path.exists():
+                return self._load(envelope_path)
+            # Marker exists but the event file is gone (operator deleted it).
+            # Fall through to re-append so the index self-heals.
+        envelope = self._append_sync(
+            stream_id=stream_id,
+            run_id=run_id,
+            root_run_id=root_run_id,
+            parent_run_id=parent_run_id,
+            session_id=session_id,
+            runnable_id=runnable_id,
+            payload=payload,
+            metadata=metadata,
+        )
+        self._write_commit_index(
+            stream_id, commit_id, event_type, sequence=envelope.sequence
+        )
+        return envelope
+
+    async def append_once(
+        self,
+        *,
+        commit_id: str,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> EventEnvelope:
+        """Commit-scoped idempotent append. Within the per-stream lock, look
+        up the (stream_id, commit_id) marker FIRST; if present, return the
+        originally-appended envelope. Otherwise append and write the marker
+        atomically (under the same lock, so a concurrent append_once for the
+        same commit_id sees the marker after this lock releases and replays
+        rather than re-appending). The store never dedupes via a full
+        list-then-filter."""
+        if not commit_id:
+            raise ValueError("append_once requires a non-empty commit_id")
+        lock = await self._stream_lock(stream_id)
+        async with lock:
+            return await asyncio.to_thread(
+                self._append_once_sync,
+                commit_id=commit_id,
                 stream_id=stream_id,
                 run_id=run_id,
                 root_run_id=root_run_id,

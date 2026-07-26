@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -241,8 +241,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
                     checkpoint_payload=b'{"m":[]}',
                     paused_event=RunPaused(run_id="run", reason="review"),
                     event_context=_ctx("run", "sess"),
-                    commit_id=commit_id,
-                )
+                    commit_id=RunCommitId(commit_id),)
             )
 
         await _pause("commit-a", "appr-1", "call-1", expected_version=1)
@@ -267,7 +266,7 @@ def test_v4_file_commit_events_dedup_by_commit_id(tmp_path):
                 result=RunResult(output="ok"),
                 completed_event=RunCompleted(run_id="run2"),
                 event_context=_ctx("run2", "sess"),
-            )
+                commit_id=RunCommitId(f"complete:run2"),)
         )
         assert await _count(storage, "run2", "RunCompleted") == 1
 

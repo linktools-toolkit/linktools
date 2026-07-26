@@ -1,71 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Dialect-strategy package: select a :class:`SqlAlchemyDialectStrategy` by the
-bound engine's dialect name at adapter construction, so an unsupported dialect
-fails immediately rather than on first write.
+"""Protocol-first dialect package.
 
-The dialect layer is the ONLY place core branches on a dialect name -- the
-adapter facade and the object backend stay dialect-neutral and delegate conflict
-classification here."""
+The dialect is the ONLY seam at which a downstream that brings its own engine
+plugs into the storage kernel's object backend. Core does NOT branch on a
+dialect name and does NOT resolve a strategy from a session_factory; the
+backend is HANDED a ``SqlAlchemyObjectDialect`` at construction.
 
-from typing import TYPE_CHECKING
+Core ships exactly one concrete implementation -- :class:`SqliteObjectDialect`
+-- for SQLite/aiosqlite and as the reference for downstream dialect authors.
+A downstream wanting a different vendor (its own engine + driver) implements
+``SqlAlchemyObjectDialect`` itself and runs the kernel's conformance suite in
+its own CI. Core never names a real production database product here."""
 
-from .base import (
-    IntegrityViolationKind,
-    SqlAlchemyDialectStrategy,
-    UnsupportedSqlAlchemyDialectError,
-)
-from .mysql import MySqlDialectStrategy
-from .postgresql import PostgreSqlDialectStrategy
-from .sqlite import SqliteDialectStrategy
-
-if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-
-def resolve_dialect_strategy(
-    session_factory: "async_sessionmaker",
-) -> SqlAlchemyDialectStrategy:
-    """Return the dialect strategy for the engine bound to ``session_factory``.
-
-    Raises :class:`UnsupportedSqlAlchemyDialectError` for any dialect that is
-    not SQLite, MySQL, or PostgreSQL. Called eagerly at adapter construction."""
-    name = _bound_dialect_name(session_factory)
-    if name == "sqlite":
-        return SqliteDialectStrategy()
-    if name == "mysql":
-        return MySqlDialectStrategy()
-    if name == "postgresql":
-        return PostgreSqlDialectStrategy()
-    raise UnsupportedSqlAlchemyDialectError(name)
-
-
-def _bound_dialect_name(session_factory: "async_sessionmaker") -> str:
-    engine = _bound_engine(session_factory)
-    return engine.dialect.name
-
-
-def _bound_engine(session_factory: "async_sessionmaker"):
-    # async_sessionmaker stores the bind in its `kw` mapping. Fall back to a
-    # constructed session's bind for factories that do not expose `kw`.
-    kw = getattr(session_factory, "kw", None)
-    bind = kw.get("bind") if isinstance(kw, dict) else None
-    if bind is not None:
-        return bind
-    try:
-        return session_factory().bind
-    except Exception as exc:  # noqa: BLE001 - surface as a clear config error
-        raise UnsupportedSqlAlchemyDialectError(
-            None, reason="session_factory does not expose a bound engine"
-        ) from exc
-
+from .base import IntegrityViolationKind, InsertResult, SqlAlchemyObjectDialect
+from .sqlite import SqliteObjectDialect
 
 __all__: "list[str]" = (
+    "InsertResult",
     "IntegrityViolationKind",
-    "SqlAlchemyDialectStrategy",
-    "UnsupportedSqlAlchemyDialectError",
-    "SqliteDialectStrategy",
-    "MySqlDialectStrategy",
-    "PostgreSqlDialectStrategy",
-    "resolve_dialect_strategy",
+    "SqlAlchemyObjectDialect",
+    "SqliteObjectDialect",
 )

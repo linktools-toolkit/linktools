@@ -195,6 +195,13 @@ class _Stores:
         self.event_store = FilesystemEventStore(root=tmp_path / "events")
         self.checkpoint_store = FilesystemCheckpointStore(root=tmp_path / "checkpoints")
         self.swarm_store = FilesystemSwarmStore(root=tmp_path / "swarm")
+        from linktools.ai.swarm.persistence.filesystem_commit import (
+            FilesystemSwarmCommitCoordinator,
+        )
+
+        self.swarm_commit_coordinator = FilesystemSwarmCommitCoordinator(
+            self.swarm_store, transactions_root=tmp_path / "transactions"
+        )
         self.run_definitions = FilesystemRunDefinitionStore(root=tmp_path / "definitions")
         self.run_controller = RunController()
         self.agent_runner = StrategyTestDispatcher(

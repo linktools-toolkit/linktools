@@ -1,39 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""FilesystemObjectBackend: filesystem-backed ObjectWriterBackend + history.
+"""FilesystemObjectBackend: filesystem-backed ObjectWriterBackend + history,
+with an operation journal for crash recovery.
 
-Every version of a key is an immutable pair of sidecar files under
-``.storage/history/<encoded-key>/<version>.{json,bin}`` -- a delete appends a
-tombstone version (json only, no ``.bin``) rather than removing anything, so
-per-key history is a free byproduct of "never overwrite a version file, only
-append the next one." The current live state is always the LATEST version
-(tombstone or not); there is no separate "current" data file to keep in sync.
+Layout:
 
-Atomic writes via temp-file-then-``os.replace``; every path is resolved
-through :func:`resolve_secure_path` (a per-component lstat walk from the
-trusted root) so a symlink planted anywhere in the chain is caught before a
-read or write follows it.
+    .storage/
+      revision                   # the namespace's monotonic revision counter
+      operations/                # the operation journal
+        <operation-id>/
+          intent.json            # the planned mutation (keys, versions, hashes)
+          state                  # PREPARED | VERSIONS_PUBLISHED |
+                                 # REVISION_PUBLISHED | COMMITTED | ABORTED
+      history/
+        <encoded-key>/
+          versions/
+            <version>/           # one immutable directory per version
+              metadata.json      # always present
+              content.bin        # absent for a tombstone
+      idempotency/
+        <encoded-op-key>.json    # journal idempotency record (immutable result ref)
 
-This backend does NOT implement ``TransactionalObjectBackend`` --
-multi-object transactions are refused (``StorageTransactionNotSupportedError``)
-rather than faked; only the single-key checked operations are atomic (via an
-in-process lock -- cross-process races on the same root remain a documented
-limitation)."""
+Every mutation runs inside ONE namespace lock
+(``coordinator.hold("object-namespace")``) so cross-process observers cannot
+see intermediate state, and a crash leaves a single operation record the next
+operation's recovery resolves. The state machine is:
+
+    PREPARED → VERSIONS_PUBLISHED → REVISION_PUBLISHED → COMMITTED
+
+Recovery on every operation entry applies the recovery table: PREPARED
+records are aborted (any temp dir cleaned up); records past PREPARED are
+forward-completed (publish remaining version dirs from the source-of-truth in
+the intent, advance revision if not yet advanced, write idempotency). The
+"never regress an already-published revision" rule is enforced: recovery
+never overwrites a higher revision with a lower one.
+
+Reads IGNORE the operations/ directory entirely -- only history/ + revision/
+participate in reads -- so a finished journal record (whether cleaned up or
+not) cannot distort a live read.
+
+All filesystem access is dirfd-relative via :class:`SecureDirectory`; no
+``resolve_secure_path`` style path-check-then-use remains."""
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import threading
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from hashlib import sha256
 from pathlib import Path
+from typing import Any, Mapping
 
+from ...coordination.protocols import KeyedCoordinator
 from ...object.errors import (
     StorageIdempotencyConflictError,
+    StorageIntegrityError,
     StorageObjectNotFoundError,
     StoragePreconditionFailedError,
 )
@@ -49,8 +73,10 @@ from ...object.models import (
     StoredObject,
     WriteOptions,
 )
-from ._path_security import SymlinkPolicy, open_temp_nofollow, resolve_secure_path
+from .secure_directory import FilesystemSecurityMode, SecureDirectory
 
+
+# --- path-encoding helpers ---------------------------------------------------
 
 def _encoded(key: StorageKey) -> str:
     # Percent-encode so the mapping from StorageKey -> directory name is
@@ -76,104 +102,536 @@ def _matches_depth(prefix: StorageKey, candidate: StorageKey, depth: "Depth") ->
     return rel_depth <= 1
 
 
+# --- journal state + record shapes ------------------------------------------
+
+class _OpState(str, Enum):
+    PREPARED = "PREPARED"
+    VERSIONS_PUBLISHED = "VERSIONS_PUBLISHED"
+    REVISION_PUBLISHED = "REVISION_PUBLISHED"
+    COMMITTED = "COMMITTED"
+    ABORTED = "ABORTED"
+
+
+@dataclass
+class _VersionIntent:
+    """One version-directory publication within an operation. For a move, the
+    operation has two of these: the target result + the source tombstone. For
+    a put, one; for a delete, one (the tombstone)."""
+
+    key_value: str
+    version: int
+    tombstone: bool
+    etag: str
+    content_type: "str | None"
+    size: int
+    modified_at: str
+    metadata: "dict[str, Any]"
+    # For a move's target: the (key, version) the content is sourced from.
+    # recovery reads source content from history/<src>/versions/<v>/content.bin.
+    source_key: "str | None" = None
+    source_version: "int | None" = None
+
+
+@dataclass
+class _OperationIntent:
+    operation: str  # "put" | "delete" | "move"
+    operation_id: str
+    request_hash: "str | None"
+    idempotency_key: "str | None"
+    new_revision: int
+    versions: "list[_VersionIntent]"
+
+    def to_json(self) -> bytes:
+        return json.dumps(
+            {
+                "operation": self.operation,
+                "operation_id": self.operation_id,
+                "request_hash": self.request_hash,
+                "idempotency_key": self.idempotency_key,
+                "new_revision": self.new_revision,
+                "versions": [v.__dict__ for v in self.versions],
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> "_OperationIntent":
+        data = json.loads(raw)
+        return cls(
+            operation=data["operation"],
+            operation_id=data["operation_id"],
+            request_hash=data.get("request_hash"),
+            idempotency_key=data.get("idempotency_key"),
+            new_revision=int(data["new_revision"]),
+            versions=[_VersionIntent(**v) for v in data.get("versions", [])],
+        )
+
+
 @dataclass
 class _IdempotencyRecord:
-    request_hash: str
-    result_version: "int | None"  # None means "no live object" (a delete)
+    """The idempotency record: the replay reads from the immutable
+    version directory (referenced by result_key + result_version), NOT from
+    the current live state."""
 
+    operation: str
+    request_hash: str
+    result_key: "str | None"  # None for delete
+    result_version: "int | None"
+    commit_revision: int
+
+    def to_json(self) -> bytes:
+        return json.dumps(
+            {
+                "operation": self.operation,
+                "request_hash": self.request_hash,
+                "result_key": self.result_key,
+                "result_version": self.result_version,
+                "commit_revision": self.commit_revision,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+
+    @classmethod
+    def from_json(cls, raw: bytes) -> "_IdempotencyRecord":
+        data = json.loads(raw)
+        return cls(
+            operation=data["operation"],
+            request_hash=data["request_hash"],
+            result_key=data.get("result_key"),
+            result_version=data.get("result_version"),
+            commit_revision=int(data["commit_revision"]),
+        )
+
+
+# --- the backend ------------------------------------------------------------
 
 class FilesystemObjectBackend:
-    """Not a ``TransactionalObjectBackend`` (no multi-object transaction);
-    IS a ``VersionedObjectBackend`` (native per-key history is intrinsic to
-    the append-only version-file layout)."""
+    """Filesystem ObjectWriterBackend + VersionedObjectBackend with an
+    operation journal for crash recovery. NOT a TransactionalObjectBackend
+    (multi-object transactions are refused rather than faked).
+
+    Every op runs inside ``coordinator.hold("object-namespace")``; every
+    mutation runs the journal state machine PREPARED → VERSIONS_PUBLISHED →
+    REVISION_PUBLISHED → COMMITTED so a crash mid-mutation leaves a record
+    the next op's recovery resolves."""
 
     backend_id: str = "primary"
+    _NAMESPACE_KEY = "object-namespace"
 
     def __init__(
         self,
         *,
         root: Path,
-        symlink_policy: SymlinkPolicy = SymlinkPolicy.DENY,
+        coordinator: "KeyedCoordinator | None" = None,
+        mode: FilesystemSecurityMode = FilesystemSecurityMode.SECURE_POSIX,
     ) -> None:
-        self._root = Path(root)
-        self._symlink_policy = symlink_policy
-        self._history_dir = self._root / ".storage" / "history"
-        self._idempotency_dir = self._root / ".storage" / "idempotency"
-        self._history_dir.mkdir(parents=True, exist_ok=True)
-        self._idempotency_dir.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._revision_cache: "int | None" = None
+        self._sd = SecureDirectory(root, mode=mode)
+        # Coordinator: the coordination spec says the backend is constructed WITH one
+        # (or constructs a default FilesystemKeyedCoordinator). Construction
+        # of the default is left to the convenience wrapper so the bare
+        # backend can be assembled into a different coordination topology.
+        if coordinator is None:
+            coordinator = self._build_default_coordinator()
+        self._coordinator = coordinator
+        # Lazy: created on first writer that needs them.
+        self._sd.ensure_directory(".storage", "history")
+        self._sd.ensure_directory(".storage", "operations")
+        self._sd.ensure_directory(".storage", "idempotency")
 
-    # --- path helpers ----------------------------------------------------
+    def _build_default_coordinator(self) -> "KeyedCoordinator":
+        # Late import: FilesystemKeyedCoordinator needs fcntl; constructing
+        # the default coordinator only on a backend that did not have one
+        # injected keeps the import out of the read path on platforms that
+        # inject their own coordinator.
+        from ...coordination.file import FilesystemKeyedCoordinator
 
-    def _key_history_dir(self, key: StorageKey) -> Path:
-        return resolve_secure_path(
-            self._root, ".storage", "history", _encoded(key), policy=self._symlink_policy
+        return FilesystemKeyedCoordinator(
+            root=self._sd.root / ".storage" / "coordination"
         )
 
-    def _version_json_path(self, key: StorageKey, version: int) -> Path:
-        return self._key_history_dir(key) / f"{version}.json"
+    @property
+    def root(self) -> Path:
+        return self._sd.root
 
-    def _version_bin_path(self, key: StorageKey, version: int) -> Path:
-        return self._key_history_dir(key) / f"{version}.bin"
+    @property
+    def security_mode(self) -> FilesystemSecurityMode:
+        return self._sd.security_mode
 
-    def _revision_path(self) -> Path:
-        return resolve_secure_path(
-            self._root, ".storage", "revision", policy=self._symlink_policy
+    @property
+    def coordinator(self) -> "KeyedCoordinator":
+        return self._coordinator
+
+    # --- component helpers ------------------------------------------------
+
+    @staticmethod
+    def _key_versions_dir_components(key: StorageKey) -> "tuple[str, ...]":
+        return (".storage", "history", _encoded(key), "versions")
+
+    @staticmethod
+    def _version_dir_components(key: StorageKey, version: int) -> "tuple[str, ...]":
+        return FilesystemObjectBackend._key_versions_dir_components(key) + (
+            str(version),
         )
 
-    def _idempotency_path(self, op_key: str) -> Path:
-        return resolve_secure_path(
-            self._root,
-            ".storage",
-            "idempotency",
-            urllib.parse.quote(op_key, safe="") + ".json",
-            policy=self._symlink_policy,
+    @staticmethod
+    def _version_metadata_components(key: StorageKey, version: int) -> "tuple[str, ...]":
+        return FilesystemObjectBackend._version_dir_components(key, version) + (
+            "metadata.json",
         )
 
-    def _atomic_write(self, path: Path, content: bytes) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        resolve_secure_path(
-            self._root, *path.relative_to(self._root).parts, policy=self._symlink_policy
+    @staticmethod
+    def _version_content_components(key: StorageKey, version: int) -> "tuple[str, ...]":
+        return FilesystemObjectBackend._version_dir_components(key, version) + (
+            "content.bin",
         )
-        fd, tmp_path = open_temp_nofollow(path.parent, prefix=f".{path.name}.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "wb") as f:
-                f.write(content)
-            os.replace(tmp_path, path)
-        finally:
-            if tmp_path.exists():
-                tmp_path.unlink()
 
-    # --- revision ----------------------------------------------------------
+    @staticmethod
+    def _operation_dir_components(operation_id: str) -> "tuple[str, ...]":
+        return (".storage", "operations", operation_id)
 
-    def _read_revision(self) -> int:
-        p = self._revision_path()
-        if not p.exists():
-            return 0
-        return int(p.read_text().strip() or "0")
+    @staticmethod
+    def _operation_intent_components(operation_id: str) -> "tuple[str, ...]":
+        return FilesystemObjectBackend._operation_dir_components(operation_id) + (
+            "intent.json",
+        )
 
-    def _bump_revision(self) -> int:
-        value = self._read_revision() + 1
-        self._atomic_write(self._revision_path(), str(value).encode("utf-8"))
-        self._revision_cache = value
-        return value
+    @staticmethod
+    def _operation_state_components(operation_id: str) -> "tuple[str, ...]":
+        return FilesystemObjectBackend._operation_dir_components(operation_id) + (
+            "state",
+        )
+
+    @staticmethod
+    def _idempotency_components(op_key: str) -> "tuple[str, ...]":
+        return (".storage", "idempotency", urllib.parse.quote(op_key, safe="") + ".json")
+
+    @staticmethod
+    def _revision_components() -> "tuple[str, ...]":
+        return (".storage", "revision")
+
+    # --- public ops (all wrapped in coordinator.hold) ----------------------
+
+    async def raw_get(self, key: StorageKey, *, include_content: bool = True):
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(self._raw_get_sync, key, include_content=include_content)
+
+    async def raw_stat(self, key: StorageKey) -> "ObjectInfo | None":
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(self._raw_stat_sync, key)
+
+    async def raw_list(
+        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
+    ) -> ObjectPage:
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(
+                self._raw_list_sync, prefix, depth=depth, limit=limit, cursor=cursor
+            )
 
     async def revision(self) -> str:
-        if self._revision_cache is None:
-            self._revision_cache = await asyncio.to_thread(self._read_revision)
-        return str(self._revision_cache)
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return str(await asyncio.to_thread(self._read_revision_sync))
 
-    # --- version read/write helpers -----------------------------------------
+    async def raw_put_checked(
+        self, key: StorageKey, content: bytes, *, options: WriteOptions, request_hash: str
+    ) -> StoredObject:
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(
+                self._raw_put_checked_sync,
+                key,
+                content,
+                options=options,
+                request_hash=request_hash,
+            )
+
+    async def raw_delete_checked(
+        self, key: StorageKey, *, options: WriteOptions, request_hash: str
+    ) -> None:
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            await asyncio.to_thread(
+                self._raw_delete_checked_sync, key, options=options, request_hash=request_hash
+            )
+
+    async def raw_move_checked(
+        self, source: StorageKey, target: StorageKey, *, options: WriteOptions, request_hash: str
+    ) -> StoredObject:
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(
+                self._raw_move_checked_sync,
+                source,
+                target,
+                options=options,
+                request_hash=request_hash,
+            )
+
+    async def raw_get_version(self, key: StorageKey, version: int) -> "StoredObject | None":
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(self._raw_get_version_sync, key, version)
+
+    async def raw_get_at_revision(self, key: StorageKey, revision: int) -> "StoredObject | None":
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(self._raw_get_at_revision_sync, key, revision)
+
+    async def raw_list_versions(
+        self, key: StorageKey, *, limit: int = 100, cursor: "str | None" = None
+    ) -> ObjectVersionPage:
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(
+                self._raw_list_versions_sync, key, limit=limit, cursor=cursor
+            )
+
+    async def raw_list_at_revision(self, prefix: StorageKey, revision: int) -> "tuple[ObjectInfo, ...]":
+        async with self._coordinator.hold(self._NAMESPACE_KEY):
+            return await asyncio.to_thread(self._raw_list_at_revision_sync, prefix, revision)
+
+    # --- recovery (the never-regress state machine) --------------------------------------------
+
+    def _recover(self) -> None:
+        """Sweep operations/ and resolve any non-COMMITTED record per the
+        the recovery state machine. Called at the entry of every mutation."""
+        operations_components = (".storage", "operations")
+        if self._sd.stat(*operations_components) is None:
+            return
+        for op_id in self._sd.list_names(*operations_components):
+            try:
+                self._recover_one(op_id)
+            except Exception:
+                # Recovery must not crash the caller; a corrupt record is
+                # marked ABORTED so the next sweep skips it.
+                self._try_mark_aborted(op_id)
+
+    def _recover_one(self, op_id: str) -> None:
+        intent_components = self._operation_intent_components(op_id)
+        if self._sd.stat(*intent_components) is None:
+            # No intent: nothing to recover (the directory may be a stray).
+            return
+        intent = _OperationIntent.from_json(self._sd.read_bytes(*intent_components))
+        state = self._read_state(op_id)
+        if state in (_OpState.COMMITTED, _OpState.ABORTED):
+            return
+        if state is _OpState.PREPARED:
+            # The intent was written but no version directory was ever
+            # published (the rename in step 7 hadn't run). Clean up any
+            # half-built temp dir and mark ABORTED. We DO NOT delete an
+            # already-published version dir here -- if it exists, the rename
+            # won the race against the state write, so forward-complete
+            # instead (see below).
+            if self._all_versions_published(intent):
+                self._finalize_after_versions_published(op_id, intent)
+            else:
+                self._abort_operation(op_id, intent)
+            return
+        if state is _OpState.VERSIONS_PUBLISHED:
+            self._finalize_after_versions_published(op_id, intent)
+            return
+        if state is _OpState.REVISION_PUBLISHED:
+            # Revision already advanced; only idempotency remains.
+            self._write_idempotency_from_intent(intent)
+            self._set_state(op_id, _OpState.COMMITTED)
+            return
+
+    def _all_versions_published(self, intent: _OperationIntent) -> bool:
+        for v in intent.versions:
+            key = StorageKey(v.key_value)
+            if self._sd.stat(*self._version_metadata_components(key, v.version)) is None:
+                return False
+        return True
+
+    def _finalize_after_versions_published(self, op_id: str, intent: _OperationIntent) -> None:
+        """Forward-complete an operation whose versions exist but which has
+        not yet reached COMMITTED. Publish any missing version dir from the
+        intent (verifying against intent); advance the revision if not yet
+        advanced; write idempotency."""
+        # 1. Ensure every version dir exists with intent-matching content.
+        for v in intent.versions:
+            self._ensure_version_published(v)
+        self._set_state(op_id, _OpState.VERSIONS_PUBLISHED)
+        # 2. Advance revision if not already at or beyond intent.new_revision.
+        # The "never regress" rule: only ever raise.
+        current = self._read_revision_sync()
+        if current < intent.new_revision:
+            self._sd.atomic_write(
+                *self._revision_components(),
+                content=str(intent.new_revision).encode("utf-8"),
+            )
+        self._set_state(op_id, _OpState.REVISION_PUBLISHED)
+        # 3. Idempotency.
+        self._write_idempotency_from_intent(intent)
+        self._set_state(op_id, _OpState.COMMITTED)
+
+    def _ensure_version_published(self, v: _VersionIntent) -> None:
+        """The version directory for ``v`` must exist with intent-matching
+        metadata. If it is missing, publish it from the source-of-truth
+        (history/<src>/versions/<v> for a move's target; an empty tombstone
+        dir for a delete). If it exists, verify the metadata matches."""
+        key = StorageKey(v.key_value)
+        meta_components = self._version_metadata_components(key, v.version)
+        existing_meta = self._sd.stat(*meta_components)
+        metadata_payload = self._version_metadata_payload(v)
+        if existing_meta is None:
+            # Publish the missing version directory atomically.
+            files: "dict[str, bytes]" = {"metadata.json": metadata_payload}
+            content_bytes = self._materialize_content(v)
+            if content_bytes is not None:
+                files["content.bin"] = content_bytes
+            self._sd.ensure_directory(*self._key_versions_dir_components(key))
+            self._sd.atomic_publish_directory(
+                *self._version_dir_components(key, v.version),
+                files=files,
+            )
+        else:
+            # Verify metadata matches (spec: "验证内容").
+            actual = json.loads(self._sd.read_bytes(*meta_components))
+            if not _metadata_matches_intent(actual, v):
+                raise StorageIntegrityError(
+                    f"version {v.version} of {v.key_value!r} on disk does not "
+                    f"match its operation intent"
+                )
+
+    def _materialize_content(self, v: _VersionIntent) -> "bytes | None":
+        """For a tombstone: no content (None). For a put: content was in the
+        caller's hand at crash time and is unrecoverable, so a put-version
+        that is missing at recovery is an integrity error. For a move's
+        target: read content from source_key@source_version in history/."""
+        if v.tombstone:
+            return None
+        if v.source_key is None:
+            # A put's content cannot be reconstructed from anything on disk.
+            raise StorageIntegrityError(
+                f"put version {v.version} of {v.key_value!r} was not persisted "
+                f"before the crash and cannot be reconstructed"
+            )
+        src_key = StorageKey(v.source_key)
+        return self._sd.read_bytes(
+            *self._version_content_components(src_key, v.source_version)
+        )
+
+    def _version_metadata_payload(self, v: _VersionIntent) -> bytes:
+        return json.dumps(
+            {
+                "key": v.key_value,
+                "version": v.version,
+                "commit_revision": None,  # filled at publish-time in the live path
+                "etag": v.etag,
+                "content_type": v.content_type,
+                "size": v.size,
+                "modified_at": v.modified_at,
+                "metadata": v.metadata,
+                "tombstone": v.tombstone,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+
+    def _abort_operation(self, op_id: str, intent: _OperationIntent) -> None:
+        """A PREPARED op that did NOT finish publishing its versions: discard
+        any temp artifacts and mark ABORTED. The published versions (there
+        should be none at PREPARED) stay; live state is unchanged."""
+        # Nothing temp to clean here in our atomic_publish_directory flow --
+        # a half-built temp dir lives under versions/ with a .NAME.tmp prefix
+        # and is removed by atomic_publish_directory itself on its own
+        # exception path. We could sweep them here as defense-in-depth.
+        self._set_state(op_id, _OpState.ABORTED)
+
+    def _try_mark_aborted(self, op_id: str) -> None:
+        try:
+            self._set_state(op_id, _OpState.ABORTED)
+        except Exception:
+            pass
+
+    def _write_idempotency_from_intent(self, intent: _OperationIntent) -> None:
+        if intent.idempotency_key is None:
+            return
+        # The result references the (non-tombstone) version produced by the
+        # operation. For move: target result. For put: the new version. For
+        # delete: None.
+        result = next(
+            (v for v in intent.versions if not v.tombstone),
+            None,
+        )
+        op_key = self._idempotency_op_key(
+            intent.operation, intent.idempotency_key, intent.versions
+        )
+        record = _IdempotencyRecord(
+            operation=intent.operation,
+            request_hash=intent.request_hash or "",
+            result_key=result.key_value if result is not None else None,
+            result_version=result.version if result is not None else None,
+            commit_revision=intent.new_revision,
+        )
+        self._sd.atomic_write(
+            *self._idempotency_components(op_key),
+            content=record.to_json(),
+        )
+
+    @staticmethod
+    def _idempotency_op_key(
+        operation: str,
+        idempotency_key: str,
+        versions: "list[_VersionIntent]",
+    ) -> str:
+        """Reproduce the live path's idempotency-op-key, which is keyed by
+        operation + the keys it touches + the caller-supplied idempotency
+        key. Used identically on the live path and in recovery so a replay
+        after a crashed-and-recovered op finds the record."""
+        if operation == "put":
+            return f"put:{versions[0].key_value}:{idempotency_key}"
+        if operation == "delete":
+            return f"delete:{versions[0].key_value}:{idempotency_key}"
+        if operation == "move":
+            keys = sorted(v.key_value for v in versions)
+            return f"move:{':'.join(keys)}:{idempotency_key}"
+        return f"{operation}:{idempotency_key}"
+
+    # --- internal: low-level journal I/O ----------------------------------
+
+    def _read_state(self, op_id: str) -> "_OpState | None":
+        components = self._operation_state_components(op_id)
+        if self._sd.stat(*components) is None:
+            return None
+        raw = self._sd.read_bytes(*components).decode("utf-8").strip()
+        try:
+            return _OpState(raw)
+        except ValueError:
+            return None
+
+    def _set_state(self, op_id: str, state: _OpState) -> None:
+        self._sd.ensure_directory(*self._operation_dir_components(op_id))
+        self._sd.atomic_write(
+            *self._operation_state_components(op_id),
+            content=state.value.encode("utf-8"),
+        )
+
+    def _begin_operation(self, intent: _OperationIntent) -> None:
+        """Spec the journal step sequence step 4: write intent.json + state=PREPARED."""
+        op_dir = self._operation_dir_components(intent.operation_id)
+        self._sd.ensure_directory(*op_dir)
+        self._sd.atomic_write(
+            *self._operation_intent_components(intent.operation_id),
+            content=intent.to_json(),
+        )
+        self._set_state(intent.operation_id, _OpState.PREPARED)
+
+    def _read_revision_sync(self) -> int:
+        components = self._revision_components()
+        if self._sd.stat(*components) is None:
+            return 0
+        return int(self._sd.read_bytes(*components).decode("utf-8").strip() or "0")
+
+    def _advance_revision_to(self, new_revision: int) -> None:
+        self._sd.atomic_write(
+            *self._revision_components(),
+            content=str(new_revision).encode("utf-8"),
+        )
+
+    # --- internal: version directory reads ---------------------------------
 
     def _list_version_numbers(self, key: StorageKey) -> "list[int]":
-        d = self._key_history_dir(key)
-        if not d.exists():
+        versions_dir = self._key_versions_dir_components(key)
+        if self._sd.stat(*versions_dir) is None:
             return []
-        out = []
-        for p in d.glob("*.json"):
+        out: "list[int]" = []
+        for name in self._sd.list_names(*versions_dir):
             try:
-                out.append(int(p.stem))
+                out.append(int(name))
             except ValueError:
                 continue
         return sorted(out)
@@ -182,98 +640,130 @@ class FilesystemObjectBackend:
         versions = self._list_version_numbers(key)
         return versions[-1] if versions else None
 
-    def _read_version_json(self, key: StorageKey, version: int) -> dict:
-        return json.loads(self._version_json_path(key, version).read_text())
+    def _read_version_metadata(self, key: StorageKey, version: int) -> "dict | None":
+        components = self._version_metadata_components(key, version)
+        if self._sd.stat(*components) is None:
+            return None
+        return json.loads(self._sd.read_bytes(*components))
 
-    def _info_from_json(self, key: StorageKey, raw: dict, revision: "int | None") -> ObjectInfo:
+    def _read_version_bytes(self, key: StorageKey, version: int) -> bytes:
+        return self._sd.read_bytes(*self._version_content_components(key, version))
+
+    def _info_from_metadata(self, key: StorageKey, raw: dict) -> ObjectInfo:
         return ObjectInfo(
             key=key,
             etag=raw["etag"],
             version=raw["version"],
-            commit_revision=revision,
+            commit_revision=raw.get("commit_revision"),
             content_type=raw["content_type"],
             size=raw["size"],
             modified_at=datetime.fromisoformat(raw["modified_at"]),
             metadata=raw.get("metadata") or {},
         )
 
-    def _write_version(
+    def _live_version_metadata(self, key: StorageKey) -> "tuple[int, dict] | None":
+        latest = self._latest_version_number(key)
+        if latest is None:
+            return None
+        return latest, self._read_version_metadata(key, latest)
+
+    def _read_idempotency(self, op_key: str) -> "_IdempotencyRecord | None":
+        components = self._idempotency_components(op_key)
+        if self._sd.stat(*components) is None:
+            return None
+        return _IdempotencyRecord.from_json(self._sd.read_bytes(*components))
+
+    def _write_idempotency(self, op_key: str, record: _IdempotencyRecord) -> None:
+        self._sd.atomic_write(
+            *self._idempotency_components(op_key),
+            content=record.to_json(),
+        )
+
+    # --- internal: publish version dirs (the live path) -------------------
+
+    def _publish_version_dir(
         self,
-        key: StorageKey,
         *,
+        key: StorageKey,
         version: int,
+        metadata: dict,
+        content: "bytes | None",
+    ) -> None:
+        """Spec the journal step sequence step 5-7: build the version directory atomically (all
+        files land together via atomic_publish_directory). The directory
+        either fully exists with both files or does not exist at all."""
+        self._sd.ensure_directory(*self._key_versions_dir_components(key))
+        files: "dict[str, bytes]" = {
+            "metadata.json": json.dumps(metadata, sort_keys=True).encode("utf-8"),
+        }
+        if content is not None:
+            files["content.bin"] = content
+        self._sd.atomic_publish_directory(
+            *self._version_dir_components(key, version),
+            files=files,
+        )
+
+    def _live_metadata_dict(
+        self,
+        *,
+        key: StorageKey,
+        version: int,
+        commit_revision: int,
         content: "bytes | None",
         content_type: "str | None",
-        metadata: "dict",
+        metadata: "dict[str, Any]",
         tombstone: bool,
-    ) -> ObjectInfo:
-        revision = self._bump_revision()
-        raw = {
+        operation_id: str,
+    ) -> dict:
+        return {
+            "key": key.value,
             "version": version,
+            "commit_revision": commit_revision,
             "etag": sha256(content).hexdigest() if content is not None else "",
             "content_type": content_type,
             "size": len(content) if content is not None else 0,
             "modified_at": datetime.now(timezone.utc).isoformat(),
             "metadata": dict(metadata),
             "tombstone": tombstone,
-            "commit_revision": revision,
+            "operation_id": operation_id,
         }
-        self._atomic_write(
-            self._version_json_path(key, version), json.dumps(raw).encode("utf-8")
-        )
-        if content is not None:
-            self._atomic_write(self._version_bin_path(key, version), content)
-        return self._info_from_json(key, raw, revision)
 
-    def _live_version(self, key: StorageKey) -> "tuple[int, dict] | None":
-        """The latest version's (number, raw json), or None if no versions
-        exist at all. Caller checks ``raw["tombstone"]`` to distinguish a
-        live object from a masked (deleted) one."""
-        latest = self._latest_version_number(key)
-        if latest is None:
-            return None
-        return latest, self._read_version_json(key, latest)
-
-    # --- ObjectReaderBackend -------------------------------------------------
+    # --- read paths -------------------------------------------------------
 
     def _raw_get_sync(self, key: StorageKey, *, include_content: bool):
-        live = self._live_version(key)
+        live = self._live_version_metadata(key)
         if live is None:
             return Missing
         version, raw = live
         if raw["tombstone"]:
-            return Masked(key=key, version=version, commit_revision=raw["commit_revision"])
+            return Masked(
+                key=key, version=version, commit_revision=raw.get("commit_revision")
+            )
         content = b""
         if include_content:
-            content = self._version_bin_path(key, version).read_bytes()
-        return Found(StoredObject(info=self._info_from_json(key, raw, raw["commit_revision"]), content=content))
-
-    async def raw_get(self, key: StorageKey, *, include_content: bool = True):
-        return await asyncio.to_thread(self._raw_get_sync, key, include_content=include_content)
+            content = self._read_version_bytes(key, version)
+        return Found(
+            StoredObject(info=self._info_from_metadata(key, raw), content=content)
+        )
 
     def _raw_stat_sync(self, key: StorageKey) -> "ObjectInfo | None":
-        live = self._live_version(key)
+        live = self._live_version_metadata(key)
         if live is None or live[1]["tombstone"]:
             return None
-        version, raw = live
-        return self._info_from_json(key, raw, raw["commit_revision"])
-
-    async def raw_stat(self, key: StorageKey) -> "ObjectInfo | None":
-        return await asyncio.to_thread(self._raw_stat_sync, key)
+        return self._info_from_metadata(key, live[1])
 
     def _raw_list_sync(
         self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
     ) -> ObjectPage:
-        if not self._history_dir.exists():
+        history_components = (".storage", "history")
+        if self._sd.stat(*history_components) is None:
             return ObjectPage(items=(), next_cursor=None)
         candidates: "list[StorageKey]" = []
-        for entry in self._history_dir.iterdir():
-            if not entry.is_dir():
-                continue
-            key = StorageKey("/" + urllib.parse.unquote(entry.name))
+        for name in self._sd.list_names(*history_components):
+            key = StorageKey("/" + urllib.parse.unquote(name))
             if not _matches_depth(prefix, key, depth):
                 continue
-            live = self._live_version(key)
+            live = self._live_version_metadata(key)
             if live is None or live[1]["tombstone"]:
                 continue
             if cursor is not None and key.value <= cursor:
@@ -283,231 +773,34 @@ class FilesystemObjectBackend:
         page_keys = candidates[: limit + 1]
         items = []
         for key in page_keys[:limit]:
-            version, raw = self._live_version(key)
-            items.append(self._info_from_json(key, raw, raw["commit_revision"]))
+            _, raw = self._live_version_metadata(key)
+            items.append(self._info_from_metadata(key, raw))
         next_cursor = page_keys[limit - 1].value if len(page_keys) > limit else None
         return ObjectPage(items=tuple(items), next_cursor=next_cursor)
 
-    async def raw_list(
-        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
-    ) -> ObjectPage:
-        return await asyncio.to_thread(
-            self._raw_list_sync, prefix, depth=depth, limit=limit, cursor=cursor
-        )
-
-    # --- idempotency ---------------------------------------------------------
-
-    def _read_idempotency(self, op_key: str) -> "_IdempotencyRecord | None":
-        p = self._idempotency_path(op_key)
-        if not p.exists():
-            return None
-        raw = json.loads(p.read_text())
-        return _IdempotencyRecord(
-            request_hash=raw["request_hash"], result_version=raw["result_version"]
-        )
-
-    def _write_idempotency(self, op_key: str, record: _IdempotencyRecord) -> None:
-        raw = {"request_hash": record.request_hash, "result_version": record.result_version}
-        self._atomic_write(self._idempotency_path(op_key), json.dumps(raw).encode("utf-8"))
-
-    # --- ObjectWriterBackend -------------------------------------------------
-
-    def _raw_put_checked_sync(
-        self, key: StorageKey, content: bytes, *, options: WriteOptions, request_hash: str
-    ) -> StoredObject:
-        with self._lock:
-            idem_key = f"put:{key.value}:{options.idempotency_key}" if options.idempotency_key else None
-            if idem_key is not None:
-                record = self._read_idempotency(idem_key)
-                if record is not None:
-                    if record.request_hash != request_hash:
-                        raise StorageIdempotencyConflictError(
-                            f"idempotency key {options.idempotency_key!r} replayed with a different request"
-                        )
-                    if record.result_version is None:
-                        raise StorageObjectNotFoundError(key.value)
-                    raw = self._read_version_json(key, record.result_version)
-                    content_bytes = self._version_bin_path(key, record.result_version).read_bytes()
-                    return StoredObject(
-                        info=self._info_from_json(key, raw, raw["commit_revision"]), content=content_bytes
-                    )
-            live = self._live_version(key)
-            live_info = None
-            if live is not None and not live[1]["tombstone"]:
-                live_info = live[1]
-            if options.if_none_match and live_info is not None:
-                raise StoragePreconditionFailedError(f"if_none_match failed: {key.value!r} already exists")
-            if options.if_match is not None:
-                if live_info is None or live_info["etag"] != options.if_match:
-                    raise StoragePreconditionFailedError(f"if_match failed: {key.value!r} etag mismatch")
-            next_version = (live[0] + 1) if live is not None else 1
-            info = self._write_version(
-                key,
-                version=next_version,
-                content=content,
-                content_type=options.content_type,
-                metadata=dict(options.metadata or {}),
-                tombstone=False,
-            )
-            if idem_key is not None:
-                self._write_idempotency(idem_key, _IdempotencyRecord(request_hash=request_hash, result_version=info.version))
-            return StoredObject(info=info, content=content)
-
-    async def raw_put_checked(
-        self, key: StorageKey, content: bytes, *, options: WriteOptions, request_hash: str
-    ) -> StoredObject:
-        return await asyncio.to_thread(
-            self._raw_put_checked_sync, key, content, options=options, request_hash=request_hash
-        )
-
-    def _raw_delete_checked_sync(
-        self, key: StorageKey, *, options: WriteOptions, request_hash: str
-    ) -> None:
-        with self._lock:
-            idem_key = f"delete:{key.value}:{options.idempotency_key}" if options.idempotency_key else None
-            if idem_key is not None:
-                record = self._read_idempotency(idem_key)
-                if record is not None:
-                    if record.request_hash != request_hash:
-                        raise StorageIdempotencyConflictError(
-                            f"idempotency key {options.idempotency_key!r} replayed with a different request"
-                        )
-                    return None
-            live = self._live_version(key)
-            if live is None or live[1]["tombstone"]:
-                # Deleting a missing key is a no-op (no tombstone, no bump).
-                if idem_key is not None:
-                    self._write_idempotency(idem_key, _IdempotencyRecord(request_hash=request_hash, result_version=None))
-                return None
-            if options.if_match is not None and live[1]["etag"] != options.if_match:
-                raise StoragePreconditionFailedError(f"if_match failed: {key.value!r} etag mismatch")
-            next_version = live[0] + 1
-            self._write_version(
-                key, version=next_version, content=None, content_type=None, metadata={}, tombstone=True
-            )
-            if idem_key is not None:
-                self._write_idempotency(idem_key, _IdempotencyRecord(request_hash=request_hash, result_version=None))
-            return None
-
-    async def raw_delete_checked(
-        self, key: StorageKey, *, options: WriteOptions, request_hash: str
-    ) -> None:
-        return await asyncio.to_thread(
-            self._raw_delete_checked_sync, key, options=options, request_hash=request_hash
-        )
-
-    def _raw_move_checked_sync(
-        self, source: StorageKey, target: StorageKey, *, options: WriteOptions, request_hash: str
-    ) -> StoredObject:
-        with self._lock:
-            idem_key = f"move:{source.value}:{target.value}:{options.idempotency_key}" if options.idempotency_key else None
-            if idem_key is not None:
-                record = self._read_idempotency(idem_key)
-                if record is not None:
-                    if record.request_hash != request_hash:
-                        raise StorageIdempotencyConflictError(
-                            f"idempotency key {options.idempotency_key!r} replayed with a different request"
-                        )
-                    if record.result_version is None:
-                        raise StorageObjectNotFoundError(source.value)
-                    raw = self._read_version_json(target, record.result_version)
-                    content_bytes = self._version_bin_path(target, record.result_version).read_bytes()
-                    return StoredObject(
-                        info=self._info_from_json(target, raw, raw["commit_revision"]), content=content_bytes
-                    )
-            src_live = self._live_version(source)
-            if src_live is None or src_live[1]["tombstone"]:
-                raise StorageObjectNotFoundError(source.value)
-            src_version, src_raw = src_live
-            content = self._version_bin_path(source, src_version).read_bytes()
-
-            tgt_live = self._live_version(target)
-            tgt_info = None
-            if tgt_live is not None and not tgt_live[1]["tombstone"]:
-                tgt_info = tgt_live[1]
-            if options.if_none_match and tgt_info is not None:
-                raise StoragePreconditionFailedError(f"if_none_match failed: {target.value!r} already exists")
-            if options.if_match is not None:
-                if tgt_info is None or tgt_info["etag"] != options.if_match:
-                    raise StoragePreconditionFailedError(f"if_match failed: {target.value!r} etag mismatch")
-
-            next_target_version = (tgt_live[0] + 1) if tgt_live is not None else 1
-            # ONE revision bump for the whole move: write the source
-            # tombstone WITHOUT its own bump, then the target write bumps.
-            next_source_version = src_version + 1
-            revision = self._bump_revision()
-            source_raw = {
-                "version": next_source_version,
-                "etag": "",
-                "content_type": None,
-                "size": 0,
-                "modified_at": datetime.now(timezone.utc).isoformat(),
-                "metadata": {},
-                "tombstone": True,
-                "commit_revision": revision,
-            }
-            self._atomic_write(
-                self._version_json_path(source, next_source_version),
-                json.dumps(source_raw).encode("utf-8"),
-            )
-            target_raw = {
-                "version": next_target_version,
-                "etag": src_raw["etag"],
-                "content_type": src_raw["content_type"],
-                "size": src_raw["size"],
-                "modified_at": datetime.now(timezone.utc).isoformat(),
-                "metadata": dict(src_raw.get("metadata") or {}),
-                "tombstone": False,
-                "commit_revision": revision,
-            }
-            self._atomic_write(
-                self._version_json_path(target, next_target_version),
-                json.dumps(target_raw).encode("utf-8"),
-            )
-            self._atomic_write(self._version_bin_path(target, next_target_version), content)
-            info = self._info_from_json(target, target_raw, revision)
-            if idem_key is not None:
-                self._write_idempotency(idem_key, _IdempotencyRecord(request_hash=request_hash, result_version=info.version))
-            return StoredObject(info=info, content=content)
-
-    async def raw_move_checked(
-        self, source: StorageKey, target: StorageKey, *, options: WriteOptions, request_hash: str
-    ) -> StoredObject:
-        return await asyncio.to_thread(
-            self._raw_move_checked_sync, source, target, options=options, request_hash=request_hash
-        )
-
-    # --- VersionedObjectBackend (native, free from the version-file layout) --
-
     def _raw_get_version_sync(self, key: StorageKey, version: int) -> "StoredObject | None":
-        p = self._version_json_path(key, version)
-        if not p.exists():
+        raw = self._read_version_metadata(key, version)
+        if raw is None or raw["tombstone"]:
             return None
-        raw = json.loads(p.read_text())
-        if raw["tombstone"]:
-            return None
-        content = self._version_bin_path(key, version).read_bytes()
-        return StoredObject(info=self._info_from_json(key, raw, raw["commit_revision"]), content=content)
-
-    async def raw_get_version(self, key: StorageKey, version: int) -> "StoredObject | None":
-        return await asyncio.to_thread(self._raw_get_version_sync, key, version)
+        content = self._read_version_bytes(key, version)
+        return StoredObject(
+            info=self._info_from_metadata(key, raw), content=content
+        )
 
     def _raw_get_at_revision_sync(self, key: StorageKey, revision: int) -> "StoredObject | None":
         best: "tuple[int, dict] | None" = None
         for v in self._list_version_numbers(key):
-            raw = self._read_version_json(key, v)
-            if raw["commit_revision"] is not None and raw["commit_revision"] <= revision:
+            raw = self._read_version_metadata(key, v)
+            cr = raw.get("commit_revision")
+            if cr is not None and cr <= revision:
                 best = (v, raw)
             else:
                 break
         if best is None or best[1]["tombstone"]:
             return None
         version, raw = best
-        content = self._version_bin_path(key, version).read_bytes()
-        return StoredObject(info=self._info_from_json(key, raw, raw["commit_revision"]), content=content)
-
-    async def raw_get_at_revision(self, key: StorageKey, revision: int) -> "StoredObject | None":
-        return await asyncio.to_thread(self._raw_get_at_revision_sync, key, revision)
+        content = self._read_version_bytes(key, version)
+        return StoredObject(info=self._info_from_metadata(key, raw), content=content)
 
     def _raw_list_versions_sync(
         self, key: StorageKey, *, limit: int, cursor: "str | None"
@@ -517,49 +810,436 @@ class FilesystemObjectBackend:
         page_versions = versions[start : start + limit]
         items = []
         for v in page_versions:
-            raw = self._read_version_json(key, v)
-            items.append(self._info_from_json(key, raw, raw["commit_revision"]))
+            raw = self._read_version_metadata(key, v)
+            items.append(self._info_from_metadata(key, raw))
         next_start = start + len(page_versions)
         next_cursor = None if next_start >= len(versions) else str(next_start)
         return ObjectVersionPage(items=tuple(items), next_cursor=next_cursor)
 
-    async def raw_list_versions(
-        self, key: StorageKey, *, limit: int = 100, cursor: "str | None" = None
-    ) -> ObjectVersionPage:
-        return await asyncio.to_thread(self._raw_list_versions_sync, key, limit=limit, cursor=cursor)
-
     def _raw_list_at_revision_sync(self, prefix: StorageKey, revision: int) -> "tuple[ObjectInfo, ...]":
-        if not self._history_dir.exists():
+        history_components = (".storage", "history")
+        if self._sd.stat(*history_components) is None:
             return ()
         out: "list[ObjectInfo]" = []
-        for entry in sorted(self._history_dir.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            key = StorageKey("/" + urllib.parse.unquote(entry.name))
+        for name in self._sd.list_names(*history_components):
+            key = StorageKey("/" + urllib.parse.unquote(name))
             if not key.is_under(prefix):
                 continue
             best: "tuple[int, dict] | None" = None
             for v in self._list_version_numbers(key):
-                raw = self._read_version_json(key, v)
-                if raw["commit_revision"] is not None and raw["commit_revision"] <= revision:
+                raw = self._read_version_metadata(key, v)
+                cr = raw.get("commit_revision")
+                if cr is not None and cr <= revision:
                     best = (v, raw)
                 else:
                     break
             if best is not None and not best[1]["tombstone"]:
-                out.append(self._info_from_json(key, best[1], best[1]["commit_revision"]))
+                out.append(self._info_from_metadata(key, best[1]))
         return tuple(out)
 
-    async def raw_list_at_revision(self, prefix: StorageKey, revision: int) -> "tuple[ObjectInfo, ...]":
-        return await asyncio.to_thread(self._raw_list_at_revision_sync, prefix, revision)
+    # --- write paths (single-key put + delete) ----------------------------
+
+    def _raw_put_checked_sync(
+        self, key: StorageKey, content: bytes, *, options: WriteOptions, request_hash: str
+    ) -> StoredObject:
+        # 1. recovery
+        self._recover()
+        # 2. idempotency replay
+        idem_key = (
+            f"put:{key.value}:{options.idempotency_key}"
+            if options.idempotency_key
+            else None
+        )
+        if idem_key is not None:
+            record = self._read_idempotency(idem_key)
+            if record is not None:
+                if record.request_hash != request_hash:
+                    raise StorageIdempotencyConflictError(
+                        f"idempotency key {options.idempotency_key!r} replayed with a different request"
+                    )
+                if record.result_key is None or record.result_version is None:
+                    raise StorageObjectNotFoundError(key.value)
+                # Replay reads from the IMMUTABLE version directory (spec
+                # the idempotency record spec): never from the current live state.
+                replay_key = StorageKey(record.result_key)
+                raw = self._read_version_metadata(replay_key, record.result_version)
+                if raw is None:
+                    raise StorageIntegrityError(
+                        f"idempotency record points at missing version "
+                        f"{record.result_version} of {record.result_key!r}"
+                    )
+                content_bytes = (
+                    self._read_version_bytes(replay_key, record.result_version)
+                    if not raw["tombstone"]
+                    else content
+                )
+                return StoredObject(
+                    info=self._info_from_metadata(replay_key, raw),
+                    content=content_bytes,
+                )
+        # 3. CAS + next version + new revision
+        live = self._live_version_metadata(key)
+        live_info = None if live is None or live[1]["tombstone"] else live[1]
+        if options.if_none_match and live_info is not None:
+            raise StoragePreconditionFailedError(
+                f"if_none_match failed: {key.value!r} already exists"
+            )
+        if options.if_match is not None:
+            if live_info is None or live_info["etag"] != options.if_match:
+                raise StoragePreconditionFailedError(
+                    f"if_match failed: {key.value!r} etag mismatch"
+                )
+        next_version = (live[0] + 1) if live is not None else 1
+        new_revision = self._read_revision_sync() + 1
+        operation_id = _new_operation_id()
+        # 4. write intent + state=PREPARED
+        intent = _OperationIntent(
+            operation="put",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            idempotency_key=options.idempotency_key,
+            new_revision=new_revision,
+            versions=[
+                _VersionIntent(
+                    key_value=key.value,
+                    version=next_version,
+                    tombstone=False,
+                    etag=sha256(content).hexdigest(),
+                    content_type=options.content_type,
+                    size=len(content),
+                    modified_at=datetime.now(timezone.utc).isoformat(),
+                    metadata=dict(options.metadata or {}),
+                )
+            ],
+        )
+        self._begin_operation(intent)
+        # 5-7. publish the version directory atomically.
+        metadata = self._live_metadata_dict(
+            key=key,
+            version=next_version,
+            commit_revision=new_revision,
+            content=content,
+            content_type=options.content_type,
+            metadata=dict(options.metadata or {}),
+            tombstone=False,
+            operation_id=operation_id,
+        )
+        self._publish_version_dir(
+            key=key,
+            version=next_version,
+            metadata=metadata,
+            content=content,
+        )
+        # 8. state=VERSIONS_PUBLISHED
+        self._set_state(operation_id, _OpState.VERSIONS_PUBLISHED)
+        # 9. publish revision
+        self._advance_revision_to(new_revision)
+        # 10. state=REVISION_PUBLISHED
+        self._set_state(operation_id, _OpState.REVISION_PUBLISHED)
+        # 11. idempotency
+        if idem_key is not None:
+            self._write_idempotency(
+                idem_key,
+                _IdempotencyRecord(
+                    operation="put",
+                    request_hash=request_hash,
+                    result_key=key.value,
+                    result_version=next_version,
+                    commit_revision=new_revision,
+                ),
+            )
+        # 12. state=COMMITTED
+        self._set_state(operation_id, _OpState.COMMITTED)
+        return StoredObject(
+            info=self._info_from_metadata(key, metadata), content=content
+        )
+
+    def _raw_delete_checked_sync(
+        self, key: StorageKey, *, options: WriteOptions, request_hash: str
+    ) -> None:
+        self._recover()
+        idem_key = (
+            f"delete:{key.value}:{options.idempotency_key}"
+            if options.idempotency_key
+            else None
+        )
+        if idem_key is not None:
+            record = self._read_idempotency(idem_key)
+            if record is not None:
+                if record.request_hash != request_hash:
+                    raise StorageIdempotencyConflictError(
+                        f"idempotency key {options.idempotency_key!r} replayed with a different request"
+                    )
+                return None
+        live = self._live_version_metadata(key)
+        if live is None or live[1]["tombstone"]:
+            # Deleting a missing key is a no-op (no tombstone, no bump). We
+            # DO record idempotency so a replay is a no-op too.
+            if idem_key is not None:
+                self._write_idempotency(
+                    idem_key,
+                    _IdempotencyRecord(
+                        operation="delete",
+                        request_hash=request_hash,
+                        result_key=None,
+                        result_version=None,
+                        commit_revision=self._read_revision_sync(),
+                    ),
+                )
+            return None
+        if options.if_match is not None and live[1]["etag"] != options.if_match:
+            raise StoragePreconditionFailedError(
+                f"if_match failed: {key.value!r} etag mismatch"
+            )
+        next_version = live[0] + 1
+        new_revision = self._read_revision_sync() + 1
+        operation_id = _new_operation_id()
+        intent = _OperationIntent(
+            operation="delete",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            idempotency_key=options.idempotency_key,
+            new_revision=new_revision,
+            versions=[
+                _VersionIntent(
+                    key_value=key.value,
+                    version=next_version,
+                    tombstone=True,
+                    etag="",
+                    content_type=None,
+                    size=0,
+                    modified_at=datetime.now(timezone.utc).isoformat(),
+                    metadata={},
+                )
+            ],
+        )
+        self._begin_operation(intent)
+        metadata = self._live_metadata_dict(
+            key=key,
+            version=next_version,
+            commit_revision=new_revision,
+            content=None,
+            content_type=None,
+            metadata={},
+            tombstone=True,
+            operation_id=operation_id,
+        )
+        # Tombstone: publish with metadata only (no content.bin).
+        self._publish_version_dir(
+            key=key, version=next_version, metadata=metadata, content=None
+        )
+        self._set_state(operation_id, _OpState.VERSIONS_PUBLISHED)
+        self._advance_revision_to(new_revision)
+        self._set_state(operation_id, _OpState.REVISION_PUBLISHED)
+        if idem_key is not None:
+            self._write_idempotency(
+                idem_key,
+                _IdempotencyRecord(
+                    operation="delete",
+                    request_hash=request_hash,
+                    result_key=None,
+                    result_version=None,
+                    commit_revision=new_revision,
+                ),
+            )
+        self._set_state(operation_id, _OpState.COMMITTED)
+
+    def _raw_move_checked_sync(
+        self,
+        source: StorageKey,
+        target: StorageKey,
+        *,
+        options: WriteOptions,
+        request_hash: str,
+    ) -> StoredObject:
+        self._recover()
+        idem_key = (
+            f"move:{source.value}:{target.value}:{options.idempotency_key}"
+            if options.idempotency_key
+            else None
+        )
+        if idem_key is not None:
+            record = self._read_idempotency(idem_key)
+            if record is not None:
+                if record.request_hash != request_hash:
+                    raise StorageIdempotencyConflictError(
+                        f"idempotency key {options.idempotency_key!r} replayed with a different request"
+                    )
+                if record.result_key is None or record.result_version is None:
+                    raise StorageObjectNotFoundError(source.value)
+                replay_key = StorageKey(record.result_key)
+                raw = self._read_version_metadata(replay_key, record.result_version)
+                if raw is None:
+                    raise StorageIntegrityError(
+                        f"idempotency record points at missing version "
+                        f"{record.result_version} of {record.result_key!r}"
+                    )
+                content_bytes = self._read_version_bytes(replay_key, record.result_version)
+                return StoredObject(
+                    info=self._info_from_metadata(replay_key, raw),
+                    content=content_bytes,
+                )
+        src_live = self._live_version_metadata(source)
+        if src_live is None or src_live[1]["tombstone"]:
+            raise StorageObjectNotFoundError(source.value)
+        src_version, src_raw = src_live
+        content = self._read_version_bytes(source, src_version)
+
+        tgt_live = self._live_version_metadata(target)
+        tgt_info = None if tgt_live is None or tgt_live[1]["tombstone"] else tgt_live[1]
+        if options.if_none_match and tgt_info is not None:
+            raise StoragePreconditionFailedError(
+                f"if_none_match failed: {target.value!r} already exists"
+            )
+        if options.if_match is not None:
+            if tgt_info is None or tgt_info["etag"] != options.if_match:
+                raise StoragePreconditionFailedError(
+                    f"if_match failed: {target.value!r} etag mismatch"
+                )
+
+        next_target_version = (tgt_live[0] + 1) if tgt_live is not None else 1
+        next_source_version = src_version + 1
+        new_revision = self._read_revision_sync() + 1
+        operation_id = _new_operation_id()
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Spec the recovery table: the move intent records BOTH version dirs (target
+        # result + source tombstone) sharing ONE commit_revision.
+        target_intent = _VersionIntent(
+            key_value=target.value,
+            version=next_target_version,
+            tombstone=False,
+            etag=src_raw["etag"],
+            content_type=src_raw["content_type"],
+            size=src_raw["size"],
+            modified_at=now_iso,
+            metadata=dict(src_raw.get("metadata") or {}),
+            # Content is sourced from source's CURRENT version, so recovery
+            # can re-materialize the target even if it crashed before the
+            # target publish completed.
+            source_key=source.value,
+            source_version=src_version,
+        )
+        source_tombstone_intent = _VersionIntent(
+            key_value=source.value,
+            version=next_source_version,
+            tombstone=True,
+            etag="",
+            content_type=None,
+            size=0,
+            modified_at=now_iso,
+            metadata={},
+        )
+        intent = _OperationIntent(
+            operation="move",
+            operation_id=operation_id,
+            request_hash=request_hash,
+            idempotency_key=options.idempotency_key,
+            new_revision=new_revision,
+            versions=[target_intent, source_tombstone_intent],
+        )
+        self._begin_operation(intent)
+        # Publish target version dir (with content sourced from source's
+        # current version).
+        target_metadata = self._live_metadata_dict(
+            key=target,
+            version=next_target_version,
+            commit_revision=new_revision,
+            content=content,
+            content_type=src_raw["content_type"],
+            metadata=dict(src_raw.get("metadata") or {}),
+            tombstone=False,
+            operation_id=operation_id,
+        )
+        self._publish_version_dir(
+            key=target,
+            version=next_target_version,
+            metadata=target_metadata,
+            content=content,
+        )
+        # Publish source tombstone (no content.bin).
+        source_metadata = self._live_metadata_dict(
+            key=source,
+            version=next_source_version,
+            commit_revision=new_revision,
+            content=None,
+            content_type=None,
+            metadata={},
+            tombstone=True,
+            operation_id=operation_id,
+        )
+        self._publish_version_dir(
+            key=source,
+            version=next_source_version,
+            metadata=source_metadata,
+            content=None,
+        )
+        self._set_state(operation_id, _OpState.VERSIONS_PUBLISHED)
+        self._advance_revision_to(new_revision)
+        self._set_state(operation_id, _OpState.REVISION_PUBLISHED)
+        if idem_key is not None:
+            self._write_idempotency(
+                idem_key,
+                _IdempotencyRecord(
+                    operation="move",
+                    request_hash=request_hash,
+                    result_key=target.value,
+                    result_version=next_target_version,
+                    commit_revision=new_revision,
+                ),
+            )
+        self._set_state(operation_id, _OpState.COMMITTED)
+        return StoredObject(
+            info=self._info_from_metadata(target, target_metadata), content=content
+        )
+
+
+def _metadata_matches_intent(actual: dict, v: _VersionIntent) -> bool:
+    """Recovery-time check that a published version dir matches what the
+    intent said it should be. commit_revision is filled in by the live path
+    after-the-fact, so the intent leaves it null; we check the immutable
+    fields only. content_type is treated as equal when both are None."""
+    pairs = (
+        ("etag", v.etag),
+        ("size", v.size),
+        ("tombstone", v.tombstone),
+        ("version", v.version),
+        ("key", v.key_value),
+    )
+    for actual_key, expected in pairs:
+        if actual.get(actual_key) != expected:
+            return False
+    # content_type: tolerate None on both sides; treat None==None as a match
+    # even though we wrote it through the live path's dict.
+    if actual.get("content_type") != v.content_type and actual.get("content_type") is not None:
+        return False
+    return True
+
+
+def _new_operation_id() -> str:
+    """A unique operation id. Uses secrets.token_hex so two operations in the
+    same nanosecond do not collide on a directory name."""
+    import secrets
+
+    return secrets.token_hex(16)
 
 
 class FilesystemObjectStore:
-    """Convenience: an ObjectStore pre-wired to a fresh FilesystemObjectBackend."""
+    """Convenience: an ObjectStore pre-wired to a fresh FilesystemObjectBackend
+    + its default FilesystemKeyedCoordinator."""
 
-    def __init__(self, *, root: Path, symlink_policy: SymlinkPolicy = SymlinkPolicy.DENY) -> None:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        coordinator: "KeyedCoordinator | None" = None,
+        mode: FilesystemSecurityMode = FilesystemSecurityMode.SECURE_POSIX,
+    ) -> None:
         from ...object.store import ObjectStore
 
-        self._backend = FilesystemObjectBackend(root=root, symlink_policy=symlink_policy)
+        self._backend = FilesystemObjectBackend(
+            root=root, coordinator=coordinator, mode=mode
+        )
         self._store = ObjectStore(primary=self._backend)
 
     @property
@@ -590,5 +1270,7 @@ class FilesystemObjectStore:
     async def get_version(self, key: StorageKey, version: int) -> "StoredObject | None":
         return await self._backend.raw_get_version(key, version)
 
-    async def list_versions(self, key: StorageKey, *, limit: int = 100, cursor: "str | None" = None) -> ObjectVersionPage:
+    async def list_versions(
+        self, key: StorageKey, *, limit: int = 100, cursor: "str | None" = None
+    ) -> ObjectVersionPage:
         return await self._backend.raw_list_versions(key, limit=limit, cursor=cursor)

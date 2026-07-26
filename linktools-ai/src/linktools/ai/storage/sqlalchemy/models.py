@@ -160,6 +160,17 @@ class SessionMessageRow(Base):
         UniqueConstraint(
             "session_id", "sequence", name="uq_session_message_session_sequence"
         ),
+        # commit-scoped idempotency for a batch append : one row per
+        # message in a commit's batch, uniquely identified by (session_id,
+        # commit_id, batch_index) so a retried append_messages_once does not
+        # duplicate the batch. NULL commit_id keeps non-idempotent appends
+        # out of the constraint.
+        UniqueConstraint(
+            "session_id",
+            "commit_id",
+            "batch_index",
+            name="uq_session_message_commit_batch",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -170,6 +181,13 @@ class SessionMessageRow(Base):
     run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime]
     metadata_json: Mapped[str] = mapped_column(Text)
+    # commit-scoped idempotency : set when appended via
+    # append_messages_once(commit_id=...). NULL otherwise.
+    commit_id: Mapped["str | None"] = mapped_column(String(200), nullable=True)
+    # 0-based position of this row within its commit-scoped batch (so the
+    # (session_id, commit_id, batch_index) unique constraint can identify
+    # each row uniquely). NULL for non-idempotent appends.
+    batch_index: Mapped["int | None"] = mapped_column(Integer, nullable=True)
 
 
 class EventRow(Base):
@@ -182,6 +200,18 @@ class EventRow(Base):
     # behavior change.
     __table_args__ = (
         UniqueConstraint("stream_id", "sequence", name="uq_event_stream_sequence"),
+        # commit-scoped idempotency: a (stream_id, commit_id, event_type)
+        # triple uniquely identifies one event append within a commit so a
+        # retried append_once returns the originally-appended event rather than
+        # re-appending. event_type is part of the key because one commit may
+        # legitimately append several distinct events (pause emits
+        # ApprovalRequested + RunPaused); deduping by (commit_id) alone would
+        # wrongly collapse the second event onto the first. NULL is distinct
+        # per SQL standard, so non-commit-scoped events do not collide on this
+        # constraint.
+        UniqueConstraint(
+            "stream_id", "commit_id", "event_type", name="uq_event_stream_commit_type"
+        ),
     )
 
     event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -200,6 +230,11 @@ class EventRow(Base):
     # critical events). Nullable: rows written before this column existed (and
     # events with no metadata) store NULL -> read back as an empty mapping.
     metadata_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
+    # Commit-scoped idempotency : when an event is appended via
+    # append_once(commit_id=...), the commit_id is recorded here so a retry
+    # detects the duplicate via the unique constraint above. NULL for events
+    # appended through the non-idempotent append() path.
+    commit_id: Mapped["str | None"] = mapped_column(String(200), nullable=True)
 
 
 class SwarmRunRow(Base):

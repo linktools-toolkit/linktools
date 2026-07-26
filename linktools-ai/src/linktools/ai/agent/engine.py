@@ -29,9 +29,11 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
   (model routing/policy/output denials, ToolError, MCPToolError) -> AgentFailed;
   everything else (config/invariant/protocol violations, programming errors)
   propagates unchanged;
-* publishes text/tool/paused dict-events through the injected ``live_events``
-  sink, and capability/tool/governance security+observability events through
-  the injected ``security_events`` sink (no direct EventStore reference).
+* publishes ONLY process dict-events through the injected ``live_events``
+  sink (text / tool / model_progress); state events (paused / completed /
+  failed / cancelled) are the RunCoordinator's job, published only AFTER the
+  durable commit succeeds. Security+observability events route through the
+  injected ``security_events`` sink (no direct EventStore reference).
 
 Optional Observability: when ``observability`` is wired, execute_pure wraps the
 loop in an outer ``agent.run`` span and the iter() drive in a nested
@@ -547,8 +549,22 @@ class AgentEngine:
                                                             }
                                                         )
                                                         await cancellation.raise_if_cancelled()
-                                        except AssertionError:
-                                            pass
+                                        except AssertionError as exc:
+                                            # Pydantic-ai raises AssertionError for
+                                            # models that do not support streaming
+                                            # (e.g. FunctionModel without a
+                                            # stream_function). The spec forbids
+                                            # silently swallowing AssertionError;
+                                            # narrow the catch to the streaming-
+                                            # not-supported message so an
+                                            # unexpected AssertionError still
+                                            # propagates as the invariant error
+                                            # it actually is. A future pydantic-ai
+                                            # release exposing a typed
+                                            # StreamNotSupportedError should
+                                            # replace this message match.
+                                            if "support streamed" not in str(exc):
+                                                raise
                                     elif PydanticAgent.is_call_tools_node(node):
                                         try:
                                             async with node.stream(
@@ -581,18 +597,26 @@ class AgentEngine:
                                                             tool_event
                                                         )
                                                         await cancellation.raise_if_cancelled()
-                                        except AssertionError:
-                                            pass
+                                        except AssertionError as exc:
+                                            # See the matching handler above: only
+                                            # the streaming-not-supported
+                                            # AssertionError is absorbed (the
+                                            # non-streaming path runs instead).
+                                            if "support streamed" not in str(exc):
+                                                raise
                             except RunPaused as paused:
                                 checkpoint_payload = serialize_messages(
                                     run.all_messages()
                                 )
-                                paused_event = {
-                                    "type": "paused",
-                                    "run_id": context.run_id,
-                                    "approval_id": paused.approval_id,
-                                }
-                                await live_events.publish(paused_event)
+                                # The engine does NOT publish a "paused" state
+                                # event: per the state-event split, state events
+                                # (paused/completed/failed/cancelled) are the
+                                # Coordinator's job, published only AFTER the
+                                # durable commit succeeds. The engine publishes
+                                # only process events (text_delta / tool_* /
+                                # model_progress); the paused outcome carries
+                                # the pause descriptor up to the Coordinator,
+                                # which commits and then publishes "paused".
                                 return AgentPaused(
                                     request=PauseRequest(
                                         approval_id=paused.approval_id,

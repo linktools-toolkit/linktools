@@ -63,6 +63,33 @@ class Runtime:
     ) -> None:
         self._components = components
         self._coordinator = components.run_coordinator
+        # Lazy recovery gate: every lifecycle entry point awaits
+        # _ensure_recovered() before doing its real work, so a crash-left
+        # in-flight commit is reconciled BEFORE the Runtime accepts a new
+        # request -- even when the caller did not enter the Runtime via
+        # ``async with``. Idempotent: a single recovery per Runtime instance.
+        self._recovery_done = False
+        self._recovery_lock = None
+
+    async def _ensure_recovered(self) -> None:
+        """Run commit-coordinator recovery exactly once, lazily on first
+        lifecycle entry. The coordinator may raise on incomplete recovery
+        (e.g. a journal it cannot reconcile); that surfaces as a Runtime
+        startup failure rather than silently accepting requests against an
+        inconsistent state."""
+        if self._recovery_done:
+            return
+        import asyncio
+
+        if self._recovery_lock is None:
+            self._recovery_lock = asyncio.Lock()
+        async with self._recovery_lock:
+            if self._recovery_done:
+                return
+            coordinator = self._components.commit_coordinator
+            if coordinator is not None:
+                await coordinator.recover_incomplete_commits()
+            self._recovery_done = True
 
     async def inspect(self, spec: AgentSpec) -> "CapabilityInspection":
         """A stable, immutable view of what ``spec`` resolves to: the exposed
@@ -79,6 +106,7 @@ class Runtime:
         )
 
     async def __aenter__(self) -> "Runtime":
+        await self._ensure_recovered()
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -102,6 +130,7 @@ class Runtime:
         context_metadata: "Mapping[str, Any] | None" = None,
     ):
         """Non-streaming run entry point. See :meth:`RunCoordinator.run`."""
+        await self._ensure_recovered()
         return await self._coordinator.run(
             spec,
             prompt,
@@ -121,6 +150,7 @@ class Runtime:
         reason: "str | None" = None,
     ) -> None:
         """Cancel an in-flight Run. See :meth:`RunCoordinator.cancel`."""
+        await self._ensure_recovered()
         await self._coordinator.cancel(run_id, principal=principal, reason=reason)
 
     async def run_stream(
@@ -135,6 +165,7 @@ class Runtime:
         context_metadata: "Mapping[str, Any] | None" = None,
     ) -> "AsyncIterator[dict]":
         """Streaming variant of :meth:`run`. See :meth:`RunCoordinator.run_stream`."""
+        await self._ensure_recovered()
         async for event in self._coordinator.run_stream(
             spec,
             prompt,
@@ -154,6 +185,7 @@ class Runtime:
         expected_version: int,
     ):
         """Approve through the Principal-bound service. See :meth:`RunCoordinator.approve`."""
+        await self._ensure_recovered()
         return await self._coordinator.approve(
             approval_id, principal=principal, expected_version=expected_version
         )
@@ -167,6 +199,7 @@ class Runtime:
         reason: "str | None" = None,
     ):
         """Reject through the Principal-bound service. See :meth:`RunCoordinator.reject`."""
+        await self._ensure_recovered()
         return await self._coordinator.reject(
             approval_id,
             principal=principal,
@@ -182,6 +215,7 @@ class Runtime:
     ) -> "AsyncIterator[dict]":
         """Resume a paused Run from its persisted definition. See
         :meth:`RunCoordinator.resume` for the full 14-step protocol."""
+        await self._ensure_recovered()
         async for event in self._coordinator.resume(run_id, principal=principal):
             yield event
 
@@ -209,6 +243,7 @@ def build_runtime(
     authorization: Any = None,
     skill_subagent: "SkillPrivateSubagentConfig | None" = None,
     requirements: "RuntimeRequirements | None" = None,
+    swarm_commit_coordinator: Any = None,
 ) -> "Runtime":
     """Assemble a Runtime from optional sub-components + a RuntimeDependencies.
     The only public construction entry point -- Runtime takes only already-
@@ -242,6 +277,15 @@ def build_runtime(
     config = RuntimeBuildConfig(
         storage=storage,
         commit_coordinator=commit_coordinator,
+        # The composition root (this function) constructs the backend-
+        # appropriate SwarmCommitCoordinator + FencedRunEventWriter from the
+        # concrete Storage and injects them. The build kernel never dispatches
+        # a backend itself (that would import concrete backend modules as a
+        # side effect of assembly, breaking the no-concrete-backends
+        # invariant).
+        swarm_commit_coordinator=swarm_commit_coordinator
+        or _resolve_swarm_commit_coordinator_for(storage),
+        fenced_event_writer=_resolve_fenced_event_writer_for(storage),
         providers=providers or RuntimeDependencies(),
         model_resolver=model_resolver,
         middleware_pipeline=middleware_pipeline,
@@ -266,6 +310,74 @@ def build_runtime(
     )
     c = build_runtime_components(config)
     return Runtime(components=c)
+
+
+def _resolve_swarm_commit_coordinator_for(storage: "Storage") -> Any:
+    """Dispatch the backend-appropriate SwarmCommitCoordinator from the
+    concrete Storage. Lives HERE (the composition root), not in the build
+    kernel -- the build kernel assembles only, never branches on Storage
+    type. Raises if the Storage exposes neither DATABASE transaction scope
+    nor a filesystem root (test stubs that don't go through build_runtime
+    must inject a coordinator explicitly via the swarm_commit_coordinator=
+    kwarg)."""
+    from ..errors import SwarmCommitCoordinatorUnavailableError
+
+    features = getattr(storage, "features", None)
+    scope = getattr(features, "transaction_scope", None)
+    if scope is not None and getattr(scope, "value", None) == "database":
+        from ..swarm.persistence.sqlalchemy_commit import (
+            SqlAlchemySwarmCommitCoordinator,
+        )
+
+        return SqlAlchemySwarmCommitCoordinator(storage, storage.swarms)
+    if scope is not None and getattr(scope, "value", None) == "none" and hasattr(
+        storage, "root"
+    ):
+        from ..swarm.persistence.filesystem_commit import (
+            FilesystemSwarmCommitCoordinator,
+        )
+
+        return FilesystemSwarmCommitCoordinator(
+            storage.swarms, transactions_root=storage.root / "transactions"
+        )
+    raise SwarmCommitCoordinatorUnavailableError(
+        f"cannot resolve a SwarmCommitCoordinator for storage "
+        f"{type(storage).__name__!r} (features.transaction_scope must be "
+        "DATABASE or NONE+root). Pass swarm_commit_coordinator= explicitly."
+    )
+
+
+def _resolve_fenced_event_writer_for(storage: "Storage") -> Any:
+    """Dispatch the backend-appropriate FencedRunEventWriter from the concrete
+    Storage. Lives HERE (the composition root); the build kernel assembles
+    only. Returns None for a Storage that exposes neither DATABASE
+    transaction scope nor a filesystem root -- the Coordinator then falls
+    back to the unfenced legacy sink (acceptable for tests/local mode)."""
+    features = getattr(storage, "features", None)
+    scope = getattr(features, "transaction_scope", None)
+    if scope is not None and getattr(scope, "value", None) == "database":
+        from ..run.persistence.sqlalchemy.event_writer import (
+            SqlAlchemyFencedRunEventWriter,
+        )
+
+        try:
+            return SqlAlchemyFencedRunEventWriter(storage)
+        except Exception:  # noqa: BLE001
+            return None
+    if scope is not None and getattr(scope, "value", None) == "none" and hasattr(
+        storage, "root"
+    ):
+        from ..run.persistence.filesystem.event_writer import (
+            FilesystemFencedRunEventWriter,
+        )
+
+        try:
+            return FilesystemFencedRunEventWriter(
+                run_store=storage.runs, event_store=storage.events
+            )
+        except Exception:  # noqa: BLE001
+            return None
+    return None
 
 
 # re-export for tooling that imports Runtime alongside these types

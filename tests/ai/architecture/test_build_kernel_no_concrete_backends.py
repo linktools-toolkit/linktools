@@ -167,7 +167,33 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
     # Snapshot the concrete-backend modules already in sys.modules BEFORE
     # the build call so the post-build diff isolates the build kernel's own
     # footprint (modules imported by this test function or earlier test
-    # collection are not counted against it).
+    # collection are not counted against it). The actual pre_build snapshot
+    # is taken AFTER the test's own setup imports below, so the diff isolates
+    # the build kernel's footprint, not the test's setup.
+
+    from linktools.ai.runtime.persistence.facade import FilesystemStorage
+
+    storage = FilesystemStorage(root=tmp_path)
+    # Composition root: the caller constructs the concrete coordinators from
+    # its concrete Storage and injects them. The build kernel never branches
+    # on Storage type.
+    coordinator = FilesystemRunCommitCoordinator.from_storage(storage)
+    from linktools.ai.swarm.persistence.filesystem_commit import (
+        FilesystemSwarmCommitCoordinator,
+    )
+
+    # Pre-access storage.swarms + storage.events so the FilesystemSwarmStore
+    # + FilesystemEventStore modules load BEFORE the pre_build snapshot --
+    # otherwise constructing the swarm coordinator (which takes the swarm
+    # store) would surface them in the post-build diff and falsely suggest
+    # the build kernel imported them.
+    _ = storage.swarms
+    _ = storage.events
+    swarm_coordinator = FilesystemSwarmCommitCoordinator(
+        storage.swarms, transactions_root=storage.root / "transactions"
+    )
+    # Re-snapshot AFTER the test's own setup imports so the diff isolates the
+    # build kernel's footprint, not the test's.
     pre_build = {
         m
         for m in sys.modules
@@ -179,23 +205,11 @@ def test_runtime_builds_with_injected_coordinator_and_no_concrete_backend(
             )
         )
     }
-
-    # The public in-memory external Storage pattern lives in the sibling
-    # storage test package; import it through its package path so its
-    # internal relative imports resolve.
-    from external_adapter import (
-        build_in_memory_external_storage,
-    )
-
-    storage = build_in_memory_external_storage(root=tmp_path)
-    # Composition root: the caller constructs the concrete coordinator from
-    # its concrete Storage and injects it. The build kernel never branches
-    # on Storage type.
-    coordinator = FilesystemRunCommitCoordinator.from_storage(storage)
     config = RuntimeBuildConfig(
         storage=storage,
         providers=RuntimeDependencies(),
         commit_coordinator=coordinator,
+        swarm_commit_coordinator=swarm_coordinator,
         settings=RuntimeSettings(),
     )
     components = build_runtime_components(config)
@@ -244,4 +258,3 @@ def test_missing_commit_coordinator_fails_fast(tmp_path):
     )
     with pytest.raises(RuntimeInitializationError, match="RunCommitCoordinator must be injected"):
         build_runtime_components(config)
-

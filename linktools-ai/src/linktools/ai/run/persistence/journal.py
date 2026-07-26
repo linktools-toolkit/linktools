@@ -62,7 +62,10 @@ class TransactionRecord:
     ``approval_id``/``checkpoint_id``/``session_message_ids`` capture what has
     already been written, so recovery can skip re-writing them or know which
     are orphans to clean up. ``command`` holds the original commit command
-    payload (serialized) so recovery can re-drive the remaining steps."""
+    payload (serialized) so recovery can re-drive the remaining steps.
+    ``request_hash`` is the canonical hash of the request payload -- a retried
+    call with the same commit_id but a DIFFERENT request_hash is a conflict
+    (RunCommitConflictError), never a silent overwrite."""
 
     id: str
     kind: TransactionKind
@@ -71,6 +74,7 @@ class TransactionRecord:
     target_run_status: str
     created_at: str
     commit_id: str = ""
+    request_hash: str = ""
     approval_id: "str | None" = None
     checkpoint_id: "str | None" = None
     session_message_ids: "tuple[str, ...]" = ()
@@ -90,6 +94,14 @@ class TransactionRecord:
         d["state"] = TransactionState(d["state"])
         d["session_message_ids"] = tuple(d.get("session_message_ids") or ())
         return cls(**d)
+
+
+class RunCommitConflictError(Exception):
+    """A retried commit carried the same ``commit_id`` but a different
+    ``request_hash`` -- the caller's retry is not a faithful replay of the
+    original request, so the coordinator refuses the write rather than
+    silently overwriting the recorded result. Mirrors the SQL side's
+    RunCommitConflictError so the two backends raise the same error type."""
 
 
 class TransactionJournal:
@@ -123,6 +135,7 @@ class TransactionJournal:
         run_id: str,
         target_run_status: str,
         commit_id: str = "",
+        request_hash: str = "",
         command: "Mapping[str, Any]",
     ) -> TransactionRecord:
         """Open a new PREPARED transaction and persist its journal."""
@@ -135,18 +148,94 @@ class TransactionJournal:
             target_run_status=target_run_status,
             created_at=_now_iso(),
             commit_id=commit_id,
+            request_hash=request_hash,
             command=dict(command),
         )
         self._write_atomic(tx_id, record.to_json())
         return record
 
-    def find_incomplete(self, commit_id: str) -> "TransactionRecord | None":
+    def find_incomplete(
+        self, commit_id: str, *, request_hash: str = ""
+    ) -> "TransactionRecord | None":
+        """Return the in-flight journal for ``commit_id`` if one exists.
+
+        If ``request_hash`` is supplied and the journal's recorded hash
+        differs, raise RunCommitConflictError -- a retried call with the same
+        commit_id but a different payload is a real conflict, not a replay."""
         if not commit_id:
             return None
         for record in self.list_incomplete():
             if record.commit_id == commit_id:
+                if (
+                    request_hash
+                    and record.request_hash
+                    and record.request_hash != request_hash
+                ):
+                    raise RunCommitConflictError(
+                        f"commit {commit_id!r} replayed with a different request"
+                    )
                 return record
         return None
+
+    def record_completion(
+        self,
+        *,
+        commit_id: str,
+        request_hash: str,
+        result: "Mapping[str, Any]",
+    ) -> None:
+        """Persist a stable completion record so a retried call with the same
+        (commit_id, request_hash) returns the original result without
+        re-executing the commit. The completion log lives at
+        ``{root}/completed/{commit_id_hash}.json`` -- separate from the
+        in-flight journal directory, retained across recoveries, and the
+        authoritative replay source (mirrors the SQL run_commit_log table)."""
+        if not commit_id:
+            return
+        d = self._root / "completed"
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{_hash_segment(commit_id)}.json"
+        payload = {
+            "commit_id": commit_id,
+            "request_hash": request_hash,
+            "result": dict(result),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+
+    def find_completion(
+        self, commit_id: str, *, request_hash: str = ""
+    ) -> "Mapping[str, Any] | None":
+        """Return the recorded result for a completed ``commit_id`` if any.
+
+        If ``request_hash`` is supplied and differs from the recorded hash,
+        raise RunCommitConflictError -- the same replay-vs-conflict rule as
+        find_incomplete, applied to the completion log."""
+        if not commit_id:
+            return None
+        path = self._root / "completed" / f"{_hash_segment(commit_id)}.json"
+        if not path.exists():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        recorded_hash = raw.get("request_hash", "")
+        if (
+            request_hash
+            and recorded_hash
+            and recorded_hash != request_hash
+        ):
+            raise RunCommitConflictError(
+                f"commit {commit_id!r} replayed with a different request"
+            )
+        return raw.get("result") or {}
 
     def update(self, record: TransactionRecord, **changes: Any) -> TransactionRecord:
         """Atomically advance the journal to a new state/fields. Returns the
@@ -163,10 +252,24 @@ class TransactionJournal:
         self._write_atomic(replaced.id, replaced.to_json())
         return replaced
 
-    def commit(self, record: TransactionRecord) -> None:
-        """Mark the transaction COMMITTED and delete its journal (the commit is
-        durable; no recovery needed)."""
+    def commit(
+        self,
+        record: TransactionRecord,
+        *,
+        result: "Mapping[str, Any] | None" = None,
+    ) -> None:
+        """Mark the transaction COMMITTED and delete its in-flight journal (the
+        commit is durable; no recovery needed). If ``result`` is supplied, also
+        write a stable completion record so a retried call with the same
+        (commit_id, request_hash) returns the original result without
+        re-executing."""
         final = self.update(record, state=TransactionState.COMMITTED)
+        if result is not None and final.commit_id:
+            self.record_completion(
+                commit_id=final.commit_id,
+                request_hash=final.request_hash,
+                result=result,
+            )
         try:
             self._path(final.id).unlink()
         except FileNotFoundError:
@@ -194,6 +297,15 @@ def _replace_field(
     items = {f: getattr(record, f) for f in record.__dataclass_fields__}
     items[name] = value
     return TransactionRecord(**items)
+
+
+def _hash_segment(commit_id: str) -> str:
+    """Stable filesystem-safe segment for an opaque commit_id (sha256 hex).
+    Keeps the completion-log filename collision-free and immune to path
+    traversal regardless of the characters the caller chose."""
+    import hashlib
+
+    return hashlib.sha256(commit_id.encode("utf-8")).hexdigest()
 
 
 def _now_iso() -> str:

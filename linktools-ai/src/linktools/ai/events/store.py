@@ -35,6 +35,28 @@ class EventStore(Protocol):
         metadata: "Mapping[str, Any] | None" = None,
     ) -> EventEnvelope: ...
 
+    async def append_once(
+        self,
+        *,
+        commit_id: str,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> EventEnvelope:
+        """Commit-scoped idempotent append. The store atomically reserves
+        (stream_id, commit_id) -- a retried call with the SAME commit_id
+        returns the originally-appended envelope instead of re-appending.
+        Used by Run lifecycle commits so a retry does not duplicate the
+        state-critical event a commit recorded. The store does NOT dedupe
+        via a full list-then-filter; the unique constraint on (stream_id,
+        commit_id) is the atomic reserve."""
+        ...
+
     async def list(
         self, stream_id: str, *, after_sequence: int = 0, limit: int = 100
     ) -> EventPage: ...

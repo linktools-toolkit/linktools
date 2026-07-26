@@ -35,9 +35,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...object.errors import (
+    StorageHashCollisionError,
     StorageIdempotencyConflictError,
     StorageObjectNotFoundError,
     StoragePreconditionFailedError,
+    StorageTransactionClosedError,
 )
 from ...object.models import (
     Depth,
@@ -51,7 +53,7 @@ from ...object.models import (
     StoredObject,
     WriteOptions,
 )
-from ...sqlalchemy.dialects import resolve_dialect_strategy
+from ...sqlalchemy.dialects import SqlAlchemyObjectDialect
 from .models import (
     Base,
     StorageObjectIdempotencyRow,
@@ -108,53 +110,52 @@ class SqlAlchemyObjectBackend:
     """Implements ObjectReaderBackend + ObjectWriterBackend +
     TransactionalObjectBackend + VersionedObjectBackend.
 
-    When ``session`` is bound (external Unit-of-Work participation, e.g. a
-    caller composing this backend into a multi-store transactional scope it
-    owns), every read AND write permanently reuses that session instead of
-    opening/closing its own -- writes flush (not commit/rollback; the
-    surrounding UoW owns that), so an object mutation commits or rolls back
-    together with every other store sharing the session. A bound backend
-    does not support its OWN ``transaction()`` (the UoW already is one)."""
+    The reusable PARENT backend opens a fresh session for each operation and
+    bumps revision on every checked op. It carries NO ambient transaction
+    state. ``transaction()`` yields a transaction-bound child
+    (``_SqlAlchemyTransactionBackend``) that owns the session, caches one
+    commit_revision across all mutations in the tx, and flushes only -- the
+    surrounding ``session.begin()`` owns commit/rollback so a clean exit
+    commits every staged mutation and an exception rolls them all back.
 
-    def __init__(self, *, session_factory, strategy=None, session=None) -> None:
+    A backend bound to an external Unit-of-Work session is constructed as a
+    ``_SqlAlchemyTransactionBackend`` directly; the parent's ``session=``
+    shortcut was removed because it leaked ambient state onto the reusable
+    parent."""
+
+    def __init__(self, *, session_factory, dialect) -> None:
+        # Protocol-first: the dialect MUST be handed in. Core never resolves
+        # one from a session_factory; a downstream that builds the engine +
+        # driver also builds the matching SqlAlchemyObjectDialect.
         self._session_factory = session_factory
         self.backend_id = "primary"
-        self._strategy = strategy or resolve_dialect_strategy(session_factory)
-        self._tx_session: "AsyncSession | None" = session
-        self._tx_revision: "int | None" = None
+        self._dialect = dialect
 
     # --- session plumbing ----------------------------------------------------
 
     @asynccontextmanager
     async def _read_session(self) -> "AsyncIterator[AsyncSession]":
-        if self._tx_session is not None:
-            yield self._tx_session
-            return
         async with self._session_factory() as session:
             yield session
 
     @asynccontextmanager
     async def _write_session(self) -> "AsyncIterator[AsyncSession]":
-        if self._tx_session is not None:
-            yield self._tx_session
-            return
         async with self._session_factory() as session:
             async with session.begin():
                 yield session
 
     @asynccontextmanager
-    async def transaction(self) -> "AsyncIterator[None]":
-        if self._tx_session is not None:
-            raise StorageObjectNotFoundError("nested transaction() is not supported")
+    async def transaction(self) -> "AsyncIterator[_SqlAlchemyTransactionBackend]":
         async with self._session_factory() as session:
             async with session.begin():
-                self._tx_session = session
-                self._tx_revision = None
+                child = _SqlAlchemyTransactionBackend(
+                    session=session,
+                    dialect=self._dialect,
+                )
                 try:
-                    yield
+                    yield child
                 finally:
-                    self._tx_session = None
-                    self._tx_revision = None
+                    child.close()
 
     async def _get_row(
         self, session: AsyncSession, key: StorageKey
@@ -162,7 +163,16 @@ class SqlAlchemyObjectBackend:
         result = await session.execute(
             select(StorageObjectRow).where(StorageObjectRow.key_hash == _key_hash(key))
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        # Hash-collision double-check (P3 hash-collision defense): a row whose plaintext key
+        # does not match the queried key MUST surface as a collision, never
+        # silently served. This is the structural defense against a hash
+        # function bug or a corrupted index.
+        if row is not None and row.key != key.value:
+            raise StorageHashCollisionError(
+                namespace="object-key", digest=_key_hash(key).hex()
+            )
+        return row
 
     # --- ObjectReaderBackend -------------------------------------------------
 
@@ -259,13 +269,10 @@ class SqlAlchemyObjectBackend:
         )
 
     async def _bump_revision(self, session: AsyncSession) -> int:
-        """Within an active transaction() the whole multi-op tx shares ONE
-        bump (cached on first mutation); outside one, every checked op bumps
-        its own single-op transaction independently."""
-        if self._tx_session is not None:
-            if self._tx_revision is None:
-                self._tx_revision = await self._bump_revision_row(session)
-            return self._tx_revision
+        """Parent backend: every checked op bumps its own single-op revision
+        independently (no caching -- the parent has no transaction-local
+        state). The child overrides this to cache one revision across the
+        whole transaction."""
         return await self._bump_revision_row(session)
 
     async def revision(self) -> str:
@@ -343,7 +350,15 @@ class SqlAlchemyObjectBackend:
                 StorageObjectIdempotencyRow.key_hash == _idempotency_key_hash(idem_key)
             )
         )
-        return result.scalar_one_or_none()
+        row = result.scalar_one_or_none()
+        # Hash-collision double-check (P3 hash-collision defense): a row whose plaintext
+        # idempotency key does not match MUST surface as a collision.
+        if row is not None and row.key != idem_key:
+            raise StorageHashCollisionError(
+                namespace="idempotency-key",
+                digest=_idempotency_key_hash(idem_key).hex(),
+            )
+        return row
 
     async def _save_idempotency(
         self,
@@ -427,10 +442,9 @@ class SqlAlchemyObjectBackend:
             if if_match is not None:
                 raise StoragePreconditionFailedError(f"if_match failed: {key.value!r} does not exist")
             commit_revision = await self._bump_revision(session)
-            conflict = await self._strategy.execute_conflict_insert(
+            insert_outcome = await self._dialect.insert_current_if_absent(
                 session,
-                StorageObjectRow,
-                {
+                values={
                     "key": key.value,
                     "key_hash": _key_hash(key),
                     "etag": etag,
@@ -443,9 +457,8 @@ class SqlAlchemyObjectBackend:
                     "tombstone": False,
                     "commit_revision": commit_revision,
                 },
-                index_elements=["key_hash"],
             )
-            if conflict:
+            if not insert_outcome.inserted:
                 return None  # retry-able: a concurrent writer just inserted
             return await self._record_version(
                 session,
@@ -702,10 +715,9 @@ class SqlAlchemyObjectBackend:
             now = datetime.now(timezone.utc)
 
             if target_row is None:
-                conflict = await self._strategy.execute_conflict_insert(
+                insert_outcome = await self._dialect.insert_current_if_absent(
                     session,
-                    StorageObjectRow,
-                    {
+                    values={
                         "key": target.value,
                         "key_hash": _key_hash(target),
                         "etag": source_info.etag,
@@ -718,9 +730,8 @@ class SqlAlchemyObjectBackend:
                         "tombstone": False,
                         "commit_revision": commit_revision,
                     },
-                    index_elements=["key_hash"],
                 )
-                if conflict:
+                if not insert_outcome.inserted:
                     raise StoragePreconditionFailedError(
                         f"move target changed concurrently: {target.value!r}"
                     )
@@ -815,6 +826,10 @@ class SqlAlchemyObjectBackend:
                 )
             )
             row = result.scalar_one_or_none()
+        if row is not None and row.key != key.value:
+            raise StorageHashCollisionError(
+                namespace="object-key", digest=_key_hash(key).hex()
+            )
         if row is None or row.tombstone:
             return None
         return StoredObject(
@@ -843,6 +858,10 @@ class SqlAlchemyObjectBackend:
                 .limit(1)
             )
             row = result.scalar_one_or_none()
+        if row is not None and row.key != key.value:
+            raise StorageHashCollisionError(
+                namespace="object-key", digest=_key_hash(key).hex()
+            )
         if row is None or row.tombstone:
             return None
         return StoredObject(
@@ -924,6 +943,68 @@ class SqlAlchemyObjectBackend:
         return tuple(out)
 
 
+class _SqlAlchemyTransactionBackend(SqlAlchemyObjectBackend):
+    """Transaction-bound child backend. Bound to ONE AsyncSession for its whole
+    lifetime; reads and writes reuse that session, writes FLUSH only (the
+    surrounding ``session.begin()`` -- owned by parent's ``transaction()`` or
+    by an external UoW -- owns commit/rollback). Caches one commit_revision
+    on first mutation so every mutation in the same tx shares it.
+
+    Construction does NOT go through the parent's session-factory init: a
+    child never opens its own session and never resolves a strategy from a
+    factory. After ``close()`` every call raises
+    ``StorageTransactionClosedError`` so a leaked child reference cannot
+    silently mutate through a finalized session."""
+
+    def __init__(self, *, session: AsyncSession, dialect) -> None:
+        # Bypass SqlAlchemyObjectBackend.__init__ entirely: no session_factory,
+        # no dialect resolution. The child is bound to the supplied session
+        # for life and reuses the parent's dialect (the dialect has no
+        # session-local state).
+        self._session = session
+        self._dialect = dialect
+        self._tx_revision: "int | None" = None
+        self._closed = False
+        self.backend_id = "primary"
+
+    def _check_open(self) -> None:
+        if self._closed:
+            raise StorageTransactionClosedError(
+                "transaction-bound backend used after context exit"
+            )
+
+    def close(self) -> None:
+        self._closed = True
+
+    # --- session plumbing (bound, no open/close) ----------------------------
+
+    @asynccontextmanager
+    async def _read_session(self) -> "AsyncIterator[AsyncSession]":
+        self._check_open()
+        yield self._session
+
+    @asynccontextmanager
+    async def _write_session(self) -> "AsyncIterator[AsyncSession]":
+        self._check_open()
+        yield self._session
+
+    async def _bump_revision(self, session: AsyncSession) -> int:
+        # Cache one revision on first mutation; every later mutation in this
+        # tx reuses it. A no-op tx writes no revision row at all.
+        if self._tx_revision is None:
+            self._tx_revision = await self._bump_revision_row(session)
+        return self._tx_revision
+
+    @asynccontextmanager
+    async def transaction(self) -> "AsyncIterator[_SqlAlchemyTransactionBackend]":
+        # A bound child cannot open a nested transaction: it has no
+        # session_factory and is already inside its parent's session.begin().
+        # Raise on enter (the only way to reach this is `async with
+        # child.transaction():`), matching the parent's old refusal.
+        raise StorageObjectNotFoundError("nested transaction() is not supported")
+        yield self  # never reached; kept so the body is a generator
+
+
 class SqlAlchemyObjectStore:
     """Convenience: an ObjectStore pre-wired to a SqlAlchemyObjectBackend.
 
@@ -931,21 +1012,52 @@ class SqlAlchemyObjectStore:
     parses no DSN and constructs no engine; that is the downstream/SQLite-
     helper's job, per the adapter boundary)."""
 
-    def __init__(self, *, session_factory) -> None:
+    def __init__(
+        self,
+        *,
+        session_factory,
+        dialect=None,
+        schema_provider=None,
+    ) -> None:
         from ...object.store import ObjectStore
+        from ...sqlalchemy.dialects import SqliteObjectDialect
+        from .schema import SqliteReferenceSchemaProvider
 
         self._session_factory = session_factory
-        self._backend = SqlAlchemyObjectBackend(session_factory=session_factory)
+        # Default to the SQLite reference dialect if none is supplied. A
+        # downstream using a different engine hands its own dialect in; core
+        # never resolves one from the session_factory.
+        if dialect is None:
+            dialect = SqliteObjectDialect()
+        # Default to the SQLite reference schema provider (which validates
+        # the schema is present). For tests + local reference, the caller
+        # invokes create_for_tests_and_local_reference() once up front.
+        if schema_provider is None:
+            schema_provider = SqliteReferenceSchemaProvider()
+        self._backend = SqlAlchemyObjectBackend(
+            session_factory=session_factory, dialect=dialect
+        )
         self._store = ObjectStore(primary=self._backend)
+        self._schema_provider = schema_provider
         self._schema_ready = False
 
     async def _ensure_schema(self) -> None:
+        """Validate (or, for the reference impl, lazily create) the schema on
+        first use. The reference provider's ``create_for_tests_and_local_
+        reference`` is the test-friendly path; production providers validate
+        and fail fast on schema drift."""
         if self._schema_ready:
             return
-        async with self._session_factory() as session:
-            conn = await session.connection()
-            await conn.run_sync(Base.metadata.create_all)
-            await session.commit()
+        from .schema import SqliteReferenceSchemaProvider
+
+        if isinstance(self._schema_provider, SqliteReferenceSchemaProvider):
+            # The reference provider creates-then-validates so existing tests
+            # that hand a fresh engine to SqlAlchemyObjectStore keep working.
+            await self._schema_provider.create_for_tests_and_local_reference(
+                self._session_factory
+            )
+        else:
+            await self._schema_provider.validate(self._session_factory)
         self._schema_ready = True
 
     @property
@@ -981,10 +1093,14 @@ class SqlAlchemyObjectStore:
         return await self._store.move(source, target, **kwargs)
 
     @asynccontextmanager
-    async def transaction(self) -> "AsyncIterator[None]":
+    async def transaction(self):
+        from ...object.store import ObjectStore
+
         await self._ensure_schema()
-        async with self._backend.transaction():
-            yield
+        async with self._backend.transaction() as tx_backend:
+            yield ObjectStore._from_transaction_backend(
+                tx_backend, metrics=None
+            )
 
     async def get_version(self, key: StorageKey, version: int) -> "StoredObject | None":
         await self._ensure_schema()

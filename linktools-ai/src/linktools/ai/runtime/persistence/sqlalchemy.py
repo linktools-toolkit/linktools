@@ -51,7 +51,8 @@ from ...tool.idempotency import IdempotencyStore
 from .features import SQLALCHEMY_STORAGE_FEATURES, StorageFeatures
 from .facade import Storage
 from ...agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
-from ...storage.sqlalchemy.dialects import resolve_dialect_strategy
+from ...storage.sqlalchemy.dialects import SqlAlchemyObjectDialect
+from ...storage.features import TransactionScope
 from ...run.persistence.sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 from ...run.persistence.sqlalchemy.definition import SqlAlchemyRunDefinitionStore
 from ...events.persistence.sqlalchemy import SqlAlchemyEventStore
@@ -127,6 +128,7 @@ class SqlAlchemyStorageAdapter(Storage):
         coordination: "LeaseCoordinator | None",
         features: StorageFeatures,
         artifact_coordinator: "KeyedCoordinator",
+        dialect: "SqlAlchemyObjectDialect",
         naming: "SqlNamingStrategy" = DEFAULT_SQL_NAMING,
     ) -> None:
         from ...artifact.store import ArtifactStore
@@ -143,14 +145,13 @@ class SqlAlchemyStorageAdapter(Storage):
             Base.metadata.naming_convention = dict(naming.naming_convention)
             ObjectBase.metadata.naming_convention = dict(naming.naming_convention)
 
-        # Resolve the dialect strategy eagerly so an unsupported dialect fails
-        # at construction rather than on first write. The asset backend uses
-        # this strategy to classify integrity violations portably.
-        self._dialect_strategy = resolve_dialect_strategy(session_factory)
+        # Protocol-first: the caller hands in the dialect that matches its
+        # engine + driver; core does not resolve one from the session_factory.
+        self._dialect = dialect
 
         assets = ObjectStore(
             primary=SqlAlchemyObjectBackend(
-                session_factory=session_factory, strategy=self._dialect_strategy
+                session_factory=session_factory, dialect=self._dialect
             )
         )
         super().__init__(
@@ -170,12 +171,12 @@ class SqlAlchemyStorageAdapter(Storage):
             evaluations=SqlAlchemyEvalStore(session_factory=session_factory),
             features=features,
             coordination=coordination,
-            _transaction_manager=_SqlAlchemyTransactionManager(session_factory),
+            _transaction_manager=_SqlAlchemyTransactionManager(
+                session_factory, dialect=self._dialect
+            ),
             artifacts=ArtifactStore(
                 artifact_blobs,
-                SqlAlchemyArtifactRecordStore(
-                    session_factory=session_factory, strategy=self._dialect_strategy
-                ),
+                SqlAlchemyArtifactRecordStore(session_factory=session_factory),
                 artifact_coordinator,
             ),
         )
@@ -198,6 +199,7 @@ class SqlAlchemyStorage(SqlAlchemyStorageAdapter):
         from ...storage.coordination.file import FilesystemKeyedCoordinator
         from ...storage.coordination.process_local import ProcessLocalLeaseCoordinator
         from ...storage.filesystem.artifact import FilesystemArtifactBlobStore
+        from ...storage.sqlalchemy.dialects import SqliteObjectDialect
 
         super().__init__(
             session_factory=session_factory,
@@ -207,6 +209,10 @@ class SqlAlchemyStorage(SqlAlchemyStorageAdapter):
             # Blobs live on the shared filesystem, so the per-digest lock must
             # span processes (a separate sweeper worker) -- flock the blobs root.
             artifact_coordinator=FilesystemKeyedCoordinator(root=blobs_root),
+            # The reference convenience ships the SQLite dialect. A downstream
+            # that brings its own engine constructs SqlAlchemyStorageAdapter
+            # directly with its own dialect.
+            dialect=SqliteObjectDialect(),
         )
 
 
@@ -220,22 +226,38 @@ class _SqlAlchemyTransactionManager:
     The internal _transaction_manager holds an instance and Storage.transaction()
     delegates to it."""
 
-    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]") -> None:
+    # The cross-store UoW is a real DATABASE-scope atomic transaction (one
+    # AsyncSession + one begin/commit/rollback wrapping every store).
+    scope = TransactionScope.DATABASE
+
+    def __init__(
+        self,
+        session_factory: "async_sessionmaker[AsyncSession]",
+        *,
+        dialect,
+    ) -> None:
         self._session_factory = session_factory
+        self._dialect = dialect
 
     @asynccontextmanager
     async def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
+        from ...storage.backends.sqlalchemy.object import _SqlAlchemyTransactionBackend
+
         async with self._session_factory() as session:
             async with session.begin():
                 yield _UnitOfWork(
                     session=session,
-                    # assets: session-bound -- the backend reuses this UoW's
-                    # session for reads (no close) and writes (flush only; the
-                    # UoW owns begin/commit/rollback), so an asset mutation
-                    # commits or rolls back with every other store here.
+                    # assets: session-bound via the transaction-bound child
+                    # backend -- the child reuses this UoW's session for reads
+                    # (no close) and writes (flush only; the UoW owns
+                    # begin/commit/rollback), so an asset mutation commits or
+                    # rolls back with every other store here. The parent
+                    # backend's ``session=`` shortcut was removed because it
+                    # leaked ambient state; the child IS the session-bound form.
                     assets=ObjectStore(
-                        primary=SqlAlchemyObjectBackend(
-                            session_factory=self._session_factory, session=session
+                        primary=_SqlAlchemyTransactionBackend(
+                            session=session,
+                            dialect=self._dialect,
                         )
                     ),
                     # artifact_records: session-bound -- joins the UoW's atomic

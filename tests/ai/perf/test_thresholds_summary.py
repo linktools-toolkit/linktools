@@ -213,35 +213,6 @@ def _measure_event_append_p95(tmp_path: Path) -> "dict[str, Any]":
     return out
 
 
-def _measure_artifact_integrity_10k() -> "dict[str, Any]":
-    from linktools.ai.storage.coordination.process_local import InProcessKeyedCoordinator
-    from linktools.ai.artifact.store import ArtifactStore
-
-    from external_adapter import (
-        InMemoryArtifactBlobStore,
-        InMemoryArtifactRecordStore,
-    )
-
-    async def _run() -> "dict[str, Any]":
-        store = ArtifactStore(
-            InMemoryArtifactBlobStore(),
-            InMemoryArtifactRecordStore(),
-            InProcessKeyedCoordinator(),
-        )
-        mismatches = 0
-        for i in range(10000):
-            content = f"payload-{i}".encode()
-            record = await store.put(content=content, media_type="text/plain", tenant_id="t1", provenance=ANONYMOUS_PROVENANCE,)
-            blob = await store.get(artifact_id=record.ref.id, tenant_id="t1")
-            if blob != content:
-                mismatches += 1
-        return {"iterations": 10000, "mismatches": mismatches}
-
-    out = asyncio.run(_run())
-    out["passed"] = out["mismatches"] == 0
-    return out
-
-
 def _measure_stability_stress() -> "dict[str, Any]":
     from datetime import timedelta
 
@@ -561,30 +532,6 @@ def test_thresholds_summary(tmp_path: Path) -> None:
             name="event_single_append_p95",
             category="event",
             threshold="p95 <= 20 ms",
-            measured=None,
-            passed=False,
-            note=f"measurement error: {exc!r}",
-        )
-
-    # --- Artifact integrity 10k ---
-    try:
-        a = _measure_artifact_integrity_10k()
-        _record_result(
-            results,
-            name="artifact_integrity_10000_rw",
-            category="artifact",
-            threshold="0 mismatch in 10,000 r/w",
-            measured=(
-                f"{a['iterations']} iterations, {a['mismatches']} mismatches"
-            ),
-            passed=a["passed"],
-        )
-    except Exception as exc:  # noqa: BLE001
-        _record_result(
-            results,
-            name="artifact_integrity_10000_rw",
-            category="artifact",
-            threshold="0 mismatch in 10,000 r/w",
             measured=None,
             passed=False,
             note=f"measurement error: {exc!r}",

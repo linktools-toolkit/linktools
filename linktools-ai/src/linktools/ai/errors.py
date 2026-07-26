@@ -204,6 +204,15 @@ class RunLiveStreamAlreadyOpenError(RunError):
     two handles, so this is refused rather than allowed to race."""
 
 
+class RunLiveStreamClosedError(RunError):
+    """Raised when a publish loses the race against close (the close-event
+    fired mid-publish), or when a publish is attempted on an already-closed
+    handle. Closes are signaled by an asyncio.Event (not a sentinel pushed
+    into the queue), so a publish racing close MUST detect the loss and
+    surface it -- a silent drop would let the caller believe the event was
+    delivered to a consumer that has already given up."""
+
+
 class RunPaused(RunError):
     """Raised by GovernedToolInvoker when a tool requires approval, and propagated
     through pydantic-ai's tool-execution stack out to AgentEngine, which
@@ -405,6 +414,14 @@ class SwarmError(LinktoolsAIError):
 
 class SwarmRunNotFoundError(SwarmError):
     pass
+
+
+class SwarmCommitCoordinatorUnavailableError(SwarmError):
+    """build_runtime_components could not dispatch a SwarmCommitCoordinator
+    from the Storage. SwarmEngine takes the coordinator as a required dep,
+    so a Storage that exposes neither DATABASE transaction scope nor a
+    filesystem root fails the build rather than silently running without
+    commit-log idempotency."""
 
 
 class SwarmResumeUnsupportedError(SwarmError):

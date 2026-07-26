@@ -75,6 +75,7 @@ class SqlAlchemyEventStore:
         runnable_id: str,
         payload: EventPayload,
         metadata: "Mapping[str, Any] | None" = None,
+        commit_id: "str | None" = None,
     ) -> EventEnvelope:
         result = await session.execute(
             select(func.max(EventRow.sequence)).where(EventRow.stream_id == stream_id)
@@ -99,6 +100,7 @@ class SqlAlchemyEventStore:
             schema_version=schema_version,
             payload_json=json.dumps(payload_data),
             metadata_json=json.dumps(meta) if meta else None,
+            commit_id=commit_id,
         )
         session.add(row)
         await session.flush()
@@ -177,6 +179,82 @@ class SqlAlchemyEventStore:
                 # SQLite serializes writers and can briefly report a lock while
                 # another append commits. Retry only that transient condition;
                 # unrelated operational failures must still surface unchanged.
+                if "database is locked" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                await asyncio.sleep(0.01)
+                continue
+        raise EventSequenceConflictError(
+            f"could not reserve a unique event sequence for stream {stream_id!r} "
+            f"after repeated conflicts"
+        ) from last_exc
+
+    async def append_once(
+        self,
+        *,
+        commit_id: str,
+        stream_id: str,
+        run_id: str,
+        root_run_id: str,
+        parent_run_id: "str | None",
+        session_id: str,
+        runnable_id: str,
+        payload: EventPayload,
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> EventEnvelope:
+        """Commit-scoped idempotent append. Atomic reserve on (stream_id,
+        commit_id) -- a retried call with the same commit_id returns the
+        originally-appended envelope instead of re-appending.
+
+        Pattern: within the inserting transaction, SELECT the existing row by
+        (stream_id, commit_id) FIRST; if it exists, return it (idempotent
+        replay). Otherwise insert. The unique constraint uq_event_stream_commit
+        is the structural backstop for the rare race where two concurrent
+        appends both saw no existing row -- the loser's INSERT raises
+        IntegrityError and the caller's retry re-enters this method, where the
+        SELECT now finds the winner's row. The store never dedupes via a full
+        list-then-filter."""
+        async def _do(session: AsyncSession) -> EventEnvelope:
+            event_type = self._codec.registry.event_type_for(payload)
+            existing = (
+                await session.execute(
+                    select(EventRow).where(
+                        EventRow.stream_id == stream_id,
+                        EventRow.commit_id == commit_id,
+                        EventRow.event_type == event_type,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return self._row_to_envelope(existing)
+            return await self._append_one(
+                session,
+                stream_id=stream_id,
+                run_id=run_id,
+                root_run_id=root_run_id,
+                parent_run_id=parent_run_id,
+                session_id=session_id,
+                runnable_id=runnable_id,
+                payload=payload,
+                metadata=metadata,
+                commit_id=commit_id,
+            )
+
+        # Use the same retry pattern as append(): a unique-constraint
+        # IntegrityError (lost the race) is retry-able.
+        if self._session is not None:
+            return await _do(self._session)
+        last_exc: "BaseException | None" = None
+        for _ in range(8):
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        return await _do(session)
+            except IntegrityError as exc:
+                last_exc = exc
+                await asyncio.sleep(0)
+                continue
+            except OperationalError as exc:
                 if "database is locked" not in str(exc).lower():
                     raise
                 last_exc = exc

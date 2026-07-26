@@ -29,5 +29,38 @@ class StorageIdempotencyConflictError(StorageObjectError):
     not a silent overwrite)."""
 
 
+class StorageIntegrityError(StorageObjectError):
+    """On-disk state contradicts what the operation expected (e.g. a journal
+    recovery found a published version dir whose metadata does not match the
+    intent, or an idempotency record points at a version that is missing).
+    Raised by the filesystem backend's crash-recovery path so a corruption
+    is surfaced instead of silently swallowed or papered over with stale
+    current-state reads."""
+
+
+class StorageHashCollisionError(StorageObjectError):
+    """A key_hash (SHA-256) lookup returned a row whose plaintext key does NOT
+    match the queried key. SHA-256 collisions are astronomically unlikely, so a
+    real collision signals either a hash function bug, a corrupted index, or an
+    adversary with a broken hash. Surfaces as a distinct error (not NotFound)
+    so the caller cannot accidentally read / overwrite the WRONG object -- the
+    digest in the message is the colliding digest, never the plaintext key."""
+
+    def __init__(self, *, namespace: str, digest: str) -> None:
+        self.namespace = namespace
+        self.digest = digest
+        super().__init__(
+            f"hash collision in {namespace!r}: digest {digest!r} matched a row "
+            f"with a different plaintext key; refusing to read or overwrite the "
+            f"wrong object"
+        )
+
+
 class StorageTransactionNotSupportedError(StorageObjectError):
     """The backend does not support the requested (multi-object) transaction."""
+
+
+class StorageTransactionClosedError(StorageObjectError):
+    """A transaction-bound child backend was used AFTER its context manager
+    exited. The child owns transaction-local state that is no longer valid;
+    callers must issue all reads/writes inside the ``async with`` block."""

@@ -102,6 +102,8 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             else Path(f"{database_str}.artifacts")
         )
         self._artifact_root = resolved_root
+        from ...storage.sqlalchemy.dialects import SqliteObjectDialect
+
         super().__init__(
             session_factory=session_factory,
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
@@ -112,6 +114,8 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             artifact_coordinator=FilesystemKeyedCoordinator(
                 root=resolved_root / "blobs"
             ),
+            # The SQLite reference convenience ships the SQLite dialect.
+            dialect=SqliteObjectDialect(),
         )
 
     async def dispose(self) -> None:

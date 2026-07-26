@@ -148,10 +148,15 @@ class SqlAlchemySessionStore:
         session: AsyncSession,
         session_id: str,
         messages: "tuple[NewSessionMessage, ...]",
+        *,
+        commit_id: "str | None" = None,
     ) -> "tuple[SessionMessage, ...]":
         # reserve the next sequence(s) inside the inserting
         # transaction -- read MAX(sequence) for the session, assign
         # contiguously, insert. Mirrors SqlAlchemyEventStore._append_one.
+        # When commit_id is set, each row carries it + its batch_index so
+        # the (session_id, commit_id, batch_index) unique constraint is the
+        # atomic reserve for commit-scoped idempotent append.
         result = await session.execute(
             select(func.max(SessionMessageRow.sequence)).where(
                 SessionMessageRow.session_id == session_id
@@ -173,6 +178,8 @@ class SqlAlchemySessionStore:
                     run_id=message.run_id,
                     created_at=now,
                     metadata_json=json.dumps(dict(message.metadata)),
+                    commit_id=commit_id,
+                    batch_index=offset if commit_id is not None else None,
                 )
             )
             persisted.append(
@@ -213,6 +220,67 @@ class SqlAlchemySessionStore:
             except IntegrityError as exc:
                 # Unique (session_id, sequence) collision -- a concurrent
                 # append reserved the same sequence first. Retry to re-read MAX.
+                last_exc = exc
+                await asyncio.sleep(0)
+                continue
+            except OperationalError as exc:
+                if "database is locked" not in str(exc).lower():
+                    raise
+                last_exc = exc
+                await asyncio.sleep(0.01)
+                continue
+        raise SessionSequenceConflictError(
+            f"could not reserve a unique message sequence for session {session_id!r} "
+            f"after repeated conflicts"
+        ) from last_exc
+
+    async def append_messages_once(
+        self,
+        *,
+        commit_id: str,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        """Commit-scoped idempotent batch append. Atomic reserve on
+        (session_id, commit_id, batch_index) -- a retried call with the same
+        commit_id returns the originally-persisted batch instead of re-
+        appending.
+
+        Pattern: within the inserting transaction, SELECT existing rows by
+        (session_id, commit_id) ordered by batch_index FIRST; if any exist,
+        return them (idempotent replay). Otherwise insert the batch. The
+        unique constraint uq_session_message_commit_batch is the structural
+        backstop for the rare race. The store never dedupes via a full
+        list-then-filter."""
+        if not messages:
+            return ()
+
+        async def _do(session: AsyncSession) -> "tuple[SessionMessage, ...]":
+            existing = (
+                await session.execute(
+                    select(SessionMessageRow)
+                    .where(
+                        SessionMessageRow.session_id == session_id,
+                        SessionMessageRow.commit_id == commit_id,
+                    )
+                    .order_by(SessionMessageRow.batch_index.asc())
+                )
+            ).scalars().all()
+            if existing:
+                return tuple(_row_to_message(row) for row in existing)
+            return await self._append_one_batch(
+                session, session_id, messages, commit_id=commit_id
+            )
+
+        if self._session is not None:
+            return await _do(self._session)
+        last_exc: "BaseException | None" = None
+        for _ in range(8):
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        return await _do(session)
+            except IntegrityError as exc:
                 last_exc = exc
                 await asyncio.sleep(0)
                 continue

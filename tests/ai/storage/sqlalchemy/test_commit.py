@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.events.context import EventStreamContext
 from linktools.ai.events.payloads import RunCompleted, RunPaused
-from linktools.ai.run.commit import CompleteRunCommand, PauseRunCommand
+from linktools.ai.run.commit import CompleteRunCommand, ExecutionFence, PauseRunCommand, RunCommitId
+# Eager import: registers RunCommitLogRow with Base.metadata BEFORE the
+# per-test _storage() helper runs Base.metadata.create_all, so the
+# run_commit_log table is present for the coordinator's replay lookup.
+from linktools.ai.run.persistence.sqlalchemy.commit import (
+    SqlAlchemyRunCommitCoordinator,
+)
 from linktools.ai.run.context import RunContext
 from linktools.ai.run.models import (
     RunInput,
@@ -144,7 +150,7 @@ def test_complete_commits_atomically_succeeded(tmp_path):
                 result=result,
                 completed_event=RunCompleted(run_id="run-1"),
                 event_context=EventStreamContext.from_run_context(_ctx("run-1", "sess-1")),
-            )
+                commit_id=RunCommitId(f"complete:run-1"),)
         )
         assert commit.result is result
         record = await storage.runs.get("run-1")
@@ -189,7 +195,7 @@ def test_pause_commits_atomically_waiting_approval(tmp_path):
                 checkpoint_payload=b'{"messages": []}',
                 paused_event=RunPaused(run_id="run-2", reason="review"),
                 event_context=EventStreamContext.from_run_context(_ctx("run-2", "sess-2")),
-            )
+                commit_id=RunCommitId(f"pause:run-2"),)
         )
         record = await storage.runs.get("run-2")
         assert record.status is RunStatus.WAITING_APPROVAL
@@ -280,7 +286,7 @@ def test_complete_rolls_back_when_transition_fails(tmp_path):
                     event_context=EventStreamContext.from_run_context(
                         _ctx("run-3", "sess-3")
                     ),
-                )
+                    commit_id=RunCommitId(f"complete:run-3"),)
             )
 
         # Post-condition: full rollback. Run stayed RUNNING; no session turn,
@@ -365,7 +371,7 @@ def test_pause_rolls_back_when_checkpoint_append_fails(tmp_path):
                     event_context=EventStreamContext.from_run_context(
                         _ctx("run-4", "sess-4")
                     ),
-                )
+                    commit_id=RunCommitId(f"pause:run-4"),)
             )
 
         # Post-condition: full rollback. Run stayed RUNNING; no orphan approval,

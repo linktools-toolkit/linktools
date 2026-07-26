@@ -1,43 +1,69 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLite dialect strategy.
+"""SQLite reference dialect for the storage kernel's object backend.
 
-Conflict-detecting INSERT uses SQLite's ``ON CONFLICT DO NOTHING``: a conflicting
-insert reports ``rowcount == 0`` with NO exception, so the surrounding UoW
-transaction is never poisoned and there is no SAVEPOINT to leak. (aiosqlite
-commits a SAVEPOINT immediately, so the MySQL-style savepoint recovery would
-break UoW rollback here.) Classification maps the column-based ``UNIQUE
-constraint failed: storage_objects.key_hash`` message for the rare path that
-still raises.
-"""
+The ONE concrete dialect core ships. Uses SQLite's ``INSERT ... ON CONFLICT
+(key_hash) DO NOTHING`` so a conflicting insert returns ``inserted=False``
+with NO exception -- safe under a surrounding UoW transaction (aiosqlite
+commits a SAVEPOINT immediately, so a savepoint-based recovery would poison
+UoW rollback, which is why the ON CONFLICT path is mandatory under SQLite).
 
-from .base import IntegrityViolationKind
+Downstreams with a different engine (their own vendor) implement
+:class:`SqlAlchemyObjectDialect` themselves and run the kernel conformance
+suite in their own CI. Core deliberately ships no MySQL / PostgreSQL /
+Oracle / etc. dialect; those belong to the downstream that owns the engine."""
+
+from __future__ import annotations
+
+from typing import Any, Mapping
+
+from .base import IntegrityViolationKind, InsertResult
 
 
-class SqliteDialectStrategy:
-    name = "sqlite"
+class SqliteObjectDialect:
+    """The SQLite reference dialect. ``insert_current_if_absent`` issues an
+    ``ON CONFLICT (key_hash) DO NOTHING`` insert into ``storage_objects``;
+    the resulting ``rowcount`` signals whether the row landed (1) or was
+    skipped because a row with the same key_hash already existed (0)."""
 
-    def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
-        orig = getattr(error, "orig", None)
-        message = str(orig or error)
-        if "storage_objects.key_hash" in message:
-            return IntegrityViolationKind.OBJECT_KEY
-        if "storage_object_idempotency.key_hash" in message:
-            return IntegrityViolationKind.IDEMPOTENCY_KEY
-        return IntegrityViolationKind.OTHER
+    @property
+    def name(self) -> str:
+        return "sqlite"
 
-    async def execute_conflict_insert(
-        self, session, table, values, *, index_elements
-    ) -> bool:
+    async def insert_current_if_absent(
+        self,
+        session: Any,
+        *,
+        values: "Mapping[str, Any]",
+    ) -> InsertResult:
         from sqlalchemy.dialects.sqlite import insert
 
+        # Late import: keep this module importable without SQLAlchemy + the
+        # backend models; the dialect is reached only when the storage kernel
+        # actually wires it into a SqlAlchemyObjectBackend.
+        from ...backends.sqlalchemy.models import StorageObjectRow
+
         stmt = (
-            insert(table)
+            insert(StorageObjectRow)
             .values(**values)
-            .on_conflict_do_nothing(index_elements=index_elements)
+            .on_conflict_do_nothing(index_elements=["key_hash"])
         )
         result = await session.execute(stmt)
-        return result.rowcount == 0
+        return InsertResult(inserted=result.rowcount == 1)
+
+    def classify_integrity_error(
+        self, error: BaseException
+    ) -> IntegrityViolationKind:
+        orig = getattr(error, "orig", None)
+        message = str(orig or error).lower()
+        # SQLite's unique-constraint message names the constraint column.
+        if "unique constraint" in message:
+            return IntegrityViolationKind.UNIQUE_CONFLICT
+        if "foreign key constraint" in message or "foreignkey" in message:
+            return IntegrityViolationKind.FOREIGN_KEY
+        if "check constraint" in message:
+            return IntegrityViolationKind.CHECK
+        return IntegrityViolationKind.UNKNOWN
 
 
-__all__: "list[str]" = ["SqliteDialectStrategy"]
+__all__: "list[str]" = ["SqliteObjectDialect"]

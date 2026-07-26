@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from ...artifact.persistence.protocols import ArtifactRecordStore
     from ...events.store import EventStore
     from ...jobs.store import JobStore
+    from ...storage.features import TransactionScope
     from ...run.checkpoint import CheckpointStore
     from ...run.store import RunStore
     from ...session.store import SessionStore
@@ -51,7 +52,14 @@ class StorageTransactionManager(Protocol):
     """Cross-store atomic scope. ``transaction()`` commits once on clean exit
     and rolls back once on exception; callers never call backend commit/rollback
     directly. An unsupported scope raises StorageTransactionNotSupportedError at
-    the call."""
+    the call.
+
+    ``scope`` declares the cross-store atomicity range the implementation
+    actually provides (NONE: refuses cross-store transactions; DATABASE:
+    real atomic commit/rollback across stores). The capability consistency
+    gate reads it; a manager that silently fakes atomicity is rejected."""
+
+    scope: "TransactionScope"
 
     def transaction(self) -> AsyncContextManager["StorageUnitOfWork"]: ...
 

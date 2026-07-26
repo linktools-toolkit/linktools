@@ -5,10 +5,10 @@
 A revisioned object store exposes a namespace token (RevisionSource.revision)
 that changes on real mutations and is stable across no-ops / idempotent
 replays / rollbacks. Four revision strategies exist: native (the backend's
-own counter), static (an injected release id), scanning (an O(N) digest over
-a directory reader), and composite (an overlay's encoded backend-set +
-order + per-layer revision). xfail(strict=True) until the types/strategies
-land."""
+own counter), static (an injected release id -- StaticRevisionReader in
+storage/object/index.py), scanning (an O(N) digest over a directory reader),
+and composite (an overlay's encoded backend-set + order + per-layer
+revision)."""
 
 from __future__ import annotations
 
@@ -59,10 +59,6 @@ class TestNativeRevision:
         asyncio.run(_run())
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="static/scanning revision readers are not yet implemented",
-)
 class TestRevisionStrategies:
     def test_static_revision_returns_injected_release_id(self) -> None:
         async def _run() -> None:

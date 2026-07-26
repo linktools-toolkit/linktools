@@ -36,6 +36,7 @@ def test_execute_returns_swarm_completed_without_creating_driving_run(tmp_path):
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     spec = _spec(
         kind="parallel_fan_out",
@@ -93,6 +94,7 @@ def test_execute_returns_swarm_failed_on_strategy_error(tmp_path):
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     # A single-worker swarm whose model is not registered -> resolution fails.
     spec = _spec(
@@ -135,6 +137,7 @@ def test_execute_propagates_swarm_conflict_error_instead_of_swarm_failed(tmp_pat
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     spec = _spec(
         kind="parallel_fan_out",
@@ -189,6 +192,7 @@ def test_execute_child_run_runnable_id_is_the_agent_ref_key_not_spec_id(tmp_path
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     spec = _spec(
         kind="parallel_fan_out",
@@ -233,6 +237,7 @@ def test_execute_emits_swarm_lifecycle_events_via_the_injected_sink(tmp_path):
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     spec = _spec(
         kind="parallel_fan_out",
@@ -279,6 +284,7 @@ def test_execute_emits_swarm_failed_via_the_injected_sink(tmp_path):
         swarm_store=stores.swarm_store,
         dispatcher=stores.agent_runner,
         compiler=compiler,
+        swarm_commit_coordinator=stores.swarm_commit_coordinator,
     )
     # A worker whose model is not registered -> ModelRoutingError -> SwarmFailed.
     spec = _spec(

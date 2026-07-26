@@ -27,6 +27,23 @@ class SessionStore(Protocol):
         session's current max sequence."""
         ...
 
+    async def append_messages_once(
+        self,
+        *,
+        commit_id: str,
+        session_id: str,
+        messages: "tuple[NewSessionMessage, ...]",
+    ) -> "tuple[SessionMessage, ...]":
+        """Commit-scoped idempotent batch append. The store atomically
+        reserves (session_id, commit_id) for the whole batch -- a retried
+        call with the SAME commit_id returns the originally-persisted batch
+        instead of re-appending. Used by Run lifecycle commits (pause/
+        complete/...) so a retry does not duplicate the session messages a
+        commit recorded. The store does NOT dedupe via a full list-then-
+        filter; the unique constraint on (session_id, commit_id, batch_index)
+        is the atomic reserve."""
+        ...
+
     async def list_messages(
         self, session_id: str, *, after_sequence: int = 0, limit: int = 1000
     ) -> "tuple[SessionMessage, ...]": ...

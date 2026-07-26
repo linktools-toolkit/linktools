@@ -236,7 +236,12 @@ def test_execute_pure_pause_returns_agent_paused_with_no_messages():
     assert outcome.request.approval_id == "appr-1"
     assert outcome.messages == ()
     assert outcome.checkpoint_payload
-    assert any(e["type"] == "paused" for e in live.events)
+    # the state-event split spec state-event split: the engine publishes ONLY process events
+    # (text/tool/model_progress); it must NOT publish the "paused" state
+    # event -- that is the RunCoordinator's job, emitted only AFTER the
+    # durable pause commit succeeds. The outcome carries the pause
+    # descriptor up to the Coordinator, which commits and then publishes.
+    assert not any(e["type"] == "paused" for e in live.events)
 
 
 def test_execute_pure_explicit_cancellation_returns_agent_cancelled():

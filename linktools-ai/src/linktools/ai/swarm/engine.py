@@ -29,7 +29,7 @@ import asyncio
 import logging
 import uuid
 from decimal import Decimal
-from typing import TYPE_CHECKING, Mapping
+from typing import Any, Mapping
 
 from ..agent.compiler import AgentCompiler
 from ..agent.models import CompiledAgent
@@ -57,25 +57,16 @@ from ..errors import (
 )
 
 from ..events.payloads import SwarmCompleted, SwarmStarted
-from ..events.context import EventStreamContext, append_event
 from ..run.live_events import NullSwarmEventSink, SwarmEventSink
-from ..events.store import EventStore
 from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
-from ..run.controller import RunController
 from ..run.dispatch import RunDispatcher
-from ..run.lifecycle import mark_completed, mark_failed
 from ..run.models import (
     RunErrorInfo,
     RunInput,
-    RunRecord,
-    RunResult,
-    RunStatus,
-    RunnableType,
 )
-from ..run.store import RunStore
 from ..session.models import MessageRole, NewSessionMessage
-from ..session.store import SessionStore
+from .commit import SwarmCommitCoordinator
 from .models import (
     SwarmCheckpoint,
     SwarmCompleted as SwarmCompletedOutcome,
@@ -88,8 +79,6 @@ from .models import (
     TokenUsage,
 )
 
-if TYPE_CHECKING:
-    from ..run.definition import RunDefinitionStore
 from .spec import SwarmSpec
 from .store import SwarmStore
 from .strategy import (
@@ -163,6 +152,7 @@ class SwarmEngine:
         swarm_store: SwarmStore,
         compiler: AgentCompiler,
         dispatcher: RunDispatcher,
+        swarm_commit_coordinator: "SwarmCommitCoordinator",
         clock: "Clock | None" = None,
     ) -> None:
         self._swarm_store = swarm_store
@@ -171,6 +161,72 @@ class SwarmEngine:
         self._clock = clock if clock is not None else SystemClock()
         self._compiler = compiler
         self._dispatcher = dispatcher
+        # REQUIRED SwarmCommitCoordinator: every lifecycle commit (start,
+        # complete, fail, cancel of the SwarmRun) routes through it so each
+        # commit is idempotent by commit_id and recorded in the commit log.
+        # The spec's swarm-commit-boundary rule forbids direct swarm_store
+        # lifecycle writes -- a terminal transition that does NOT go through
+        # the commit log would defeat replay detection.
+        self._swarm_commit_coordinator = swarm_commit_coordinator
+
+    async def _commit_swarm_transition(
+        self,
+        *,
+        swarm_run_id: str,
+        expected_version: int,
+        target: "SwarmStatus",
+        commit_id_suffix: str,
+        payload: "Mapping[str, Any] | None" = None,
+    ) -> "int":
+        """Apply a terminal SwarmRun transition through the
+        SwarmCommitCoordinator so the commit is idempotent by commit_id and
+        recorded in the commit log. Returns the new version.
+        ``commit_id_suffix`` distinguishes the operations (complete/fail/cancel)
+        so the same swarm_run_id can carry distinct commit_ids per terminal
+        kind."""
+        from .commit import (
+            CancelSwarmCommand,
+            CompleteSwarmCommand,
+            FailSwarmCommand,
+        )
+
+        commit_id = f"{commit_id_suffix}:{swarm_run_id}"
+        command_payload = dict(payload or {})
+        if target is SwarmStatus.SUCCEEDED:
+            result = await self._swarm_commit_coordinator.complete(
+                CompleteSwarmCommand(
+                    commit_id=commit_id,
+                    swarm_run_id=swarm_run_id,
+                    expected_version=expected_version,
+                    payload=command_payload,
+                    event_context=None,
+                )
+            )
+        elif target is SwarmStatus.FAILED:
+            result = await self._swarm_commit_coordinator.fail(
+                FailSwarmCommand(
+                    commit_id=commit_id,
+                    swarm_run_id=swarm_run_id,
+                    expected_version=expected_version,
+                    payload=command_payload,
+                    event_context=None,
+                )
+            )
+        elif target is SwarmStatus.CANCELLED:
+            result = await self._swarm_commit_coordinator.cancel(
+                CancelSwarmCommand(
+                    commit_id=commit_id,
+                    swarm_run_id=swarm_run_id,
+                    expected_version=expected_version,
+                    payload=command_payload,
+                    event_context=None,
+                )
+            )
+        else:  # pragma: no cover -- defensive
+            raise SwarmError(
+                f"unsupported terminal swarm status for commit: {target!r}"
+            )
+        return int(result.get("version", expected_version))
 
     # -- run() ----------------------------------------------------------------
     async def execute(
@@ -219,7 +275,39 @@ class SwarmEngine:
                 created_at=now,
                 updated_at=now,
             )
-            created_swarm = await self._swarm_store.create_run(swarm_run)
+            # Route through the SwarmCommitCoordinator: one atomic, commit_id-
+            # keyed idempotent start. The payload carries the full initial
+            # SwarmRun, so the coordinator re-creates the same shape (id
+            # included) rather than the engine minting a second id.
+            from .commit import StartSwarmCommand
+
+            await self._swarm_commit_coordinator.start(
+                StartSwarmCommand(
+                    commit_id=f"start:{swarm_run.id}",
+                    swarm_run_id=swarm_run.id,
+                    expected_version=1,
+                    payload={
+                        "id": swarm_run.id,
+                        "run_id": swarm_run.run_id,
+                        "round": swarm_run.round,
+                        "status": swarm_run.status,
+                        "version": swarm_run.version,
+                        "token_usage": swarm_run.token_usage,
+                        "cost": str(swarm_run.cost),
+                        "created_at": swarm_run.created_at,
+                        "updated_at": swarm_run.updated_at,
+                    },
+                    event_context=None,
+                )
+            )
+            # RUNNING is a mid-execution state change (not a terminal commit),
+            # so it stays a direct swarm_store.update_run -- the lifecycle
+            # entry write (PENDING create) is what the commit_log protects.
+            created_swarm = await self._swarm_store.get_run(swarm_run.id)
+            if created_swarm is None:
+                raise SwarmConflictError(
+                    f"swarm run {swarm_run.id} missing after coordinator.start"
+                )
             swarm_run = await self._swarm_store.update_run(
                 swarm_run.id,
                 expected_version=created_swarm.version,
@@ -279,10 +367,11 @@ class SwarmEngine:
             # 4. Transition SwarmRun SUCCEEDED + SwarmCompleted event. The
             # driving RunRecord + parent-session aggregate write are the
             # Coordinator's job (it reads them off SwarmCompleted).
-            await self._swarm_store.update_run(
-                swarm_run.id,
+            swarm_version = await self._commit_swarm_transition(
+                swarm_run_id=swarm_run.id,
                 expected_version=swarm_version,
-                status=SwarmStatus.SUCCEEDED,
+                target=SwarmStatus.SUCCEEDED,
+                commit_id_suffix="complete",
             )
             await sink.emit(SwarmCompleted(swarm_run_id=swarm_run.id))
             aggregate_messages: "tuple[NewSessionMessage, ...]" = ()
@@ -346,10 +435,15 @@ class SwarmEngine:
             )
             if swarm_run is not None and swarm_version is not None:
                 try:
-                    await self._swarm_store.update_run(
-                        swarm_run.id,
+                    swarm_version = await self._commit_swarm_transition(
+                        swarm_run_id=swarm_run.id,
                         expected_version=swarm_version,
-                        status=SwarmStatus.FAILED,
+                        target=SwarmStatus.FAILED,
+                        commit_id_suffix="fail",
+                        payload={"error": {
+                            "error_type": error_info.error_type,
+                            "message": error_info.message,
+                        }},
                     )
                 except Exception as swarm_exc:  # noqa: BLE001
                     _LOGGER.warning(
@@ -387,10 +481,11 @@ class SwarmEngine:
         ):
             return
         if current.status == SwarmStatus.CANCELLING:
-            await self._swarm_store.update_run(
-                swarm_run_id,
+            await self._commit_swarm_transition(
+                swarm_run_id=swarm_run_id,
                 expected_version=current.version,
-                status=SwarmStatus.CANCELLED,
+                target=SwarmStatus.CANCELLED,
+                commit_id_suffix="cancel",
             )
             return
         cancelling = await self._swarm_store.update_run(
@@ -398,10 +493,11 @@ class SwarmEngine:
             expected_version=current.version,
             status=SwarmStatus.CANCELLING,
         )
-        await self._swarm_store.update_run(
-            swarm_run_id,
+        await self._commit_swarm_transition(
+            swarm_run_id=swarm_run_id,
             expected_version=cancelling.version,
-            status=SwarmStatus.CANCELLED,
+            target=SwarmStatus.CANCELLED,
+            commit_id_suffix="cancel",
         )
 
     # -- helpers --------------------------------------------------------------

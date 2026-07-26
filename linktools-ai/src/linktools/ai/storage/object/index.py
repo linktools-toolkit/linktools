@@ -76,4 +76,33 @@ class RevisionedObjectIndex:
         return await self._source.list(prefix, **kwargs)
 
 
-__all__: "list[str]" = ["RevisionedObjectIndex"]
+__all__: "list[str]" = ["RevisionedObjectIndex", "StaticRevisionReader"]
+
+
+class StaticRevisionReader:
+    """A RevisionedObjectReader-shaped source whose ``revision()`` returns a
+    caller-injected constant. Used when an external system already provides a
+    release id (a deployment tag, a content hash, a version label) and the
+    store does not need to compute its own. Two distinct release ids produce
+    two distinct revisions, so an index built against one will refresh when
+    the source's release id changes."""
+
+    def __init__(self, release_id: str) -> None:
+        if not isinstance(release_id, str) or not release_id:
+            raise ValueError("StaticRevisionReader release_id must be a non-empty string")
+        self._release_id = release_id
+
+    @property
+    def release_id(self) -> str:
+        return self._release_id
+
+    async def revision(self) -> str:
+        return self._release_id
+
+    async def stat(self, key: StorageKey) -> "ObjectInfo | None":
+        # A static reader has no object content of its own; it is a revision
+        # source only. stat/list always miss.
+        return None
+
+    async def list(self, prefix: StorageKey, **kwargs) -> ObjectPage:
+        return ObjectPage(items=(), next_cursor=None)
