@@ -34,6 +34,8 @@ from linktools.ai.swarm.models import (
     TokenUsage,
 )
 
+_EXECUTION_TOKEN = "store-contract-token"
+
 
 # ---------------------------------------------------------------------------
 # Record builders. Defaults use datetime.now(timezone.utc), TokenUsage() and
@@ -63,6 +65,7 @@ def make_run(
         created_at=now,
         updated_at=now,
         metadata={"k": "v"} if metadata is None else metadata,
+        execution_token=_EXECUTION_TOKEN,
     )
 
 
@@ -231,6 +234,7 @@ def test_update_run_advances_version_and_applies_fields(store_factory):
         updated = await store.update_run(
             "swarm-1",
             expected_version=1,
+            expected_token=_EXECUTION_TOKEN,
             status=SwarmStatus.RUNNING,
             round=2,
             token_usage=TokenUsage(
@@ -257,7 +261,10 @@ def test_update_run_wrong_expected_version_raises_conflict(store_factory):
         await store.create_run(make_run())
         with pytest.raises(SwarmConflictError):
             await store.update_run(
-                "swarm-1", expected_version=99, status=SwarmStatus.RUNNING
+                "swarm-1",
+                expected_version=99,
+                expected_token=_EXECUTION_TOKEN,
+                status=SwarmStatus.RUNNING,
             )
 
     asyncio.run(_run())
@@ -272,7 +279,10 @@ def test_update_run_invalid_transition_raises(store_factory):
         await store.create_run(make_run())
         with pytest.raises(InvalidSwarmTransitionError):
             await store.update_run(
-                "swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED
+                "swarm-1",
+                expected_version=1,
+                expected_token=_EXECUTION_TOKEN,
+                status=SwarmStatus.SUCCEEDED,
             )
 
     asyncio.run(_run())
@@ -524,7 +534,10 @@ def test_missing_run_and_task_raise_not_found(store_factory):
         # update_run / complete_task / fail_task on missing ids -> typed errors.
         with pytest.raises(SwarmRunNotFoundError):
             await store.update_run(
-                "nope", expected_version=1, status=SwarmStatus.RUNNING
+                "nope",
+                expected_version=1,
+                expected_token=_EXECUTION_TOKEN,
+                status=SwarmStatus.RUNNING,
             )
         with pytest.raises(SwarmStepNotFoundError):
             await store.complete_task(

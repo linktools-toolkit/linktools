@@ -65,6 +65,16 @@ def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
 
 
 class SqlAlchemyIdempotencyStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+            idempotency=True,
+        )
+
     """Multi-process IdempotencyStore backed by SQLAlchemy/AsyncSession.
 
     Mirrors SqlAlchemyApprovalStore: ``session_factory`` constructor,

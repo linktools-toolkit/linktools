@@ -7,12 +7,25 @@ SqlAlchemySwarmStore (multi-process via atomic optimistic claim)."""
 from typing import Any, Protocol, runtime_checkable
 
 from ..run.models import RunErrorInfo, RunResult
+from ..storage.features import ComponentCapabilities
 from .models import SwarmRun, SwarmStatus, SwarmStep, SwarmStepAttempt, SwarmStepStatus
+from .commit import SwarmExecutionLease
 
 
 @runtime_checkable
 class SwarmStore(Protocol):
+    @property
+    def capabilities(self) -> ComponentCapabilities: ...
+
     async def create_run(self, run: SwarmRun) -> SwarmRun: ...
+
+    async def claim_execution(
+        self,
+        swarm_run_id: str,
+        *,
+        owner_id: str,
+        expected_generation: "int | None",
+    ) -> SwarmExecutionLease: ...
 
     async def get_run(self, swarm_run_id: str) -> "SwarmRun | None": ...
 
@@ -40,6 +53,7 @@ class SwarmStore(Protocol):
         swarm_run_id: str,
         *,
         expected_version: int,
+        expected_token: str,
         status: "SwarmStatus | None" = None,
         round: "int | None" = None,
         token_usage: "Any | None" = None,

@@ -53,13 +53,19 @@ def test_file_storage_features_match_spec(tmp_path):
     # there is NO general cross-store transaction (Storage.transaction()
     # raises). transactional_components is empty -- no components are grouped.
     # Filesystem remains process-local and does not participate in a database
-    # transaction; only its asset store exposes optimistic concurrency.
-    _assets_only = frozenset({StorageComponent.ASSETS})
+    # transaction. Components with their own file-level CAS still advertise
+    # optimistic concurrency independently.
+    _optimistic = frozenset({
+        StorageComponent.ASSETS,
+        StorageComponent.SWARMS,
+        StorageComponent.MEMORIES,
+        StorageComponent.IDEMPOTENCY,
+    })
     assert features == StorageFeatures(
         transaction_scope=TransactionScope.NONE,
         transactional_components=frozenset(),
         coordination_scope=CoordinationScope.PROCESS_LOCAL,
-        optimistic_concurrency=_assets_only,
+        optimistic_concurrency=_optimistic,
         append_only_events=False,
         leasing=True,
         fencing=True,
@@ -78,11 +84,15 @@ def test_sqlalchemy_storage_features_match_spec(tmp_path):
         StorageComponent.RUNS, StorageComponent.SESSIONS,
         StorageComponent.EVENTS, StorageComponent.APPROVALS,
         StorageComponent.CHECKPOINTS, StorageComponent.JOBS,
+        StorageComponent.SWARMS, StorageComponent.MEMORIES,
+        StorageComponent.IDEMPOTENCY, StorageComponent.EVALUATIONS,
     })
     _optimistic = frozenset({
         StorageComponent.ASSETS, StorageComponent.ARTIFACT_RECORDS,
         StorageComponent.RUNS, StorageComponent.APPROVALS,
         StorageComponent.JOBS,
+        StorageComponent.SWARMS, StorageComponent.MEMORIES,
+        StorageComponent.IDEMPOTENCY,
     })
     assert features == StorageFeatures(
         transaction_scope=TransactionScope.DATABASE,

@@ -781,7 +781,9 @@ class RunCoordinator:
         consumer for a non-streaming run)."""
         from ..run.live_events import NullRunLiveEventSink
 
-        async with self._claim_and_fence(context) as (cancellation, token, _live):
+        async with self._claim_and_fence(context) as (
+            cancellation, token, _owner_id, _live
+        ):
             outcome = await self._execute_and_commit(
                 compiled,
                 context,
@@ -808,7 +810,11 @@ class RunCoordinator:
         outcome switch -> commit the driving Run. SwarmEngine owns only the
         SwarmRun/strategy; the driving RunRecord is the Coordinator's. Returns
         the aggregate RunResult on completion."""
-        async with self._claim_and_fence(context) as (cancellation, token, _live):
+        async with self._claim_and_fence(context) as (
+            cancellation, token, owner_id, _live
+        ):
+            from ..swarm.commit import SwarmExecutionLease
+
             try:
                 outcome = await self._swarm_engine.execute(
                     spec,
@@ -816,6 +822,11 @@ class RunCoordinator:
                     context,
                     agents=agents,
                     cancellation=cancellation,
+                    execution_lease=SwarmExecutionLease(
+                        owner_id=owner_id,
+                        generation=1,
+                        token=token,
+                    ),
                 )
             except asyncio.CancelledError:
                 # Explicit cancellation: SwarmEngine already transitioned its
@@ -993,6 +1004,7 @@ class RunCoordinator:
             async with self._claim_and_fence(context, cancellation=cancellation) as (
                 _cancellation,
                 token,
+                _owner_id,
                 _live,
             ):
                 outcome = await self._execute_and_commit(
@@ -1039,7 +1051,7 @@ class RunCoordinator:
             if current is not None:
                 await self._run_controller.register(run_id, current, cancellation)
         try:
-            yield cancellation, token, None
+            yield cancellation, token, worker_id, None
         finally:
             if heartbeat_task is not None:
                 heartbeat_task.cancel()

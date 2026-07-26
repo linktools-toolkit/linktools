@@ -173,7 +173,10 @@ def test_fs_terminal_complete_is_idempotent(tmp_path):
     _run(coordinator.start(_start_command("swarm-fs-c", "driving-fs-c")))
     _run(
         swarm_store.update_run(
-            "swarm-fs-c", expected_version=1, status=SwarmStatus.RUNNING
+            "swarm-fs-c",
+            expected_version=1,
+            expected_token=_FENCE_TOKEN,
+            status=SwarmStatus.RUNNING,
         )
     )
 
@@ -202,7 +205,10 @@ def test_fs_recovery_marks_inflight_commit_failed(tmp_path):
     _run(coordinator.start(_start_command("swarm-fs-r", "driving-fs-r")))
     _run(
         swarm_store.update_run(
-            "swarm-fs-r", expected_version=1, status=SwarmStatus.RUNNING
+            "swarm-fs-r",
+            expected_version=1,
+            expected_token=_FENCE_TOKEN,
+            status=SwarmStatus.RUNNING,
         )
     )
     # Simulate the crash mid-complete: hand-write the in-flight journal in the
@@ -330,7 +336,9 @@ def test_result_ready_validates_command_before_completion(tmp_path):
     command = _start_command("swarm-result-ready", "driving-result")
     journal = _prepare_start_journal(coordinator, command)
     coordinator._record_inflight_result(
-        str(command.commit_id), "start", {"swarm_run_id": command.swarm_run_id}
+        str(command.commit_id),
+        "start",
+        {"swarm_run_id": command.swarm_run_id, "version": 1},
     )
     raw = json.loads(journal.read_text())
     raw["commit_id"] = "wrong-result-ready-id"

@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from linktools.ai.storage.sqlalchemy.models import Base
 
 from ..commit import SwarmCommitConflictError, SwarmCommitPolicy
-from .codec import SwarmCommitCodec
+from .codec import SwarmCommitCodec, SwarmCommitCommand, SwarmCommitResult
 
 
 async def _append_lifecycle_event(tx: object, command: object, commit_id: str) -> None:
@@ -149,8 +149,8 @@ async def _check_replay(
     codec: SwarmCommitCodec,
     commit_id: str,
     operation: str,
-    request_payload: Mapping[str, Any],
-) -> "Mapping[str, Any] | None":
+    request_payload: SwarmCommitCommand,
+) -> "SwarmCommitResult | None":
     """Look up commit_id in the swarm commit log within the UoW's session.
     Return the recorded result dict if this is an idempotent replay (same id
     + same request_hash); raise SwarmCommitConflictError on a hash mismatch;
@@ -191,15 +191,6 @@ class SqlAlchemySwarmCommitCoordinator:
 
     async def get_run(self, swarm_run_id: str):
         return await self._storage.swarms.get_run(swarm_run_id)
-
-    async def update_run(self, swarm_run_id: str, *, expected_version: int, status=None, token_usage=None):
-        async with self._storage.transaction() as tx:
-            return await tx.swarms.update_run(
-                swarm_run_id,
-                expected_version=expected_version,
-                status=status,
-                token_usage=token_usage,
-            )
 
     async def recover_incomplete_commits(self) -> None:
         """No-op: every SQL swarm commit is one atomic Storage.transaction()
@@ -378,7 +369,9 @@ class SqlAlchemySwarmCommitCoordinator:
             updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.SUCCEEDED,
+                token_usage=command.payload.token_usage,
             )
             await _append_lifecycle_event(tx, command, commit_id)
             result = {"swarm_run_id": updated.id, "version": updated.version}
@@ -412,7 +405,9 @@ class SqlAlchemySwarmCommitCoordinator:
             updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.FAILED,
+                token_usage=command.payload.token_usage,
             )
             await _append_lifecycle_event(tx, command, commit_id)
             result = {"swarm_run_id": updated.id, "version": updated.version}
@@ -446,7 +441,9 @@ class SqlAlchemySwarmCommitCoordinator:
             updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.CANCELLED,
+                token_usage=command.payload.token_usage,
             )
             await _append_lifecycle_event(tx, command, commit_id)
             result = {"swarm_run_id": updated.id, "version": updated.version}

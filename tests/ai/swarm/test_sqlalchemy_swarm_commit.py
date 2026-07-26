@@ -228,7 +228,10 @@ def test_terminal_complete_is_idempotent(tmp_path):
     _run(coordinator.start(_start_command("swarm-run-c", "driving-c")))
     _run(
         swarm_store.update_run(
-            "swarm-run-c", expected_version=1, status=SwarmStatus.RUNNING
+            "swarm-run-c",
+            expected_version=1,
+            expected_token=_FENCE_TOKEN,
+            status=SwarmStatus.RUNNING,
         )
     )
 

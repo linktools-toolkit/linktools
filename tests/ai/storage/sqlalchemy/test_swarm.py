@@ -32,6 +32,8 @@ from linktools.ai.swarm.models import (
     TokenUsage,
 )
 
+_EXECUTION_TOKEN = "sqlalchemy-store-token"
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -57,6 +59,7 @@ def _run(
         created_at=now,
         updated_at=now,
         metadata={"k": "v"},
+        execution_token=_EXECUTION_TOKEN,
     )
 
 
@@ -149,6 +152,7 @@ def test_update_run_advances_version_and_applies_fields(tmp_path):
             updated = await store.update_run(
                 "swarm-1",
                 expected_version=1,
+                expected_token=_EXECUTION_TOKEN,
                 status=SwarmStatus.RUNNING,
                 round=2,
                 token_usage=TokenUsage(
@@ -174,7 +178,10 @@ def test_update_run_wrong_expected_version_raises_conflict(tmp_path):
             await store.create_run(_run())
             with pytest.raises(SwarmConflictError):
                 await store.update_run(
-                    "swarm-1", expected_version=99, status=SwarmStatus.RUNNING
+                    "swarm-1",
+                    expected_version=99,
+                    expected_token=_EXECUTION_TOKEN,
+                    status=SwarmStatus.RUNNING,
                 )
 
     asyncio.run(_run_case())
@@ -187,7 +194,10 @@ def test_update_run_invalid_transition_raises(tmp_path):
             await store.create_run(_run())
             with pytest.raises(InvalidSwarmTransitionError):
                 await store.update_run(
-                    "swarm-1", expected_version=1, status=SwarmStatus.SUCCEEDED
+                    "swarm-1",
+                    expected_version=1,
+                    expected_token=_EXECUTION_TOKEN,
+                    status=SwarmStatus.SUCCEEDED,
                 )
 
     asyncio.run(_run_case())
@@ -198,7 +208,10 @@ def test_update_run_missing_raises_not_found(tmp_path):
         async with _store_ctx(tmp_path) as store:
             with pytest.raises(SwarmRunNotFoundError):
                 await store.update_run(
-                    "nope", expected_version=1, status=SwarmStatus.RUNNING
+                    "nope",
+                    expected_version=1,
+                    expected_token=_EXECUTION_TOKEN,
+                    status=SwarmStatus.RUNNING,
                 )
 
     asyncio.run(_run_case())

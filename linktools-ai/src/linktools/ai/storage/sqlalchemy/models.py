@@ -255,6 +255,8 @@ class SwarmRunRow(Base):
     # token against this persisted value). None until the swarm's `start`
     # commit stamps it; a reclaim rotates it to the new owner's token.
     execution_token: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    execution_owner_id: Mapped["str | None"] = mapped_column(String(256), nullable=True)
+    execution_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class SwarmStepRow(Base):

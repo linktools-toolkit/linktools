@@ -87,6 +87,12 @@ def _row_to_result(row: EvalResultRow) -> EvalResult:
 
 
 class SqlAlchemyEvalStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(transaction_participation=True)
+
     def __init__(
         self,
         *,

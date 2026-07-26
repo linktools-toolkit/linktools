@@ -72,6 +72,8 @@ def _row_to_run(row: SwarmRunRow) -> SwarmRun:
         updated_at=_as_utc(row.updated_at),
         metadata=json.loads(row.metadata_json),
         execution_token=row.execution_token,
+        execution_owner_id=row.execution_owner_id,
+        execution_generation=row.execution_generation,
     )
 
 
@@ -141,6 +143,15 @@ def _row_to_attempt(row: SwarmStepAttemptRow) -> SwarmStepAttempt:
 
 
 class SqlAlchemySwarmStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+        )
+
     """Multi-process SwarmStore backed by SQLAlchemy/AsyncSession.
 
     Optimistic concurrency on ``update_run`` mirrors ``SqlAlchemyRunStore.transition``
@@ -191,6 +202,8 @@ class SqlAlchemySwarmStore:
                     updated_at=run.updated_at,
                     metadata_json=json.dumps(dict(run.metadata)),
                     execution_token=run.execution_token,
+                    execution_owner_id=run.execution_owner_id,
+                    execution_generation=run.execution_generation,
                 )
             )
 
@@ -206,6 +219,51 @@ class SqlAlchemySwarmStore:
             return None if row is None else _row_to_run(row)
 
         return await self._execute_in_session(_do)
+
+    async def claim_execution(
+        self,
+        swarm_run_id: str,
+        *,
+        owner_id: str,
+        expected_generation: "int | None",
+    ):
+        import secrets
+        from sqlalchemy import update
+        from ..commit import SwarmExecutionLease, SwarmFenceLostError
+
+        if not isinstance(owner_id, str) or not owner_id:
+            raise ValueError("owner_id must be non-empty")
+        if expected_generation is not None and (
+            type(expected_generation) is not int or expected_generation < 0
+        ):
+            raise ValueError("expected_generation must be a non-negative integer")
+        required = 0 if expected_generation is None else expected_generation
+        lease = SwarmExecutionLease(
+            owner_id=owner_id,
+            generation=required + 1,
+            token=secrets.token_hex(32),
+        )
+
+        async def _do(session):
+            result = await session.execute(
+                update(SwarmRunRow)
+                .where(
+                    SwarmRunRow.id == swarm_run_id,
+                    SwarmRunRow.execution_generation == required,
+                )
+                .values(
+                    execution_owner_id=lease.owner_id,
+                    execution_generation=lease.generation,
+                    execution_token=lease.token,
+                    version=SwarmRunRow.version + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            if result.rowcount != 1:
+                raise SwarmFenceLostError("swarm execution generation mismatch")
+
+        await self._execute_in_session(_do)
+        return lease
 
     async def assert_execution_fence(
         self,
@@ -245,6 +303,7 @@ class SqlAlchemySwarmStore:
         swarm_run_id: str,
         *,
         expected_version: int,
+        expected_token: str,
         status: "SwarmStatus | None" = None,
         round: "int | None" = None,
         token_usage: "TokenUsage | None" = None,
@@ -291,6 +350,7 @@ class SqlAlchemySwarmStore:
                 update(SwarmRunRow)
                 .where(SwarmRunRow.id == swarm_run_id)
                 .where(SwarmRunRow.version == expected_version)
+                .where(SwarmRunRow.execution_token == expected_token)
             )
             if valid_sources is not None:
                 stmt = stmt.where(SwarmRunRow.status.in_(valid_sources))
@@ -307,6 +367,10 @@ class SqlAlchemySwarmStore:
                     raise SwarmConflictError(
                         f"expected version {expected_version}, found {row.version}"
                     )
+                if row.execution_token != expected_token:
+                    from ..commit import SwarmFenceLostError
+
+                    raise SwarmFenceLostError("swarm execution fence mismatch")
                 current = SwarmStatus(row.status)
                 raise InvalidSwarmTransitionError(
                     f"cannot transition {current} -> {status}"

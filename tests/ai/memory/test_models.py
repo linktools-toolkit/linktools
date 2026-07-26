@@ -172,6 +172,9 @@ def test_memory_conflict_raises_as_memory_error():
 
 
 class _StubStore:
+    @property
+    def capabilities(self): ...
+
     async def get(self, memory_id): ...
 
     async def search(self, query, *, scope, limit=10, category=None): ...

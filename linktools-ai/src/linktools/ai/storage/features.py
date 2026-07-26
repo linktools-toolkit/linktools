@@ -42,6 +42,10 @@ class StorageComponent(str, Enum):
     APPROVALS = "approvals"
     CHECKPOINTS = "checkpoints"
     JOBS = "jobs"
+    SWARMS = "swarms"
+    MEMORIES = "memories"
+    IDEMPOTENCY = "idempotency"
+    EVALUATIONS = "evaluations"
 
 
 @dataclass(frozen=True, slots=True)

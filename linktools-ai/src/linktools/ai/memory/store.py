@@ -11,6 +11,7 @@ optional orthogonal content filter (it carries no authorization weight)."""
 
 from typing import Protocol, runtime_checkable
 
+from ..storage.features import ComponentCapabilities
 from .models import MemoryMatch, MemoryRecord
 from .scope import MemoryScope
 
@@ -21,6 +22,9 @@ _UNSET = (
 
 @runtime_checkable
 class MemoryStore(Protocol):
+    @property
+    def capabilities(self) -> ComponentCapabilities: ...
+
     async def get(self, memory_id: str) -> "MemoryRecord | None": ...
 
     async def search(

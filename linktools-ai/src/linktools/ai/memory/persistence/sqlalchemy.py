@@ -55,6 +55,15 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
 
 
 class SqlAlchemyMemoryStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+        )
+
     """Multi-process MemoryStore backed by SQLAlchemy/AsyncSession.
 
     Optimistic concurrency on ``update`` / ``forget`` mirrors

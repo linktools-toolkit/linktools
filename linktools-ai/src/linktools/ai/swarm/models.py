@@ -141,6 +141,8 @@ class SwarmRun:
     updated_at: datetime
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
     execution_token: "str | None" = None
+    execution_owner_id: "str | None" = None
+    execution_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)

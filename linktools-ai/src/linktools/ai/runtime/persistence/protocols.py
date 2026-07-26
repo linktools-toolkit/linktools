@@ -73,11 +73,14 @@ if TYPE_CHECKING:
     from ...artifact.persistence.protocols import ArtifactRecordStore
     from ...events.store import EventStore
     from ...jobs.store import JobStore
+    from ...memory.store import MemoryStore
+    from ...evaluation.store import EvalStore
     from ...storage.features import TransactionScope
     from ...run.checkpoint import CheckpointStore
     from ...run.store import RunStore
     from ...session.store import SessionStore
     from ...storage.object.store import ObjectStore
+    from ...swarm.store import SwarmStore
     from ...tool.idempotency import IdempotencyStore
 
 
@@ -124,6 +127,9 @@ class StorageUnitOfWork(Protocol):
     checkpoints: "CheckpointStore"
     approvals: "ApprovalStore"
     idempotency: "IdempotencyStore"
+    swarms: "SwarmStore"
+    memories: "MemoryStore"
+    evaluations: "EvalStore"
     jobs: "JobStore | None"
 
 

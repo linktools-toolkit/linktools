@@ -11,6 +11,7 @@ CRUD."""
 import dataclasses
 from typing import Protocol, runtime_checkable
 
+from ..storage.features import ComponentCapabilities
 from .models import EvalResult, EvalRun, EvalRunStatus
 
 
@@ -24,6 +25,9 @@ class EvalResultConflictError(Exception):
 
 @runtime_checkable
 class EvalStore(Protocol):
+    @property
+    def capabilities(self) -> ComponentCapabilities: ...
+
     async def create_run(self, run: EvalRun) -> EvalRun: ...
 
     async def get_run(self, run_id: str) -> "EvalRun | None": ...
@@ -45,6 +49,12 @@ class EvalStore(Protocol):
 
 
 class InMemoryEvalStore:
+    @property
+    def capabilities(self):
+        from ..storage.features import ComponentCapabilities
+
+        return ComponentCapabilities()
+
     """A process-local EvalStore. Sufficient for the runner contract and for
     tests; the file and SQL backends satisfy the same Protocol for
     cross-process persistence."""

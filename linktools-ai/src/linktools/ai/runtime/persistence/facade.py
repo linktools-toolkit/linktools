@@ -76,6 +76,9 @@ def storage_component_map(storage: "Storage") -> "Mapping[StorageComponent, obje
         StorageComponent.EVENTS: storage.events,
         StorageComponent.APPROVALS: storage.approvals,
         StorageComponent.CHECKPOINTS: storage.checkpoints,
+        StorageComponent.SWARMS: getattr(storage, "swarms", None),
+        StorageComponent.MEMORIES: getattr(storage, "memories", None),
+        StorageComponent.IDEMPOTENCY: getattr(storage, "idempotency", None),
     }
     if storage.jobs is not None:
         components[StorageComponent.JOBS] = storage.jobs
@@ -84,6 +87,8 @@ def storage_component_map(storage: "Storage") -> "Mapping[StorageComponent, obje
         # through the ArtifactStore facade. Its capabilities feed
         # transactional_components (SQL shares the UoW session).
         components[StorageComponent.ARTIFACT_RECORDS] = storage.artifacts.record_store
+    if getattr(storage, "evaluations", None) is not None:
+        components[StorageComponent.EVALUATIONS] = storage.evaluations
     return components
 
 

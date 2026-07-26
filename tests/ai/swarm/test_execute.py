@@ -15,6 +15,7 @@ from linktools.ai.errors import SwarmConflictError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.run.cancellation import CancellationToken
 from linktools.ai.run.models import RunInput, RunnableType, RunStatus
+from linktools.ai.swarm.commit import SwarmExecutionLease
 from linktools.ai.swarm.engine import SwarmEngine
 from linktools.ai.swarm.models import SwarmCompleted, SwarmFailed, SwarmStatus
 from tests.ai.swarm.test_engine import (
@@ -25,6 +26,12 @@ from tests.ai.swarm.test_engine import (
     _limits,
     _spec,
     _Stores,
+)
+
+_EXECUTION_LEASE = SwarmExecutionLease(
+    owner_id="test-worker",
+    generation=1,
+    token="test-execution-token",
 )
 
 
@@ -58,6 +65,7 @@ def test_execute_returns_swarm_completed_without_creating_driving_run(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     outcome = asyncio.run(_run())
@@ -115,6 +123,7 @@ def test_execute_returns_swarm_failed_on_strategy_error(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     outcome = asyncio.run(_run())
@@ -169,6 +178,7 @@ def test_execute_propagates_swarm_conflict_error_instead_of_swarm_failed(tmp_pat
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     with pytest.raises(SwarmConflictError):
@@ -211,6 +221,7 @@ def test_execute_child_run_runnable_id_is_the_agent_ref_key_not_spec_id(tmp_path
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     outcome = asyncio.run(_run())
@@ -254,6 +265,7 @@ def test_execute_emits_swarm_lifecycle_events_via_the_injected_sink(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     outcome = asyncio.run(_run())
@@ -297,6 +309,7 @@ def test_execute_emits_swarm_failed_via_the_injected_sink(tmp_path):
             context,
             agents=agents,
             cancellation=CancellationToken(),
+            execution_lease=_EXECUTION_LEASE,
         )
 
     outcome = asyncio.run(_run())

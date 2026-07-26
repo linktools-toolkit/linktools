@@ -98,6 +98,12 @@ def _subscope_matches(record: MemoryRecord, scope: MemoryScope) -> bool:
 
 
 class FilesystemMemoryStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(optimistic_concurrency=True)
+
     """Single-process MemoryStore backed by per-record JSON files, partitioned
     by tenant (``root/{tenant_id}/{memory_id}.json``). Writes are atomic
     (temp-file + ``os.replace``) and both the tenant and memory id segments are

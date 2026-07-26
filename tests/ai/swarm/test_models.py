@@ -363,7 +363,14 @@ def test_swarm_limit_exceeded_raises_as_swarm_error():
 
 
 class _StubStore:
+    @property
+    def capabilities(self): ...
+
     async def create_run(self, run): ...
+
+    async def claim_execution(
+        self, swarm_run_id, *, owner_id, expected_generation
+    ): ...
 
     async def get_run(self, swarm_run_id): ...
 
@@ -376,6 +383,7 @@ class _StubStore:
         swarm_run_id,
         *,
         expected_version,
+        expected_token,
         status=None,
         round=None,
         token_usage=None,

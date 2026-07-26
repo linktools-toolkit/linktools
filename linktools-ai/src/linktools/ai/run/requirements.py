@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from ..storage.features import CoordinationScope, TransactionScope
+from ..storage.features import CoordinationScope, StorageComponent, TransactionScope
 from ..runtime.persistence.features import StorageFeatures
 
 if TYPE_CHECKING:
@@ -61,10 +61,8 @@ _TRANSACTION_RANK: "dict[TransactionScope, int]" = {
 }
 # Boolean capabilities a runtime may require. Each defaults to False (no
 # requirement); the gate fails only when a requirement is set that storage
-# does not offer. ``streaming_artifacts`` / ``optimistic_concurrency`` are
-# component-level frozensets on StorageFeatures -- a True requirement is met
-# when the frozenset is non-empty (the storage offers the capability for at
-# least one component).
+# does not offer. Transaction and optimistic-concurrency requirements are
+# component sets below, because support by an unrelated store is insufficient.
 _BOOL_CAPABILITIES: "tuple[str, ...]" = (
     "leasing",
     "fencing",
@@ -92,6 +90,7 @@ class RuntimeTopology(str, Enum):
 
     SINGLE_PROCESS = "single_process"
     MULTI_WORKER = "multi_worker"
+    MULTI_PROCESS_SWARM = "multi_process_swarm"
 
 
 def derive_runtime_requirements(
@@ -122,6 +121,14 @@ def derive_runtime_requirements(
       stale worker's commit is unsafe) AND the dependencies bundle must carry
       a real Storage + RunCommitCoordinator.
     """
+    if settings.topology is RuntimeTopology.MULTI_PROCESS_SWARM:
+        if dependencies.storage is None:
+            from ..errors import StorageRequirementsNotMetError
+
+            raise StorageRequirementsNotMetError(
+                "MULTI_PROCESS_SWARM topology requires a real Storage"
+            )
+        return RuntimeRequirements.for_multi_process_swarm()
     if settings.topology is RuntimeTopology.MULTI_WORKER:
         # Real-object presence the topology's shared-row model requires: a
         # multi-worker deployment cannot run without a Storage (JobStore rows
@@ -167,7 +174,8 @@ class RuntimeRequirements:
     fencing: bool = False
     idempotency: bool = False
     streaming_artifacts: bool = False
-    optimistic_concurrency: bool = False
+    required_transactional_components: "frozenset[StorageComponent]" = frozenset()
+    required_optimistic_components: "frozenset[StorageComponent]" = frozenset()
     append_only_events: bool = False
     # A MULTI_WORKER topology with an enabled ArtifactStore requires its digest
     # coordinator to be DISTRIBUTED (a process-local one races between workers on
@@ -190,7 +198,22 @@ class RuntimeRequirements:
             coordination=CoordinationScope.DISTRIBUTED,
             leasing=True,
             fencing=True,
+            required_optimistic_components=frozenset({StorageComponent.JOBS}),
             artifact_coordination=CoordinationScope.DISTRIBUTED,
+        )
+
+    @classmethod
+    def for_multi_process_swarm(cls) -> "RuntimeRequirements":
+        return cls(
+            coordination=CoordinationScope.DISTRIBUTED,
+            transactions=TransactionScope.DATABASE,
+            fencing=True,
+            required_transactional_components=frozenset(
+                {StorageComponent.SWARMS}
+            ),
+            required_optimistic_components=frozenset(
+                {StorageComponent.SWARMS}
+            ),
         )
 
 
@@ -222,8 +245,13 @@ def merge_runtime_requirements(
         fencing=base.fencing or extra.fencing,
         idempotency=base.idempotency or extra.idempotency,
         streaming_artifacts=base.streaming_artifacts or extra.streaming_artifacts,
-        optimistic_concurrency=(
-            base.optimistic_concurrency or extra.optimistic_concurrency
+        required_transactional_components=(
+            base.required_transactional_components
+            | extra.required_transactional_components
+        ),
+        required_optimistic_components=(
+            base.required_optimistic_components
+            | extra.required_optimistic_components
         ),
         append_only_events=base.append_only_events or extra.append_only_events,
         artifact_coordination=_max_by(
@@ -275,12 +303,23 @@ def enforce_storage_capability_gate(
             raise StorageRequirementsNotMetError(
                 f"storage does not provide the required capability {flag!r}"
             )
-    # optimistic_concurrency is component-level on features (frozenset) but a
-    # bool on requirements: a True requirement is met when the storage offers
-    # optimistic concurrency for at least one component.
-    if requirements.optimistic_concurrency and not features.optimistic_concurrency:
+    missing_transactional = (
+        requirements.required_transactional_components
+        - features.transactional_components
+    )
+    if missing_transactional:
+        names = ", ".join(sorted(component.value for component in missing_transactional))
         raise StorageRequirementsNotMetError(
-            "storage does not provide the required capability 'optimistic_concurrency'"
+            f"storage lacks required transactional components: {names}"
+        )
+    missing_optimistic = (
+        requirements.required_optimistic_components
+        - features.optimistic_concurrency
+    )
+    if missing_optimistic:
+        names = ", ".join(sorted(component.value for component in missing_optimistic))
+        raise StorageRequirementsNotMetError(
+            f"storage lacks required optimistic-concurrency components: {names}"
         )
 
 

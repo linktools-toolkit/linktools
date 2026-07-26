@@ -24,6 +24,12 @@ from linktools.ai.storage.filesystem._util import _atomic_write, _validate_id_se
 
 
 class FilesystemEvaluationStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities()
+
     def __init__(self, root: Path, *, clock: "Clock | None" = None) -> None:
         self._root = Path(root)
         self._lock = asyncio.Lock()

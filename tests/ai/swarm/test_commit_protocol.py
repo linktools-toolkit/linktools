@@ -53,7 +53,7 @@ def test_swarm_commit_coordinator_protocol_has_all_seven_methods():
 
 def test_a_class_implementing_all_seven_methods_satisfies_the_protocol():
     """A concrete class that implements every Protocol member (the 7 swarm
-    lifecycle commits plus the get_run/update_run helpers AND the
+    lifecycle commits plus the get_run helper AND the
     ``state_store`` attribute) satisfies SwarmCommitCoordinator
     (runtime_checkable). runtime_checkable checks every Protocol member is
     present on the instance, not just the seven commit methods."""
@@ -62,7 +62,6 @@ def test_a_class_implementing_all_seven_methods_satisfies_the_protocol():
         state_store = None  # Protocol member (non-callable): checked by runtime_checkable
 
         async def get_run(self, swarm_run_id): ...
-        async def update_run(self, swarm_run_id, *, expected_version, status=None, token_usage=None): ...
         async def start(self, command): ...
         async def start_step(self, command): ...
         async def complete_step(self, command): ...

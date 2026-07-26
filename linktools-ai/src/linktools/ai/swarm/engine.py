@@ -74,7 +74,7 @@ from .commit import (
     StartSwarmPayload,
     SwarmCommitCoordinator,
     SwarmCommitId,
-    SwarmExecutionFence,
+    SwarmExecutionLease,
 )
 from .models import (
     SwarmCheckpoint,
@@ -185,6 +185,8 @@ class SwarmEngine:
         commit_id_suffix: str,
         result: "RunResult | None" = None,
         error: "RunErrorInfo | None" = None,
+        token_usage: "TokenUsage",
+        execution_lease: "SwarmExecutionLease",
         event_context: "EventStreamContext | None" = None,
     ) -> "int":
         """Apply a terminal SwarmRun transition through the
@@ -221,10 +223,11 @@ class SwarmEngine:
                     expected_version=expected_version,
                     payload=CompleteSwarmPayload(
                         result=result,
+                        token_usage=token_usage,
                         completed_event=lifecycle_event,
                         event_context=event_context,
                     ),
-                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
+                    fence=execution_lease.fence,
                 )
             )
         elif target is SwarmStatus.FAILED:
@@ -235,10 +238,11 @@ class SwarmEngine:
                     expected_version=expected_version,
                     payload=FailSwarmPayload(
                         error=error,
+                        token_usage=token_usage,
                         failed_event=lifecycle_event,
                         event_context=event_context,
                     ),
-                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
+                    fence=execution_lease.fence,
                 )
             )
         elif target is SwarmStatus.CANCELLED:
@@ -248,10 +252,11 @@ class SwarmEngine:
                     swarm_run_id=swarm_run_id,
                     expected_version=expected_version,
                     payload=CancelSwarmPayload(
+                        token_usage=token_usage,
                         cancelled_event=lifecycle_event,
                         event_context=event_context,
                     ),
-                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
+                    fence=execution_lease.fence,
                 )
             )
         else:  # pragma: no cover -- defensive
@@ -269,6 +274,7 @@ class SwarmEngine:
         *,
         agents: "Mapping[str, AgentSpec]",
         cancellation: "CancellationToken",
+        execution_lease: "SwarmExecutionLease",
     ) -> "SwarmExecutionOutcome":
         """The target swarm execution loop. Drives the strategy + manages
         SwarmRun/SwarmStep domain state and returns a
@@ -298,12 +304,15 @@ class SwarmEngine:
                 id=str(uuid.uuid4()),
                 run_id=context.run_id,
                 round=0,
-                status=SwarmStatus.PENDING,
+                status=SwarmStatus.RUNNING,
                 version=1,
                 token_usage=TokenUsage(),
                 cost=Decimal("0"),
                 created_at=now,
                 updated_at=now,
+                execution_token=execution_lease.token,
+                execution_owner_id=execution_lease.owner_id,
+                execution_generation=execution_lease.generation,
             )
             swarm_event_context = EventStreamContext.from_run_context(context)
             # Route through the SwarmCommitCoordinator: one atomic, commit_id-
@@ -324,23 +333,16 @@ class SwarmEngine:
                         ),
                         event_context=swarm_event_context,
                     ),
-                    fence=SwarmExecutionFence(f"swarm:{swarm_run.id}"),
+                    fence=execution_lease.fence,
                 )
             )
-            # RUNNING is a mid-execution state change (not a terminal commit),
-            # so it remains a coordinator-owned state update -- the lifecycle
-            # entry write (PENDING create) is what the commit_log protects.
             created_swarm = await self._swarm_commit_coordinator.get_run(swarm_run.id)
             if created_swarm is None:
                 raise SwarmConflictError(
                     f"swarm run {swarm_run.id} missing after coordinator.start"
                 )
-            swarm_run = await self._swarm_commit_coordinator.update_run(
-                swarm_run.id,
-                expected_version=created_swarm.version,
-                status=SwarmStatus.RUNNING,
-            )
-            swarm_version = swarm_run.version
+            swarm_run = created_swarm
+            swarm_version = created_swarm.version
 
             # 3. Build the context the strategy consumes + delegate the round loop.
             ctx = SwarmExecutionContext(
@@ -374,14 +376,9 @@ class SwarmEngine:
                     f"used {acc_input + acc_output}",
                     kind="max_total_tokens",
                 )
-            swarm_run = await self._swarm_commit_coordinator.update_run(
-                swarm_run.id,
-                expected_version=swarm_version,
-                token_usage=TokenUsage(
-                    input_tokens=acc_input, output_tokens=acc_output
-                ),
+            final_usage = TokenUsage(
+                input_tokens=acc_input, output_tokens=acc_output
             )
-            swarm_version = swarm_run.version
 
             await cancellation.raise_if_cancelled()
 
@@ -394,6 +391,8 @@ class SwarmEngine:
                 target=SwarmStatus.SUCCEEDED,
                 commit_id_suffix="complete",
                 result=result,
+                token_usage=final_usage,
+                execution_lease=execution_lease,
                 event_context=swarm_event_context,
             )
             aggregate_messages: "tuple[NewSessionMessage, ...]" = ()
@@ -416,7 +415,10 @@ class SwarmEngine:
             if swarm_run is not None and swarm_version is not None:
                 try:
                     await self._finalize_cancelled_swarm_run(
-                        swarm_run.id, event_context=EventStreamContext.from_run_context(context)
+                        swarm_run.id,
+                        token_usage=swarm_run.token_usage,
+                        execution_lease=execution_lease,
+                        event_context=EventStreamContext.from_run_context(context),
                     )
                 except Exception as swarm_exc:  # noqa: BLE001
                     raise SwarmError(
@@ -452,6 +454,8 @@ class SwarmEngine:
                         target=SwarmStatus.FAILED,
                         commit_id_suffix="fail",
                         error=error_info,
+                        token_usage=swarm_run.token_usage,
+                        execution_lease=execution_lease,
                         event_context=swarm_event_context,
                     )
                 except Exception as swarm_exc:  # noqa: BLE001
@@ -465,6 +469,8 @@ class SwarmEngine:
         self,
         swarm_run_id: str,
         *,
+        token_usage: "TokenUsage",
+        execution_lease: "SwarmExecutionLease",
         event_context: "EventStreamContext | None" = None,
     ) -> None:
         """Same finalization semantics as :meth:`_finalize_cancelled_run`,
@@ -478,25 +484,13 @@ class SwarmEngine:
             SwarmStatus.CANCELLED,
         ):
             return
-        if current.status == SwarmStatus.CANCELLING:
-            await self._commit_swarm_transition(
-                swarm_run_id=swarm_run_id,
-                expected_version=current.version,
-                target=SwarmStatus.CANCELLED,
-                commit_id_suffix="cancel",
-                event_context=event_context,
-            )
-            return
-        cancelling = await self._swarm_commit_coordinator.update_run(
-            swarm_run_id,
-            expected_version=current.version,
-            status=SwarmStatus.CANCELLING,
-        )
         await self._commit_swarm_transition(
             swarm_run_id=swarm_run_id,
-            expected_version=cancelling.version,
+            expected_version=current.version,
             target=SwarmStatus.CANCELLED,
             commit_id_suffix="cancel",
+            token_usage=token_usage,
+            execution_lease=execution_lease,
             event_context=event_context,
         )
 

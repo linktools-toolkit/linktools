@@ -141,6 +141,36 @@ class _VersionIntent:
     operation_id: str = ""
 
 
+def _positive_int(value: object) -> bool:
+    return type(value) is int and value >= 1
+
+
+def _json_mapping(value: object) -> bool:
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        return False
+
+    def valid(item: object) -> bool:
+        if item is None or type(item) in (str, int, float, bool):
+            return True
+        if isinstance(item, list):
+            return all(valid(child) for child in item)
+        if isinstance(item, dict):
+            return all(isinstance(key, str) and valid(child) for key, child in item.items())
+        return False
+
+    return all(valid(item) for item in value.values())
+
+
+def _sha256_hex(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
+
+
 @dataclass
 class _OperationIntent:
     operation: str  # "put" | "delete" | "move"
@@ -187,8 +217,13 @@ class _OperationIntent:
         request_hash = data.get("request_hash")
         if not isinstance(request_hash, str) or not request_hash:
             raise StorageRecoveryError("intent has invalid request_hash")
+        idempotency_key = data.get("idempotency_key")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not idempotency_key
+        ):
+            raise StorageRecoveryError("intent has invalid idempotency_key")
         new_revision = data.get("new_revision")
-        if not isinstance(new_revision, int) or new_revision < 1:
+        if not _positive_int(new_revision):
             raise StorageRecoveryError(
                 f"intent has invalid new_revision {new_revision!r}"
             )
@@ -200,26 +235,60 @@ class _OperationIntent:
         for entry in raw_versions:
             if not isinstance(entry, dict):
                 raise StorageRecoveryError("intent version is not an object")
+            required = {
+                "key_value", "version", "tombstone", "etag", "content_type",
+                "size", "modified_at", "metadata", "commit_revision",
+                "operation_id",
+            }
+            if not required.issubset(entry):
+                raise StorageRecoveryError("intent version is missing required fields")
+            source_version = entry.get("source_version")
+            content_type = entry["content_type"]
+            source_key = entry.get("source_key")
+            content_sha256 = entry.get("content_sha256")
+            if (
+                not isinstance(entry["key_value"], str)
+                or not entry["key_value"]
+                or not _positive_int(entry["version"])
+                or type(entry["tombstone"]) is not bool
+                or not isinstance(entry["etag"], str)
+                or type(entry["size"]) is not int
+                or entry["size"] < 0
+                or not isinstance(entry["modified_at"], str)
+                or not _json_mapping(entry["metadata"])
+                or not _positive_int(entry["commit_revision"])
+                or not isinstance(entry["operation_id"], str)
+                or not entry["operation_id"]
+                or (content_type is not None and not isinstance(content_type, str))
+                or (source_key is not None and not isinstance(source_key, str))
+                or (source_version is not None and not _positive_int(source_version))
+                or (content_sha256 is not None and not _sha256_hex(content_sha256))
+            ):
+                raise StorageRecoveryError("intent version has invalid field types")
             try:
-                v = _VersionIntent(
-                    key_value=entry["key_value"],
-                    version=int(entry["version"]),
-                    tombstone=bool(entry["tombstone"]),
-                    etag=entry["etag"],
-                    content_type=entry.get("content_type"),
-                    size=int(entry["size"]),
-                    modified_at=entry["modified_at"],
-                    metadata=dict(entry.get("metadata") or {}),
-                    source_key=entry.get("source_key"),
-                    source_version=entry.get("source_version"),
-                    commit_revision=int(entry["commit_revision"]),
-                    content_sha256=entry.get("content_sha256"),
-                    operation_id=entry["operation_id"],
-                )
-            except (KeyError, ValueError, TypeError) as exc:
-                raise StorageRecoveryError(
-                    f"intent version is malformed: {exc}"
-                ) from exc
+                datetime.fromisoformat(entry["modified_at"])
+            except ValueError as exc:
+                raise StorageRecoveryError("intent version has invalid modified_at") from exc
+            if entry["tombstone"]:
+                if entry["etag"] != "":
+                    raise StorageRecoveryError("tombstone version has a non-empty etag")
+            elif not _sha256_hex(entry["etag"]):
+                raise StorageRecoveryError("non-tombstone version has invalid etag")
+            v = _VersionIntent(
+                key_value=entry["key_value"],
+                version=entry["version"],
+                tombstone=entry["tombstone"],
+                etag=entry["etag"],
+                content_type=content_type,
+                size=entry["size"],
+                modified_at=entry["modified_at"],
+                metadata=entry["metadata"],
+                source_key=source_key,
+                source_version=source_version,
+                commit_revision=entry["commit_revision"],
+                content_sha256=content_sha256,
+                operation_id=entry["operation_id"],
+            )
             if v.commit_revision != new_revision:
                 raise StorageRecoveryError(
                     f"version commit_revision {v.commit_revision} != "
@@ -267,7 +336,7 @@ class _OperationIntent:
             operation=operation,
             operation_id=operation_id,
             request_hash=request_hash,
-            idempotency_key=data.get("idempotency_key"),
+            idempotency_key=idempotency_key,
             new_revision=new_revision,
             versions=versions,
         )
@@ -299,13 +368,41 @@ class _IdempotencyRecord:
 
     @classmethod
     def from_json(cls, raw: bytes) -> "_IdempotencyRecord":
-        data = json.loads(raw)
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as exc:
+            raise StorageIntegrityError("idempotency record is not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise StorageIntegrityError("idempotency record must be an object")
+        operation = data.get("operation")
+        request_hash = data.get("request_hash")
+        result_key = data.get("result_key")
+        result_version = data.get("result_version")
+        commit_revision = data.get("commit_revision")
+        if operation not in {"put", "delete", "move"}:
+            raise StorageIntegrityError("idempotency record has invalid operation")
+        if not isinstance(request_hash, str) or not request_hash:
+            raise StorageIntegrityError("idempotency record has invalid request_hash")
+        if result_key is not None and (
+            not isinstance(result_key, str) or not result_key
+        ):
+            raise StorageIntegrityError("idempotency record has invalid result_key")
+        if result_version is not None and not _positive_int(result_version):
+            raise StorageIntegrityError("idempotency record has invalid result_version")
+        if not _positive_int(commit_revision):
+            raise StorageIntegrityError("idempotency record has invalid commit_revision")
+        if (result_key is None) != (result_version is None):
+            raise StorageIntegrityError("idempotency result key/version must both be present")
+        if operation in {"put", "move"} and result_key is None:
+            raise StorageIntegrityError("object-producing idempotency record has no result")
+        if operation == "delete" and result_key is not None:
+            raise StorageIntegrityError("delete idempotency record must not reference a result")
         return cls(
-            operation=data["operation"],
-            request_hash=data["request_hash"],
-            result_key=data.get("result_key"),
-            result_version=data.get("result_version"),
-            commit_revision=int(data["commit_revision"]),
+            operation=operation,
+            request_hash=request_hash,
+            result_key=result_key,
+            result_version=result_version,
+            commit_revision=commit_revision,
         )
 
 
@@ -871,6 +968,62 @@ class FilesystemObjectBackend:
             return None
         return _IdempotencyRecord.from_json(self._sd.read_bytes(*components))
 
+    def _load_idempotency_result(
+        self,
+        record: _IdempotencyRecord,
+        *,
+        expected_operation: str,
+        expected_result_key: "StorageKey | None",
+    ) -> "StoredObject | None":
+        if record.operation != expected_operation:
+            raise StorageIntegrityError(
+                f"idempotency operation {record.operation!r} does not match "
+                f"{expected_operation!r}"
+            )
+        if expected_result_key is None:
+            if record.result_key is not None or record.result_version is not None:
+                raise StorageIntegrityError("idempotency no-result replay references an object")
+            return None
+        if (
+            record.result_key != expected_result_key.value
+            or record.result_version is None
+        ):
+            raise StorageIntegrityError("idempotency result identity mismatch")
+        replay_key = StorageKey(record.result_key)
+        try:
+            raw = self._read_version_metadata(replay_key, record.result_version)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise StorageIntegrityError("idempotency version metadata is corrupt") from exc
+        if raw is None:
+            raise StorageIntegrityError(
+                f"idempotency record points at missing version "
+                f"{record.result_version} of {record.result_key!r}"
+            )
+        if (
+            not isinstance(raw, dict)
+            or raw.get("key") != replay_key.value
+            or raw.get("version") != record.result_version
+            or raw.get("commit_revision") != record.commit_revision
+            or raw.get("tombstone") is not False
+        ):
+            raise StorageIntegrityError("idempotency version metadata does not match record")
+        try:
+            content = self._read_version_bytes(replay_key, record.result_version)
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise StorageIntegrityError("idempotency version content is missing") from exc
+        digest = sha256(content).hexdigest()
+        if (
+            type(raw.get("size")) is not int
+            or raw["size"] != len(content)
+            or raw.get("etag") != digest
+        ):
+            raise StorageIntegrityError("idempotency version content digest mismatch")
+        try:
+            info = self._info_from_metadata(replay_key, raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StorageIntegrityError("idempotency version metadata is invalid") from exc
+        return StoredObject(info=info, content=content)
+
     def _write_idempotency(self, op_key: str, record: _IdempotencyRecord) -> None:
         self._sd.atomic_write(
             *self._idempotency_components(op_key),
@@ -1062,26 +1215,13 @@ class FilesystemObjectBackend:
                     raise StorageIdempotencyConflictError(
                         f"idempotency key {options.idempotency_key!r} replayed with a different request"
                     )
-                if record.result_key is None or record.result_version is None:
-                    raise StorageObjectNotFoundError(key.value)
-                # Replay reads from the IMMUTABLE version directory (spec
-                # the idempotency record spec): never from the current live state.
-                replay_key = StorageKey(record.result_key)
-                raw = self._read_version_metadata(replay_key, record.result_version)
-                if raw is None:
-                    raise StorageIntegrityError(
-                        f"idempotency record points at missing version "
-                        f"{record.result_version} of {record.result_key!r}"
-                    )
-                content_bytes = (
-                    self._read_version_bytes(replay_key, record.result_version)
-                    if not raw["tombstone"]
-                    else content
+                replay = self._load_idempotency_result(
+                    record,
+                    expected_operation="put",
+                    expected_result_key=key,
                 )
-                return StoredObject(
-                    info=self._info_from_metadata(replay_key, raw),
-                    content=content_bytes,
-                )
+                assert replay is not None
+                return replay
         # 3. CAS + next version + new revision
         live = self._live_version_metadata(key)
         live_info = None if live is None or live[1]["tombstone"] else live[1]
@@ -1183,6 +1323,11 @@ class FilesystemObjectBackend:
                     raise StorageIdempotencyConflictError(
                         f"idempotency key {options.idempotency_key!r} replayed with a different request"
                     )
+                self._load_idempotency_result(
+                    record,
+                    expected_operation="delete",
+                    expected_result_key=None,
+                )
                 return None
         live = self._live_version_metadata(key)
         if live is None or live[1]["tombstone"]:
@@ -1196,7 +1341,7 @@ class FilesystemObjectBackend:
                         request_hash=request_hash,
                         result_key=None,
                         result_version=None,
-                        commit_revision=self._read_revision_sync(),
+                        commit_revision=max(1, self._read_revision_sync()),
                     ),
                 )
             return None
@@ -1280,20 +1425,13 @@ class FilesystemObjectBackend:
                     raise StorageIdempotencyConflictError(
                         f"idempotency key {options.idempotency_key!r} replayed with a different request"
                     )
-                if record.result_key is None or record.result_version is None:
-                    raise StorageObjectNotFoundError(source.value)
-                replay_key = StorageKey(record.result_key)
-                raw = self._read_version_metadata(replay_key, record.result_version)
-                if raw is None:
-                    raise StorageIntegrityError(
-                        f"idempotency record points at missing version "
-                        f"{record.result_version} of {record.result_key!r}"
-                    )
-                content_bytes = self._read_version_bytes(replay_key, record.result_version)
-                return StoredObject(
-                    info=self._info_from_metadata(replay_key, raw),
-                    content=content_bytes,
+                replay = self._load_idempotency_result(
+                    record,
+                    expected_operation="move",
+                    expected_result_key=target,
                 )
+                assert replay is not None
+                return replay
         src_live = self._live_version_metadata(source)
         if src_live is None or src_live[1]["tombstone"]:
             raise StorageObjectNotFoundError(source.value)

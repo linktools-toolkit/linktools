@@ -23,7 +23,7 @@ The Filesystem implementation journals the same shape."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
 
 from ..events.context import EventStreamContext
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
         SwarmStepCompleted, SwarmStepCreated, SwarmStepFailed,
     )
     from ..run.models import RunErrorInfo, RunResult
-    from .models import SwarmRun, SwarmStatus, SwarmStep
+    from .models import SwarmRun, SwarmStatus, SwarmStep, TokenUsage
     from .store import SwarmStore
 
 
@@ -57,6 +57,28 @@ class SwarmExecutionFence:
     def __post_init__(self) -> None:
         if not self.token:
             raise ValueError("swarm execution fence cannot be empty")
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmExecutionLease:
+    owner_id: str
+    generation: int
+    token: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.owner_id, str)
+            or not self.owner_id
+            or type(self.generation) is not int
+            or self.generation < 1
+            or not isinstance(self.token, str)
+            or not self.token
+        ):
+            raise ValueError("invalid Swarm execution lease")
+
+    @property
+    def fence(self) -> SwarmExecutionFence:
+        return SwarmExecutionFence(self.token)
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +147,12 @@ class SwarmFenceConfigurationError(Exception):
     is present -- a deployment/configuration inconsistency."""
 
 
+def _empty_token_usage():
+    from .models import TokenUsage
+
+    return TokenUsage()
+
+
 @dataclass(frozen=True, slots=True)
 class StartSwarmPayload:
     run: "SwarmRun"
@@ -162,6 +190,7 @@ class CompleteSwarmPayload:
     result: "RunResult"
     completed_event: "SwarmCompleted"
     event_context: EventStreamContext
+    token_usage: "TokenUsage" = field(default_factory=lambda: _empty_token_usage())
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,12 +198,14 @@ class FailSwarmPayload:
     error: "RunErrorInfo"
     failed_event: "SwarmFailed"
     event_context: EventStreamContext
+    token_usage: "TokenUsage" = field(default_factory=lambda: _empty_token_usage())
 
 
 @dataclass(frozen=True, slots=True)
 class CancelSwarmPayload:
     cancelled_event: "SwarmCancelled"
     event_context: EventStreamContext
+    token_usage: "TokenUsage" = field(default_factory=lambda: _empty_token_usage())
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,15 +286,6 @@ class SwarmCommitCoordinator(Protocol):
 
     async def get_run(self, swarm_run_id: str) -> "SwarmRun | None": ...
 
-    async def update_run(
-        self,
-        swarm_run_id: str,
-        *,
-        expected_version: int,
-        status: "SwarmStatus | None" = None,
-        token_usage: object | None = None,
-    ) -> "SwarmRun": ...
-
     async def start(self, command: StartSwarmCommand) -> "SwarmCommitResult": ...
     async def start_step(self, command: StartSwarmStepCommand) -> "SwarmCommitResult": ...
     async def complete_step(self, command: CompleteSwarmStepCommand) -> "SwarmCommitResult": ...
@@ -305,6 +327,7 @@ __all__: "list[str]" = [
     "SwarmCommitId",
     "SwarmCommitPolicy",
     "SwarmExecutionFence",
+    "SwarmExecutionLease",
     "SwarmFenceConfigurationError",
     "SwarmFenceLostError",
     "SwarmFenceRequiredError",

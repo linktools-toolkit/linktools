@@ -48,7 +48,7 @@ def _transaction_return(module_path: Path, class_name: str) -> str:
 
 
 def test_uow_field_set_matches_the_frozen_contract():
-    # fixed interface: exactly these nine stores, no more, no fewer.
+    # Fixed interface: every store used by the concrete SQL UoW is public.
     ann = _uow_annotations()
     assert set(ann) == {
         "assets",
@@ -60,6 +60,9 @@ def test_uow_field_set_matches_the_frozen_contract():
         "approvals",
         "idempotency",
         "jobs",
+        "swarms",
+        "memories",
+        "evaluations",
     }, f"StorageUnitOfWork field set drifted: {set(ann)}"
 
 

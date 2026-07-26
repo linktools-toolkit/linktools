@@ -83,8 +83,10 @@ class FilesystemSwarmCommitView:
         self._require_open(); return await asyncio.to_thread(self._store._complete_task_sync, task_id, result, expected_version=expected_version, active_run_id=active_run_id)
     async def fail_task(self, task_id, error, *, expected_version, active_run_id=None):
         self._require_open(); return await asyncio.to_thread(self._store._fail_task_sync, task_id, error, expected_version=expected_version, active_run_id=active_run_id)
-    async def update_run(self, *, expected_version, status=None, round=None, token_usage=None, cost=None, metadata=None):
-        self._require_open(); return await asyncio.to_thread(self._store._update_run_sync, self._swarm_run_id, expected_version=expected_version, status=status, round=round, token_usage=token_usage, cost=cost, metadata=metadata)
+    async def update_run(self, *, expected_version, expected_token, status=None, round=None, token_usage=None, cost=None, metadata=None):
+        self._require_open()
+        await self.assert_execution_fence(expected_token)
+        return await asyncio.to_thread(self._store._update_run_sync, self._swarm_run_id, expected_version=expected_version, status=status, round=round, token_usage=token_usage, cost=cost, metadata=metadata)
     def close(self) -> None:
         self._open = False
 
@@ -106,6 +108,8 @@ def _run_to_json(run: SwarmRun) -> dict:
         "updated_at": run.updated_at.isoformat(),
         "metadata": dict(run.metadata),
         "execution_token": run.execution_token,
+        "execution_owner_id": run.execution_owner_id,
+        "execution_generation": run.execution_generation,
     }
 
 
@@ -127,6 +131,8 @@ def _run_from_json(raw: dict) -> SwarmRun:
         updated_at=datetime.fromisoformat(raw["updated_at"]),
         metadata=raw["metadata"],
         execution_token=raw.get("execution_token"),
+        execution_owner_id=raw.get("execution_owner_id"),
+        execution_generation=raw.get("execution_generation", 0),
     )
 
 
@@ -250,6 +256,12 @@ def _attempt_from_json(raw: dict) -> SwarmStepAttempt:
 
 
 class FilesystemSwarmStore:
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(optimistic_concurrency=True)
+
     """Single-process SwarmStore backed by per-record JSON files.
 
     ``SwarmRun`` records live at ``root/runs/{swarm_run_id}.json`` and
@@ -364,9 +376,74 @@ class FilesystemSwarmStore:
             token_usage=current.token_usage, cost=current.cost,
             created_at=current.created_at, updated_at=datetime.now(current.created_at.tzinfo),
             metadata=current.metadata, execution_token=new_token,
+            execution_owner_id=current.execution_owner_id,
+            execution_generation=current.execution_generation + 1,
         )
         _atomic_write(self._run_path(swarm_run_id), json.dumps(_run_to_json(updated)).encode("utf-8"))
         return updated
+
+    async def claim_execution(
+        self,
+        swarm_run_id: str,
+        *,
+        owner_id: str,
+        expected_generation: "int | None",
+    ):
+        if not isinstance(owner_id, str) or not owner_id:
+            raise ValueError("owner_id must be non-empty")
+        if expected_generation is not None and (
+            type(expected_generation) is not int or expected_generation < 0
+        ):
+            raise ValueError("expected_generation must be a non-negative integer")
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._claim_execution_sync,
+                swarm_run_id,
+                owner_id=owner_id,
+                expected_generation=expected_generation,
+            )
+
+    def _claim_execution_sync(
+        self,
+        swarm_run_id: str,
+        *,
+        owner_id: str,
+        expected_generation: "int | None",
+    ):
+        import secrets
+        from ..commit import SwarmExecutionLease, SwarmFenceLostError
+
+        current = self._get_run_sync(swarm_run_id)
+        if current is None:
+            raise SwarmRunNotFoundError(swarm_run_id)
+        required = 0 if expected_generation is None else expected_generation
+        if current.execution_generation != required:
+            raise SwarmFenceLostError("swarm execution generation mismatch")
+        lease = SwarmExecutionLease(
+            owner_id=owner_id,
+            generation=current.execution_generation + 1,
+            token=secrets.token_hex(32),
+        )
+        updated = SwarmRun(
+            id=current.id,
+            run_id=current.run_id,
+            round=current.round,
+            status=current.status,
+            version=current.version + 1,
+            token_usage=current.token_usage,
+            cost=current.cost,
+            created_at=current.created_at,
+            updated_at=datetime.now(current.created_at.tzinfo),
+            metadata=current.metadata,
+            execution_token=lease.token,
+            execution_owner_id=lease.owner_id,
+            execution_generation=lease.generation,
+        )
+        _atomic_write(
+            self._run_path(swarm_run_id),
+            json.dumps(_run_to_json(updated)).encode("utf-8"),
+        )
+        return lease
 
     async def create_run(self, run: SwarmRun) -> SwarmRun:
         return await asyncio.to_thread(self._create_run_sync, run)
@@ -447,6 +524,8 @@ class FilesystemSwarmStore:
             updated_at=datetime.now(current.created_at.tzinfo),
             metadata=new_metadata,
             execution_token=current.execution_token,
+            execution_owner_id=current.execution_owner_id,
+            execution_generation=current.execution_generation,
         )
         _atomic_write(
             self._run_path(swarm_run_id),
@@ -459,6 +538,7 @@ class FilesystemSwarmStore:
         swarm_run_id: str,
         *,
         expected_version: int,
+        expected_token: str,
         status: "SwarmStatus | None" = None,
         round: "int | None" = None,
         token_usage: "TokenUsage | None" = None,
@@ -466,6 +546,13 @@ class FilesystemSwarmStore:
         metadata: "dict | None" = None,
     ) -> SwarmRun:
         async with self._lock:
+            current = self._get_run_sync(swarm_run_id)
+            if current is None:
+                raise SwarmRunNotFoundError(f"swarm run not found: {swarm_run_id}")
+            if current.execution_token != expected_token:
+                from ..commit import SwarmFenceLostError
+
+                raise SwarmFenceLostError("swarm execution fence mismatch")
             return await asyncio.to_thread(
                 self._update_run_sync,
                 swarm_run_id,

@@ -94,14 +94,6 @@ class FilesystemSwarmCommitCoordinator:
     async def get_run(self, swarm_run_id: str):
         return await self._state_store.get_run(swarm_run_id)
 
-    async def update_run(self, swarm_run_id: str, *, expected_version: int, status=None, token_usage=None):
-        return await self._state_store.update_run(
-            swarm_run_id,
-            expected_version=expected_version,
-            status=status,
-            token_usage=token_usage,
-        )
-
     def _decode_inflight_journal(self, path: Path) -> "_DecodedInflightCommit":
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -225,6 +217,7 @@ class FilesystemSwarmCommitCoordinator:
                     ):
                         await state.update_run(
                             expected_version=current.version,
+                            expected_token=decoded.command.fence.token,
                             status=SwarmStatus.FAILED,
                         )
                     raise SwarmRecoveryError(
@@ -526,7 +519,9 @@ class FilesystemSwarmCommitCoordinator:
 
             updated = await state.update_run(
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.SUCCEEDED,
+                token_usage=command.payload.token_usage,
             )
             return {"swarm_run_id": updated.id, "version": updated.version}
 
@@ -540,7 +535,9 @@ class FilesystemSwarmCommitCoordinator:
 
             updated = await state.update_run(
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.FAILED,
+                token_usage=command.payload.token_usage,
             )
             return {"swarm_run_id": updated.id, "version": updated.version}
 
@@ -554,7 +551,9 @@ class FilesystemSwarmCommitCoordinator:
 
             updated = await state.update_run(
                 expected_version=command.expected_version,
+                expected_token=command.fence.token,
                 status=SwarmStatus.CANCELLED,
+                token_usage=command.payload.token_usage,
             )
             return {"swarm_run_id": updated.id, "version": updated.version}
 
