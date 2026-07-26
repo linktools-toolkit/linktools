@@ -65,7 +65,9 @@ def _ctx(run_id: str = "driving-1") -> EventStreamContext:
     )
 
 
-def _run(swarm_run_id: str = "swarm-1") -> SwarmRun:
+def _run(
+    swarm_run_id: str = "swarm-1", *, execution_token: str | None = None
+) -> SwarmRun:
     return SwarmRun(
         id=swarm_run_id,
         run_id="driving-1",
@@ -76,6 +78,7 @@ def _run(swarm_run_id: str = "swarm-1") -> SwarmRun:
         cost=Decimal("0"),
         created_at=_now(),
         updated_at=_now(),
+        execution_token=execution_token,
     )
 
 
@@ -133,17 +136,17 @@ def _complete_command(swarm_run_id: str, token: str, *, commit_id: str | None = 
     )
 
 
-def _rotate_token(swarm_store: FilesystemSwarmStore, swarm_run_id: str, new_token: str) -> None:
-    """Simulate a reclaim that rotated the run-level owner: overwrite the
-    persisted execution_token directly (reclaim's effect)."""
-    from dataclasses import replace as _replace
-    import json
-    from linktools.ai.swarm.persistence.filesystem import _run_to_json, _run_from_json
-
-    path = swarm_store._run_path(swarm_run_id)
-    current = _run_from_json(json.loads(path.read_text()))
-    rotated = _replace(current, execution_token=new_token)
-    path.write_text(json.dumps(_run_to_json(rotated)), encoding="utf-8")
+async def _rotate_token(
+    swarm_store: FilesystemSwarmStore, swarm_run_id: str, new_token: str
+) -> None:
+    """Rotate ownership through the production atomic store operation."""
+    current = await swarm_store.get_run(swarm_run_id)
+    assert current is not None
+    await swarm_store.rotate_execution_token(
+        swarm_run_id,
+        expected_token=current.execution_token or "",
+        new_token=new_token,
+    )
 
 
 # --- real token validation --------------------------------------------------
@@ -168,7 +171,7 @@ def test_previous_worker_fence_is_rejected(tmp_path):
 
     async def _run_async():
         await coordinator.start(_start_command("swarm-1", "worker-A"))
-        _rotate_token(swarm_store, "swarm-1", "worker-B")
+        await _rotate_token(swarm_store, "swarm-1", "worker-B")
         with pytest.raises(SwarmFenceLostError):
             await coordinator.complete(_complete_command("swarm-1", "worker-A"))
 
@@ -204,7 +207,7 @@ def test_replay_succeeds_after_fence_rotates(tmp_path):
         )
         # Token rotates (reclaim). The SAME complete commit_id now replays --
         # it must return the FIRST result, NOT raise SwarmFenceLostError.
-        _rotate_token(swarm_store, "swarm-1", "worker-B")
+        await _rotate_token(swarm_store, "swarm-1", "worker-B")
         replayed = await coordinator.complete(
             _complete_command("swarm-1", "worker-A", commit_id="complete:swarm-1")
         )
@@ -220,7 +223,7 @@ def test_new_commit_fails_after_fence_rotates(tmp_path):
 
     async def _run_async():
         await coordinator.start(_start_command("swarm-1", "worker-A"))
-        _rotate_token(swarm_store, "swarm-1", "worker-B")
+        await _rotate_token(swarm_store, "swarm-1", "worker-B")
         with pytest.raises(SwarmFenceLostError):
             await coordinator.complete(
                 _complete_command("swarm-1", "worker-A", commit_id="complete:NEW")
@@ -268,8 +271,8 @@ def test_filesystem_fence_check_happens_inside_lock(tmp_path):
     coordinator, swarm_store = _make_coordinator(tmp_path)
 
     async def _run_async():
-        await swarm_store.create_run(_run("swarm-1"))
-        _rotate_token(swarm_store, "swarm-1", "tok-1")
+        await swarm_store.create_run(_run("swarm-1", execution_token="tok-0"))
+        await _rotate_token(swarm_store, "swarm-1", "tok-1")
 
         # Instrument the ACTUAL lock object the store uses: wrap its
         # acquire/release so we count holders strictly inside the critical
@@ -335,7 +338,7 @@ def test_fence_failure_has_zero_event_and_log_writes(tmp_path):
         await coordinator.start(_start_command("swarm-1", "worker-A"))
         events_before = len(events.appended)
         completed_before = len(list(coordinator._completed_dir.glob("*.json")))
-        _rotate_token(swarm_store, "swarm-1", "worker-B")
+        await _rotate_token(swarm_store, "swarm-1", "worker-B")
         with pytest.raises(SwarmFenceLostError):
             await coordinator.complete(
                 _complete_command("swarm-1", "worker-A", commit_id="complete:fresh")

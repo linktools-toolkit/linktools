@@ -23,6 +23,7 @@ import logging
 import os
 import base64
 import binascii
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -101,66 +102,134 @@ class FilesystemSwarmCommitCoordinator:
             token_usage=token_usage,
         )
 
-    async def recover_incomplete_commits(self) -> None:
-        """Recover in-flight journals without deleting unresolved evidence.
+    def _decode_inflight_journal(self, path: Path) -> "_DecodedInflightCommit":
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise SwarmRecoveryError("swarm journal cannot be parsed") from exc
+        if not isinstance(raw, dict):
+            raise SwarmRecoveryError("swarm journal must contain an object")
+        required = {
+            "commit_id", "operation", "swarm_run_id", "request_hash",
+            "state", "command_payload_b64",
+        }
+        if not required.issubset(raw):
+            raise SwarmRecoveryError("swarm journal is missing required fields")
+        commit_id = raw["commit_id"]
+        operation = raw["operation"]
+        swarm_run_id = raw["swarm_run_id"]
+        if not all(isinstance(value, str) and value for value in (
+            commit_id, operation, swarm_run_id, raw["request_hash"]
+        )):
+            raise SwarmRecoveryError("swarm journal has invalid identity fields")
+        try:
+            request_hash = bytes.fromhex(raw["request_hash"])
+            command_payload = base64.b64decode(
+                raw["command_payload_b64"], validate=True
+            )
+        except (binascii.Error, TypeError, ValueError) as exc:
+            raise SwarmRecoveryError("swarm journal has invalid encoded fields") from exc
+        if len(request_hash) != 32:
+            raise SwarmRecoveryError("swarm journal request hash has invalid length")
+        try:
+            command = self._codec.decode_request(operation, command_payload)
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise SwarmRecoveryError("swarm journal command cannot be decoded") from exc
+        if str(command.commit_id) != commit_id:
+            raise SwarmRecoveryError("journal commit_id mismatch")
+        if command.swarm_run_id != swarm_run_id:
+            raise SwarmRecoveryError("journal swarm_run_id mismatch")
+        if self._codec.request_hash(operation, command) != request_hash:
+            raise SwarmRecoveryError("journal request_hash mismatch")
+        state = raw["state"]
+        if state not in {"PREPARED", "RESULT_READY"}:
+            raise SwarmRecoveryError(f"unknown swarm journal state {state!r}")
+        result_payload = None
+        if raw.get("result_payload_b64") is not None:
+            try:
+                result_payload = base64.b64decode(
+                    raw["result_payload_b64"], validate=True
+                )
+            except (binascii.Error, TypeError, ValueError) as exc:
+                raise SwarmRecoveryError("swarm journal result is invalid") from exc
+        if state == "RESULT_READY" and result_payload is None:
+            raise SwarmRecoveryError("RESULT_READY journal has no result payload")
+        return _DecodedInflightCommit(
+            commit_id=commit_id, operation=operation, swarm_run_id=swarm_run_id,
+            request_hash=request_hash, state=state, command=command,
+            command_payload=command_payload, result_payload=result_payload,
+        )
 
-        A result-ready journal is safe to forward-complete because the state,
-        lifecycle event, and typed result have already crossed their durable
-        boundaries. A PREPARED journal cannot prove that the event and
-        completion log were written, so recovery marks an active run failed
-        when possible but still raises and retains the journal.
-        """
+    async def recover_incomplete_commits(self) -> None:
+        """Recover in-flight journals while retaining unverifiable evidence."""
         from ..models import SwarmStatus
 
         failures: list[BaseException] = []
         for path in sorted(self._inflight_dir.glob("*.json")):
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(raw, dict):
-                    raise SwarmRecoveryError("swarm journal must contain an object")
-                required = {
-                    "commit_id", "operation", "swarm_run_id", "request_hash",
-                    "state", "command_payload_b64",
-                }
-                if not required.issubset(raw):
-                    raise SwarmRecoveryError("swarm journal is missing required fields")
-                commit_id = raw["commit_id"]
-                operation = raw["operation"]
-                swarm_run_id = raw["swarm_run_id"]
-                request_hash = bytes.fromhex(raw["request_hash"])
-                if not all(isinstance(value, str) and value for value in (
-                    commit_id, operation, swarm_run_id
-                )) or len(request_hash) != 32:
-                    raise SwarmRecoveryError("swarm journal has invalid identity fields")
-                try:
-                    base64.b64decode(raw["command_payload_b64"], validate=True)
-                except (binascii.Error, TypeError, ValueError) as exc:
-                    raise SwarmRecoveryError(
-                        "swarm journal has an invalid command payload"
-                    ) from exc
-
-                async with self._state_store.commit_scope(swarm_run_id) as state:
-                    if raw["state"] == "RESULT_READY":
-                        result_payload = base64.b64decode(raw.get("result_payload_b64") or "", validate=True)
-                        decoded = self._codec.decode_result(operation, result_payload)
-                        if not isinstance(decoded, Mapping):
+                decoded = self._decode_inflight_journal(path)
+                async with self._state_store.commit_scope(decoded.swarm_run_id) as state:
+                    if decoded.state == "RESULT_READY":
+                        result = self._codec.decode_result(
+                            decoded.operation, decoded.result_payload or b""
+                        )
+                        if not isinstance(result, Mapping):
                             raise SwarmRecoveryError("swarm result payload is not a mapping")
-                        self._write_completion(commit_id, operation, request_hash, decoded, result_payload)
-                        self._clear_inflight(commit_id)
+                        self._write_completion(
+                            decoded.commit_id, decoded.operation,
+                            decoded.request_hash, result, decoded.result_payload,
+                        )
+                        self._clear_inflight(decoded.commit_id)
                         continue
 
-                    if raw["state"] == "PREPARED":
-                        try:
-                            current = await state.get_run()
-                            if current is not None and current.status in (SwarmStatus.PENDING, SwarmStatus.RUNNING, SwarmStatus.CANCELLING):
-                                await state.update_run(expected_version=current.version, status=SwarmStatus.FAILED)
-                        except BaseException as exc:
-                            failures.append(exc)
-                        failures.append(SwarmRecoveryError(f"swarm journal {commit_id!r} stopped before durable completion"))
+                    if decoded.operation == "start":
+                        from dataclasses import replace
+                        from ...events.context import append_event_once
+
+                        command = decoded.command
+                        expected = replace(
+                            command.payload.run,
+                            execution_token=command.fence.token,
+                        )
+                        current = await state.get_run()
+                        if current is None:
+                            current = await state.create_run_if_absent(expected)
+                        elif current != expected:
+                            raise SwarmRecoveryError(
+                                "persisted SwarmRun does not match Start journal"
+                            )
+                        await append_event_once(
+                            self._events,
+                            command.payload.event_context,
+                            command.payload.started_event,
+                            commit_id=decoded.commit_id,
+                            metadata={"commit_id": decoded.commit_id},
+                        )
+                        result = {
+                            "swarm_run_id": current.id,
+                            "version": current.version,
+                        }
+                        result_payload = self._codec.encode_result(
+                            decoded.operation, result
+                        )
+                        self._write_completion(
+                            decoded.commit_id, decoded.operation,
+                            decoded.request_hash, result, result_payload,
+                        )
+                        self._clear_inflight(decoded.commit_id)
                         continue
-                raise SwarmRecoveryError(
-                    f"unknown swarm journal state {raw['state']!r}"
-                )
+
+                    current = await state.get_run()
+                    if current is not None and current.status in (
+                        SwarmStatus.PENDING, SwarmStatus.RUNNING, SwarmStatus.CANCELLING,
+                    ):
+                        await state.update_run(
+                            expected_version=current.version,
+                            status=SwarmStatus.FAILED,
+                        )
+                    raise SwarmRecoveryError(
+                        f"swarm journal {decoded.commit_id!r} stopped before durable completion"
+                    )
             except (OSError, TypeError, ValueError, KeyError, SwarmRecoveryError) as exc:
                 failures.append(exc)
         if failures:
@@ -275,13 +344,12 @@ class FilesystemSwarmCommitCoordinator:
         if not path.exists():
             return False
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
+            decoded = self._decode_inflight_journal(path)
+        except (OSError, ValueError, TypeError, KeyError, SwarmRecoveryError):
             return False
         return (
-            raw.get("commit_id") == commit_id
-            and raw.get("state") in {"PREPARED", "RESULT_READY"}
-            and raw.get("request_hash") == request_hash.hex()
+            decoded.commit_id == commit_id
+            and decoded.request_hash == request_hash
         )
 
     def _record_inflight_result(self, commit_id: str, operation: str, result: Mapping[str, Any]) -> bytes:
@@ -500,3 +568,15 @@ __all__: "list[str]" = ["FilesystemSwarmCommitCoordinator"]
 
 class SwarmRecoveryError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class _DecodedInflightCommit:
+    commit_id: str
+    operation: str
+    swarm_run_id: str
+    request_hash: bytes
+    state: str
+    command: Any
+    command_payload: bytes
+    result_payload: bytes | None

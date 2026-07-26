@@ -230,12 +230,12 @@ def test_fs_recovery_marks_inflight_commit_failed(tmp_path):
         encoding="utf-8",
     )
 
-    # PREPARED journals cannot prove the event + completion log were written,
-    # so recovery marks the run FAILED but raises (and retains the journal).
+    # An un-decodable journal fails closed before touching state and remains
+    # available for forensics.
     with pytest.raises(SwarmRecoveryError):
         _run(coordinator.recover_incomplete_commits())
 
     run = _run(swarm_store.get_run("swarm-fs-r"))
-    assert run.status is SwarmStatus.FAILED
-    # The journal is retained for forensics (not cleared) on the PREPARED path.
+    assert run.status is SwarmStatus.RUNNING
+    # The journal is retained for forensics on the invalid identity path.
     assert inflight_path.exists()

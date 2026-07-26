@@ -319,16 +319,16 @@ def test_mismatched_operation_rejected():
 
 def test_malformed_base64_rejected():
     codec = RunCommitCodec()
-    # Hand-build a payload whose __b64__ field is invalid.
     import json
-    bad_node = {"__b64__": "!!!not base64!!!"}
-    envelope = {
-        "schema_version": 1,
-        "operation": RunCommitOperation.FAIL.value,
-        "payload": {"__dc__": "linktools.ai.run.commit.FailedRunCommit", "f": {"run_id": bad_node}},
-    }
+    envelope = json.loads(
+        codec.encode_request(RunCommitOperation.COMPLETE, _complete_command())
+    )
+    envelope["payload"]["checkpoint_payload_b64"] = "!!!"
     with pytest.raises(RunCommitCodecError):
-        codec.decode_result(RunCommitOperation.FAIL, json.dumps(envelope).encode())
+        codec.decode_request(
+            RunCommitOperation.COMPLETE,
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(),
+        )
 
 
 def test_malformed_json_rejected():

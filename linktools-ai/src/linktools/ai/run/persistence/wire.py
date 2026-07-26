@@ -127,6 +127,36 @@ NonEmptyFence = Annotated[str, Field(min_length=1)]
 NonNegativeVersion = Annotated[int, Field(ge=0)]
 
 
+class RunStartedEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+    runnable_id: NonEmptyId
+
+
+class RunPausedEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+    reason: str
+
+
+class RunResumedEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+
+
+class RunCompletedEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+    result_summary: JsonValue
+
+
+class RunFailedEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+    error_type: NonEmptyId
+    message: str
+
+
+class RunCancelledEventPayloadWire(_WireModel):
+    run_id: NonEmptyId
+    reason: str | None
+
+
 class RunRecordWire(_WireModel):
     id: NonEmptyId
     root_run_id: NonEmptyId
@@ -356,23 +386,40 @@ _EVENTS = {RunStarted: ("run.started", ("run_id", "runnable_id")), RunPaused: ("
            RunResumed: ("run.resumed", ("run_id",)), RunCompleted: ("run.completed", ("run_id", "result_summary")),
            RunFailed: ("run.failed", ("run_id", "error_type", "message")), RunCancelled: ("run.cancelled", ("run_id", "reason"))}
 _EVENT_BY_NAME = {name: cls for cls, (name, _) in _EVENTS.items()}
+_EVENT_PAYLOAD_MODELS = {
+    "run.started": RunStartedEventPayloadWire,
+    "run.paused": RunPausedEventPayloadWire,
+    "run.resumed": RunResumedEventPayloadWire,
+    "run.completed": RunCompletedEventPayloadWire,
+    "run.failed": RunFailedEventPayloadWire,
+    "run.cancelled": RunCancelledEventPayloadWire,
+}
 
 
 def _event(value: Any) -> dict[str, Any]:
     for cls, (name, fields) in _EVENTS.items():
         if isinstance(value, cls):
-            return {"event_type": name, "schema_version": 1, "payload": {field: _json(getattr(value, field), f"event.{field}") for field in fields}}
+            payload = {field: _json(getattr(value, field), f"event.{field}") for field in fields}
+            try:
+                payload_model = _EVENT_PAYLOAD_MODELS[name].model_validate(payload)
+            except ValidationError as exc:
+                raise RunCommitCodecError(f"invalid {name} payload") from exc
+            return {"event_type": name, "schema_version": 1, "payload": payload_model.model_dump(mode="json")}
     raise RunCommitCodecError(f"event: unsupported lifecycle event {type(value).__name__}")
 
 
 def _event_from(value: EventWire) -> Any:
-    if value.schema_version != 1 or value.event_type not in _EVENT_BY_NAME:
-        raise RunCommitCodecError("event: unknown type or schema")
-    cls = _EVENT_BY_NAME[value.event_type]
-    fields = _EVENTS[cls][1]
-    if set(value.payload) != set(fields):
-        raise RunCommitCodecError("event.payload: fields do not match event type")
-    return cls(**value.payload)
+    if value.schema_version != 1:
+        raise RunCommitCodecError("event: unknown schema")
+    payload_model = _EVENT_PAYLOAD_MODELS.get(value.event_type)
+    event_cls = _EVENT_BY_NAME.get(value.event_type)
+    if payload_model is None or event_cls is None:
+        raise RunCommitCodecError(f"unknown lifecycle event {value.event_type!r}")
+    try:
+        payload = payload_model.model_validate(value.payload)
+    except ValidationError as exc:
+        raise RunCommitCodecError(f"invalid {value.event_type} payload") from exc
+    return event_cls(**payload.model_dump())
 
 
 def _message(value: NewSessionMessage) -> dict[str, Any]:
@@ -464,7 +511,8 @@ def _approval_from(value: ApprovalRequestWire) -> ApprovalRequestData:
     return ApprovalRequestData(**value.model_dump())
 
 
-def _request_wire(value: Any, operation: RunCommitOperation) -> _WireModel:
+def _request_wire(value: DecodedRunCommand, operation: RunCommitOperation) -> _WireModel:
+    _require_domain_type(value, operation, result=False)
     common = {"commit_id": value.commit_id.value}
     if operation is RunCommitOperation.START:
         return StartRunRequestWire(record=RunRecordWire.model_validate(run_record_to_wire(value.record)), started_event=EventWire.model_validate(_event(value.started_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), **common)
@@ -481,6 +529,35 @@ def _request_wire(value: Any, operation: RunCommitOperation) -> _WireModel:
     if operation is RunCommitOperation.ACKNOWLEDGE_CANCEL:
         return AcknowledgeCancelRunRequestWire(run_id=value.run_id, expected_version=value.expected_version, cancelled_event=EventWire.model_validate(_event(value.cancelled_event)), event_context=EventContextWire.model_validate(_ctx(value.event_context)), execution_fence=_fence(value.execution_fence), **common)
     raise RunCommitCodecError(f"unsupported operation {operation!r}")
+
+
+_REQUEST_DOMAIN_TYPES = {
+    RunCommitOperation.START: StartRunCommand,
+    RunCommitOperation.PAUSE: PauseRunCommand,
+    RunCommitOperation.RESUME: ResumeRunCommand,
+    RunCommitOperation.COMPLETE: CompleteRunCommand,
+    RunCommitOperation.FAIL: FailRunCommand,
+    RunCommitOperation.REQUEST_CANCEL: RequestCancelRunCommand,
+    RunCommitOperation.ACKNOWLEDGE_CANCEL: AcknowledgeCancelRunCommand,
+}
+_RESULT_DOMAIN_TYPES = {
+    RunCommitOperation.START: StartedRunCommit,
+    RunCommitOperation.PAUSE: PausedRunCommit,
+    RunCommitOperation.RESUME: ResumedRunCommit,
+    RunCommitOperation.COMPLETE: CompletedRunCommit,
+    RunCommitOperation.FAIL: FailedRunCommit,
+    RunCommitOperation.REQUEST_CANCEL: CancellingRunCommit,
+    RunCommitOperation.ACKNOWLEDGE_CANCEL: CancelledRunCommit,
+}
+
+
+def _require_domain_type(value: object, operation: RunCommitOperation, *, result: bool) -> None:
+    expected_type = (_RESULT_DOMAIN_TYPES if result else _REQUEST_DOMAIN_TYPES)[operation]
+    if not isinstance(value, expected_type):
+        raise RunCommitCodecError(
+            f"{operation.value} requires {expected_type.__name__}, "
+            f"got {type(value).__name__}"
+        )
 
 
 REQUEST_WIRE_MODELS = {
@@ -567,7 +644,8 @@ def _decode_result_model(value: _WireModel, operation: RunCommitOperation) -> De
     return CancelledRunCommit(run_id=value.run_id)
 
 
-def _result_wire(value: Any, operation: RunCommitOperation) -> _WireModel:
+def _result_wire(value: DecodedRunResult, operation: RunCommitOperation) -> _WireModel:
+    _require_domain_type(value, operation, result=True)
     if operation is RunCommitOperation.START:
         return StartedRunResultWire(record=RunRecordWire.model_validate(run_record_to_wire(value.record)))
     if operation is RunCommitOperation.PAUSE:
@@ -595,7 +673,7 @@ def encode_envelope(operation: RunCommitOperation | str, payload: Any, *, kind: 
         return _canonical(envelope.model_dump(mode="json"))
     except RunCommitCodecError:
         raise
-    except (ValidationError, KeyError, TypeError, ValueError, binascii.Error) as exc:
+    except (AttributeError, ValidationError, KeyError, TypeError, ValueError, binascii.Error) as exc:
         raise RunCommitCodecError("cannot encode malformed Run payload") from exc
 
 
@@ -619,4 +697,4 @@ def decode_envelope(payload: bytes, *, expected_operation: RunCommitOperation | 
         ) from exc
 
 
-__all__ = ["JsonValue", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "RunRecordWire", "ApprovalRequestWire", "StartRunRequestWire", "PauseRunRequestWire", "ResumeRunRequestWire", "CompleteRunRequestWire", "FailRunRequestWire", "RequestCancelRunRequestWire", "AcknowledgeCancelRunRequestWire", "StartedRunResultWire", "PausedRunResultWire", "ResumedRunResultWire", "CompletedRunResultWire", "FailedRunResultWire", "CancellingRunResultWire", "CancelledRunResultWire", "REQUEST_WIRE_MODELS", "RESULT_WIRE_MODELS", "require_json_value", "run_record_to_wire", "run_record_from_wire", "run_result_from_wire", "run_error_from_wire", "encode_envelope", "decode_envelope"]
+__all__ = ["JsonValue", "RunCommitOperation", "RunCommitCodecError", "RunCommitIntegrityError", "SCHEMA_VERSION", "RunCommitWireEnvelope", "DateTimeWire", "RunInputWire", "RunResultWire", "RunErrorWire", "NewSessionMessageWire", "EventContextWire", "EventWire", "RunStartedEventPayloadWire", "RunPausedEventPayloadWire", "RunResumedEventPayloadWire", "RunCompletedEventPayloadWire", "RunFailedEventPayloadWire", "RunCancelledEventPayloadWire", "RunRecordWire", "ApprovalRequestWire", "StartRunRequestWire", "PauseRunRequestWire", "ResumeRunRequestWire", "CompleteRunRequestWire", "FailRunRequestWire", "RequestCancelRunRequestWire", "AcknowledgeCancelRunRequestWire", "StartedRunResultWire", "PausedRunResultWire", "ResumedRunResultWire", "CompletedRunResultWire", "FailedRunResultWire", "CancellingRunResultWire", "CancelledRunResultWire", "REQUEST_WIRE_MODELS", "RESULT_WIRE_MODELS", "require_json_value", "run_record_to_wire", "run_record_from_wire", "run_result_from_wire", "run_error_from_wire", "encode_envelope", "decode_envelope"]
