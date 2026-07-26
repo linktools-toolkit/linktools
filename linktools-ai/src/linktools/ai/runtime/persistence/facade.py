@@ -14,13 +14,13 @@ This module is deliberately SQLAlchemy-free: ``Storage`` and
 ``FilesystemStorage`` depend only on the standard library and core stores, so
 ``import linktools.ai`` and ``import linktools.ai.runtime`` succeed without
 the optional SQLAlchemy/aiosqlite dependencies. The SQLAlchemy-backed
-composition (``SqlAlchemyStorage``) lives at
+composition (``SqlAlchemyStorageAdapter``) lives at
 ``linktools.ai.runtime.persistence.sqlalchemy`` and is loaded lazily via
 ``runtime/persistence/__init__.__getattr__``.
 
 - Storage: frozen composition of the nine backends + capabilities; the base
   ``transaction()`` delegates to the internal ``_transaction_manager``. A backend whose
-  stores share a transaction provider (SqlAlchemyStorage) yields a real UoW; a
+  stores share a transaction provider (SqlAlchemyStorageAdapter) yields a real UoW; a
   backend whose stores are independent (FilesystemStorage) raises
   StorageTransactionNotSupportedError at the call.
 - FilesystemStorage: nine independent file backends under a root dir. No cross-store
@@ -55,14 +55,15 @@ from ...session.store import SessionStore
 from ...storage.object.store import ObjectStore
 from ...swarm.store import SwarmStore
 from ...tool.idempotency import IdempotencyStore
-from .features import FILE_STORAGE_FEATURES, StorageFeatures
+from .features import StorageFeatures
+from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
 from .transaction import NoCrossStoreTransactions
 
 
 @dataclass(frozen=True)
 class Storage:
     """Frozen composition of the storage backends. Concrete subclasses
-    (FilesystemStorage, SqlAlchemyStorage) are responsible for constructing the
+    (FilesystemStorage, SqliteStorage) are responsible for constructing the
     backends; this base only holds them and exposes the cross-cutting
     transaction() hook."""
 
@@ -94,7 +95,7 @@ class Storage:
     # StorageTransactionNotSupportedError at the call -- the honest declaration
     # for features.transaction_scope = NONE (each store independently durable,
     # no cross-store UoW). A backend with a shared transaction provider
-    # (SqlAlchemyStorage) supplies a real manager and declares
+    # (SqlAlchemyStorageAdapter) supplies a real manager and declares
     # TransactionScope.DATABASE.
     _transaction_manager: "StorageTransactionManager"
     # Required, not optional: every run entry point (agent / subagent / swarm
@@ -116,15 +117,44 @@ class Storage:
     # when present (no implicit getattr fallback on the asset store).
     artifacts: "ArtifactStore | None" = None
 
+    def __post_init__(self) -> None:
+        """Derive public capabilities from the stores actually wired."""
+        components = {
+            StorageComponent.ASSETS: self.assets,
+            StorageComponent.RUNS: self.runs,
+            StorageComponent.SESSIONS: self.sessions,
+            StorageComponent.EVENTS: self.events,
+            StorageComponent.APPROVALS: self.approvals,
+            StorageComponent.CHECKPOINTS: self.checkpoints,
+            StorageComponent.JOBS: self.jobs,
+        }
+        object.__setattr__(
+            self,
+            "features",
+            StorageFeatures.from_components(
+                transaction_scope=self.features.transaction_scope,
+                coordination_scope=self.features.coordination_scope,
+                artifact_coordination_scope=self.features.artifact_coordination_scope,
+                leasing=self.features.leasing,
+                fencing=self.features.fencing,
+                streaming_artifacts=self.features.streaming_artifacts,
+                components=components,
+            ),
+        )
+
     def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         """Cross-store transactional scope -- the single public entry. A backend
-        whose stores share a transaction provider (SqlAlchemyStorage) yields a
+        whose stores share a transaction provider (SqlAlchemyStorageAdapter) yields a
         real UoW; a backend whose stores are independent (FilesystemStorage)
         raises StorageTransactionNotSupportedError at the call. Branch on
         ``features.transaction_scope is TransactionScope.DATABASE`` before
         relying on it. The wired transaction manager is an internal dependency;
         callers go through this method, never the manager object directly."""
         return self._transaction_manager.transaction()
+
+    @property
+    def transaction_manager(self) -> "StorageTransactionManager":
+        return self._transaction_manager
 
 
 class FilesystemStorage(Storage):
@@ -134,7 +164,12 @@ class FilesystemStorage(Storage):
     features.transaction_scope == TransactionScope.DATABASE (False here) before
     calling it."""
 
-    def __init__(self, *, root: "str | Path" = "./data") -> None:
+    def __init__(
+        self,
+        *,
+        root: "str | Path" = "./data",
+        mode: "FilesystemSecurityMode | None" = None,
+    ) -> None:
         # Lazy import keeps `import linktools.ai` / `import linktools.ai.runtime`
         # from pulling the per-domain persistence adapters eagerly; only
         # constructing a FilesystemStorage does.
@@ -150,6 +185,7 @@ class FilesystemStorage(Storage):
         from ...run.persistence.run import FilesystemRunStore
         from ...session.persistence.filesystem import FilesystemSessionStore
         from ...storage.backends.filesystem.object import FilesystemObjectBackend
+        from ...storage.backends.filesystem.secure_directory import FilesystemSecurityMode
         from ...storage.coordination.process_local import (
             InProcessKeyedCoordinator,
             ProcessLocalLeaseCoordinator,
@@ -159,7 +195,12 @@ class FilesystemStorage(Storage):
         from ...tool.persistence.filesystem import FilesystemIdempotencyStore
 
         root_path = Path(root)
-        assets = ObjectStore(primary=FilesystemObjectBackend(root=root_path / "assets"))
+        assets = ObjectStore(
+            primary=FilesystemObjectBackend(
+                root=root_path / "assets",
+                mode=mode or FilesystemSecurityMode.SECURE_POSIX,
+            )
+        )
         super().__init__(
             assets=assets,
             sessions=FilesystemSessionStore(root=root_path / "sessions"),
@@ -171,7 +212,13 @@ class FilesystemStorage(Storage):
             approvals=FilesystemApprovalStore(root=root_path / "approvals"),
             idempotency=FilesystemIdempotencyStore(root=root_path / "idempotency"),
             run_definitions=FilesystemRunDefinitionStore(root=root_path / "definitions"),
-            features=FILE_STORAGE_FEATURES,
+            features=StorageFeatures.from_components(
+                transaction_scope=TransactionScope.NONE,
+                coordination_scope=CoordinationScope.PROCESS_LOCAL,
+                artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
+                leasing=True, fencing=True, streaming_artifacts=True,
+                components={StorageComponent.ASSETS: assets},
+            ),
             coordination=ProcessLocalLeaseCoordinator(),
             _transaction_manager=NoCrossStoreTransactions("FilesystemStorage"),
             jobs=FilesystemJobStore(root_path / "jobs"),
@@ -197,7 +244,6 @@ class FilesystemStorage(Storage):
 
 
 __all__: "list[str]" = [
-    "FILE_STORAGE_FEATURES",
     "FilesystemStorage",
     "Storage",
     "StorageFeatures",

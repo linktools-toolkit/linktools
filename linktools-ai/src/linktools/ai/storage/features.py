@@ -5,7 +5,7 @@ declares as its capability surface. Pure standard-library (no domain imports),
 so this module stays in the storage kernel.
 
 The runtime-composition surface that BUILDS ON these enums (``StorageFeatures``
-dataclass + the ``FILE_STORAGE_FEATURES`` / ``SQLALCHEMY_STORAGE_FEATURES``
+dataclass + composition-derived features
 presets + the ``StorageFeatures.from_components`` derivation) lives at
 ``linktools.ai.runtime.persistence.features`` -- it is runtime-shaped (a frozen
 declaration of what THIS Storage provides), not a storage-kernel primitive.
@@ -50,7 +50,7 @@ class ComponentCapabilities:
     a ``capabilities`` property returning one of these; ``StorageFeatures.
     from_components`` (in the runtime layer) aggregates them so a Storage's
     declared features are a FUNCTION of the wired stores rather than an
-    optimistic ``_ALL_COMPONENTS`` default. Defaults are conservative (every
+    optimistic all-components default. Defaults are conservative (every
     capability False) so a store that does not declare ``capabilities`` is
     treated as offering nothing, never silently offering everything."""
 

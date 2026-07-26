@@ -48,20 +48,6 @@ class FilesystemSecurityMode(str, Enum):
     TRUSTED_LOCAL = "trusted_local"
 
 
-# Flags reused on every dirfd-relative directory open. Captured once so the
-# class does not re-fetch them per call.
-_DIR_FLAGS = (
-    os.O_RDONLY
-    | os.O_DIRECTORY
-    | os.O_NOFOLLOW
-    | getattr(os, "O_CLOEXEC", 0)
-)
-_FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-_FILE_CREATE_FLAGS = (
-    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-)
-
-
 def _check_posix_capabilities() -> None:
     """Probe the platform for the dirfd/O_NOFOLLOW/O_DIRECTORY/flock primitives
     SECURE_POSIX depends on. Raises StorageObjectError if any are missing so
@@ -71,13 +57,13 @@ def _check_posix_capabilities() -> None:
         if not hasattr(os, capability):
             missing.append(f"os.{capability}")
     # dir_fd support on the operations we use:
-    for fn_name in ("open", "mkdir", "rmdir", "unlink", "replace", "stat", "fstat"):
+    for fn_name in ("open", "mkdir", "rmdir", "unlink", "stat"):
         fn = getattr(os, fn_name, None)
         # CPython exposes dir_fd acceptance via the function's __doc__ /
         # signature; the reliable probe is to inspect support_os_dir_fd.
-        if fn is None:
+        if fn is None or fn not in getattr(os, "supports_dir_fd", set()):
             missing.append(f"os.{fn_name}")
-    if not getattr(os, "replace", None):
+    if not getattr(os, "replace", None) or os.rename not in getattr(os, "supports_dir_fd", set()):
         missing.append("os.replace (dir_fd form)")
     try:
         import fcntl  # noqa: F401
@@ -124,6 +110,9 @@ class SecureDirectory:
     ) -> None:
         if mode is FilesystemSecurityMode.SECURE_POSIX:
             _check_posix_capabilities()
+            self._dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            self._file_read_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            self._file_create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._mode = mode
@@ -140,7 +129,7 @@ class SecureDirectory:
 
     @contextmanager
     def _open_root(self) -> "Iterator[int]":
-        fd = os.open(str(self._root), _DIR_FLAGS)
+        fd = os.open(str(self._root), self._dir_flags)
         try:
             yield fd
         finally:
@@ -158,10 +147,10 @@ class SecureDirectory:
             if not components:
                 yield root_fd
                 return
-            current = os.open(components[0], _DIR_FLAGS, dir_fd=root_fd)
+            current = os.open(components[0], self._dir_flags, dir_fd=root_fd)
             try:
                 for component in components[1:]:
-                    next_fd = os.open(component, _DIR_FLAGS, dir_fd=current)
+                    next_fd = os.open(component, self._dir_flags, dir_fd=current)
                     os.close(current)
                     current = next_fd
                 yield current
@@ -180,18 +169,18 @@ class SecureDirectory:
                 return
             try:
                 try:
-                    current = os.open(components[0], _DIR_FLAGS, dir_fd=root_fd)
+                    current = os.open(components[0], self._dir_flags, dir_fd=root_fd)
                 except FileNotFoundError:
                     os.mkdir(components[0], mode, dir_fd=root_fd)
                     os.fsync(root_fd)
-                    current = os.open(components[0], _DIR_FLAGS, dir_fd=root_fd)
+                    current = os.open(components[0], self._dir_flags, dir_fd=root_fd)
                 for component in components[1:]:
                     try:
-                        next_fd = os.open(component, _DIR_FLAGS, dir_fd=current)
+                        next_fd = os.open(component, self._dir_flags, dir_fd=current)
                     except FileNotFoundError:
                         os.mkdir(component, mode, dir_fd=current)
                         os.fsync(current)
-                        next_fd = os.open(component, _DIR_FLAGS, dir_fd=current)
+                        next_fd = os.open(component, self._dir_flags, dir_fd=current)
                     os.close(current)
                     current = next_fd
             finally:
@@ -204,7 +193,7 @@ class SecureDirectory:
         parent_components = components[:-1]
         name = components[-1]
         with self._open_dir_chain(*parent_components) as parent_fd:
-            file_fd = os.open(name, _FILE_READ_FLAGS, dir_fd=parent_fd)
+            file_fd = os.open(name, self._file_read_flags, dir_fd=parent_fd)
             try:
                 chunks: "list[bytes]" = []
                 while True:
@@ -301,7 +290,7 @@ class SecureDirectory:
                 with self._open_under(parent_fd, temp_name) as temp_fd:
                     for fname, content in files.items():
                         file_fd = os.open(
-                            fname, _FILE_CREATE_FLAGS, 0o600, dir_fd=temp_fd
+                            fname, self._file_create_flags, 0o600, dir_fd=temp_fd
                         )
                         try:
                             self._write_fd(file_fd, content)
@@ -353,7 +342,7 @@ class SecureDirectory:
         for _ in range(16):
             name = f".{prefix}.{secrets.token_hex(8)}.tmp"
             try:
-                fd = os.open(name, _FILE_CREATE_FLAGS, mode, dir_fd=parent_fd)
+                fd = os.open(name, self._file_create_flags, mode, dir_fd=parent_fd)
                 return fd, name
             except FileExistsError:
                 continue
@@ -384,7 +373,7 @@ class SecureDirectory:
 
     @contextmanager
     def _open_under(self, parent_fd: int, name: str) -> "Iterator[int]":
-        fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        fd = os.open(name, self._dir_flags, dir_fd=parent_fd)
         try:
             yield fd
         finally:
@@ -395,7 +384,7 @@ class SecureDirectory:
         recursively. Refuses to follow a symlink: a symlink is unlinked, not
         traversed."""
         try:
-            sub_fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+            sub_fd = os.open(name, self._dir_flags, dir_fd=parent_fd)
         except NotADirectoryError:
             # Not a directory: unlink it directly (O_NOFOLLOW guarantees we
             # are NOT following a symlink to do so).
@@ -409,3 +398,57 @@ class SecureDirectory:
         finally:
             os.close(sub_fd)
         os.rmdir(name, dir_fd=parent_fd)
+
+
+class DirectoryIO:
+    """Common directory I/O contract used by both platform modes."""
+
+
+class PosixSecureDirectory(SecureDirectory, DirectoryIO):
+    pass
+
+
+class TrustedLocalDirectory(DirectoryIO):
+    """Path-based I/O for an explicitly trusted, single-user local root.
+
+    This mode intentionally makes no symlink or TOCTOU guarantee and must not
+    be used for multi-tenant data. It is separate from the POSIX implementation
+    so importing and constructing it never evaluates POSIX-only flags.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._mode = FilesystemSecurityMode.TRUSTED_LOCAL
+
+    @property
+    def root(self) -> Path: return self._root
+    @property
+    def security_mode(self) -> FilesystemSecurityMode: return self._mode
+
+    def _path(self, parts: tuple[str, ...]) -> Path:
+        _validate_components(parts)
+        return self._root.joinpath(*parts)
+
+    def ensure_directory(self, *parts: str, mode: int = 0o700) -> None:
+        self._path(parts).mkdir(parents=True, exist_ok=True, mode=mode)
+    def read_bytes(self, *parts: str) -> bytes: return self._path(parts).read_bytes()
+    def stat(self, *parts: str):
+        try: return self._path(parts).lstat()
+        except FileNotFoundError: return None
+    def list_names(self, *parts: str) -> tuple[str, ...]:
+        path = self._path(parts)
+        return tuple(sorted(p.name for p in path.iterdir())) if path.exists() else ()
+    def atomic_write(self, *parts: str, content: bytes, mode: int = 0o600) -> None:
+        path = self._path(parts); path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_bytes(content); tmp.replace(path)
+    def atomic_publish_directory(self, *parts: str, files: Mapping[str, bytes]) -> None:
+        path = self._path(parts); tmp = path.with_name(f".{path.name}.tmp")
+        tmp.mkdir(parents=True, exist_ok=True)
+        for name, content in files.items(): (tmp / name).write_bytes(content)
+        tmp.replace(path)
+    def unlink(self, *parts: str, missing_ok: bool = False) -> None: self._path(parts).unlink(missing_ok=missing_ok)
+    def remove_tree(self, *parts: str) -> None:
+        import shutil
+        shutil.rmtree(self._path(parts), ignore_errors=True)

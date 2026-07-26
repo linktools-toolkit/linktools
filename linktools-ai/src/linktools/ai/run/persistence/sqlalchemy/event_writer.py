@@ -9,7 +9,7 @@ run into fail/fencing-loss convergence (the security-sensitive action that
 triggered the append must NOT proceed).
 
 The writer consumes an EventStore + RunStore that share the same
-SqlAlchemyStorage UoW so the read-check-append-commit cycle is one
+SQLAlchemy Storage UoW so the read-check-append-commit cycle is one
 transaction. It does not own the transaction itself; the caller (typically
 RunCoordinator) opens it via Storage.transaction()."""
 

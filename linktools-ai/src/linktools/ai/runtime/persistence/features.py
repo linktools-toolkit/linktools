@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Runtime persistence features: ``StorageFeatures`` (the capability surface a
 Storage declares, at component granularity) + the two in-repo reference
-presets (``FILE_STORAGE_FEATURES``, ``SQLALCHEMY_STORAGE_FEATURES``).
+static capability presets.
 
 The capability enums themselves (``TransactionScope`` / ``CoordinationScope`` /
 ``StorageComponent``) live at ``linktools.ai.storage.features`` -- they are the
@@ -35,9 +35,6 @@ from ...storage.features import (
     StorageComponent,
     TransactionScope,
 )
-
-_ALL_COMPONENTS: "frozenset[StorageComponent]" = frozenset(StorageComponent)
-
 
 def _capabilities_of(store: object) -> ComponentCapabilities:
     """Read a store's declared capabilities, defaulting to the empty
@@ -81,7 +78,7 @@ class StorageFeatures:
         components: "Mapping[StorageComponent, object]",
     ) -> "StorageFeatures":
         """Build features by inspecting each wired store's ``capabilities``
-        rather than optimistically declaring ``_ALL_COMPONENTS``. The
+        rather than optimistically declaring every component. The
         transactional_components / optimistic_concurrency / idempotency /
         append_only_events frozensets are derived: a component appears in a
         set iff its wired store's capabilities say so."""
@@ -113,55 +110,7 @@ class StorageFeatures:
         )
 
 
-# Coordination note: the in-repo reference Storage instances (FilesystemStorage
-# and SqlAlchemyStorage) both ship the process-local ProcessLocalLeaseCoordinator,
-# so both declare CoordinationScope.PROCESS_LOCAL. DISTRIBUTED coordination (a
-# real cross-process lease backend -- Redis/etcd/a shared DB lease table) is a
-# downstream concern: a deployment that needs multi-worker Jobs or multi-process
-# Swarms injects a distributed LeaseCoordinator and declares DISTRIBUTED on its
-# own StorageFeatures. The build-time capability gate compares these scopes
-# against a declared RuntimeRequirements and refuses a shortfall at build_runtime
-# time; subsystems opt into enforcement by passing requirements.
-
-
-FILE_STORAGE_FEATURES = StorageFeatures(
-    # NONE: each file store is independently durable (atomic writes), but there
-    # is NO general cross-store transaction -- Storage.transaction() raises.
-    transaction_scope=TransactionScope.NONE,
-    transactional_components=frozenset(),
-    coordination_scope=CoordinationScope.PROCESS_LOCAL,
-    optimistic_concurrency=_ALL_COMPONENTS,
-    leasing=True,
-    fencing=True,
-    idempotency=True,
-    streaming_artifacts=True,
-    append_only_events=True,
-    # FilesystemStorage wires ArtifactStore with the default
-    # InProcessKeyedCoordinator -> PROCESS_LOCAL.
-    artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
-)
-
-SQLALCHEMY_STORAGE_FEATURES = StorageFeatures(
-    # DATABASE: one AsyncSession + one transaction groups every store, so all
-    # components commit or roll back together.
-    transaction_scope=TransactionScope.DATABASE,
-    transactional_components=_ALL_COMPONENTS,
-    coordination_scope=CoordinationScope.PROCESS_LOCAL,
-    optimistic_concurrency=_ALL_COMPONENTS,
-    leasing=True,
-    fencing=True,
-    idempotency=True,
-    streaming_artifacts=True,
-    append_only_events=True,
-    # SqlAlchemyStorage wires ArtifactStore with a FilesystemKeyedCoordinator
-    # -> PROCESS_LOCAL (flock coordinates one filesystem, not distributed workers).
-    artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
-)
-
-
 __all__: "list[str]" = [
     "ComponentCapabilities",
-    "FILE_STORAGE_FEATURES",
-    "SQLALCHEMY_STORAGE_FEATURES",
     "StorageFeatures",
 ]

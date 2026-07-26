@@ -30,9 +30,11 @@ from sqlalchemy.ext.asyncio import (
 
 from ...storage.coordination.file import FilesystemKeyedCoordinator
 from ...storage.coordination.process_local import ProcessLocalLeaseCoordinator
-from .features import SQLALCHEMY_STORAGE_FEATURES
+from .features import StorageFeatures
+from ...storage.features import CoordinationScope, TransactionScope
 from ...storage.filesystem.artifact import FilesystemArtifactBlobStore
 from .sqlalchemy import SqlAlchemyStorageAdapter
+from ...storage.backends.sqlalchemy.schema import SqliteReferenceSchemaProvider
 
 
 def configure_wal_pragmas(engine: AsyncEngine) -> None:
@@ -76,6 +78,14 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         database: "str | Path",
         artifact_root: "Path | None" = None,
     ) -> None:
+        raise TypeError("SqliteStorage must be created with await create()")
+
+    def _configure(
+        self,
+        *,
+        database: "str | Path",
+        artifact_root: "Path | None" = None,
+    ) -> None:
         database_str = str(database)
         # An in-memory or URI database has no filesystem path to derive a
         # private artifact root from, and a shared ``parent / "blobs"`` would
@@ -104,11 +114,17 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         self._artifact_root = resolved_root
         from ...storage.sqlalchemy.dialects import SqliteObjectDialect
 
-        super().__init__(
+        self._initialize(
             session_factory=session_factory,
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
             coordination=ProcessLocalLeaseCoordinator(),
-            features=SQLALCHEMY_STORAGE_FEATURES,
+            features=StorageFeatures.from_components(
+                transaction_scope=TransactionScope.DATABASE,
+                coordination_scope=CoordinationScope.PROCESS_LOCAL,
+                artifact_coordination_scope=CoordinationScope.PROCESS_LOCAL,
+                leasing=True, fencing=True, streaming_artifacts=True,
+                components={},
+            ),
             # Blobs live on the shared filesystem, so the per-digest lock must
             # span processes (a separate sweeper worker) -- flock the blobs root.
             artifact_coordinator=FilesystemKeyedCoordinator(
@@ -116,7 +132,24 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             ),
             # The SQLite reference convenience ships the SQLite dialect.
             dialect=SqliteObjectDialect(),
+            schema_provider=SqliteReferenceSchemaProvider(),
         )
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        database: "str | Path",
+        artifact_root: "Path | None" = None,
+    ) -> "SqliteStorage":
+        """Construct and validate the reference composition asynchronously."""
+        instance = cls.__new__(cls)
+        instance._configure(database=database, artifact_root=artifact_root)
+        await instance._schema_provider.create_for_tests_and_local_reference(
+            instance._session_factory
+        )
+        await instance._schema_provider.validate(instance._session_factory)
+        return instance
 
     async def dispose(self) -> None:
         """Release the engine's connection pool. Call on shutdown. The artifact

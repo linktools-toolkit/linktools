@@ -89,6 +89,9 @@ class Runtime:
             coordinator = self._components.commit_coordinator
             if coordinator is not None:
                 await coordinator.recover_incomplete_commits()
+            swarm_coordinator = self._components.swarm_commit_coordinator
+            if swarm_coordinator is not None:
+                await swarm_coordinator.recover_incomplete_commits()
             self._recovery_done = True
 
     async def inspect(self, spec: AgentSpec) -> "CapabilityInspection":
@@ -328,17 +331,27 @@ def _resolve_swarm_commit_coordinator_for(storage: "Storage") -> Any:
         from ..swarm.persistence.sqlalchemy_commit import (
             SqlAlchemySwarmCommitCoordinator,
         )
+        from ..swarm.commit import SwarmCommitPolicy
+        from ..swarm.persistence.codec import SwarmCommitCodec
 
-        return SqlAlchemySwarmCommitCoordinator(storage, storage.swarms)
+        return SqlAlchemySwarmCommitCoordinator(
+            storage, policy=SwarmCommitPolicy(), codec=SwarmCommitCodec()
+        )
     if scope is not None and getattr(scope, "value", None) == "none" and hasattr(
         storage, "root"
     ):
         from ..swarm.persistence.filesystem_commit import (
             FilesystemSwarmCommitCoordinator,
         )
+        from ..swarm.commit import SwarmCommitPolicy
+        from ..swarm.persistence.codec import SwarmCommitCodec
 
         return FilesystemSwarmCommitCoordinator(
-            storage.swarms, transactions_root=storage.root / "transactions"
+            storage.swarms,
+            event_store=storage.events,
+            transactions_root=storage.root / "transactions",
+            policy=SwarmCommitPolicy(),
+            codec=SwarmCommitCodec(),
         )
     raise SwarmCommitCoordinatorUnavailableError(
         f"cannot resolve a SwarmCommitCoordinator for storage "

@@ -56,17 +56,26 @@ from ..errors import (
     ToolSchemaError,
 )
 
-from ..events.payloads import SwarmCompleted, SwarmStarted
-from ..run.live_events import NullSwarmEventSink, SwarmEventSink
+from ..events.context import EventStreamContext
+from ..events.payloads import SwarmCancelled, SwarmCompleted, SwarmFailed, SwarmStarted
 from ..run.cancellation import CancellationToken
 from ..run.context import RunContext
 from ..run.dispatch import RunDispatcher
 from ..run.models import (
     RunErrorInfo,
     RunInput,
+    RunResult,
 )
 from ..session.models import MessageRole, NewSessionMessage
-from .commit import SwarmCommitCoordinator
+from .commit import (
+    CancelSwarmPayload,
+    CompleteSwarmPayload,
+    FailSwarmPayload,
+    StartSwarmPayload,
+    SwarmCommitCoordinator,
+    SwarmCommitId,
+    SwarmExecutionFence,
+)
 from .models import (
     SwarmCheckpoint,
     SwarmCompleted as SwarmCompletedOutcome,
@@ -80,7 +89,6 @@ from .models import (
 )
 
 from .spec import SwarmSpec
-from .store import SwarmStore
 from .strategy import (
     ResumableSwarmStrategy,
     SwarmExecutionContext,
@@ -149,13 +157,11 @@ class SwarmEngine:
     def __init__(
         self,
         *,
-        swarm_store: SwarmStore,
         compiler: AgentCompiler,
         dispatcher: RunDispatcher,
         swarm_commit_coordinator: "SwarmCommitCoordinator",
         clock: "Clock | None" = None,
     ) -> None:
-        self._swarm_store = swarm_store
         # Injected Clock so timestamp logic is deterministic under test
         # (FakeClock) and uses the wall clock in production (the default).
         self._clock = clock if clock is not None else SystemClock()
@@ -168,6 +174,7 @@ class SwarmEngine:
         # lifecycle writes -- a terminal transition that does NOT go through
         # the commit log would defeat replay detection.
         self._swarm_commit_coordinator = swarm_commit_coordinator
+        self._state_store = swarm_commit_coordinator.state_store
 
     async def _commit_swarm_transition(
         self,
@@ -176,7 +183,9 @@ class SwarmEngine:
         expected_version: int,
         target: "SwarmStatus",
         commit_id_suffix: str,
-        payload: "Mapping[str, Any] | None" = None,
+        result: "RunResult | None" = None,
+        error: "RunErrorInfo | None" = None,
+        event_context: "EventStreamContext | None" = None,
     ) -> "int":
         """Apply a terminal SwarmRun transition through the
         SwarmCommitCoordinator so the commit is idempotent by commit_id and
@@ -191,35 +200,58 @@ class SwarmEngine:
         )
 
         commit_id = f"{commit_id_suffix}:{swarm_run_id}"
-        command_payload = dict(payload or {})
+        if target is SwarmStatus.SUCCEEDED:
+            if result is None:
+                raise SwarmError("successful swarm commit requires a result")
+            lifecycle_event = SwarmCompleted(swarm_run_id=swarm_run_id)
+        elif target is SwarmStatus.FAILED:
+            if error is None:
+                raise SwarmError("failed swarm commit requires an error")
+            lifecycle_event = SwarmFailed(
+                swarm_run_id=swarm_run_id,
+                error=error.message,
+            )
+        else:
+            lifecycle_event = SwarmCancelled(swarm_run_id=swarm_run_id)
         if target is SwarmStatus.SUCCEEDED:
             result = await self._swarm_commit_coordinator.complete(
                 CompleteSwarmCommand(
-                    commit_id=commit_id,
+                    commit_id=SwarmCommitId(commit_id),
                     swarm_run_id=swarm_run_id,
                     expected_version=expected_version,
-                    payload=command_payload,
-                    event_context=None,
+                    payload=CompleteSwarmPayload(
+                        result=result,
+                        completed_event=lifecycle_event,
+                        event_context=event_context,
+                    ),
+                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
                 )
             )
         elif target is SwarmStatus.FAILED:
             result = await self._swarm_commit_coordinator.fail(
                 FailSwarmCommand(
-                    commit_id=commit_id,
+                    commit_id=SwarmCommitId(commit_id),
                     swarm_run_id=swarm_run_id,
                     expected_version=expected_version,
-                    payload=command_payload,
-                    event_context=None,
+                    payload=FailSwarmPayload(
+                        error=error,
+                        failed_event=lifecycle_event,
+                        event_context=event_context,
+                    ),
+                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
                 )
             )
         elif target is SwarmStatus.CANCELLED:
             result = await self._swarm_commit_coordinator.cancel(
                 CancelSwarmCommand(
-                    commit_id=commit_id,
+                    commit_id=SwarmCommitId(commit_id),
                     swarm_run_id=swarm_run_id,
                     expected_version=expected_version,
-                    payload=command_payload,
-                    event_context=None,
+                    payload=CancelSwarmPayload(
+                        cancelled_event=lifecycle_event,
+                        event_context=event_context,
+                    ),
+                    fence=SwarmExecutionFence(f"swarm:{swarm_run_id}"),
                 )
             )
         else:  # pragma: no cover -- defensive
@@ -237,7 +269,6 @@ class SwarmEngine:
         *,
         agents: "Mapping[str, AgentSpec]",
         cancellation: "CancellationToken",
-        swarm_event_sink: "SwarmEventSink | None" = None,
     ) -> "SwarmExecutionOutcome":
         """The target swarm execution loop. Drives the strategy + manages
         SwarmRun/SwarmStep domain state and returns a
@@ -253,10 +284,9 @@ class SwarmEngine:
         now = self._clock.now()
         swarm_run: "SwarmRun | None" = None
         swarm_version: "int | None" = None
-        # The Coordinator owns the swarm event sink (durable, per-Run); direct
-        # callers pass None for a null audit trail. SwarmEngine never appends the
-        # EventStore itself.
-        sink = swarm_event_sink or NullSwarmEventSink()
+        # Lifecycle events are carried by typed commit payloads; the
+        # coordinator appends them at the same durability boundary as state.
+        # SwarmEngine never appends the EventStore itself.
 
         try:
             await cancellation.raise_if_cancelled()
@@ -275,6 +305,7 @@ class SwarmEngine:
                 created_at=now,
                 updated_at=now,
             )
+            swarm_event_context = EventStreamContext.from_run_context(context)
             # Route through the SwarmCommitCoordinator: one atomic, commit_id-
             # keyed idempotent start. The payload carries the full initial
             # SwarmRun, so the coordinator re-creates the same shape (id
@@ -283,43 +314,33 @@ class SwarmEngine:
 
             await self._swarm_commit_coordinator.start(
                 StartSwarmCommand(
-                    commit_id=f"start:{swarm_run.id}",
+                    commit_id=SwarmCommitId(f"start:{swarm_run.id}"),
                     swarm_run_id=swarm_run.id,
                     expected_version=1,
-                    payload={
-                        "id": swarm_run.id,
-                        "run_id": swarm_run.run_id,
-                        "round": swarm_run.round,
-                        "status": swarm_run.status,
-                        "version": swarm_run.version,
-                        "token_usage": swarm_run.token_usage,
-                        "cost": str(swarm_run.cost),
-                        "created_at": swarm_run.created_at,
-                        "updated_at": swarm_run.updated_at,
-                    },
-                    event_context=None,
+                    payload=StartSwarmPayload(
+                        run=swarm_run,
+                        started_event=SwarmStarted(
+                            swarm_run_id=swarm_run.id, swarm_id=spec.id
+                        ),
+                        event_context=swarm_event_context,
+                    ),
+                    fence=SwarmExecutionFence(f"swarm:{swarm_run.id}"),
                 )
             )
             # RUNNING is a mid-execution state change (not a terminal commit),
-            # so it stays a direct swarm_store.update_run -- the lifecycle
+            # so it remains a coordinator-owned state update -- the lifecycle
             # entry write (PENDING create) is what the commit_log protects.
-            created_swarm = await self._swarm_store.get_run(swarm_run.id)
+            created_swarm = await self._swarm_commit_coordinator.get_run(swarm_run.id)
             if created_swarm is None:
                 raise SwarmConflictError(
                     f"swarm run {swarm_run.id} missing after coordinator.start"
                 )
-            swarm_run = await self._swarm_store.update_run(
+            swarm_run = await self._swarm_commit_coordinator.update_run(
                 swarm_run.id,
                 expected_version=created_swarm.version,
                 status=SwarmStatus.RUNNING,
             )
             swarm_version = swarm_run.version
-
-            # 2. SwarmStarted event (swarm-domain; emitted via the
-            # Coordinator-owned sink, never SwarmEngine's own EventStore).
-            await sink.emit(
-                SwarmStarted(swarm_run_id=swarm_run.id, swarm_id=spec.id)
-            )
 
             # 3. Build the context the strategy consumes + delegate the round loop.
             ctx = SwarmExecutionContext(
@@ -329,7 +350,7 @@ class SwarmEngine:
                 parent_context=context,
                 dispatcher=self._dispatcher,
                 agents=compiled_agents,
-                swarm_store=self._swarm_store,
+                swarm_store=self._state_store,
             )
             strategy = build_strategy(spec.strategy)
             timeout = spec.limits.timeout_seconds
@@ -353,7 +374,7 @@ class SwarmEngine:
                     f"used {acc_input + acc_output}",
                     kind="max_total_tokens",
                 )
-            swarm_run = await self._swarm_store.update_run(
+            swarm_run = await self._swarm_commit_coordinator.update_run(
                 swarm_run.id,
                 expected_version=swarm_version,
                 token_usage=TokenUsage(
@@ -372,8 +393,9 @@ class SwarmEngine:
                 expected_version=swarm_version,
                 target=SwarmStatus.SUCCEEDED,
                 commit_id_suffix="complete",
+                result=result.result,
+                event_context=swarm_event_context,
             )
-            await sink.emit(SwarmCompleted(swarm_run_id=swarm_run.id))
             aggregate_messages: "tuple[NewSessionMessage, ...]" = ()
             if spec.context_policy.write_aggregate_to_session:
                 aggregate_messages = (
@@ -393,27 +415,16 @@ class SwarmEngine:
             # domain), then re-raise so the Coordinator cancels the driving Run.
             if swarm_run is not None and swarm_version is not None:
                 try:
-                    await self._finalize_cancelled_swarm_run(swarm_run.id)
-                except Exception as swarm_exc:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "failed to transition swarm run %s to CANCELLED: %s",
-                        swarm_run.id,
-                        swarm_exc,
+                    await self._finalize_cancelled_swarm_run(
+                        swarm_run.id, event_context=EventStreamContext.from_run_context(context)
                     )
+                except Exception as swarm_exc:  # noqa: BLE001
+                    raise SwarmError(
+                        f"swarm cancellation convergence failed for {swarm_run.id}"
+                    ) from swarm_exc
             # Best-effort swarm-domain cancel event via the Coordinator-owned
             # sink (the Coordinator separately persists run-domain RunCancelled
             # via the acknowledge_cancel commit). Never masks the cancellation.
-            if swarm_run is not None:
-                try:
-                    from ..events.payloads import SwarmCancelled
-
-                    await sink.emit(SwarmCancelled(swarm_run_id=swarm_run.id))
-                except Exception as swarm_exc:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "failed to emit SwarmCancelled event for swarm %s",
-                        swarm_run.id,
-                        swarm_exc,
-                    )
             raise
         except _EXPECTED_SWARM_FAILURES as exc:
             # Conflict / invariant / not-found swarm subtypes are NOT per-run
@@ -440,38 +451,25 @@ class SwarmEngine:
                         expected_version=swarm_version,
                         target=SwarmStatus.FAILED,
                         commit_id_suffix="fail",
-                        payload={"error": {
-                            "error_type": error_info.error_type,
-                            "message": error_info.message,
-                        }},
+                        error=error_info,
+                        event_context=swarm_event_context,
                     )
                 except Exception as swarm_exc:  # noqa: BLE001
-                    _LOGGER.warning(
-                        "failed to transition swarm run %s to FAILED: %s",
-                        swarm_run.id,
-                        swarm_exc,
-                    )
-            try:
-                from ..events.payloads import SwarmFailed
-
-                await sink.emit(
-                    SwarmFailed(
-                        swarm_run_id=swarm_run.id if swarm_run else "",
-                        error=f"{type(exc).__name__}: {redact_exception(exc)}",
-                    )
-                )
-            except Exception:  # noqa: BLE001
-                _LOGGER.warning(
-                    "failed to emit SwarmFailed event for swarm %s",
-                    swarm_run.id if swarm_run else "?",
-                )
+                    raise SwarmError(
+                        f"swarm failure convergence failed for {swarm_run.id}"
+                    ) from swarm_exc
             return SwarmFailedOutcome(error=error_info)
 
     # -- resume() -------------------------------------------------------------
-    async def _finalize_cancelled_swarm_run(self, swarm_run_id: str) -> None:
+    async def _finalize_cancelled_swarm_run(
+        self,
+        swarm_run_id: str,
+        *,
+        event_context: "EventStreamContext | None" = None,
+    ) -> None:
         """Same finalization semantics as :meth:`_finalize_cancelled_run`,
         for the SwarmRun record."""
-        current = await self._swarm_store.get_run(swarm_run_id)
+        current = await self._swarm_commit_coordinator.get_run(swarm_run_id)
         if current is None:
             return
         if current.status in (
@@ -486,9 +484,10 @@ class SwarmEngine:
                 expected_version=current.version,
                 target=SwarmStatus.CANCELLED,
                 commit_id_suffix="cancel",
+                event_context=event_context,
             )
             return
-        cancelling = await self._swarm_store.update_run(
+        cancelling = await self._swarm_commit_coordinator.update_run(
             swarm_run_id,
             expected_version=current.version,
             status=SwarmStatus.CANCELLING,
@@ -498,6 +497,7 @@ class SwarmEngine:
             expected_version=cancelling.version,
             target=SwarmStatus.CANCELLED,
             commit_id_suffix="cancel",
+            event_context=event_context,
         )
 
     # -- helpers --------------------------------------------------------------

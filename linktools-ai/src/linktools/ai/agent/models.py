@@ -10,7 +10,7 @@ ToolContext reaches them via pydantic-ai dependency injection
 CompiledAgent is safe to share across concurrent Runs."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, TypeAlias, runtime_checkable
 
 from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage
@@ -20,6 +20,18 @@ from ..run.models import RunErrorInfo, RunResult
 from ..session.models import NewSessionMessage
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
+
+
+@runtime_checkable
+class ModelStreamCapability(Protocol):
+    @property
+    def supports_streaming(self) -> bool:
+        ...
+
+
+def model_supports_streaming(model: object) -> bool:
+    capability = getattr(model, "supports_streaming", False)
+    return capability is True
 
 if TYPE_CHECKING:
     from ..middleware.capability import MiddlewareCapability

@@ -66,6 +66,7 @@ class RunCommitLogRow(Base):
     # SHA-256 of the canonical-serialized command. 32 raw bytes.
     request_hash = Column(LargeBinary(32), nullable=False)
     result_json = Column(String, nullable=False)
+    result_payload = Column(LargeBinary, nullable=True)
     created_at = Column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
     )
@@ -78,6 +79,7 @@ class RunCommitLogRecord:
     run_id: str
     request_hash: bytes
     result: Mapping[str, Any]
+    result_payload: bytes | None
     created_at: datetime
 
 
@@ -88,6 +90,7 @@ def _row_to_record(row: RunCommitLogRow) -> RunCommitLogRecord:
         run_id=row.run_id,
         request_hash=bytes(row.request_hash),
         result=json.loads(row.result_json),
+        result_payload=bytes(row.result_payload) if row.result_payload is not None else None,
         created_at=row.created_at,
     )
 
@@ -127,6 +130,7 @@ class SqlAlchemyRunCommitLog:
         run_id: str,
         request_hash: bytes,
         result: Mapping[str, Any],
+        result_payload: bytes | None = None,
     ) -> RunCommitLogRecord:
         session.add(
             RunCommitLogRow(
@@ -135,6 +139,7 @@ class SqlAlchemyRunCommitLog:
                 run_id=run_id,
                 request_hash=request_hash,
                 result_json=json.dumps(result, sort_keys=True, default=_json_default),
+                result_payload=result_payload,
             )
         )
         await session.flush()
@@ -144,6 +149,7 @@ class SqlAlchemyRunCommitLog:
             run_id=run_id,
             request_hash=request_hash,
             result=result,
+            result_payload=result_payload,
             created_at=datetime.now(timezone.utc),
         )
 

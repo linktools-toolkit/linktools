@@ -24,6 +24,22 @@ from ..events.payloads import (
     RunStarted as RunStartedEvent,
 )
 
+
+class RunFenceRequiredError(Exception):
+    pass
+
+
+class RunFenceStateError(Exception):
+    pass
+
+
+class RunFenceLostError(Exception):
+    pass
+
+
+class RunFenceConfigurationError(Exception):
+    pass
+
 if TYPE_CHECKING:
     from typing import Any
 
@@ -88,6 +104,28 @@ class RunCommitPolicy:
 
     fencing_required: bool
 
+    def validate(self, *, supplied: "ExecutionFence | None", stored_token: str | None) -> None:
+        if self.fencing_required:
+            if supplied is None:
+                raise RunFenceRequiredError("execution fence is required")
+            if not stored_token:
+                raise RunFenceStateError("stored execution fence is missing")
+            if supplied.token != stored_token:
+                raise RunFenceLostError("execution fence does not match stored owner")
+        elif supplied is not None or stored_token:
+            raise RunFenceConfigurationError("fence supplied while fencing is disabled")
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRequestData:
+    approval_id: str
+    tool_name: str
+    reason: str
+    arguments: Mapping[str, object]
+    tenant_id: str
+    tool_call_id: str | None
+    binding: Mapping[str, object]
+
 
 @dataclass(frozen=True, slots=True)
 class StartRunCommand:
@@ -104,10 +142,10 @@ class StartRunCommand:
 class PauseRunCommand:
     run_id: str
     expected_version: int
-    approval_request: "Mapping[str, Any]"
+    approval_request: ApprovalRequestData
     checkpoint_payload: bytes
     # The caller-built RunPaused event, carrying the ACTUAL pause reason
-    # (from approval_request["reason"]) -- the coordinator appends this
+    # (from approval_request.reason) -- the coordinator appends this
     # verbatim rather than re-deriving a generic message from the approval
     # id, so the persisted event keeps full fidelity to why the run paused.
     paused_event: RunPausedEvent

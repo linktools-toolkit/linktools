@@ -25,8 +25,34 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from linktools.ai.storage.sqlalchemy.models import Base
 
-from ..commit import SwarmCommitConflictError
-from ...run.persistence._replay import canonical_request_hash
+from ..commit import SwarmCommitConflictError, SwarmCommitPolicy
+from .codec import SwarmCommitCodec
+
+_CODEC = SwarmCommitCodec()
+
+
+async def _append_lifecycle_event(tx: object, command: object, commit_id: str) -> None:
+    """Append the typed lifecycle event inside the same SQL UoW when supplied."""
+    from ...events.context import append_event_once
+
+    event = None
+    payload = getattr(command, "payload", None)
+    event_context = getattr(payload, "event_context", None)
+    for name in (
+        "started_event", "step_event", "completed_event", "failed_event",
+        "cancelled_event",
+    ):
+        event = getattr(payload, name, None)
+        if event is not None:
+            break
+    if event_context is not None and event is not None:
+        await append_event_once(
+            tx.events,
+            event_context,
+            event,
+            commit_id=commit_id,
+            metadata={"commit_id": commit_id},
+        )
 
 if TYPE_CHECKING:
     from .sqlalchemy import SqlAlchemySwarmStore
@@ -38,6 +64,7 @@ if TYPE_CHECKING:
         FailSwarmStepCommand,
         StartSwarmCommand,
         StartSwarmStepCommand,
+        SwarmCommitResult,
     )
     # The Storage the coordinator participates in is referenced by a string
     # annotation only -- importing runtime.persistence.facade here would form
@@ -57,6 +84,7 @@ class SwarmCommitLogRow(Base):
     swarm_run_id = Column(String(200), nullable=False, index=True)
     request_hash = Column(LargeBinary(32), nullable=False)
     result_json = Column(String, nullable=False)
+    result_payload = Column(LargeBinary, nullable=False)
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -89,6 +117,7 @@ class SqlAlchemySwarmCommitLog:
             "swarm_run_id": row.swarm_run_id,
             "request_hash": bytes(row.request_hash),
             "result": json.loads(row.result_json),
+            "result_payload": bytes(row.result_payload),
         }
 
     async def record(
@@ -100,6 +129,7 @@ class SqlAlchemySwarmCommitLog:
         swarm_run_id: str,
         request_hash: bytes,
         result: Mapping[str, Any],
+        result_payload: bytes | None = None,
     ) -> None:
         session.add(
             SwarmCommitLogRow(
@@ -108,6 +138,7 @@ class SqlAlchemySwarmCommitLog:
                 swarm_run_id=swarm_run_id,
                 request_hash=request_hash,
                 result_json=json.dumps(result, sort_keys=True),
+                result_payload=result_payload or _CODEC.encode_result(operation, result),
             )
         )
         await session.flush()
@@ -126,7 +157,7 @@ async def _check_replay(
     + same request_hash); raise SwarmCommitConflictError on a hash mismatch;
     return None on a fresh commit so the caller proceeds with the business
     writes and then records the result itself."""
-    request_hash = canonical_request_hash(operation, request_payload)
+    request_hash = _CODEC.request_hash(operation, request_payload)
     existing = await log.find(session, commit_id)
     if existing is None:
         return None
@@ -134,7 +165,7 @@ async def _check_replay(
         raise SwarmCommitConflictError(
             f"swarm commit {commit_id!r} replayed with a different request"
         )
-    return existing["result"]
+    return _CODEC.decode_result(operation, existing["result_payload"])
 
 
 class SqlAlchemySwarmCommitCoordinator:
@@ -145,11 +176,30 @@ class SqlAlchemySwarmCommitCoordinator:
     def __init__(
         self,
         storage: Any,
-        swarm_store: "SqlAlchemySwarmStore",
+        *,
+        policy: SwarmCommitPolicy,
+        codec: SwarmCommitCodec,
     ) -> None:
         self._storage = storage
-        self._swarm_store = swarm_store
         self._log = SqlAlchemySwarmCommitLog()
+        self._codec = codec
+        self._policy = policy
+
+    @property
+    def state_store(self):
+        return self._storage.swarms
+
+    async def get_run(self, swarm_run_id: str):
+        return await self._storage.swarms.get_run(swarm_run_id)
+
+    async def update_run(self, swarm_run_id: str, *, expected_version: int, status=None, token_usage=None):
+        async with self._storage.transaction() as tx:
+            return await tx.swarms.update_run(
+                swarm_run_id,
+                expected_version=expected_version,
+                status=status,
+                token_usage=token_usage,
+            )
 
     async def recover_incomplete_commits(self) -> None:
         """No-op: every SQL swarm commit is one atomic Storage.transaction()
@@ -157,254 +207,217 @@ class SqlAlchemySwarmCommitCoordinator:
         is the Filesystem coordinator's concern."""
         return None
 
-    async def start(self, command: "StartSwarmCommand") -> Any:
-        commit_id = command.commit_id
-        # Hash only the JSON-primitive identity fields -- the full payload may
-        # carry non-JSON-native values (TokenUsage, Decimal) the hash helper
-        # refuses to silently stringify. The id+run_id+expected_version triple
-        # uniquely identifies the start intent for replay-vs-conflict.
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "expected_version": command.expected_version,
-            "new_run_id": str(command.payload.get("id", "")),
-            "driving_run_id": str(command.payload.get("run_id", "")),
-        }
+    async def start(self, command: "StartSwarmCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="start",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ..models import SwarmRun
 
-            run = SwarmRun(**dict(command.payload))
-            created = await self._swarm_store.create_run(run)
+            created = await tx.swarms.create_run(command.payload.run)
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="start",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("start", request_payload),
+                request_hash=self._codec.request_hash("start", command),
                 result={"swarm_run_id": created.id, "version": created.version},
             )
             return {"swarm_run_id": created.id, "version": created.version}
 
-    async def start_step(self, command: "StartSwarmStepCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "step_attempt_id": command.step_attempt_id,
-            "expected_version": command.expected_version,
-            "new_task_id": str(command.payload.get("id", "")),
-        }
+    async def start_step(self, command: "StartSwarmStepCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="start_step",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ..models import SwarmStep
 
-            step = SwarmStep(**dict(command.payload))
-            created = await self._swarm_store.create_task(step)
+            created = await tx.swarms.create_task(command.payload.step)
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="start_step",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("start_step", request_payload),
+                request_hash=self._codec.request_hash("start_step", command),
                 result={"task_id": created.id, "version": created.version},
             )
             return {"task_id": created.id, "version": created.version}
 
-    async def complete_step(self, command: "CompleteSwarmStepCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "step_attempt_id": command.step_attempt_id,
-            "expected_version": command.expected_version,
-            "task_id": str(command.payload.get("task_id", "")),
-            "active_run_id": str(command.payload.get("active_run_id", "")),
-        }
+    async def complete_step(self, command: "CompleteSwarmStepCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="complete_step",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ...run.models import RunResult
 
-            task_id = str(command.payload.get("task_id", ""))
-            result = RunResult(**dict(command.payload.get("result", {})))
-            updated = await self._swarm_store.complete_task(
+            task_id = command.payload.task_id
+            result = command.payload.result
+            updated = await tx.swarms.complete_task(
                 task_id,
                 result,
                 expected_version=command.expected_version,
-                active_run_id=command.payload.get("active_run_id"),
+                active_run_id=command.payload.active_run_id,
             )
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="complete_step",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("complete_step", request_payload),
+                request_hash=self._codec.request_hash("complete_step", command),
                 result={"task_id": updated.id, "version": updated.version},
             )
             return {"task_id": updated.id, "version": updated.version}
 
-    async def fail_step(self, command: "FailSwarmStepCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "step_attempt_id": command.step_attempt_id,
-            "expected_version": command.expected_version,
-            "task_id": str(command.payload.get("task_id", "")),
-            "active_run_id": str(command.payload.get("active_run_id", "")),
-            "error_type": str(
-                dict(command.payload.get("error", {})).get("error_type", "")
-            ),
-        }
+    async def fail_step(self, command: "FailSwarmStepCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="fail_step",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ...run.models import RunErrorInfo
 
-            task_id = str(command.payload.get("task_id", ""))
-            error = RunErrorInfo(**dict(command.payload.get("error", {})))
-            updated = await self._swarm_store.fail_task(
+            task_id = command.payload.task_id
+            error = command.payload.error
+            updated = await tx.swarms.fail_task(
                 task_id,
                 error,
                 expected_version=command.expected_version,
-                active_run_id=command.payload.get("active_run_id"),
+                active_run_id=command.payload.active_run_id,
             )
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="fail_step",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("fail_step", request_payload),
+                request_hash=self._codec.request_hash("fail_step", command),
                 result={"task_id": updated.id, "version": updated.version},
             )
             return {"task_id": updated.id, "version": updated.version}
 
-    async def complete(self, command: "CompleteSwarmCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "expected_version": command.expected_version,
-        }
+    async def complete(self, command: "CompleteSwarmCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="complete",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ..models import SwarmStatus
 
-            updated = await self._swarm_store.update_run(
+            updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
                 status=SwarmStatus.SUCCEEDED,
             )
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="complete",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("complete", request_payload),
+                request_hash=self._codec.request_hash("complete", command),
                 result={"swarm_run_id": updated.id, "version": updated.version},
             )
             return {"swarm_run_id": updated.id, "version": updated.version}
 
-    async def fail(self, command: "FailSwarmCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "expected_version": command.expected_version,
-            "error_type": str(
-                dict(command.payload.get("error", {})).get("error_type", "")
-            ),
-        }
+    async def fail(self, command: "FailSwarmCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="fail",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ..models import SwarmStatus
 
-            updated = await self._swarm_store.update_run(
+            updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
                 status=SwarmStatus.FAILED,
             )
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="fail",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("fail", request_payload),
+                request_hash=self._codec.request_hash("fail", command),
                 result={"swarm_run_id": updated.id, "version": updated.version},
             )
             return {"swarm_run_id": updated.id, "version": updated.version}
 
-    async def cancel(self, command: "CancelSwarmCommand") -> Any:
-        commit_id = command.commit_id
-        request_payload = {
-            "swarm_run_id": command.swarm_run_id,
-            "expected_version": command.expected_version,
-            "reason": str(command.payload.get("reason", "")),
-        }
+    async def cancel(self, command: "CancelSwarmCommand") -> "SwarmCommitResult":
+        self._policy.validate(command.fence)
+        commit_id = str(command.commit_id)
         async with self._storage.transaction() as tx:
             replay = await _check_replay(
                 self._log,
                 tx.session,
                 commit_id=commit_id,
                 operation="cancel",
-                request_payload=request_payload,
+                request_payload=command,
             )
             if replay is not None:
                 return replay
             from ..models import SwarmStatus
 
-            updated = await self._swarm_store.update_run(
+            updated = await tx.swarms.update_run(
                 command.swarm_run_id,
                 expected_version=command.expected_version,
                 status=SwarmStatus.CANCELLED,
             )
+            await _append_lifecycle_event(tx, command, commit_id)
             await self._log.record(
                 tx.session,
                 commit_id=commit_id,
                 operation="cancel",
                 swarm_run_id=command.swarm_run_id,
-                request_hash=canonical_request_hash("cancel", request_payload),
+                request_hash=self._codec.request_hash("cancel", command),
                 result={"swarm_run_id": updated.id, "version": updated.version},
             )
             return {"swarm_run_id": updated.id, "version": updated.version}

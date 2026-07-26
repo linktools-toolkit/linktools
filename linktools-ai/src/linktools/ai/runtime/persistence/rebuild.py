@@ -73,22 +73,22 @@ async def _init_sql_schema(engine: Any) -> None:
 
 
 def rebuild_sqlite_storage(*, engine: Any, blobs_root: Path) -> Any:
-    """Initialize a fresh SqlAlchemyStorage on a caller-constructed ``engine``:
+    """Initialize a fresh SQLAlchemy storage adapter on a caller-constructed ``engine``:
     run ``Base.metadata.create_all`` and wrap a session_factory.
 
     The caller owns the engine lifecycle (constructs it, disposes it). This
     module does NOT construct engines -- the core never parses a connection
     string (the SQLAlchemy adapter-boundary invariant). The caller is
     expected to point the engine at a fresh (deleted-then-recreated) db file.
-    ``blobs_root`` is the filesystem path the SqlAlchemyStorage uses for its
+    ``blobs_root`` is the filesystem path the SQLAlchemy adapter uses for its
     FilesystemArtifactBlobStore (artifact content lives outside the DB)."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
-    from .sqlalchemy import SqlAlchemyStorage
+    from .sqlalchemy import _ReferenceSqlAlchemyComposition
 
     asyncio.run(_init_sql_schema(engine))
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return SqlAlchemyStorage(
+    return _ReferenceSqlAlchemyComposition(
         session_factory=session_factory, blobs_root=blobs_root
     )
 

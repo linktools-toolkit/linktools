@@ -104,6 +104,7 @@ class RuntimeComponents:
     sandbox: "Sandbox | None"
     mcp_connection_pool: "MCPConnectionPool | None"
     commit_coordinator: Any = None
+    swarm_commit_coordinator: Any = None
     run_coordinator: Any = None
     settings: RuntimeSettings = dataclasses.field(default_factory=RuntimeSettings)
     schema_registry: OutputSchemaRegistry = dataclasses.field(default_factory=OutputSchemaRegistry)
@@ -126,7 +127,7 @@ class RuntimeBuildConfig:
     commit_coordinator: "RunCommitCoordinator | None"
     # Optional FencedRunEventWriter. When None, build_runtime_components
     # constructs the backend-appropriate writer from the Storage if the
-    # Storage exposes one (FilesystemStorage / SqlAlchemyStorage do); callers
+    # Storage exposes one (FilesystemStorage / SqliteStorage do); callers
     # that want to disable fenced security-event appending pass None
     # explicitly via a sentinel (rare -- tests/local mode).
     fenced_event_writer: Any = None
@@ -273,6 +274,15 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
             "RunCommitCoordinator must be injected; the build kernel no "
             "longer selects one"
         )
+    if config.settings.multi_tenant:
+        primary = getattr(config.storage.assets, "primary", None)
+        security_mode = getattr(primary, "security_mode", None)
+        if getattr(security_mode, "value", security_mode) == "trusted_local":
+            from ..errors import UnsafeSandboxError
+
+            raise UnsafeSandboxError(
+                "TrustedLocalDirectory cannot serve multi-tenant storage"
+            )
     if config.settings.multi_tenant and config.sandbox is not None:
         # Protocol runtime checks cannot distinguish a trusted local backend;
         # use its declared isolation level when available.
@@ -460,7 +470,6 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         ),
     )
     swarm_engine = SwarmEngine(
-        swarm_store=config.storage.swarms,
         compiler=compiler,
         dispatcher=dispatcher_handle,
         swarm_commit_coordinator=_resolve_swarm_commit_coordinator(config),
@@ -520,6 +529,7 @@ def build_runtime_components(config: RuntimeBuildConfig) -> RuntimeComponents:
         sandbox=config.sandbox,
         mcp_connection_pool=mcp_manager,
         commit_coordinator=config.commit_coordinator,
+        swarm_commit_coordinator=config.swarm_commit_coordinator,
         run_coordinator=run_coordinator,
         settings=config.settings,
         schema_registry=schema_registry,

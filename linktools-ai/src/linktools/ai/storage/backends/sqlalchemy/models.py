@@ -10,7 +10,7 @@ exceed MySQL's index key-length limit."""
 
 from datetime import datetime
 
-from sqlalchemy import Index, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Index, LargeBinary, String, Text, UniqueConstraint, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -32,6 +32,7 @@ class StorageObjectRow(Base):
     __tablename__ = "storage_objects"
     __table_args__ = (
         UniqueConstraint("key_hash", name=STORAGE_OBJECT_KEY_CONSTRAINT),
+        Index("ix_storage_objects_key_hash", "key_hash"),
         Index("ix_storage_objects_key_prefix", "key", mysql_length={"key": 191}),
     )
 
@@ -82,6 +83,7 @@ class StorageObjectIdempotencyRow(Base):
         UniqueConstraint(
             "key_hash", name=STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT
         ),
+        Index("ix_storage_object_idempotency_key_hash", "key_hash"),
         Index(
             "ix_storage_object_idempotency_key_prefix",
             "key",
@@ -93,6 +95,11 @@ class StorageObjectIdempotencyRow(Base):
     key_hash: Mapped[bytes] = mapped_column(LargeBinary(32))
     key: Mapped[str] = mapped_column(String(1024))
     request_hash: Mapped[str] = mapped_column(String(64))
+    operation: Mapped[str] = mapped_column(String(32))
+    result_key_hash: Mapped["bytes | None"] = mapped_column(LargeBinary(32), nullable=True)
+    result_key: Mapped["str | None"] = mapped_column(String(1024), nullable=True)
+    result_version: Mapped["int | None"] = mapped_column(nullable=True)
+    commit_revision: Mapped[int] = mapped_column(default=0)
     result_json: Mapped["str | None"] = mapped_column(Text, nullable=True)
 
 
@@ -101,6 +108,14 @@ class StorageObjectRevisionRow(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     value: Mapped[int]
+
+
+class StorageSchemaVersionRow(Base):
+    __tablename__ = "storage_schema_version"
+    component: Mapped[str] = mapped_column(String(128), primary_key=True)
+    version: Mapped[int]
+    checksum: Mapped[str] = mapped_column(String(128))
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
 
 
 __all__: "list[str]" = [
@@ -112,4 +127,5 @@ __all__: "list[str]" = [
     "STORAGE_OBJECT_KEY_CONSTRAINT",
     "STORAGE_OBJECT_IDEMPOTENCY_CONSTRAINT",
     "STORAGE_OBJECT_VERSION_CONSTRAINT",
+    "StorageSchemaVersionRow",
 ]

@@ -29,6 +29,8 @@ journals remain for recovery."""
 import json
 import os
 import uuid
+import base64
+import binascii
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -79,6 +81,7 @@ class TransactionRecord:
     checkpoint_id: "str | None" = None
     session_message_ids: "tuple[str, ...]" = ()
     command: "Mapping[str, Any]" = field(default_factory=dict)
+    command_payload_b64: str = ""
 
     def to_json(self) -> str:
         d = asdict(self)
@@ -104,6 +107,10 @@ class RunCommitConflictError(Exception):
     RunCommitConflictError so the two backends raise the same error type."""
 
 
+class RunRecoveryError(RuntimeError):
+    """The filesystem run journal could not be reconciled safely."""
+
+
 class TransactionJournal:
     """Crash-recovery journal backing the FilesystemRunCommitCoordinator."""
 
@@ -113,6 +120,14 @@ class TransactionJournal:
 
     def _path(self, tx_id: str) -> Path:
         return self._root / f"{tx_id}.json"
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def _write_atomic(self, tx_id: str, text: str) -> None:
         """Write ``text`` to the journal file atomically: tmp -> fsync ->
@@ -127,6 +142,7 @@ class TransactionJournal:
         finally:
             os.close(fd)
         os.replace(tmp, target)
+        self._fsync_directory(target.parent)
 
     def begin(
         self,
@@ -137,6 +153,7 @@ class TransactionJournal:
         commit_id: str = "",
         request_hash: str = "",
         command: "Mapping[str, Any]",
+        command_payload: bytes,
     ) -> TransactionRecord:
         """Open a new PREPARED transaction and persist its journal."""
         tx_id = uuid.uuid4().hex
@@ -150,6 +167,7 @@ class TransactionJournal:
             commit_id=commit_id,
             request_hash=request_hash,
             command=dict(command),
+            command_payload_b64=base64.b64encode(command_payload).decode("ascii"),
         )
         self._write_atomic(tx_id, record.to_json())
         return record
@@ -183,6 +201,7 @@ class TransactionJournal:
         commit_id: str,
         request_hash: str,
         result: "Mapping[str, Any]",
+        result_payload: "bytes | None" = None,
     ) -> None:
         """Persist a stable completion record so a retried call with the same
         (commit_id, request_hash) returns the original result without
@@ -200,6 +219,8 @@ class TransactionJournal:
             "request_hash": request_hash,
             "result": dict(result),
         }
+        if result_payload is not None:
+            payload["result_payload_b64"] = base64.b64encode(result_payload).decode("ascii")
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         fd = os.open(tmp, os.O_WRONLY)
@@ -208,6 +229,7 @@ class TransactionJournal:
         finally:
             os.close(fd)
         os.replace(tmp, path)
+        self._fsync_directory(path.parent)
 
     def find_completion(
         self, commit_id: str, *, request_hash: str = ""
@@ -235,7 +257,10 @@ class TransactionJournal:
             raise RunCommitConflictError(
                 f"commit {commit_id!r} replayed with a different request"
             )
-        return raw.get("result") or {}
+        result = dict(raw.get("result") or {})
+        if raw.get("result_payload_b64"):
+            result["__result_payload_b64"] = raw["result_payload_b64"]
+        return result
 
     def update(self, record: TransactionRecord, **changes: Any) -> TransactionRecord:
         """Atomically advance the journal to a new state/fields. Returns the
@@ -257,6 +282,7 @@ class TransactionJournal:
         record: TransactionRecord,
         *,
         result: "Mapping[str, Any] | None" = None,
+        result_payload: "bytes | None" = None,
     ) -> None:
         """Mark the transaction COMMITTED and delete its in-flight journal (the
         commit is durable; no recovery needed). If ``result`` is supplied, also
@@ -269,11 +295,14 @@ class TransactionJournal:
                 commit_id=final.commit_id,
                 request_hash=final.request_hash,
                 result=result,
+                result_payload=result_payload,
             )
         try:
             self._path(final.id).unlink()
         except FileNotFoundError:
             pass
+        else:
+            self._fsync_directory(self._root)
 
     def list_incomplete(self) -> "list[TransactionRecord]":
         """All journals not yet COMMITTED, in creation order. Drives recovery."""
@@ -281,10 +310,22 @@ class TransactionJournal:
         for path in sorted(self._root.glob("*.json")):
             try:
                 rec = TransactionRecord.from_json(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                # A corrupt/unreadable journal is itself a recovery signal --
-                # skip it here; recovery treats missing-state runs conservatively.
-                continue
+            except (OSError, TypeError, ValueError, KeyError) as exc:
+                # A corrupt/unreadable journal is itself durable evidence. Do
+                # not skip it: Runtime remains unavailable until it is repaired.
+                raise RunRecoveryError(
+                    f"run journal {path.name!r} cannot be parsed"
+                ) from exc
+            if not rec.command_payload_b64:
+                raise RunRecoveryError(
+                    f"run journal {path.name!r} has no typed command payload"
+                )
+            try:
+                base64.b64decode(rec.command_payload_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise RunRecoveryError(
+                    f"run journal {path.name!r} has an invalid command payload"
+                ) from exc
             if rec.state is not TransactionState.COMMITTED:
                 records.append(rec)
         return records

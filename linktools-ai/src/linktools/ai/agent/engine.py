@@ -79,6 +79,7 @@ from .models import (
     AgentCompleted,
     AgentExecutionOutcome,
     AgentFailed,
+    model_supports_streaming,
     AgentInput,
     AgentPaused,
     CompiledAgent,
@@ -523,6 +524,11 @@ class AgentEngine:
 
                                     await cancellation.raise_if_cancelled()
 
+                                    model = iter_model or agent.pydantic_agent.model
+                                    if not model_supports_streaming(model) and hasattr(node, "run"):
+                                        node = await node.run(run.ctx)
+                                        continue
+
                                     if PydanticAgent.is_model_request_node(node):
                                         try:
                                             async with node.stream(
@@ -549,22 +555,8 @@ class AgentEngine:
                                                             }
                                                         )
                                                         await cancellation.raise_if_cancelled()
-                                        except AssertionError as exc:
-                                            # Pydantic-ai raises AssertionError for
-                                            # models that do not support streaming
-                                            # (e.g. FunctionModel without a
-                                            # stream_function). The spec forbids
-                                            # silently swallowing AssertionError;
-                                            # narrow the catch to the streaming-
-                                            # not-supported message so an
-                                            # unexpected AssertionError still
-                                            # propagates as the invariant error
-                                            # it actually is. A future pydantic-ai
-                                            # release exposing a typed
-                                            # StreamNotSupportedError should
-                                            # replace this message match.
-                                            if "support streamed" not in str(exc):
-                                                raise
+                                        except BaseException:
+                                            raise
                                     elif PydanticAgent.is_call_tools_node(node):
                                         try:
                                             async with node.stream(
@@ -597,13 +589,8 @@ class AgentEngine:
                                                             tool_event
                                                         )
                                                         await cancellation.raise_if_cancelled()
-                                        except AssertionError as exc:
-                                            # See the matching handler above: only
-                                            # the streaming-not-supported
-                                            # AssertionError is absorbed (the
-                                            # non-streaming path runs instead).
-                                            if "support streamed" not in str(exc):
-                                                raise
+                                        except BaseException:
+                                            raise
                             except RunPaused as paused:
                                 checkpoint_payload = serialize_messages(
                                     run.all_messages()

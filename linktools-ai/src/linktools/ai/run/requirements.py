@@ -308,18 +308,18 @@ def enforce_storage_feature_consistency(storage: "Storage") -> None:
     the first use."""
     from ..errors import StorageRequirementsNotMetError
     from ..storage.features import StorageComponent
-    from ..runtime.persistence.transaction import NoCrossStoreTransactions
 
     f = storage.features
     if f.transaction_scope is not TransactionScope.NONE:
-        if storage._transaction_manager is None:
+        manager = storage.transaction_manager
+        if manager is None:
             raise StorageRequirementsNotMetError(
                 f"Storage declares transaction_scope={f.transaction_scope.value!r} "
                 "but its transaction manager is None"
             )
         if (
             f.transaction_scope is TransactionScope.DATABASE
-            and isinstance(storage._transaction_manager, NoCrossStoreTransactions)
+            and getattr(manager, "scope", TransactionScope.NONE) is not TransactionScope.DATABASE
         ):
             raise StorageRequirementsNotMetError(
                 "Storage declares transaction_scope=DATABASE but its transaction "

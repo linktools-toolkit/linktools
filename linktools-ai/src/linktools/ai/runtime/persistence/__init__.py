@@ -12,10 +12,9 @@ backend adapters; this package composes them.
 
 Public symbols (mirroring the pre-Phase-7 ``linktools.ai.storage`` surface):
 - ``Storage``, ``FilesystemStorage`` -- the core composition + FS reference.
-- ``SqlAlchemyStorage`` -- loaded lazily on access (SQLAlchemy is an optional
+- SQLAlchemy composition -- loaded lazily on access (SQLAlchemy is optional
   dependency).
-- ``StorageFeatures``, ``FILE_STORAGE_FEATURES``, ``SQLALCHEMY_STORAGE_FEATURES``
-  -- runtime composition of the capability enums.
+- ``StorageFeatures`` -- runtime composition of the capability enums.
 - ``StorageUnitOfWork``, ``StorageTransactionManager`` -- the cross-store UoW
   Protocol.
 """
@@ -23,30 +22,26 @@ Public symbols (mirroring the pre-Phase-7 ``linktools.ai.storage`` surface):
 __all__: "list[str]" = [
     "Storage",
     "FilesystemStorage",
-    "SqlAlchemyStorage",
+    "SqlAlchemyStorageAdapter",
     "StorageFeatures",
-    "FILE_STORAGE_FEATURES",
-    "SQLALCHEMY_STORAGE_FEATURES",
     "StorageUnitOfWork",
     "StorageTransactionManager",
 ]
 
 
 def __getattr__(name: str):
-    if name in {"Storage", "FilesystemStorage", "FILE_STORAGE_FEATURES"}:
-        from .facade import FILE_STORAGE_FEATURES, FilesystemStorage, Storage
+    if name in {"Storage", "FilesystemStorage"}:
+        from .facade import FilesystemStorage, Storage
 
         return {
             "Storage": Storage,
             "FilesystemStorage": FilesystemStorage,
-            "FILE_STORAGE_FEATURES": FILE_STORAGE_FEATURES,
         }[name]
-    if name in {"StorageFeatures", "SQLALCHEMY_STORAGE_FEATURES"}:
-        from .features import SQLALCHEMY_STORAGE_FEATURES, StorageFeatures
+    if name == "StorageFeatures":
+        from .features import StorageFeatures
 
         return {
             "StorageFeatures": StorageFeatures,
-            "SQLALCHEMY_STORAGE_FEATURES": SQLALCHEMY_STORAGE_FEATURES,
         }[name]
     if name in {"StorageUnitOfWork", "StorageTransactionManager"}:
         from .protocols import StorageTransactionManager, StorageUnitOfWork
@@ -55,16 +50,16 @@ def __getattr__(name: str):
             "StorageUnitOfWork": StorageUnitOfWork,
             "StorageTransactionManager": StorageTransactionManager,
         }[name]
-    if name == "SqlAlchemyStorage":
+    if name == "SqlAlchemyStorageAdapter":
         try:
-            from .sqlalchemy import SqlAlchemyStorage
+            from .sqlalchemy import SqlAlchemyStorageAdapter
         except ModuleNotFoundError as exc:
             if exc.name and exc.name.split(".")[0] in {"sqlalchemy", "aiosqlite"}:
                 raise ImportError(
-                    "SqlAlchemyStorage requires optional dependencies. "
+                    "SQLAlchemy storage requires optional dependencies. "
                     "Install with: pip install 'linktools-ai[sqlite]' "
                     "or pip install 'linktools-ai[sqlalchemy]'."
                 ) from exc
             raise
-        return SqlAlchemyStorage
+        return SqlAlchemyStorageAdapter
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

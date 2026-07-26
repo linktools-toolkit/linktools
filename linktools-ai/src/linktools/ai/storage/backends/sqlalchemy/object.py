@@ -381,13 +381,43 @@ class SqlAlchemyObjectBackend:
                     "metadata": dict(info.metadata),
                 }
             )
+        operation = idem_key.split(":", 1)[0]
         session.add(
             StorageObjectIdempotencyRow(
                 key_hash=_idempotency_key_hash(idem_key),
                 key=idem_key,
                 request_hash=request_hash,
+                operation=operation,
+                result_key_hash=_key_hash(info.key) if info is not None else None,
+                result_key=info.key.value if info is not None else None,
+                result_version=info.version if info is not None else None,
+                commit_revision=info.commit_revision if info is not None else 0,
                 result_json=result_json,
             )
+        )
+
+    async def _load_versioned_result(
+        self, session: AsyncSession, *, key: StorageKey, version: int
+    ) -> StoredObject:
+        result = await session.execute(
+            select(StorageObjectVersionRow).where(
+                StorageObjectVersionRow.key_hash == _key_hash(key),
+                StorageObjectVersionRow.version == version,
+            )
+        )
+        row = result.scalar_one_or_none()
+        if row is not None and row.key != key.value:
+            raise StorageHashCollisionError(namespace="object-key", digest=_key_hash(key).hex())
+        if row is None or row.tombstone:
+            raise StorageIntegrityError(f"immutable history missing result {key.value!r}@{version}")
+        return StoredObject(
+            info=ObjectInfo(
+                key=key, etag=row.etag, version=row.version,
+                commit_revision=row.commit_revision, content_type=row.content_type,
+                size=row.size, modified_at=row.modified_at,
+                metadata=json.loads(row.metadata_json),
+            ),
+            content=row.content or b"",
         )
 
     @staticmethod
@@ -574,10 +604,15 @@ class SqlAlchemyObjectBackend:
                         raise StorageIdempotencyConflictError(
                             f"idempotency key {options.idempotency_key!r} replayed with a different request"
                         )
-                    info = self._idempotency_result_to_info(idem_row.result_json)
-                    row = await self._get_row(session, key)
-                    content_bytes = row.content if (row is not None and not row.tombstone) else content
-                    return StoredObject(info=info, content=content_bytes)
+                    if idem_row.operation != "put" or idem_row.result_key != key.value:
+                        raise StorageIdempotencyConflictError("idempotency operation/key conflict")
+                    if idem_row.result_key_hash is not None and idem_row.result_key_hash != _key_hash(key):
+                        raise StorageHashCollisionError(namespace="idempotency-result", digest=bytes(idem_row.result_key_hash).hex())
+                    if idem_row.result_version is None:
+                        raise StorageIntegrityError("idempotency result has no immutable version")
+                    return await self._load_versioned_result(
+                        session, key=StorageKey(idem_row.result_key), version=idem_row.result_version
+                    )
             info = await self._put_with_retry(
                 session,
                 key,
@@ -654,6 +689,8 @@ class SqlAlchemyObjectBackend:
                         raise StorageIdempotencyConflictError(
                             f"idempotency key {options.idempotency_key!r} replayed with a different request"
                         )
+                    if idem_row.operation != "delete":
+                        raise StorageIdempotencyConflictError("idempotency operation conflict")
                     return None
             for _ in range(_CONFLICT_RETRIES):
                 outcome = await self._raw_delete_once(session, key, if_match=options.if_match)
@@ -686,12 +723,15 @@ class SqlAlchemyObjectBackend:
                         raise StorageIdempotencyConflictError(
                             f"idempotency key {options.idempotency_key!r} replayed with a different request"
                         )
-                    info = self._idempotency_result_to_info(idem_row.result_json)
-                    if info is None:
-                        raise StorageObjectNotFoundError(source.value)
-                    row = await self._get_row(session, target)
-                    content_bytes = row.content if (row is not None and not row.tombstone) else b""
-                    return StoredObject(info=info, content=content_bytes)
+                    if idem_row.operation != "move" or idem_row.result_key != target.value:
+                        raise StorageIdempotencyConflictError("idempotency operation/key conflict")
+                    if idem_row.result_key_hash is not None and idem_row.result_key_hash != _key_hash(target):
+                        raise StorageHashCollisionError(namespace="idempotency-result", digest=bytes(idem_row.result_key_hash).hex())
+                    if idem_row.result_version is None:
+                        raise StorageIntegrityError("idempotency result has no immutable version")
+                    return await self._load_versioned_result(
+                        session, key=StorageKey(idem_row.result_key), version=idem_row.result_version
+                    )
 
             source_row = await self._get_row(session, source)
             if source_row is None or source_row.tombstone:

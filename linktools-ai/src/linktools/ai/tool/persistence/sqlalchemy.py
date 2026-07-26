@@ -5,7 +5,7 @@ tool/idempotency.py). Mirrors SqlAlchemyApprovalStore's structure:
 ``session_factory: Callable[[], AsyncSession]`` constructor, ``_as_utc``
 helper for aiosqlite's naive-datetime round-trip, and the
 ``_execute_in_session`` UoW hook so the store can participate in cross-store
-transactions through SqlAlchemyStorage.transaction().
+transactions through the SQLAlchemy storage transaction manager.
 
 ``reserve`` handles the race via the unique (scope, key) constraint:
 INSERT a RESERVED row; on IntegrityError (concurrent insert from another

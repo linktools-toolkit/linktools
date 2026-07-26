@@ -73,7 +73,7 @@ from ...object.models import (
     StoredObject,
     WriteOptions,
 )
-from .secure_directory import FilesystemSecurityMode, SecureDirectory
+from .secure_directory import FilesystemSecurityMode, SecureDirectory, TrustedLocalDirectory
 
 
 # --- path-encoding helpers ---------------------------------------------------
@@ -106,6 +106,8 @@ def _matches_depth(prefix: StorageKey, candidate: StorageKey, depth: "Depth") ->
 
 class _OpState(str, Enum):
     PREPARED = "PREPARED"
+    TARGET_PUBLISHED = "TARGET_PUBLISHED"
+    SOURCE_PUBLISHED = "SOURCE_PUBLISHED"
     VERSIONS_PUBLISHED = "VERSIONS_PUBLISHED"
     REVISION_PUBLISHED = "REVISION_PUBLISHED"
     COMMITTED = "COMMITTED"
@@ -130,6 +132,9 @@ class _VersionIntent:
     # recovery reads source content from history/<src>/versions/<v>/content.bin.
     source_key: "str | None" = None
     source_version: "int | None" = None
+    commit_revision: "int | None" = None
+    content_sha256: "str | None" = None
+    operation_id: "str | None" = None
 
 
 @dataclass
@@ -225,7 +230,11 @@ class FilesystemObjectBackend:
         coordinator: "KeyedCoordinator | None" = None,
         mode: FilesystemSecurityMode = FilesystemSecurityMode.SECURE_POSIX,
     ) -> None:
-        self._sd = SecureDirectory(root, mode=mode)
+        self._sd = (
+            TrustedLocalDirectory(root)
+            if mode is FilesystemSecurityMode.TRUSTED_LOCAL
+            else SecureDirectory(root, mode=mode)
+        )
         # Coordinator: the coordination spec says the backend is constructed WITH one
         # (or constructs a default FilesystemKeyedCoordinator). Construction
         # of the default is left to the convenience wrapper so the bare
@@ -233,6 +242,8 @@ class FilesystemObjectBackend:
         if coordinator is None:
             coordinator = self._build_default_coordinator()
         self._coordinator = coordinator
+        self._recovery_error: BaseException | None = None
+        self._last_generation = -1
         # Lazy: created on first writer that needs them.
         self._sd.ensure_directory(".storage", "history")
         self._sd.ensure_directory(".storage", "operations")
@@ -308,6 +319,10 @@ class FilesystemObjectBackend:
     @staticmethod
     def _revision_components() -> "tuple[str, ...]":
         return (".storage", "revision")
+
+    @staticmethod
+    def _generation_components() -> "tuple[str, ...]":
+        return (".storage", "operations_generation")
 
     # --- public ops (all wrapped in coordinator.hold) ----------------------
 
@@ -386,26 +401,27 @@ class FilesystemObjectBackend:
     # --- recovery (the never-regress state machine) --------------------------------------------
 
     def _recover(self) -> None:
-        """Sweep operations/ and resolve any non-COMMITTED record per the
-        the recovery state machine. Called at the entry of every mutation."""
+        """Strictly recover every unfinished operation before serving work."""
+        if self._recovery_error is not None:
+            raise self._recovery_error
         operations_components = (".storage", "operations")
         if self._sd.stat(*operations_components) is None:
             return
-        for op_id in self._sd.list_names(*operations_components):
-            try:
+        try:
+            for op_id in self._sd.list_names(*operations_components):
                 self._recover_one(op_id)
-            except Exception:
-                # Recovery must not crash the caller; a corrupt record is
-                # marked ABORTED so the next sweep skips it.
-                self._try_mark_aborted(op_id)
+        except BaseException as exc:
+            self._recovery_error = exc
+            raise
 
     def _recover_one(self, op_id: str) -> None:
         intent_components = self._operation_intent_components(op_id)
         if self._sd.stat(*intent_components) is None:
-            # No intent: nothing to recover (the directory may be a stray).
-            return
+            raise StorageIntegrityError(f"operation {op_id!r} has no intent")
         intent = _OperationIntent.from_json(self._sd.read_bytes(*intent_components))
         state = self._read_state(op_id)
+        if state is None:
+            raise StorageIntegrityError(f"operation {op_id!r} has invalid state")
         if state in (_OpState.COMMITTED, _OpState.ABORTED):
             return
         if state is _OpState.PREPARED:
@@ -415,12 +431,12 @@ class FilesystemObjectBackend:
             # already-published version dir here -- if it exists, the rename
             # won the race against the state write, so forward-complete
             # instead (see below).
-            if self._all_versions_published(intent):
+            if any(self._version_exists(v) for v in intent.versions):
                 self._finalize_after_versions_published(op_id, intent)
             else:
                 self._abort_operation(op_id, intent)
             return
-        if state is _OpState.VERSIONS_PUBLISHED:
+        if state in (_OpState.TARGET_PUBLISHED, _OpState.SOURCE_PUBLISHED, _OpState.VERSIONS_PUBLISHED):
             self._finalize_after_versions_published(op_id, intent)
             return
         if state is _OpState.REVISION_PUBLISHED:
@@ -428,6 +444,11 @@ class FilesystemObjectBackend:
             self._write_idempotency_from_intent(intent)
             self._set_state(op_id, _OpState.COMMITTED)
             return
+        raise StorageIntegrityError(f"unknown recovery state for operation {op_id!r}")
+
+    def _version_exists(self, v: _VersionIntent) -> bool:
+        key = StorageKey(v.key_value)
+        return self._sd.stat(*self._version_metadata_components(key, v.version)) is not None
 
     def _all_versions_published(self, intent: _OperationIntent) -> bool:
         for v in intent.versions:
@@ -486,6 +507,13 @@ class FilesystemObjectBackend:
                     f"version {v.version} of {v.key_value!r} on disk does not "
                     f"match its operation intent"
                 )
+            if not v.tombstone:
+                try:
+                    content = self._read_version_bytes(key, v.version)
+                except FileNotFoundError as exc:
+                    raise StorageIntegrityError(f"missing content for {v.key_value!r}") from exc
+                if v.content_sha256 and sha256(content).hexdigest() != v.content_sha256:
+                    raise StorageIntegrityError(f"content digest mismatch for {v.key_value!r}")
 
     def _materialize_content(self, v: _VersionIntent) -> "bytes | None":
         """For a tombstone: no content (None). For a put: content was in the
@@ -495,22 +523,30 @@ class FilesystemObjectBackend:
         if v.tombstone:
             return None
         if v.source_key is None:
-            # A put's content cannot be reconstructed from anything on disk.
-            raise StorageIntegrityError(
-                f"put version {v.version} of {v.key_value!r} was not persisted "
-                f"before the crash and cannot be reconstructed"
-            )
+            if not v.operation_id:
+                raise StorageIntegrityError(f"missing operation id for {v.key_value!r}")
+            payload = self._operation_dir_components(v.operation_id) + ("payloads", str(v.version), "content.bin")
+            try:
+                content = self._sd.read_bytes(*payload)
+            except FileNotFoundError as exc:
+                raise StorageIntegrityError(f"missing staged payload for {v.key_value!r}") from exc
+            if v.content_sha256 and sha256(content).hexdigest() != v.content_sha256:
+                raise StorageIntegrityError(f"content digest mismatch for {v.key_value!r}")
+            return content
         src_key = StorageKey(v.source_key)
-        return self._sd.read_bytes(
+        content = self._sd.read_bytes(
             *self._version_content_components(src_key, v.source_version)
         )
+        if v.content_sha256 and sha256(content).hexdigest() != v.content_sha256:
+            raise StorageIntegrityError(f"content digest mismatch for {v.key_value!r}")
+        return content
 
     def _version_metadata_payload(self, v: _VersionIntent) -> bytes:
         return json.dumps(
             {
                 "key": v.key_value,
                 "version": v.version,
-                "commit_revision": None,  # filled at publish-time in the live path
+                "commit_revision": v.commit_revision,
                 "etag": v.etag,
                 "content_type": v.content_type,
                 "size": v.size,
@@ -609,6 +645,10 @@ class FilesystemObjectBackend:
             content=intent.to_json(),
         )
         self._set_state(intent.operation_id, _OpState.PREPARED)
+        generation = 0
+        if self._sd.stat(*self._generation_components()) is not None:
+            generation = int(self._sd.read_bytes(*self._generation_components()) or b"0")
+        self._sd.atomic_write(*self._generation_components(), content=str(generation + 1).encode())
 
     def _read_revision_sync(self) -> int:
         components = self._revision_components()
@@ -731,6 +771,7 @@ class FilesystemObjectBackend:
     # --- read paths -------------------------------------------------------
 
     def _raw_get_sync(self, key: StorageKey, *, include_content: bool):
+        self._recover()
         live = self._live_version_metadata(key)
         if live is None:
             return Missing
@@ -747,6 +788,7 @@ class FilesystemObjectBackend:
         )
 
     def _raw_stat_sync(self, key: StorageKey) -> "ObjectInfo | None":
+        self._recover()
         live = self._live_version_metadata(key)
         if live is None or live[1]["tombstone"]:
             return None
@@ -755,6 +797,7 @@ class FilesystemObjectBackend:
     def _raw_list_sync(
         self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
     ) -> ObjectPage:
+        self._recover()
         history_components = (".storage", "history")
         if self._sd.stat(*history_components) is None:
             return ObjectPage(items=(), next_cursor=None)
@@ -779,6 +822,7 @@ class FilesystemObjectBackend:
         return ObjectPage(items=tuple(items), next_cursor=next_cursor)
 
     def _raw_get_version_sync(self, key: StorageKey, version: int) -> "StoredObject | None":
+        self._recover()
         raw = self._read_version_metadata(key, version)
         if raw is None or raw["tombstone"]:
             return None
@@ -788,6 +832,7 @@ class FilesystemObjectBackend:
         )
 
     def _raw_get_at_revision_sync(self, key: StorageKey, revision: int) -> "StoredObject | None":
+        self._recover()
         best: "tuple[int, dict] | None" = None
         for v in self._list_version_numbers(key):
             raw = self._read_version_metadata(key, v)
@@ -805,6 +850,7 @@ class FilesystemObjectBackend:
     def _raw_list_versions_sync(
         self, key: StorageKey, *, limit: int, cursor: "str | None"
     ) -> ObjectVersionPage:
+        self._recover()
         versions = self._list_version_numbers(key)
         start = 0 if cursor is None else int(cursor)
         page_versions = versions[start : start + limit]
@@ -817,6 +863,7 @@ class FilesystemObjectBackend:
         return ObjectVersionPage(items=tuple(items), next_cursor=next_cursor)
 
     def _raw_list_at_revision_sync(self, prefix: StorageKey, revision: int) -> "tuple[ObjectInfo, ...]":
+        self._recover()
         history_components = (".storage", "history")
         if self._sd.stat(*history_components) is None:
             return ()
@@ -909,8 +956,16 @@ class FilesystemObjectBackend:
                     size=len(content),
                     modified_at=datetime.now(timezone.utc).isoformat(),
                     metadata=dict(options.metadata or {}),
+                    commit_revision=new_revision,
+                    content_sha256=sha256(content).hexdigest(),
+                    operation_id=operation_id,
                 )
             ],
+        )
+        self._sd.ensure_directory(*self._operation_dir_components(operation_id), "payloads", str(next_version))
+        self._sd.atomic_write(
+            *self._operation_dir_components(operation_id), "payloads", str(next_version), "content.bin",
+            content=content,
         )
         self._begin_operation(intent)
         # 5-7. publish the version directory atomically.
@@ -1010,6 +1065,8 @@ class FilesystemObjectBackend:
                     size=0,
                     modified_at=datetime.now(timezone.utc).isoformat(),
                     metadata={},
+                    commit_revision=new_revision,
+                    operation_id=operation_id,
                 )
             ],
         )
@@ -1119,6 +1176,9 @@ class FilesystemObjectBackend:
             # target publish completed.
             source_key=source.value,
             source_version=src_version,
+            commit_revision=new_revision,
+            content_sha256=sha256(content).hexdigest(),
+            operation_id=operation_id,
         )
         source_tombstone_intent = _VersionIntent(
             key_value=source.value,
@@ -1129,6 +1189,8 @@ class FilesystemObjectBackend:
             size=0,
             modified_at=now_iso,
             metadata={},
+            commit_revision=new_revision,
+            operation_id=operation_id,
         )
         intent = _OperationIntent(
             operation="move",
@@ -1197,14 +1259,15 @@ class FilesystemObjectBackend:
 def _metadata_matches_intent(actual: dict, v: _VersionIntent) -> bool:
     """Recovery-time check that a published version dir matches what the
     intent said it should be. commit_revision is filled in by the live path
-    after-the-fact, so the intent leaves it null; we check the immutable
-    fields only. content_type is treated as equal when both are None."""
+    and verify the operation revision as well as the immutable fields."""
     pairs = (
         ("etag", v.etag),
         ("size", v.size),
         ("tombstone", v.tombstone),
         ("version", v.version),
         ("key", v.key_value),
+        ("commit_revision", v.commit_revision),
+        ("metadata", v.metadata),
     )
     for actual_key, expected in pairs:
         if actual.get(actual_key) != expected:
@@ -1213,6 +1276,8 @@ def _metadata_matches_intent(actual: dict, v: _VersionIntent) -> bool:
     # even though we wrote it through the live path's dict.
     if actual.get("content_type") != v.content_type and actual.get("content_type") is not None:
         return False
+    if not v.tombstone and v.content_sha256:
+        return True
     return True
 
 

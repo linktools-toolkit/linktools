@@ -7,7 +7,7 @@ runtime / capability). Domains depend on this kernel's narrow Protocols; the
 kernel never depends back.
 
 The runtime composition (``Storage`` + ``FilesystemStorage`` +
-``SqlAlchemyStorage`` + ``StorageFeatures`` + ``StorageUnitOfWork``) lives at
+the SQLAlchemy adapter + ``StorageFeatures`` + ``StorageUnitOfWork``) lives at
 ``linktools.ai.runtime.persistence``. Importing ``linktools.ai.storage`` pulls
 only the storage kernel; it never pulls a domain package or a runtime
 composition."""

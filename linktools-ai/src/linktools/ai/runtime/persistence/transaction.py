@@ -19,7 +19,7 @@ and its manager is a :class:`NoCrossStoreTransactions` whose
 ``transaction()`` raises :class:`StorageTransactionNotSupportedError` at the
 call. That is the honest declaration: the capability is not faked -- it
 fails explicitly. A backend with a shared transaction provider
-(SqlAlchemyStorage -- one AsyncSession across stores) sets
+(the SQLAlchemy adapter -- one AsyncSession across stores) sets
 ``features.transaction_scope = TransactionScope.DATABASE`` and supplies a
 real manager (see :mod:`linktools.ai.runtime.persistence.sqlalchemy`).
 

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from .cancellation import CancellationToken
 from .commit import (
     AcknowledgeCancelRunCommand,
+    ApprovalRequestData,
     CompleteRunCommand,
     ExecutionFence,
     FailRunCommand,
@@ -808,9 +809,6 @@ class RunCoordinator:
         SwarmRun/strategy; the driving RunRecord is the Coordinator's. Returns
         the aggregate RunResult on completion."""
         async with self._claim_and_fence(context) as (cancellation, token, _live):
-            # Coordinator-owned swarm event sink: SwarmEngine emits lifecycle
-            # events through it rather than appending its own EventStore.
-            swarm_event_sink = _EventStoreEventSink(self._storage.events, context)
             try:
                 outcome = await self._swarm_engine.execute(
                     spec,
@@ -818,7 +816,6 @@ class RunCoordinator:
                     context,
                     agents=agents,
                     cancellation=cancellation,
-                    swarm_event_sink=swarm_event_sink,
                 )
             except asyncio.CancelledError:
                 # Explicit cancellation: SwarmEngine already transitioned its
@@ -1170,15 +1167,15 @@ class RunCoordinator:
                 PauseRunCommand(
                     run_id=run_id,
                     expected_version=expected_version,
-                    approval_request={
-                        "tenant_id": context.tenant_id,
-                        "approval_id": outcome.request.approval_id,
-                        "tool_call_id": outcome.request.tool_call_id,
-                        "tool_name": outcome.request.tool_name or "",
-                        "reason": outcome.request.reason,
-                        "arguments": outcome.request.arguments,
-                        **outcome.request.binding,
-                    },
+                    approval_request=ApprovalRequestData(
+                        tenant_id=context.tenant_id or "",
+                        approval_id=outcome.request.approval_id,
+                        tool_call_id=outcome.request.tool_call_id,
+                        tool_name=outcome.request.tool_name or "",
+                        reason=outcome.request.reason or "",
+                        arguments=outcome.request.arguments,
+                        binding=outcome.request.binding,
+                    ),
                     checkpoint_payload=outcome.checkpoint_payload,
                     paused_event=RunPausedEvent(
                         run_id=run_id,
