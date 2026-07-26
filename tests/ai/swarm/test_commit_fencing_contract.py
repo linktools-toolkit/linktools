@@ -138,15 +138,16 @@ def _complete_command(swarm_run_id: str, token: str, *, commit_id: str | None = 
 
 async def _rotate_token(
     swarm_store: FilesystemSwarmStore, swarm_run_id: str, new_token: str
-) -> None:
+) -> str:
     """Rotate ownership through the production atomic store operation."""
     current = await swarm_store.get_run(swarm_run_id)
     assert current is not None
-    await swarm_store.rotate_execution_token(
+    lease = await swarm_store.claim_execution(
         swarm_run_id,
-        expected_token=current.execution_token or "",
-        new_token=new_token,
+        owner_id=new_token,
+        expected_generation=current.execution_generation,
     )
+    return lease.token
 
 
 # --- real token validation --------------------------------------------------
@@ -272,7 +273,7 @@ def test_filesystem_fence_check_happens_inside_lock(tmp_path):
 
     async def _run_async():
         await swarm_store.create_run(_run("swarm-1", execution_token="tok-0"))
-        await _rotate_token(swarm_store, "swarm-1", "tok-1")
+        current_token = await _rotate_token(swarm_store, "swarm-1", "worker-1")
 
         # Instrument the ACTUAL lock object the store uses: wrap its
         # acquire/release so we count holders strictly inside the critical
@@ -310,7 +311,9 @@ def test_filesystem_fence_check_happens_inside_lock(tmp_path):
         # lock they queue one-at-a-time (peak == 1); without a lock they
         # overlap (peak >> 1).
         await asyncio.gather(*[
-            swarm_store.assert_execution_fence("swarm-1", expected_token="tok-1")
+            swarm_store.assert_execution_fence(
+                "swarm-1", expected_token=current_token
+            )
             for _ in range(20)
         ])
         assert peak[0] == 1, (

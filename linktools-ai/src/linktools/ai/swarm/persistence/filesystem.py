@@ -114,6 +114,26 @@ def _run_to_json(run: SwarmRun) -> dict:
 
 
 def _run_from_json(raw: dict) -> SwarmRun:
+    from ..commit import SwarmCommitIntegrityError
+
+    try:
+        execution_token = raw["execution_token"]
+        execution_owner_id = raw["execution_owner_id"]
+        execution_generation = raw["execution_generation"]
+    except KeyError as exc:
+        raise SwarmCommitIntegrityError(
+            f"SwarmRun ownership field is missing: {exc.args[0]}"
+        ) from exc
+    if execution_token is not None and (
+        not isinstance(execution_token, str) or not execution_token
+    ):
+        raise SwarmCommitIntegrityError("SwarmRun execution_token is invalid")
+    if execution_owner_id is not None and (
+        not isinstance(execution_owner_id, str) or not execution_owner_id
+    ):
+        raise SwarmCommitIntegrityError("SwarmRun execution_owner_id is invalid")
+    if type(execution_generation) is not int or execution_generation < 0:
+        raise SwarmCommitIntegrityError("SwarmRun execution_generation is invalid")
     tu = raw["token_usage"]
     return SwarmRun(
         id=raw["id"],
@@ -130,9 +150,9 @@ def _run_from_json(raw: dict) -> SwarmRun:
         created_at=datetime.fromisoformat(raw["created_at"]),
         updated_at=datetime.fromisoformat(raw["updated_at"]),
         metadata=raw["metadata"],
-        execution_token=raw.get("execution_token"),
-        execution_owner_id=raw.get("execution_owner_id"),
-        execution_generation=raw.get("execution_generation", 0),
+        execution_token=execution_token,
+        execution_owner_id=execution_owner_id,
+        execution_generation=execution_generation,
     )
 
 
@@ -348,47 +368,13 @@ class FilesystemSwarmStore:
             )
         return self._create_run_sync(run)
 
-    async def rotate_execution_token(
-        self, swarm_run_id: str, *, expected_token: str, new_token: str
-    ) -> SwarmRun:
-        if not expected_token or not new_token:
-            raise ValueError("execution tokens must be non-empty")
-        async with self._lock:
-            return await asyncio.to_thread(
-                self._rotate_execution_token_sync,
-                swarm_run_id,
-                expected_token=expected_token,
-                new_token=new_token,
-            )
-
-    def _rotate_execution_token_sync(
-        self, swarm_run_id: str, *, expected_token: str, new_token: str
-    ) -> SwarmRun:
-        from ..commit import SwarmFenceLostError
-        current = self._get_run_sync(swarm_run_id)
-        if current is None:
-            raise SwarmRunNotFoundError(swarm_run_id)
-        if current.execution_token != expected_token:
-            raise SwarmFenceLostError("swarm execution fence mismatch")
-        updated = SwarmRun(
-            id=current.id, run_id=current.run_id, round=current.round,
-            status=current.status, version=current.version + 1,
-            token_usage=current.token_usage, cost=current.cost,
-            created_at=current.created_at, updated_at=datetime.now(current.created_at.tzinfo),
-            metadata=current.metadata, execution_token=new_token,
-            execution_owner_id=current.execution_owner_id,
-            execution_generation=current.execution_generation + 1,
-        )
-        _atomic_write(self._run_path(swarm_run_id), json.dumps(_run_to_json(updated)).encode("utf-8"))
-        return updated
-
     async def claim_execution(
         self,
         swarm_run_id: str,
         *,
         owner_id: str,
         expected_generation: "int | None",
-    ):
+    ) -> "SwarmExecutionLease":
         if not isinstance(owner_id, str) or not owner_id:
             raise ValueError("owner_id must be non-empty")
         if expected_generation is not None and (
@@ -409,7 +395,7 @@ class FilesystemSwarmStore:
         *,
         owner_id: str,
         expected_generation: "int | None",
-    ):
+    ) -> "SwarmExecutionLease":
         import secrets
         from ..commit import SwarmExecutionLease, SwarmFenceLostError
 

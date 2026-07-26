@@ -6,6 +6,7 @@ style (sync test wrapper driving its own event loop) so no pytest-asyncio mode
 config is needed."""
 
 import asyncio
+import json
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
@@ -18,6 +19,10 @@ from linktools.ai.errors import (
     SwarmStepNotFoundError,
 )
 from linktools.ai.run.models import RunErrorInfo, RunResult
+from linktools.ai.swarm.commit import (
+    SwarmCommitIntegrityError,
+    SwarmFenceLostError,
+)
 from linktools.ai.swarm.persistence.filesystem import FilesystemSwarmStore
 from linktools.ai.swarm.models import (
     AttemptStatus,
@@ -653,3 +658,51 @@ def test_renew_lease_non_claimed_raises_invalid_transition(tmp_path):
             )
 
     asyncio.run(_run_case())
+
+
+def test_claim_execution_rotates_and_persists_complete_ownership(tmp_path):
+    async def _run_case():
+        store = FilesystemSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+
+        first = await store.claim_execution(
+            "swarm-1", owner_id="worker-a", expected_generation=0
+        )
+        persisted = await FilesystemSwarmStore(root=tmp_path).get_run("swarm-1")
+        assert persisted is not None
+        assert persisted.execution_owner_id == "worker-a"
+        assert persisted.execution_generation == 1
+        assert persisted.execution_token == first.token
+        assert persisted.version == 2
+
+        second = await store.claim_execution(
+            "swarm-1", owner_id="worker-b", expected_generation=1
+        )
+        assert second.generation == 2
+        assert second.token != first.token
+        with pytest.raises(SwarmFenceLostError):
+            await store.claim_execution(
+                "swarm-1", owner_id="stale-worker", expected_generation=1
+            )
+
+    asyncio.run(_run_case())
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["execution_token", "execution_owner_id", "execution_generation"],
+)
+def test_run_reader_rejects_missing_ownership_fields(tmp_path, missing_field):
+    async def _seed():
+        store = FilesystemSwarmStore(root=tmp_path)
+        await store.create_run(_run())
+        return store
+
+    store = asyncio.run(_seed())
+    path = store._run_path("swarm-1")
+    raw = json.loads(path.read_text())
+    del raw[missing_field]
+    path.write_text(json.dumps(raw))
+
+    with pytest.raises(SwarmCommitIntegrityError):
+        asyncio.run(FilesystemSwarmStore(root=tmp_path).get_run("swarm-1"))
