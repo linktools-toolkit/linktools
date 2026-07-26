@@ -56,6 +56,10 @@ class FilesystemArtifactRecordStore:
     composition root injects this concrete backend into the ArtifactStore
     facade."""
 
+    def __init__(self, *, records_root: Path) -> None:
+        self._root = Path(records_root)
+        self._root.mkdir(parents=True, exist_ok=True)
+
     @property
     def capabilities(self) -> "ComponentCapabilities":
         # Filesystem records are independent files: there is NO cross-store
@@ -71,10 +75,6 @@ class FilesystemArtifactRecordStore:
             idempotency=True,
             append_only=False,
         )
-
-    def __init__(self, *, records_root: Path) -> None:
-        self._root = Path(records_root)
-        self._root.mkdir(parents=True, exist_ok=True)
 
     def _path(self, tenant_id: str, artifact_id: str) -> Path:
         _safe_component(tenant_id, "tenant_id")

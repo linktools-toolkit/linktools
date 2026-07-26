@@ -55,15 +55,6 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
 
 
 class SqlAlchemyMemoryStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(
-            transaction_participation=True,
-            optimistic_concurrency=True,
-        )
-
     """Multi-process MemoryStore backed by SQLAlchemy/AsyncSession.
 
     Optimistic concurrency on ``update`` / ``forget`` mirrors
@@ -83,6 +74,15 @@ class SqlAlchemyMemoryStore:
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+        )
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

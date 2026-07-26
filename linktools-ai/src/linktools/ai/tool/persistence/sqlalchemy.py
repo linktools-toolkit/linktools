@@ -65,16 +65,6 @@ def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
 
 
 class SqlAlchemyIdempotencyStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(
-            transaction_participation=True,
-            optimistic_concurrency=True,
-            idempotency=True,
-        )
-
     """Multi-process IdempotencyStore backed by SQLAlchemy/AsyncSession.
 
     Mirrors SqlAlchemyApprovalStore: ``session_factory`` constructor,
@@ -94,6 +84,16 @@ class SqlAlchemyIdempotencyStore:
         # and does NOT open its own session or call session.begin() -- the
         # UoW owns the transaction. None means normal mode.
         self._session = session
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+            idempotency=True,
+        )
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against

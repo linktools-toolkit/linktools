@@ -88,15 +88,6 @@ def _record_from_json(raw: dict) -> IdempotencyRecord:
 
 
 class FilesystemIdempotencyStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(
-            optimistic_concurrency=True,
-            idempotency=True,
-        )
-
     """Single-process IdempotencyStore backed by per-(scope, key) JSON files.
 
     Records live at ``root/{scope}/{key}.json``. Writes are atomic
@@ -110,6 +101,15 @@ class FilesystemIdempotencyStore:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            optimistic_concurrency=True,
+            idempotency=True,
+        )
 
     # -- paths ---------------------------------------------------------
 

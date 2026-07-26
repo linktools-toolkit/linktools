@@ -256,12 +256,6 @@ def _attempt_from_json(raw: dict) -> SwarmStepAttempt:
 
 
 class FilesystemSwarmStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(optimistic_concurrency=True)
-
     """Single-process SwarmStore backed by per-record JSON files.
 
     ``SwarmRun`` records live at ``root/runs/{swarm_run_id}.json`` and
@@ -304,6 +298,12 @@ class FilesystemSwarmStore:
         self._attempts_dir = self._root / "attempts"
         self._attempts_dir.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(optimistic_concurrency=True)
 
     @asynccontextmanager
     async def commit_scope(self, swarm_run_id: str):

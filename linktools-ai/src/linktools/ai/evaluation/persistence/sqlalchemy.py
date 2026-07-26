@@ -87,12 +87,6 @@ def _row_to_result(row: EvalResultRow) -> EvalResult:
 
 
 class SqlAlchemyEvalStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(transaction_participation=True)
-
     def __init__(
         self,
         *,
@@ -101,6 +95,12 @@ class SqlAlchemyEvalStore:
     ) -> None:
         self._session_factory = session_factory
         self._session = session
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(transaction_participation=True)
 
     async def _in_session(self, action):
         if self._session is not None:

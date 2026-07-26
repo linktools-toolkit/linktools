@@ -49,12 +49,6 @@ class EvalStore(Protocol):
 
 
 class InMemoryEvalStore:
-    @property
-    def capabilities(self):
-        from ..storage.features import ComponentCapabilities
-
-        return ComponentCapabilities()
-
     """A process-local EvalStore. Sufficient for the runner contract and for
     tests; the file and SQL backends satisfy the same Protocol for
     cross-process persistence."""
@@ -63,6 +57,12 @@ class InMemoryEvalStore:
         self._runs: "dict[str, EvalRun]" = {}
         self._results: "dict[str, EvalResult]" = {}
         self._order: "dict[str, list[str]]" = {}
+
+    @property
+    def capabilities(self):
+        from ..storage.features import ComponentCapabilities
+
+        return ComponentCapabilities()
 
     async def create_run(self, run: EvalRun) -> EvalRun:
         if run.id in self._runs:

@@ -48,6 +48,15 @@ class SqlAlchemyArtifactRecordStore:
     :class:`ArtifactRecordConflictError`. There is no UPDATE path; the lineage
     of a prior write can never be overwritten."""
 
+    def __init__(
+        self,
+        *,
+        session_factory: "Callable[[], AsyncSession]",
+        session: "AsyncSession | None" = None,
+    ) -> None:
+        self._session_factory = session_factory
+        self._session = session
+
     @property
     def capabilities(self) -> "ComponentCapabilities":
         # transaction_participation: shares the UoW AsyncSession (session=...),
@@ -64,15 +73,6 @@ class SqlAlchemyArtifactRecordStore:
             idempotency=True,
             append_only=False,
         )
-
-    def __init__(
-        self,
-        *,
-        session_factory: "Callable[[], AsyncSession]",
-        session: "AsyncSession | None" = None,
-    ) -> None:
-        self._session_factory = session_factory
-        self._session = session
 
     async def _run(self, action):
         if self._session is not None:

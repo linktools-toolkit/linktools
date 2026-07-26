@@ -143,15 +143,6 @@ def _row_to_attempt(row: SwarmStepAttemptRow) -> SwarmStepAttempt:
 
 
 class SqlAlchemySwarmStore:
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(
-            transaction_participation=True,
-            optimistic_concurrency=True,
-        )
-
     """Multi-process SwarmStore backed by SQLAlchemy/AsyncSession.
 
     Optimistic concurrency on ``update_run`` mirrors ``SqlAlchemyRunStore.transition``
@@ -172,6 +163,15 @@ class SqlAlchemySwarmStore:
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+
+    @property
+    def capabilities(self):
+        from ...storage.features import ComponentCapabilities
+
+        return ComponentCapabilities(
+            transaction_participation=True,
+            optimistic_concurrency=True,
+        )
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in own transaction (normal mode) or against the

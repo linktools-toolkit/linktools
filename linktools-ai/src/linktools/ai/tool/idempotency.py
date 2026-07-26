@@ -123,12 +123,12 @@ class ClaimResult:
 
 @runtime_checkable
 class IdempotencyStore(Protocol):
-    @property
-    def capabilities(self) -> ComponentCapabilities: ...
-
     """Persistent idempotency storage. Two backends: FilesystemIdempotencyStore
     (one JSON per (scope, key)) and SqlAlchemyIdempotencyStore (table
     ``ai_idempotency``). Both implement the same fenced-claim contract."""
+
+    @property
+    def capabilities(self) -> ComponentCapabilities: ...
 
     async def claim(
         self,
