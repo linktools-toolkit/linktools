@@ -29,7 +29,7 @@ from linktools.ai.storage.backends.sqlalchemy.object import (
 )
 from linktools.ai.storage.object.errors import StorageTransactionClosedError
 from linktools.ai.storage.object.models import StorageKey, WriteOptions
-from linktools.ai.storage.sqlalchemy.dialects import SqliteObjectDialect
+from linktools.ai.storage.sqlalchemy.dialects import SqliteDialect
 
 
 def _key(value: str) -> StorageKey:
@@ -62,7 +62,7 @@ def test_parent_backend_has_no_ambient_tx_fields():
     bleed bug."""
     backend = SqlAlchemyObjectBackend(
         session_factory=async_sessionmaker(create_async_engine("sqlite+aiosqlite://")),
-        dialect=SqliteObjectDialect(),
+        dialect=SqliteDialect(),
     )
     assert not hasattr(backend, "_tx_session")
     assert not hasattr(backend, "_tx_revision")
@@ -236,7 +236,7 @@ def test_child_session_attribute_is_set_at_construction():
         async with session_factory() as session:
             child = _SqlAlchemyTransactionBackend(
                 session=session,
-                dialect=SqliteObjectDialect(),
+                dialect=SqliteDialect(),
             )
             assert child._session is session
             assert isinstance(child._session, AsyncSession)

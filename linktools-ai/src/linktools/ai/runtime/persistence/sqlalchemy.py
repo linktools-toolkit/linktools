@@ -51,7 +51,7 @@ from ...tool.idempotency import IdempotencyStore
 from .features import StorageFeatures
 from .facade import Storage
 from ...agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
-from ...storage.sqlalchemy.dialects import SqlAlchemyObjectDialect
+from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
 from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
 from ...run.persistence.sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 from ...run.persistence.sqlalchemy.definition import SqlAlchemyRunDefinitionStore
@@ -111,11 +111,15 @@ class SqlAlchemyStorageAdapter(Storage):
     caller-constructed ``async_sessionmaker`` (NEVER a URL/engine), the caller's
     chosen :class:`ArtifactBlobStore` + :class:`LeaseCoordinator` +
     :class:`StorageFeatures`, and wires the SQLAlchemy metadata stores around
-    them. It imports no dialect driver, constructs no engine, branches on no
-    dialect name, and takes the blob store + coordination + features as INJECTED
-    dependencies -- the caller owns those choices. The artifact facade is built
-    over the injected blob store + a session-bound SqlAlchemyArtifactRecordStore
-    so artifact records share the cross-store transaction.
+    them. It imports no dialect driver, constructs no engine, and takes the
+    blob store + coordination + features as INJECTED dependencies -- the
+    caller owns those choices. ``dialect`` is optional: when omitted, each
+    sub-store lazily auto-detects it from its open session's bound engine on
+    first use (see ``storage.sqlalchemy.dialects.resolve_dialect``); the
+    adapter itself never branches on the dialect's identity, only calls its
+    Protocol methods. The artifact facade is built over the injected blob
+    store + a session-bound SqlAlchemyArtifactRecordStore so artifact records
+    share the cross-store transaction.
 
     The in-repo :class:`~..sqlite.SqliteStorage` convenience supplies default
     blob/coordination/features and delegates here."""
@@ -128,7 +132,7 @@ class SqlAlchemyStorageAdapter(Storage):
         coordination,
         features,
         artifact_coordinator,
-        dialect,
+        dialect=None,
         schema_provider,
     ) -> None:
         raise TypeError("SqlAlchemyStorageAdapter must be created with await create()")
@@ -141,14 +145,16 @@ class SqlAlchemyStorageAdapter(Storage):
         coordination: "LeaseCoordinator | None",
         features: StorageFeatures,
         artifact_coordinator: "KeyedCoordinator",
-        dialect: "SqlAlchemyObjectDialect",
+        dialect: "SqlAlchemyDialect | None" = None,
         schema_provider: "SqlAlchemySchemaProvider",
     ) -> None:
         from ...artifact.store import ArtifactStore
 
         self._session_factory = session_factory
-        # Protocol-first: the caller hands in the dialect that matches its
-        # engine + driver; core does not resolve one from the session_factory.
+        # dialect may be left None: each sub-store below auto-detects it from
+        # an open session's bound engine on first use. A caller wanting a
+        # vendor with no built-in (or a test double) hands its own dialect in
+        # instead, threaded to every sub-store so they all agree.
         self._dialect = dialect
         self._schema_provider = schema_provider
 
@@ -179,7 +185,9 @@ class SqlAlchemyStorageAdapter(Storage):
             ),
             artifacts=ArtifactStore(
                 artifact_blobs,
-                SqlAlchemyArtifactRecordStore(session_factory=session_factory),
+                SqlAlchemyArtifactRecordStore(
+                    session_factory=session_factory, dialect=self._dialect
+                ),
                 artifact_coordinator,
             ),
         )
@@ -189,7 +197,7 @@ class SqlAlchemyStorageAdapter(Storage):
         cls,
         *,
         session_factory: "async_sessionmaker[AsyncSession]",
-        dialect: "SqlAlchemyObjectDialect",
+        dialect: "SqlAlchemyDialect | None" = None,
         schema_provider: "SqlAlchemySchemaProvider",
         artifact_blobs: "BlobStore",
         coordination: "LeaseCoordinator | None",
@@ -234,7 +242,6 @@ class _ReferenceSqlAlchemyComposition(SqlAlchemyStorageAdapter):
         from ...storage.coordination.file import FilesystemKeyedCoordinator
         from ...storage.coordination.process_local import ProcessLocalLeaseCoordinator
         from ...storage.filesystem.artifact import FilesystemArtifactBlobStore
-        from ...storage.sqlalchemy.dialects import SqliteObjectDialect
         from ...storage.backends.sqlalchemy.schema import SqliteReferenceSchemaProvider
         # The commit-log ORM models (run_commit_log, swarm_commit_log) are
         # domain-owned and must be registered on the shared DomainBase metadata
@@ -252,7 +259,7 @@ class _ReferenceSqlAlchemyComposition(SqlAlchemyStorageAdapter):
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=blobs_root),
             coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_manager=_SqlAlchemyTransactionManager(session_factory, dialect=SqliteObjectDialect()),
+                transaction_manager=_SqlAlchemyTransactionManager(session_factory),
                 coordination=coordination,
                 artifacts=None,
                 components={},
@@ -260,10 +267,11 @@ class _ReferenceSqlAlchemyComposition(SqlAlchemyStorageAdapter):
             # Blobs live on the shared filesystem, so the per-digest lock must
             # span processes (a separate sweeper worker) -- flock the blobs root.
             artifact_coordinator=FilesystemKeyedCoordinator(root=blobs_root),
-            # The reference convenience ships the SQLite dialect. A downstream
-            # that brings its own engine constructs SqlAlchemyStorageAdapter
-            # directly with its own dialect.
-            dialect=SqliteObjectDialect(),
+            # dialect is omitted: this reference convenience is always handed
+            # a SQLite session_factory, so auto-detection resolves it. A
+            # downstream that brings its own engine constructs
+            # SqlAlchemyStorageAdapter directly (auto-detection works there
+            # too) or passes an explicit dialect for a vendor with no built-in.
             schema_provider=SqliteReferenceSchemaProvider(),
         )
 
@@ -286,16 +294,21 @@ class _SqlAlchemyTransactionManager:
         self,
         session_factory: "async_sessionmaker[AsyncSession]",
         *,
-        dialect,
+        dialect=None,
     ) -> None:
         self._session_factory = session_factory
+        # May be None here (auto-detect on first use in transaction()); a
+        # caller wanting a vendor with no built-in (or a test double) hands
+        # an explicit dialect in instead.
         self._dialect = dialect
 
     @asynccontextmanager
     async def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         from ...storage.backends.sqlalchemy.object import _SqlAlchemyTransactionBackend
+        from ...storage.sqlalchemy.dialects import resolve_dialect
 
         async with self._session_factory() as session:
+            dialect = self._dialect if self._dialect is not None else resolve_dialect(session)
             async with session.begin():
                 yield _UnitOfWork(
                     session=session,
@@ -309,14 +322,16 @@ class _SqlAlchemyTransactionManager:
                     assets=ObjectStore(
                         primary=_SqlAlchemyTransactionBackend(
                             session=session,
-                            dialect=self._dialect,
+                            dialect=dialect,
                         )
                     ),
                     # artifact_records: session-bound -- joins the UoW's atomic
                     # scope (flush, not commit) so an artifact-record write
                     # rolls back with a run/event write on failure.
                     artifact_records=SqlAlchemyArtifactRecordStore(
-                        session_factory=self._session_factory, session=session
+                        session_factory=self._session_factory,
+                        session=session,
+                        dialect=dialect,
                     ),
                     runs=SqlAlchemyRunStore(
                         session_factory=self._session_factory, session=session

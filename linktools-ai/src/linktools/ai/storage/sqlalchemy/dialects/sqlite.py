@@ -1,52 +1,49 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLite reference dialect for the storage kernel's object backend.
+"""SQLite reference dialect, shared by every SQL store/backend.
 
-The ONE concrete dialect core ships. Uses SQLite's ``INSERT ... ON CONFLICT
-(key_hash) DO NOTHING`` so a conflicting insert returns ``inserted=False``
-with NO exception -- safe under a surrounding UoW transaction (aiosqlite
-commits a SAVEPOINT immediately, so a savepoint-based recovery would poison
-UoW rollback, which is why the ON CONFLICT path is mandatory under SQLite).
+The reference dialect core ships (alongside :class:`MySQLDialect` and
+:class:`PostgreSQLDialect`). Uses SQLite's ``INSERT ... ON CONFLICT (...)
+DO NOTHING`` so a conflicting insert returns ``inserted=False`` with NO
+exception -- safe under a surrounding UoW transaction (aiosqlite commits a
+SAVEPOINT immediately, so a savepoint-based recovery would poison UoW
+rollback, which is why the ON CONFLICT path is mandatory under SQLite).
 
 Downstreams with a different engine (their own vendor) implement
-:class:`SqlAlchemyObjectDialect` themselves and run the kernel conformance
-suite in their own CI. Core deliberately ships no MySQL / PostgreSQL /
-Oracle / etc. dialect; those belong to the downstream that owns the engine."""
+:class:`SqlAlchemyDialect` themselves and run the kernel conformance suite in
+their own CI."""
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .base import IntegrityViolationKind, InsertResult
 
 
-class SqliteObjectDialect:
-    """The SQLite reference dialect. ``insert_current_if_absent`` issues an
-    ``ON CONFLICT (key_hash) DO NOTHING`` insert into ``storage_objects``;
-    the resulting ``rowcount`` signals whether the row landed (1) or was
-    skipped because a row with the same key_hash already existed (0)."""
+class SqliteDialect:
+    """The SQLite reference dialect. ``insert_ignore_conflict`` issues an
+    ``ON CONFLICT (...) DO NOTHING`` insert into the given model's table; the
+    resulting ``rowcount`` signals whether the row landed (1) or was skipped
+    because a row with the same unique-column values already existed (0)."""
 
     @property
     def name(self) -> str:
         return "sqlite"
 
-    async def insert_current_if_absent(
+    async def insert_ignore_conflict(
         self,
         session: Any,
         *,
+        model: type,
         values: "Mapping[str, Any]",
+        index_elements: "Sequence[str]",
     ) -> InsertResult:
         from sqlalchemy.dialects.sqlite import insert
 
-        # Late import: keep this module importable without SQLAlchemy + the
-        # backend models; the dialect is reached only when the storage kernel
-        # actually wires it into a SqlAlchemyObjectBackend.
-        from ...backends.sqlalchemy.models import StorageObjectRow
-
         stmt = (
-            insert(StorageObjectRow)
+            insert(model)
             .values(**values)
-            .on_conflict_do_nothing(index_elements=["key_hash"])
+            .on_conflict_do_nothing(index_elements=list(index_elements))
         )
         result = await session.execute(stmt)
         return InsertResult(inserted=result.rowcount == 1)
@@ -66,4 +63,4 @@ class SqliteObjectDialect:
         return IntegrityViolationKind.UNKNOWN
 
 
-__all__: "list[str]" = ["SqliteObjectDialect"]
+__all__: "list[str]" = ["SqliteDialect"]

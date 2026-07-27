@@ -7,11 +7,13 @@ scope (it lives on the filesystem via FilesystemArtifactBlobStore; a row here
 never holds bytes). The store uses the caller-provided AsyncSession: a
 ``session_factory`` for standalone use, or a shared ``session`` so it can
 participate in the same UnitOfWork as the other SQL stores. The create-only
-INSERT detects a primary-key conflict through ``ON CONFLICT DO NOTHING`` -- the
-reference implementation is SQLite/aiosqlite, where a SAVEPOINT-based recovery
-would poison UoW rollback (aiosqlite commits savepoints immediately), so the
-ON CONFLICT path is mandatory. A downstream that ships its own engine +
-driver reimplements this conflict-detecting insert against its own dialect.
+INSERT detects a conflict on ``artifact_id`` through the injected
+:class:`~linktools.ai.storage.sqlalchemy.dialects.SqlAlchemyDialect`'s
+``insert_ignore_conflict`` -- the same seam the storage kernel's object
+backend uses, so this store needs no vendor-specific SQL of its own. A
+SAVEPOINT-based recovery would poison UoW rollback under aiosqlite (which
+commits savepoints immediately), so the conflict-detecting insert (rather
+than INSERT + catch IntegrityError) is mandatory for every dialect.
 Record serialization goes through the public codec
 (:func:`record_to_jsonable` / :func:`record_from_jsonable`) so the JSON shape is
 owned in one place."""
@@ -20,7 +22,6 @@ import json
 from typing import TYPE_CHECKING, AsyncIterator, Callable
 
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..digest import ArtifactDigest
@@ -31,6 +32,7 @@ from linktools.ai.storage.sqlalchemy.models import ArtifactRecordRow
 
 if TYPE_CHECKING:
     from ...storage.features import ComponentCapabilities
+    from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
 
 
 def _row_to_record(row: ArtifactRecordRow) -> ArtifactRecord:
@@ -43,7 +45,7 @@ class SqlAlchemyArtifactRecordStore:
     the content-addressed bytes. ``session_factory`` for standalone use;
     ``session`` for UoW participation (shared with the other SQL stores).
 
-    Records are create-only: an INSERT that hits an existing primary key is
+    Records are create-only: an INSERT that hits an existing artifact_id is
     reconciled -- byte-identical content is idempotent, any field change raises
     :class:`ArtifactRecordConflictError`. There is no UPDATE path; the lineage
     of a prior write can never be overwritten."""
@@ -53,9 +55,22 @@ class SqlAlchemyArtifactRecordStore:
         *,
         session_factory: "Callable[[], AsyncSession]",
         session: "AsyncSession | None" = None,
+        dialect: "SqlAlchemyDialect | None" = None,
     ) -> None:
         self._session_factory = session_factory
         self._session = session
+        # dialect may be left None: _dialect_for() then auto-detects it from
+        # an open session's bound engine on first use. A caller wanting a
+        # vendor with no built-in (or a test double) passes its own dialect
+        # in instead.
+        self._dialect = dialect
+
+    def _dialect_for(self, session: AsyncSession) -> "SqlAlchemyDialect":
+        if self._dialect is not None:
+            return self._dialect
+        from ...storage.sqlalchemy.dialects import resolve_dialect
+
+        return resolve_dialect(session)
 
     @property
     def capabilities(self) -> "ComponentCapabilities":
@@ -86,27 +101,27 @@ class SqlAlchemyArtifactRecordStore:
         payload = json.dumps(record_to_jsonable(record))
 
         async def _action(session: AsyncSession) -> ArtifactRecord:
-            # INSERT first. ON CONFLICT DO NOTHING absorbs a concurrent same-id
-            # insert without poisoning the session (the reference impl is
-            # SQLite/aiosqlite, where a SAVEPOINT-based recovery would break
-            # UoW rollback). A reported conflict -> the row exists, read it
-            # and reconcile (idempotent on identical content, conflict on a
+            # INSERT first. The dialect's ignore-conflict insert absorbs a
+            # concurrent same-artifact_id insert without poisoning the session
+            # (a SAVEPOINT-based recovery would break UoW rollback under
+            # aiosqlite). A reported conflict -> the row exists, read it and
+            # reconcile (idempotent on identical content, conflict on a
             # different value).
-            stmt = (
-                sqlite_insert(ArtifactRecordRow)
-                .values(
-                    artifact_id=record.ref.id,
-                    tenant_id=record.tenant_id,
-                    content_hash=record.ref.sha256,
-                    producer_kind=record.provenance.producer_kind,
-                    producer_id=record.provenance.producer_id or None,
-                    run_id=record.provenance.run_id,
-                    data_json=payload,
-                )
-                .on_conflict_do_nothing(index_elements=["artifact_id"])
+            insert_outcome = await self._dialect_for(session).insert_ignore_conflict(
+                session,
+                model=ArtifactRecordRow,
+                values={
+                    "artifact_id": record.ref.id,
+                    "tenant_id": record.tenant_id,
+                    "content_hash": record.ref.sha256,
+                    "producer_kind": record.provenance.producer_kind,
+                    "producer_id": record.provenance.producer_id or None,
+                    "run_id": record.provenance.run_id,
+                    "data_json": payload,
+                },
+                index_elements=["artifact_id"],
             )
-            result = await session.execute(stmt)
-            if result.rowcount == 0:
+            if not insert_outcome.inserted:
                 existing = (
                     await session.execute(
                         select(ArtifactRecordRow).where(

@@ -229,27 +229,8 @@ def test_stable_read_scans_empty_active_directory(tmp_path):
     assert _active(backend) == ()
 
 
-def test_100k_completed_mutations_leave_no_active_journals(tmp_path):
-    """100,000 completed mutations must leave zero active operation
-    directories. Uses TRUSTED_LOCAL mode (no per-op fsync) so the volume is
-    exercisable in-test; the lifecycle contract (dir removed on commit) is
-    identical across modes."""
-    backend = _backend(tmp_path, mode=FilesystemSecurityMode.TRUSTED_LOCAL)
-    total = 100_000
-
-    async def _run():
-        for i in range(total):
-            await backend.raw_put_checked(
-                _key(f"/k/{i}"),
-                b"x",
-                options=WriteOptions(),
-                request_hash=f"h{i}",
-            )
-
-    asyncio.run(_run())
-    # The assertion the spec demands: zero active journals regardless of how
-    # many mutations ran.
-    assert _active(backend) == ()
+# The 100k-mutation volume version of this same contract lives in
+# tests/ai_slow/test_object_journal_soak.py (too slow for the default loop).
 
 
 # --- intent strong validation ---------------------------------------------------

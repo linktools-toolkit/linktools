@@ -112,7 +112,6 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             else Path(f"{database_str}.artifacts")
         )
         self._artifact_root = resolved_root
-        from ...storage.sqlalchemy.dialects import SqliteObjectDialect
         from .sqlalchemy import _SqlAlchemyTransactionManager
 
         coordination = ProcessLocalLeaseCoordinator()
@@ -121,7 +120,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             artifact_blobs=FilesystemArtifactBlobStore(blobs_root=resolved_root / "blobs"),
             coordination=coordination,
             features=StorageFeatures.from_components(
-                transaction_manager=_SqlAlchemyTransactionManager(session_factory, dialect=SqliteObjectDialect()),
+                transaction_manager=_SqlAlchemyTransactionManager(session_factory),
                 coordination=coordination,
                 artifacts=None,
                 components={},
@@ -131,8 +130,10 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             artifact_coordinator=FilesystemKeyedCoordinator(
                 root=resolved_root / "blobs"
             ),
-            # The SQLite reference convenience ships the SQLite dialect.
-            dialect=SqliteObjectDialect(),
+            # dialect is omitted: this SQLite reference composition always
+            # hands _initialize a sqlite+aiosqlite session_factory, so
+            # resolve_dialect auto-detects it from the bound engine without
+            # constructing anything here.
             schema_provider=SqliteReferenceSchemaProvider(),
         )
 

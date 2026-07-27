@@ -70,35 +70,40 @@ def test_sql_object_backend_has_no_tx_revision_attribute():
                     )
 
 
-def test_sql_object_backend_does_not_call_resolve_dialect_strategy():
-    """P3: core never resolves a dialect from a session_factory. The backend
-    receives the dialect explicitly."""
+def test_sql_object_backend_delegates_default_dialect_resolution():
+    """The backend accepts an optional ``dialect`` and, when the caller omits
+    one, delegates resolution to the dialects package's ``resolve_dialect``
+    (keyed off the bound engine's ``dialect.name``) rather than
+    reimplementing its own name-based lookup."""
     source = _read(SQL_OBJECT_BACKEND)
-    assert "resolve_dialect_strategy" not in source, (
-        "SqlAlchemyObjectBackend calls resolve_dialect_strategy -- core must "
-        "receive the dialect explicitly (P3 Protocol-first)"
+    assert "resolve_dialect" in source, (
+        "SqlAlchemyObjectBackend must delegate default-dialect resolution to "
+        "storage.sqlalchemy.dialects.resolve_dialect, not reimplement it"
     )
 
 
 def test_sql_object_backend_does_not_branch_on_engine_dialect_name():
-    """P3: the backend never reads engine.dialect.name to switch behavior."""
+    """The backend's OWN control flow never contains a dialect-name string
+    literal -- it treats ``self._dialect`` opaquely (calling its Protocol
+    methods) regardless of which concrete dialect got resolved or injected."""
     source = _read(SQL_OBJECT_BACKEND)
     assert "engine.dialect.name" not in source, (
-        "SqlAlchemyObjectBackend branches on engine.dialect.name -- core must "
-        "stay dialect-neutral (P3 Protocol-first)"
+        "SqlAlchemyObjectBackend branches on engine.dialect.name -- dialect-name "
+        "branching belongs only inside storage/sqlalchemy/dialects/"
     )
 
 
-def test_dialects_package_ships_no_env_specific_modules():
-    """P3: core ships no MySQL / PostgreSQL dialect modules. A downstream
-    wanting one of those vendors ships its own."""
+def test_dialects_package_ships_no_dead_legacy_modules():
+    """A deleted legacy migration module must not be silently reintroduced.
+    (Core now ships MySQL and PostgreSQL dialects, see mysql.py/postgresql.py,
+    so those are no longer in the forbidden set.)"""
     dialects_dir = _SRC / "linktools" / "ai" / "storage" / "sqlalchemy" / "dialects"
     py_files = [p.name for p in dialects_dir.glob("*.py") if p.name != "__init__.py"]
-    forbidden = {"mysql.py", "postgresql.py", "_hash_migration.py"}
+    forbidden = {"_hash_migration.py"}
     leaked = forbidden & set(py_files)
     assert not leaked, (
-        f"storage/sqlalchemy/dialects/ leaked environment-specific modules: "
-        f"{sorted(leaked)} -- core must not ship vendor dialects"
+        f"storage/sqlalchemy/dialects/ leaked dead legacy modules: "
+        f"{sorted(leaked)}"
     )
 
 

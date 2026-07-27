@@ -26,7 +26,7 @@ from linktools.ai.storage.backends.sqlalchemy.object import (
 )
 from linktools.ai.storage.object.errors import StorageHashCollisionError
 from linktools.ai.storage.object.models import StorageKey, WriteOptions
-from linktools.ai.storage.sqlalchemy.dialects import SqliteObjectDialect
+from linktools.ai.storage.sqlalchemy.dialects import SqliteDialect
 
 
 def _key(value: str) -> StorageKey:

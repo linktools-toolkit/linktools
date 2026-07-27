@@ -53,7 +53,7 @@ from ...object.models import (
     StoredObject,
     WriteOptions,
 )
-from ...sqlalchemy.dialects import SqlAlchemyObjectDialect
+from ...sqlalchemy.dialects import SqlAlchemyDialect
 from .models import (
     Base,
     StorageObjectIdempotencyRow,
@@ -123,13 +123,21 @@ class SqlAlchemyObjectBackend:
     shortcut was removed because it leaked ambient state onto the reusable
     parent."""
 
-    def __init__(self, *, session_factory, dialect) -> None:
-        # Protocol-first: the dialect MUST be handed in. Core never resolves
-        # one from a session_factory; a downstream that builds the engine +
-        # driver also builds the matching SqlAlchemyObjectDialect.
+    def __init__(self, *, session_factory, dialect: "SqlAlchemyDialect | None" = None) -> None:
+        # dialect may be left None: _dialect_for() then auto-detects it from
+        # an open session's bound engine on first use. A caller wanting a
+        # vendor with no built-in (or a test double) passes its own
+        # SqlAlchemyDialect in instead.
         self._session_factory = session_factory
         self.backend_id = "primary"
         self._dialect = dialect
+
+    def _dialect_for(self, session: AsyncSession) -> "SqlAlchemyDialect":
+        if self._dialect is not None:
+            return self._dialect
+        from ...sqlalchemy.dialects import resolve_dialect
+
+        return resolve_dialect(session)
 
     # --- session plumbing ----------------------------------------------------
 
@@ -472,8 +480,9 @@ class SqlAlchemyObjectBackend:
             if if_match is not None:
                 raise StoragePreconditionFailedError(f"if_match failed: {key.value!r} does not exist")
             commit_revision = await self._bump_revision(session)
-            insert_outcome = await self._dialect.insert_current_if_absent(
+            insert_outcome = await self._dialect_for(session).insert_ignore_conflict(
                 session,
+                model=StorageObjectRow,
                 values={
                     "key": key.value,
                     "key_hash": _key_hash(key),
@@ -487,6 +496,7 @@ class SqlAlchemyObjectBackend:
                     "tombstone": False,
                     "commit_revision": commit_revision,
                 },
+                index_elements=["key_hash"],
             )
             if not insert_outcome.inserted:
                 return None  # retry-able: a concurrent writer just inserted
@@ -755,8 +765,9 @@ class SqlAlchemyObjectBackend:
             now = datetime.now(timezone.utc)
 
             if target_row is None:
-                insert_outcome = await self._dialect.insert_current_if_absent(
+                insert_outcome = await self._dialect_for(session).insert_ignore_conflict(
                     session,
+                    model=StorageObjectRow,
                     values={
                         "key": target.value,
                         "key_hash": _key_hash(target),
@@ -770,6 +781,7 @@ class SqlAlchemyObjectBackend:
                         "tombstone": False,
                         "commit_revision": commit_revision,
                     },
+                    index_elements=["key_hash"],
                 )
                 if not insert_outcome.inserted:
                     raise StoragePreconditionFailedError(
@@ -997,10 +1009,10 @@ class _SqlAlchemyTransactionBackend(SqlAlchemyObjectBackend):
     silently mutate through a finalized session."""
 
     def __init__(self, *, session: AsyncSession, dialect) -> None:
-        # Bypass SqlAlchemyObjectBackend.__init__ entirely: no session_factory,
-        # no dialect resolution. The child is bound to the supplied session
-        # for life and reuses the parent's dialect (the dialect has no
-        # session-local state).
+        # Bypass SqlAlchemyObjectBackend.__init__ entirely: no session_factory
+        # needed. Reuses the parent's already-resolved dialect (or None, in
+        # which case the inherited _dialect_for() lazily resolves it from
+        # this child's own bound session on first use).
         self._session = session
         self._dialect = dialect
         self._tx_revision: "int | None" = None
@@ -1060,15 +1072,13 @@ class SqlAlchemyObjectStore:
         schema_provider=None,
     ) -> None:
         from ...object.store import ObjectStore
-        from ...sqlalchemy.dialects import SqliteObjectDialect
         from .schema import SqliteReferenceSchemaProvider
 
         self._session_factory = session_factory
-        # Default to the SQLite reference dialect if none is supplied. A
-        # downstream using a different engine hands its own dialect in; core
-        # never resolves one from the session_factory.
-        if dialect is None:
-            dialect = SqliteObjectDialect()
+        # dialect=None is passed straight through: SqlAlchemyObjectBackend
+        # lazily auto-detects it from an open session's bound engine on
+        # first use. A downstream wanting a vendor with no built-in (or a
+        # test double) hands its own dialect in here instead.
         # Default to the SQLite reference schema provider (which validates
         # the schema is present). For tests + local reference, the caller
         # invokes create_for_tests_and_local_reference() once up front.

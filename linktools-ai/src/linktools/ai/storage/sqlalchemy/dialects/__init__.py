@@ -2,23 +2,69 @@
 # -*- coding: utf-8 -*-
 """Protocol-first dialect package.
 
-The dialect is the ONLY seam at which a downstream that brings its own engine
-plugs into the storage kernel's object backend. Core does NOT branch on a
-dialect name and does NOT resolve a strategy from a session_factory; the
-backend is HANDED a ``SqlAlchemyObjectDialect`` at construction.
+The dialect is the seam every SQL store/backend uses to adapt to its concrete
+SQL vendor. A caller may inject one explicitly (a test double, or a vendor
+with no built-in); otherwise it is left unset and :func:`resolve_dialect`
+supplies the matching built-in, keyed off an open session's bound engine's
+``dialect.name`` (``session.bind.dialect.name`` -- documented SQLAlchemy API,
+no sessionmaker-internals digging) -- the store/backend itself never branches
+on the name; that happens once, here, inside the dialects package.
 
-Core ships exactly one concrete implementation -- :class:`SqliteObjectDialect`
--- for SQLite/aiosqlite and as the reference for downstream dialect authors.
-A downstream wanting a different vendor (its own engine + driver) implements
-``SqlAlchemyObjectDialect`` itself and runs the kernel's conformance suite in
-its own CI. Core never names a real production database product here."""
+Core ships three concrete implementations -- :class:`SqliteDialect`,
+:class:`MySQLDialect`, :class:`PostgreSQLDialect` -- covering the common SQL
+vendors' conflict-detecting insert + integrity-error classification. None of
+them bundle an actual DBAPI driver: they use SQLAlchemy's own per-dialect
+SQL-construction helpers (``sqlalchemy.dialects.mysql``/``postgresql``), so
+the caller still supplies its own driver via the engine URL (e.g.
+``mysql+asyncmy://`` or ``postgresql+asyncpg://``). A downstream with a
+different vendor implements ``SqlAlchemyDialect`` itself and passes it
+explicitly."""
 
-from .base import IntegrityViolationKind, InsertResult, SqlAlchemyObjectDialect
-from .sqlite import SqliteObjectDialect
+from typing import Any
+
+from .base import IntegrityViolationKind, InsertResult, SqlAlchemyDialect
+from .mysql import MySQLDialect
+from .postgresql import PostgreSQLDialect
+from .sqlite import SqliteDialect
+
+_BUILTIN_DIALECTS: "dict[str, SqlAlchemyDialect]" = {
+    "sqlite": SqliteDialect(),
+    "mysql": MySQLDialect(),
+    "postgresql": PostgreSQLDialect(),
+}
+
+
+def resolve_dialect(session: Any) -> SqlAlchemyDialect:
+    """Auto-detect the dialect from an open session's bound engine
+    (``session.bind.dialect.name``) and return the matching built-in
+    :class:`SqlAlchemyDialect`.
+
+    Raises ``ValueError`` when the session has no bound engine (a per-call
+    bind rather than a sessionmaker-level one) or the resolved name has no
+    built-in -- in either case the caller passes an explicit ``dialect``
+    instead."""
+    bind = session.bind
+    if bind is None:
+        raise ValueError(
+            "cannot auto-resolve a dialect: session has no bound engine -- "
+            "pass dialect= explicitly"
+        )
+    name = bind.dialect.name
+    try:
+        return _BUILTIN_DIALECTS[name]
+    except KeyError:
+        raise ValueError(
+            f"no built-in dialect for {name!r} -- pass dialect= explicitly "
+            f"with your own SqlAlchemyDialect implementation"
+        ) from None
+
 
 __all__: "list[str]" = (
     "InsertResult",
     "IntegrityViolationKind",
-    "SqlAlchemyObjectDialect",
-    "SqliteObjectDialect",
+    "MySQLDialect",
+    "PostgreSQLDialect",
+    "SqlAlchemyDialect",
+    "SqliteDialect",
+    "resolve_dialect",
 )
