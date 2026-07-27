@@ -81,6 +81,7 @@ def _row_to_info(row: StorageObjectRow) -> ObjectInfo:
         size=row.size,
         modified_at=row.modified_at,
         metadata=json.loads(row.metadata_json),
+        tombstoned=row.tombstone,
     )
 
 
@@ -201,12 +202,16 @@ class SqlAlchemyObjectBackend:
             return _row_to_info(row)
 
     async def raw_list(
-        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
+        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         if depth is Depth.ZERO:
             async with self._read_session() as session:
                 row = await self._get_row(session, prefix)
-            items = [_row_to_info(row)] if (row is not None and not row.tombstone) else []
+            if row is not None and (include_tombstones or not row.tombstone):
+                items = [_row_to_info(row)]
+            else:
+                items = []
             return ObjectPage(items=tuple(items), next_cursor=None)
 
         prefix_str = prefix.value.rstrip("/") + "/"
@@ -218,7 +223,9 @@ class SqlAlchemyObjectBackend:
         items: "list[ObjectInfo]" = []
         scan_cursor = cursor
         while True:
-            conditions = [candidate_clause, StorageObjectRow.tombstone.is_(False)]
+            conditions = [candidate_clause]
+            if not include_tombstones:
+                conditions.append(StorageObjectRow.tombstone.is_(False))
             if scan_cursor is not None:
                 conditions.append(StorageObjectRow.key > scan_cursor)
             async with self._read_session() as session:

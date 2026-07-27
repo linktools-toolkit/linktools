@@ -220,8 +220,12 @@ class ObjectStore:
         depth: "Depth" = Depth.ONE,
         limit: int = 100,
         cursor: "str | None" = None,
+        include_tombstones: bool = False,
     ) -> ObjectPage:
-        return await self._primary.raw_list(prefix, depth=depth, limit=limit, cursor=cursor)
+        return await self._primary.raw_list(
+            prefix, depth=depth, limit=limit, cursor=cursor,
+            include_tombstones=include_tombstones,
+        )
 
     async def revision(self) -> str:
         return await self._primary.revision()

@@ -172,7 +172,7 @@ class SqlAlchemyStorageAdapter(Storage):
             from ...storage.object.models import StorageKey
 
             assets._index = RevisionedObjectIndex(
-                source=assets, prefix=StorageKey.root
+                source=assets, prefix=StorageKey("/")
             )
             assets._cache = cache
         super().__init__(

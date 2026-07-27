@@ -52,6 +52,7 @@ class ObjectReaderBackend(Protocol):
         depth: "Depth",
         limit: int,
         cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage: ...
 
     async def revision(self) -> str: ...

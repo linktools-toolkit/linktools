@@ -338,6 +338,8 @@ def require_json_value(value: Any, path: str = "value") -> JsonValue:
                 raise RunCommitCodecError(f"{path}: mapping key must be str")
             result[key] = require_json_value(item, f"{path}.{key}")
         return result
+    if hasattr(value, "model_dump"):
+        return require_json_value(value.model_dump(mode="json"), path)
     raise RunCommitCodecError(f"{path}: {type(value).__name__} is not JSON-compatible")
 
 

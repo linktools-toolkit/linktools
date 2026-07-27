@@ -221,18 +221,22 @@ class MemoryObjectBackend:
         depth: "Depth",
         limit: int,
         cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         async with self._lock:
             items: "list[ObjectInfo]" = []
             for key_value in sorted(self._records):
                 if not _under(prefix, key_value):
                     continue
-                rec = self._live(key_value)
-                if rec is None:
+                history = self._records[key_value]
+                if not history:
+                    continue
+                last = history[-1]
+                if last.tombstone and not include_tombstones:
                     continue
                 if not _matches_depth(prefix.value, key_value, depth):
                     continue
-                items.append(rec.info)
+                items.append(last.info)
             start = 0 if cursor is None else int(cursor)
             page = items[start : start + limit]
             next_start = start + len(page)
@@ -552,6 +556,7 @@ class _MemoryTransactionBackend:
         depth: "Depth",
         limit: int,
         cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         self._check_open()
         async with self._parent._lock:
@@ -563,12 +568,15 @@ class _MemoryTransactionBackend:
             for key_value in all_keys:
                 if not _under(prefix, key_value):
                     continue
-                rec = self._visible_live(key_value)
-                if rec is None:
+                history = self._visible_history(key_value)
+                if not history:
+                    continue
+                last = history[-1]
+                if last.tombstone and not include_tombstones:
                     continue
                 if not _matches_depth(prefix.value, key_value, depth):
                     continue
-                items.append(rec.info)
+                items.append(last.info)
             start = 0 if cursor is None else int(cursor)
             page = items[start : start + limit]
             next_start = start + len(page)

@@ -528,11 +528,13 @@ class FilesystemObjectBackend:
             return await asyncio.to_thread(self._raw_stat_sync, key)
 
     async def raw_list(
-        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
+        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         async with self._coordinator.hold(self._NAMESPACE_KEY):
             return await asyncio.to_thread(
-                self._raw_list_sync, prefix, depth=depth, limit=limit, cursor=cursor
+                self._raw_list_sync, prefix, depth=depth, limit=limit, cursor=cursor,
+                include_tombstones=include_tombstones,
             )
 
     async def revision(self) -> str:
@@ -954,6 +956,7 @@ class FilesystemObjectBackend:
             size=raw["size"],
             modified_at=datetime.fromisoformat(raw["modified_at"]),
             metadata=raw.get("metadata") or {},
+            tombstoned=raw.get("tombstone", False),
         )
 
     def _live_version_metadata(self, key: StorageKey) -> "tuple[int, dict] | None":
@@ -1106,7 +1109,8 @@ class FilesystemObjectBackend:
         return self._info_from_metadata(key, live[1])
 
     def _raw_list_sync(
-        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None"
+        self, prefix: StorageKey, *, depth: "Depth", limit: int, cursor: "str | None",
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         self._recover()
         history_components = (".storage", "history")
@@ -1118,7 +1122,9 @@ class FilesystemObjectBackend:
             if not _matches_depth(prefix, key, depth):
                 continue
             live = self._live_version_metadata(key)
-            if live is None or live[1]["tombstone"]:
+            if live is None:
+                continue
+            if live[1]["tombstone"] and not include_tombstones:
                 continue
             if cursor is not None and key.value <= cursor:
                 continue

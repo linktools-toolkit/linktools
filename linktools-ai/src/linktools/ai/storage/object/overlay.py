@@ -16,6 +16,7 @@ the read/write/reveal/composite-revision surface the overlay contracts pin."""
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 from .backend import ObjectReaderBackend, ObjectWriterBackend
 from .cursor import (
@@ -38,6 +39,7 @@ from .models import (
     WriteOptions,
 )
 from .store import (
+    _content_cache_key,
     _delete_request_hash,
     _move_request_hash,
     _put_request_hash,
@@ -45,10 +47,22 @@ from .store import (
 )
 
 
+def _overlay_cache_key(key: str, version: int, etag: str) -> str:
+    """Same key format as ObjectStore's _content_cache_key — so a cached
+    object version is shared between the single-backend and overlay stores
+    when both happen to read the same key+version+etag."""
+    return _content_cache_key(key, version, etag)
+
+
 class OverlayObjectStore:
     """Primary + ordered overlays. The primary must be a writer; overlays are
     readers. ``backend_id`` is tagged on each backend so a future listing
-    cursor can attribute items to their source."""
+    cursor can attribute items to their source.
+
+    An optional ``cache`` + ``index`` pair wires a read-through cache on top
+    of the overlay resolution: ``stat`` serves from the revision-gated index
+    (0 SQL on hot path), and ``get`` checks the content cache keyed by
+    version+etag before falling through to the backend chain."""
 
     def __init__(
         self,
@@ -56,6 +70,8 @@ class OverlayObjectStore:
         primary: "ObjectWriterBackend | None" = None,
         overlays: "tuple[ObjectReaderBackend, ...]" = (),
         cursor_codec: "ObjectCursorCodecProtocol | None" = None,
+        cache: Any = None,
+        index: Any = None,
     ) -> None:
         if primary is not None and not isinstance(primary, ObjectWriterBackend):
             raise StorageObjectError(
@@ -66,10 +82,12 @@ class OverlayObjectStore:
         # Injected, never auto-generated: list() needs it only when a caller
         # actually pages; a store that never lists need not construct one.
         self._cursor_codec = cursor_codec
+        self._cache = cache
+        self._index = index
         if primary is not None:
             primary.backend_id = "primary"
-        for index, overlay in enumerate(overlays):
-            overlay.backend_id = f"overlay:{index}"
+        for index_, overlay in enumerate(overlays):
+            overlay.backend_id = f"overlay:{index_}"
 
     @property
     def backends(self) -> "tuple[ObjectReaderBackend, ...]":
@@ -96,8 +114,21 @@ class OverlayObjectStore:
 
     async def get(self, key: StorageKey) -> "StoredObject | None":
         _require_persistable_key(key)
+        if self._cache is not None and self._index is not None:
+            info = await self._index.stat(key)
+            if info is not None:
+                cache_key = _overlay_cache_key(key.value, info.version, info.etag)
+                cached = await self._cache.get(cache_key)
+                if cached is not None:
+                    return StoredObject(info=info, content=cached)
         lookup = await self._lookup(key)
-        return lookup.object if isinstance(lookup, Found) else None
+        obj = lookup.object if isinstance(lookup, Found) else None
+        if obj is not None and self._cache is not None:
+            cache_key = _overlay_cache_key(
+                key.value, obj.info.version, obj.info.etag
+            )
+            await self._cache.put(cache_key, obj.content)
+        return obj
 
     async def list(
         self,
@@ -106,6 +137,7 @@ class OverlayObjectStore:
         depth: "Depth" = Depth.ONE,
         limit: int = 100,
         cursor: "str | None" = None,
+        include_tombstones: bool = False,
     ) -> ObjectPage:
         """List objects under ``prefix`` via a k-way merge over each backend's
         OWN independent pagination position.
@@ -195,7 +227,8 @@ class OverlayObjectStore:
             if buffers[bid] or exhausted[bid]:
                 return
             page = await backend.raw_list(
-                prefix, depth=depth, limit=fetch_size, cursor=next_page_cursor[bid]
+                prefix, depth=depth, limit=fetch_size, cursor=next_page_cursor[bid],
+                include_tombstones=include_tombstones,
             )
             buffers[bid].extend(page.items)
             next_page_cursor[bid] = page.next_cursor
@@ -275,6 +308,8 @@ class OverlayObjectStore:
     async def stat(self, key: StorageKey) -> "ObjectInfo | None":
         if key.is_root:
             return None
+        if self._index is not None:
+            return await self._index.stat(key)
         # stat is metadata-only; route through raw_stat, but still honor a
         # primary tombstone (Masked) so overlays are not resurrected.
         if self._primary is not None:

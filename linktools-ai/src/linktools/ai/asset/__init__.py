@@ -14,8 +14,12 @@ def compose_assets(
     *,
     primary: "ObjectWriterBackend | None" = None,
     overlays: "tuple[ObjectReaderBackend, ...]" = (),
+    cache=None,
+    index=None,
 ) -> RevisionedOverlayObjectStore:
-    return RevisionedOverlayObjectStore(primary=primary, overlays=overlays)
+    return RevisionedOverlayObjectStore(
+        primary=primary, overlays=overlays, cache=cache, index=index
+    )
 
 
 __all__ = ["compose_assets"]

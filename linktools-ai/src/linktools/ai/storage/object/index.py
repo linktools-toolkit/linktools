@@ -56,7 +56,8 @@ class RevisionedObjectIndex:
             cursor: "str | None" = None
             while True:
                 page: ObjectPage = await self._source.list(
-                    self._prefix, depth=self._depth, limit=200, cursor=cursor
+                    self._prefix, depth=self._depth, limit=200, cursor=cursor,
+                    include_tombstones=True,
                 )
                 for info in page.items:
                     entries[info.key.value] = info
