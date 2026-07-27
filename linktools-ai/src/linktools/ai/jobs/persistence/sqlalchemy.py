@@ -79,6 +79,7 @@ from ..store import (
     TaskNotFoundError,
     UnsupportedTaskSchemaError,
 )
+from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
 from linktools.ai.storage.sqlalchemy.models import (
     TaskAttemptRow,
     TaskJobRow,
@@ -101,6 +102,39 @@ def _as_utc(value: "datetime | None") -> "datetime | None":
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+# session.get(Model, pk) only works when the natural id IS the primary key.
+# The surrogate BIGSERIAL id (D2) means every natural-key lookup below is an
+# explicit SELECT instead.
+async def _get_job(session: AsyncSession, job_id: str) -> "TaskJobRow | None":
+    return (
+        await session.execute(select(TaskJobRow).where(TaskJobRow.job_id == job_id))
+    ).scalar_one_or_none()
+
+
+async def _get_task(session: AsyncSession, task_id: str) -> "TaskRow | None":
+    return (
+        await session.execute(select(TaskRow).where(TaskRow.task_id == task_id))
+    ).scalar_one_or_none()
+
+
+async def _get_attempt(
+    session: AsyncSession, attempt_id: str
+) -> "TaskAttemptRow | None":
+    return (
+        await session.execute(
+            select(TaskAttemptRow).where(TaskAttemptRow.attempt_id == attempt_id)
+        )
+    ).scalar_one_or_none()
+
+
+async def _get_signal(session: AsyncSession, signal_id: str) -> "TaskSignalRow | None":
+    return (
+        await session.execute(
+            select(TaskSignalRow).where(TaskSignalRow.signal_id == signal_id)
+        )
+    ).scalar_one_or_none()
 
 
 # Bumped whenever the persisted task envelope's field set changes. Rows carry
@@ -168,7 +202,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
     env_version = env.get("schema_version")
     if env_version is not None and env_version != TASK_ENVELOPE_SCHEMA_VERSION:
         raise UnsupportedTaskSchemaError(
-            f"task {row.id} envelope schema_version {env_version} (expected "
+            f"task {row.task_id} envelope schema_version {env_version} (expected "
             f"{TASK_ENVELOPE_SCHEMA_VERSION})"
         )
     legacy_missing_scopes = False
@@ -186,7 +220,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         ):
             if required not in env:
                 raise UnsupportedTaskSchemaError(
-                    f"task {row.id} v1 envelope missing required field "
+                    f"task {row.task_id} v1 envelope missing required field "
                     f"{required!r}"
                 )
         depth = env["depth"]
@@ -197,7 +231,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         raw_scopes = env["delegated_scopes"]
         if not isinstance(raw_scopes, dict):
             raise UnsupportedTaskSchemaError(
-                f"task {row.id} v1 envelope delegated_scopes must be a ScopeSet "
+                f"task {row.task_id} v1 envelope delegated_scopes must be a ScopeSet "
                 f"object, got {type(raw_scopes).__name__}"
             )
         delegated_scopes = from_jsonable(ScopeSet, raw_scopes)
@@ -211,7 +245,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
                 raw_chain.get("delegated_scopes"), dict
             ):
                 raise UnsupportedTaskSchemaError(
-                    f"task {row.id} v1 envelope actor_chain.delegated_scopes "
+                    f"task {row.task_id} v1 envelope actor_chain.delegated_scopes "
                     f"must be a ScopeSet object"
                 )
         actor_chain = (
@@ -248,7 +282,7 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
             else None
         )
     return TaskRecord(
-        id=row.id,
+        id=row.task_id,
         job_id=row.job_id,
         parent_task_id=row.parent_task_id,
         key=row.key,
@@ -265,7 +299,9 @@ def _row_to_task(row: TaskRow) -> TaskRecord:
         lease_expires_at=_as_utc(row.lease_expires_at),
         fencing_token=row.fencing_token,
         active_attempt_id=row.active_attempt_id,
-        timeout_seconds=row.timeout_seconds,
+        timeout_seconds=(
+            row.timeout_ms / 1000.0 if row.timeout_ms is not None else None
+        ),
         asset_snapshots=tuple(
             from_jsonable(AssetSnapshotRef, s) for s in env["asset_snapshots"]
         ),
@@ -303,7 +339,7 @@ def _row_to_job(row: TaskJobRow) -> JobRecord:
     if legacy_missing_scopes:
         raw_chain = {**raw_chain, "delegated_scopes": to_jsonable(ScopeSet.empty())}
     return JobRecord(
-        id=row.id,
+        id=row.job_id,
         status=JobStatus(row.status),
         principal=from_jsonable(TaskPrincipal, env["principal"]),
         actor_chain=from_jsonable(ActorChain, raw_chain),
@@ -323,7 +359,7 @@ def _row_to_job(row: TaskJobRow) -> JobRecord:
 def _row_to_attempt(row: TaskAttemptRow) -> TaskAttemptRecord:
     env = json.loads(row.data_json) if row.data_json else {}
     return TaskAttemptRecord(
-        id=row.id,
+        id=row.attempt_id,
         task_id=row.task_id,
         job_id=row.job_id,
         attempt=row.attempt,
@@ -393,12 +429,12 @@ class SqlAlchemyJobStore:
             # The store re-validates the budget so the domain invariant holds
             # even for callers that bypass JobRuntime.
             validate_job_budget(job.budget)
-            existing = await session.get(TaskJobRow, job.id)
+            existing = await _get_job(session, job.id)
             if existing is not None:
                 raise FileExistsError(job.id)
             session.add(
                 TaskJobRow(
-                    id=job.id,
+                    job_id=job.id,
                     status=job.status.value,
                     tenant_id=job.principal.tenant_id,
                     root_task_id=job.root_task_id,
@@ -443,14 +479,14 @@ class SqlAlchemyJobStore:
 
     async def get_job(self, job_id: str) -> "JobRecord | None":
         async def do(session: AsyncSession):
-            row = await session.get(TaskJobRow, job_id)
+            row = await _get_job(session, job_id)
             return _row_to_job(row) if row is not None else None
 
         return await self._in_session(do)
 
     async def get_task(self, task_id: str) -> "TaskRecord | None":
         async def do(session: AsyncSession):
-            row = await session.get(TaskRow, task_id)
+            row = await _get_task(session, task_id)
             return _row_to_task(row) if row is not None else None
 
         return await self._in_session(do)
@@ -494,7 +530,7 @@ class SqlAlchemyJobStore:
             for t in due:
                 promo = await session.execute(
                     update(TaskRow)
-                    .where(TaskRow.id == t.id)
+                    .where(TaskRow.task_id == t.task_id)
                     .where(TaskRow.status == TaskStatus.RETRY_WAIT.value)
                     .values(
                         status=TaskStatus.READY.value,
@@ -507,7 +543,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             t.job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=TaskStatus.RETRY_WAIT.value,
                             to_status=TaskStatus.READY.value,
@@ -533,7 +569,7 @@ class SqlAlchemyJobStore:
             for candidate in candidates:
                 if handlers is not None and candidate.handler not in handlers:
                     continue
-                job_row = await session.get(TaskJobRow, candidate.job_id)
+                job_row = await _get_job(session, candidate.job_id)
                 if job_row is None:
                     continue
                 # Whitelist claimable job statuses: a terminal or cancelling job
@@ -547,11 +583,11 @@ class SqlAlchemyJobStore:
                 if await self._finalize_budget_exhausted_sql(session, job_row, now):
                     continue
                 attempt_number = candidate.attempt_count + 1
-                attempt_id = f"{candidate.id}-att{attempt_number}"
+                attempt_id = f"{candidate.task_id}-att{attempt_number}"
                 # Atomic CAS: READY -> CLAIMED. rowcount==1 means we won the race.
                 result = await session.execute(
                     update(TaskRow)
-                    .where(TaskRow.id == candidate.id)
+                    .where(TaskRow.task_id == candidate.task_id)
                     .where(TaskRow.status == TaskStatus.READY.value)
                     .where(TaskRow.available_at <= now)
                     .values(
@@ -648,7 +684,7 @@ class SqlAlchemyJobStore:
             ]
             if create_commands:
                 parent_row = await self._require_claimed(session, claim)
-                parent_job_row = await session.get(TaskJobRow, parent_row.job_id)
+                parent_job_row = await _get_job(session, parent_row.job_id)
                 if parent_job_row is not None:
                     await self._assert_child_budget_sql(
                         session,
@@ -666,7 +702,7 @@ class SqlAlchemyJobStore:
                     await session.execute(
                         select(TaskRow)
                         .where(TaskRow.job_id == parent_row.job_id)
-                        .where(TaskRow.id != parent_row.id)
+                        .where(TaskRow.task_id != parent_row.task_id)
                         .where(TaskRow.status.not_in([s.value for s in TASK_TERMINAL]))
                     )
                 ).scalars().all()
@@ -719,13 +755,13 @@ class SqlAlchemyJobStore:
             )
             await session.execute(
                 update(TaskAttemptRow)
-                .where(TaskAttemptRow.id == claim.attempt_id)
+                .where(TaskAttemptRow.attempt_id == claim.attempt_id)
                 .values(status=AttemptStatus.SUCCEEDED.value, finished_at=now)
             )
             session.add(
                 self._transition(
                     updated.job_id,
-                    task_id=updated.id,
+                    task_id=updated.task_id,
                     attempt_id=claim.attempt_id,
                     from_status=TaskStatus.CLAIMED.value,
                     to_status=target.value,
@@ -739,7 +775,7 @@ class SqlAlchemyJobStore:
             for cmd in outcome.commands:
                 if isinstance(cmd, CreateTask):
                     if job_record is None:
-                        jr = await session.get(TaskJobRow, updated.job_id)
+                        jr = await _get_job(session, updated.job_id)
                         if jr is None:
                             # Invariant: a task being committed belongs to an
                             # existing job; skip child creation if it vanished.
@@ -755,7 +791,7 @@ class SqlAlchemyJobStore:
                     )
                 elif isinstance(cmd, CompleteJob):
                     await self._complete_job_sql(
-                        session, updated.job_id, updated.id, cmd, now
+                        session, updated.job_id, updated.task_id, cmd, now
                     )
                 elif isinstance(cmd, CancelTask):
                     await self._cancel_task_in_job_sql(
@@ -797,7 +833,7 @@ class SqlAlchemyJobStore:
             )
             await session.execute(
                 update(TaskAttemptRow)
-                .where(TaskAttemptRow.id == claim.attempt_id)
+                .where(TaskAttemptRow.attempt_id == claim.attempt_id)
                 .values(
                     status=AttemptStatus.FAILED.value,
                     finished_at=now,
@@ -826,7 +862,7 @@ class SqlAlchemyJobStore:
             session.add(
                 self._transition(
                     updated.job_id,
-                    task_id=updated.id,
+                    task_id=updated.task_id,
                     attempt_id=claim.attempt_id,
                     from_status=TaskStatus.CLAIMED.value,
                     to_status=target.value,
@@ -855,14 +891,14 @@ class SqlAlchemyJobStore:
         row.version += 1
         await session.execute(
             update(TaskAttemptRow)
-            .where(TaskAttemptRow.id == claim.attempt_id)
+            .where(TaskAttemptRow.attempt_id == claim.attempt_id)
             .where(TaskAttemptRow.status == AttemptStatus.RUNNING.value)
             .values(status=AttemptStatus.CANCELLED.value, finished_at=now)
         )
         session.add(
             self._transition(
                 row.job_id,
-                task_id=row.id,
+                task_id=row.task_id,
                 attempt_id=claim.attempt_id,
                 from_status=from_status,
                 to_status=TaskStatus.CANCELLED.value,
@@ -879,7 +915,7 @@ class SqlAlchemyJobStore:
         now = _store_dt(self._clock.now())
 
         async def do(session: AsyncSession) -> JobRecord:
-            job_row = await session.get(TaskJobRow, job_id)
+            job_row = await _get_job(session, job_id)
             if job_row is None:
                 raise JobNotFoundError(job_id)
             if job_row.status in (
@@ -913,7 +949,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=from_status,
                             to_status=TaskStatus.CANCELLED.value,
@@ -932,7 +968,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=from_status,
                             to_status=TaskStatus.CANCELLING.value,
@@ -959,12 +995,12 @@ class SqlAlchemyJobStore:
         validate_metadata(dict(signal.metadata))
 
         async def do(session: AsyncSession):
-            existing = await session.get(TaskSignalRow, signal.id)
+            existing = await _get_signal(session, signal.id)
             if existing is not None:
                 return signal
             session.add(
                 TaskSignalRow(
-                    id=signal.id,
+                    signal_id=signal.id,
                     job_id=signal.job_id,
                     name=signal.name,
                     correlation_key=signal.correlation_key,
@@ -1013,7 +1049,7 @@ class SqlAlchemyJobStore:
                 session.add(
                     self._transition(
                         signal.job_id,
-                        task_id=woken.id,
+                        task_id=woken.task_id,
                         attempt_id=None,
                         from_status=from_status,
                         to_status=TaskStatus.READY.value,
@@ -1024,8 +1060,8 @@ class SqlAlchemyJobStore:
                 # Record which task consumed this signal (the reverse link).
                 await session.execute(
                     update(TaskSignalRow)
-                    .where(TaskSignalRow.id == signal.id)
-                    .values(consumed_by_task_id=woken.id)
+                    .where(TaskSignalRow.signal_id == signal.id)
+                    .values(consumed_by_task_id=woken.task_id)
                 )
             # A woken task may move a WAITING job back to RUNNING,
             # or complete the job if all tasks are now terminal.
@@ -1068,7 +1104,7 @@ class SqlAlchemyJobStore:
                     if t.active_attempt_id:
                         await session.execute(
                             update(TaskAttemptRow)
-                            .where(TaskAttemptRow.id == t.active_attempt_id)
+                            .where(TaskAttemptRow.attempt_id == t.active_attempt_id)
                             .where(TaskAttemptRow.status == AttemptStatus.RUNNING.value)
                             .values(
                                 status=AttemptStatus.CANCELLED.value, finished_at=now
@@ -1085,7 +1121,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             t.job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=attempt_id,
                             from_status=from_status,
                             to_status=TaskStatus.CANCELLED.value,
@@ -1108,7 +1144,7 @@ class SqlAlchemyJobStore:
                 if t.active_attempt_id:
                     await session.execute(
                         update(TaskAttemptRow)
-                        .where(TaskAttemptRow.id == t.active_attempt_id)
+                        .where(TaskAttemptRow.attempt_id == t.active_attempt_id)
                         .where(TaskAttemptRow.status == AttemptStatus.RUNNING.value)
                         .values(status=AttemptStatus.SUPERSEDED.value, finished_at=now)
                     )
@@ -1129,7 +1165,7 @@ class SqlAlchemyJobStore:
                 session.add(
                     self._transition(
                         t.job_id,
-                        task_id=t.id,
+                        task_id=t.task_id,
                         attempt_id=task.active_attempt_id,
                         from_status=TaskStatus.CLAIMED.value,
                         to_status=target.value,
@@ -1190,7 +1226,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             t.job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=from_status,
                             to_status=TaskStatus.READY.value,
@@ -1212,7 +1248,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             t.job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=from_status,
                             to_status=TaskStatus.CANCELLING.value,
@@ -1223,7 +1259,7 @@ class SqlAlchemyJobStore:
                     session.add(
                         self._transition(
                             t.job_id,
-                            task_id=t.id,
+                            task_id=t.task_id,
                             attempt_id=None,
                             from_status=TaskStatus.CANCELLING.value,
                             to_status=TaskStatus.CANCELLED.value,
@@ -1321,7 +1357,7 @@ class SqlAlchemyJobStore:
         async def do(session: AsyncSession):
             result = await session.execute(
                 update(TaskRow)
-                .where(TaskRow.id == task_id)
+                .where(TaskRow.task_id == task_id)
                 .where(TaskRow.status == TaskStatus.CLAIMED.value)
                 .where(TaskRow.lease_owner == worker_id)
                 .where(TaskRow.active_attempt_id == attempt_id)
@@ -1334,7 +1370,7 @@ class SqlAlchemyJobStore:
             )
             if result.rowcount != 1:
                 raise TaskClaimLostError(task_id)
-            return _row_to_task(await session.get(TaskRow, task_id))
+            return _row_to_task(await _get_task(session, task_id))
 
         return await self._in_session(do)
 
@@ -1350,7 +1386,7 @@ class SqlAlchemyJobStore:
         async def do(session: AsyncSession):
             # 4-field fencing: status + lease_owner + active_attempt_id +
             # fencing_token must all match the live claim.
-            task_row = await session.get(TaskRow, task_id)
+            task_row = await _get_task(session, task_id)
             if task_row is None:
                 raise TaskNotFoundError(task_id)
             if (
@@ -1362,10 +1398,10 @@ class SqlAlchemyJobStore:
                 raise TaskClaimLostError(task_id)
             await session.execute(
                 update(TaskAttemptRow)
-                .where(TaskAttemptRow.id == attempt_id)
+                .where(TaskAttemptRow.attempt_id == attempt_id)
                 .values(run_id=run_id)
             )
-            return _row_to_attempt(await session.get(TaskAttemptRow, attempt_id))
+            return _row_to_attempt(await _get_attempt(session, attempt_id))
 
         return await self._in_session(do)
 
@@ -1381,7 +1417,7 @@ class SqlAlchemyJobStore:
         fingerprint: str,
     ) -> TaskRecord:
         async def do(session: AsyncSession):
-            task_row = await session.get(TaskRow, task_id)
+            task_row = await _get_task(session, task_id)
             if task_row is None:
                 raise TaskNotFoundError(task_id)
             if (
@@ -1422,7 +1458,7 @@ class SqlAlchemyJobStore:
     async def _require_claimed(
         self, session: AsyncSession, claim: TaskClaim
     ) -> TaskRow:
-        row = await session.get(TaskRow, claim.task_id)
+        row = await _get_task(session, claim.task_id)
         if row is None:
             raise TaskNotFoundError(claim.task_id)
         if (
@@ -1455,7 +1491,7 @@ class SqlAlchemyJobStore:
             values["status"] = status
         result = await session.execute(
             update(TaskRow)
-            .where(TaskRow.id == claim.task_id)
+            .where(TaskRow.task_id == claim.task_id)
             .where(TaskRow.status == TaskStatus.CLAIMED.value)
             .where(TaskRow.lease_owner == claim.worker_id)
             .where(TaskRow.active_attempt_id == claim.attempt_id)
@@ -1464,7 +1500,7 @@ class SqlAlchemyJobStore:
         )
         if result.rowcount != 1:
             raise TaskClaimLostError(claim.task_id)
-        return await session.get(TaskRow, claim.task_id)
+        return await _get_task(session, claim.task_id)
 
     async def _assert_child_budget_sql(
         self,
@@ -1522,7 +1558,7 @@ class SqlAlchemyJobStore:
             attempt_total = (
                 await session.execute(
                     select(func.coalesce(func.sum(TaskRow.attempt_count), 0)).where(
-                        TaskRow.job_id == job_row.id
+                        TaskRow.job_id == job_row.job_id
                     )
                 )
             ).scalar_one()
@@ -1539,7 +1575,7 @@ class SqlAlchemyJobStore:
             (
                 await session.execute(
                     select(TaskRow)
-                    .where(TaskRow.job_id == job_row.id)
+                    .where(TaskRow.job_id == job_row.job_id)
                     .where(TaskRow.status.not_in(terminal_vals))
                 )
             )
@@ -1566,7 +1602,7 @@ class SqlAlchemyJobStore:
             if att_id:
                 await session.execute(
                     update(TaskAttemptRow)
-                    .where(TaskAttemptRow.id == att_id)
+                    .where(TaskAttemptRow.attempt_id == att_id)
                     .where(TaskAttemptRow.status == AttemptStatus.RUNNING.value)
                     .values(status=AttemptStatus.CANCELLED.value, finished_at=now)
                 )
@@ -1575,8 +1611,8 @@ class SqlAlchemyJobStore:
             if pre != TaskStatus.CANCELLING:
                 session.add(
                     self._transition(
-                        job_row.id,
-                        task_id=t.id,
+                        job_row.job_id,
+                        task_id=t.task_id,
                         attempt_id=att_id,
                         from_status=from_status,
                         to_status=TaskStatus.CANCELLING.value,
@@ -1586,8 +1622,8 @@ class SqlAlchemyJobStore:
                 )
             session.add(
                 self._transition(
-                    job_row.id,
-                    task_id=t.id,
+                    job_row.job_id,
+                    task_id=t.task_id,
                     attempt_id=att_id,
                     from_status=TaskStatus.CANCELLING.value,
                     to_status=TaskStatus.CANCELLED.value,
@@ -1614,7 +1650,7 @@ class SqlAlchemyJobStore:
                 job_row.finished_at = now
             session.add(
                 self._transition(
-                    job_row.id,
+                    job_row.job_id,
                     task_id=None,
                     attempt_id=None,
                     from_status=current.value,
@@ -1635,7 +1671,7 @@ class SqlAlchemyJobStore:
         cmd: CompleteJob,
         now: datetime,
     ) -> None:
-        job_row = await session.get(TaskJobRow, job_id)
+        job_row = await _get_job(session, job_id)
         if job_row is None or JobStatus(job_row.status) in JOB_TERMINAL:
             return
         tasks = (
@@ -1646,10 +1682,10 @@ class SqlAlchemyJobStore:
         live = [
             t
             for t in tasks
-            if t.id != current_task_id and t.status not in TASK_TERMINAL
+            if t.task_id != current_task_id and t.status not in TASK_TERMINAL
         ]
         if live:
-            ids = ", ".join(t.id for t in live[:5])
+            ids = ", ".join(t.task_id for t in live[:5])
             raise InvalidTaskCommandError(
                 "CompleteJob requires all sibling tasks to be terminal; "
                 f"non-terminal tasks: {ids}"
@@ -1688,7 +1724,7 @@ class SqlAlchemyJobStore:
             (
                 await session.execute(
                     select(TaskRow)
-                    .where(TaskRow.id == cmd.task_id)
+                    .where(TaskRow.task_id == cmd.task_id)
                     .where(TaskRow.job_id == job_id)
                 )
             )
@@ -1714,7 +1750,7 @@ class SqlAlchemyJobStore:
             session.add(
                 self._transition(
                     job_id,
-                    task_id=ct.id,
+                    task_id=ct.task_id,
                     attempt_id=None,
                     from_status=from_status,
                     to_status=TaskStatus.CANCELLING.value,
@@ -1725,7 +1761,7 @@ class SqlAlchemyJobStore:
         session.add(
             self._transition(
                 job_id,
-                task_id=ct.id,
+                task_id=ct.task_id,
                 attempt_id=None,
                 from_status=TaskStatus.CANCELLING.value,
                 to_status=TaskStatus.CANCELLED.value,
@@ -1737,7 +1773,7 @@ class SqlAlchemyJobStore:
     async def _maybe_complete_job(
         self, session: AsyncSession, job_id: str, now: datetime
     ) -> None:
-        job_row = await session.get(TaskJobRow, job_id)
+        job_row = await _get_job(session, job_id)
         if job_row is None or job_row.status not in (
             JobStatus.RUNNING.value,
             JobStatus.WAITING.value,
@@ -1849,11 +1885,11 @@ class SqlAlchemyJobStore:
                 env["wait_conditions"] = []
                 env["wait_deadline_at"] = None
                 t.data_json = json.dumps(env)
-                sig.consumed_by_task_id = t.id
+                sig.consumed_by_task_id = t.task_id
                 session.add(
                     self._transition(
                         sig.job_id,
-                        task_id=t.id,
+                        task_id=t.task_id,
                         attempt_id=None,
                         from_status=from_status,
                         to_status=TaskStatus.READY.value,
@@ -1866,7 +1902,7 @@ class SqlAlchemyJobStore:
     async def _maybe_complete_job_all(
         self, session: AsyncSession, now: datetime
     ) -> None:
-        job_ids = (await session.execute(select(TaskJobRow.id))).scalars().all()
+        job_ids = (await session.execute(select(TaskJobRow.job_id))).scalars().all()
         for job_id in job_ids:
             await self._maybe_complete_job(session, job_id, now)
 
@@ -1910,7 +1946,7 @@ class SqlAlchemyJobStore:
         child_scopes, child_chain = narrow_child_principal(
             parent_rec, cmd.delegated_scopes, cmd.handler, job.actor_chain
         )
-        child_id = f"{parent.id}-{cmd.key}-{_uuid.uuid4().hex[:8]}"
+        child_id = f"{parent.task_id}-{cmd.key}-{_uuid.uuid4().hex[:8]}"
         env = {
             "schema_version": TASK_ENVELOPE_SCHEMA_VERSION,
             "dependencies": list(cmd.dependencies),
@@ -1926,10 +1962,11 @@ class SqlAlchemyJobStore:
         }
         session.add(
             TaskRow(
-                id=child_id,
+                task_id=child_id,
                 job_id=job_id,
-                parent_task_id=parent.id,
+                parent_task_id=parent.task_id,
                 key=cmd.key,
+                job_key_hash=sha256_hash(job_id + cmd.key),
                 handler=cmd.handler,
                 status=(
                     TaskStatus.PENDING.value
@@ -1946,7 +1983,11 @@ class SqlAlchemyJobStore:
                 lease_expires_at=None,
                 fencing_token=0,
                 active_attempt_id=None,
-                timeout_seconds=cmd.timeout_seconds,
+                timeout_ms=(
+                    None
+                    if cmd.timeout_seconds is None
+                    else round(cmd.timeout_seconds * 1000)
+                ),
                 version=1,
                 created_at=now,
                 updated_at=now,
@@ -1993,7 +2034,7 @@ class SqlAlchemyJobStore:
                 continue
             deps_ok = True
             for dep_id in deps:
-                dep = await session.get(TaskRow, dep_id)
+                dep = await _get_task(session, dep_id)
                 if dep is None or dep.status != TaskStatus.SUCCEEDED.value:
                     deps_ok = False
                     break
@@ -2004,7 +2045,7 @@ class SqlAlchemyJobStore:
                 session.add(
                     self._transition(
                         job_id,
-                        task_id=t.id,
+                        task_id=t.task_id,
                         attempt_id=None,
                         from_status=TaskStatus.PENDING.value,
                         to_status=TaskStatus.READY.value,
@@ -2019,7 +2060,7 @@ class SqlAlchemyJobStore:
         job_id: str,
         now: datetime,
     ) -> None:
-        job_row = await session.get(TaskJobRow, job_id)
+        job_row = await _get_job(session, job_id)
         if job_row is None:
             return
         if job_row.status in (
@@ -2060,10 +2101,11 @@ def _with_status(task: TaskRecord, status: TaskStatus) -> TaskRecord:
 
 def _task_to_row(task: TaskRecord) -> TaskRow:
     return TaskRow(
-        id=task.id,
+        task_id=task.id,
         job_id=task.job_id,
         parent_task_id=task.parent_task_id,
         key=task.key,
+        job_key_hash=sha256_hash(task.job_id + task.key),
         handler=task.handler,
         status=task.status.value,
         input_artifact_id=task.input_artifact_id,
@@ -2074,7 +2116,11 @@ def _task_to_row(task: TaskRecord) -> TaskRow:
         lease_expires_at=_store_dt(task.lease_expires_at),
         fencing_token=task.fencing_token,
         active_attempt_id=task.active_attempt_id,
-        timeout_seconds=task.timeout_seconds,
+        timeout_ms=(
+            None
+            if task.timeout_seconds is None
+            else round(task.timeout_seconds * 1000)
+        ),
         version=task.version,
         created_at=_store_dt(task.created_at),
         updated_at=_store_dt(task.updated_at),
@@ -2084,7 +2130,7 @@ def _task_to_row(task: TaskRecord) -> TaskRow:
 
 def _attempt_to_row(attempt: TaskAttemptRecord) -> TaskAttemptRow:
     return TaskAttemptRow(
-        id=attempt.id,
+        attempt_id=attempt.id,
         task_id=attempt.task_id,
         job_id=attempt.job_id,
         attempt=attempt.attempt,

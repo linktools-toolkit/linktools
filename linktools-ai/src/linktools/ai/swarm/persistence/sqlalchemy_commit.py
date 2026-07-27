@@ -20,9 +20,17 @@ import json
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping
 
-from sqlalchemy import Column, DateTime, LargeBinary, String
+from sqlalchemy import BINARY, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
 
+from linktools.ai.storage.sqlalchemy.conventions import (
+    BIGSERIAL,
+    TABLE_PREFIX,
+    TimestampMixin,
+    sha256_hash,
+    timestamp_indexes,
+)
 from linktools.ai.storage.sqlalchemy.models import Base
 
 from ..commit import SwarmCommitConflictError, SwarmCommitPolicy
@@ -70,24 +78,30 @@ if TYPE_CHECKING:
     # SwarmEngine; swarm must not import runtime).
 
 
-class SwarmCommitLogRow(Base):
+class SwarmCommitLogRow(TimestampMixin, Base):
     """One row per committed swarm lifecycle point. Same shape as
-    RunCommitLogRow: commit_id primary + unique, request_hash for replay-
-    vs-conflict detection, result_json the deserializable recorded result."""
+    RunCommitLogRow: uniqueness carried by commit_hash (sha256(commit_id)),
+    request_hash for replay-vs-conflict detection, result_json the
+    deserializable recorded result."""
 
-    __tablename__ = "swarm_commit_log"
-
-    commit_id = Column(String(200), primary_key=True)
-    operation = Column(String(64), nullable=False)
-    swarm_run_id = Column(String(200), nullable=False, index=True)
-    request_hash = Column(LargeBinary(32), nullable=False)
-    result_json = Column(String, nullable=False)
-    result_payload = Column(LargeBinary, nullable=False)
-    created_at = Column(
-        DateTime(timezone=True),
-        nullable=False,
-        default=lambda: datetime.now(timezone.utc),
+    __tablename__ = f"{TABLE_PREFIX}swarm_commit_log"
+    __table_args__ = (
+        UniqueConstraint("commit_hash", name="uk_commit_hash"),
+        # A MySQL deployment prefix-lengths `commit_id` in this index (see
+        # migrations/init_schema.sql) -- kept out of the vendor-neutral core.
+        Index("ix_commit_id", "commit_id"),
+        Index("ix_swarm_run_id", "swarm_run_id"),
+        *timestamp_indexes(),
     )
+
+    id: Mapped[int] = mapped_column(BIGSERIAL, primary_key=True, autoincrement=True)
+    commit_id: Mapped[str] = mapped_column(String(200))
+    commit_hash: Mapped[bytes] = mapped_column(BINARY(32))
+    operation: Mapped[str] = mapped_column(String(64))
+    swarm_run_id: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[bytes] = mapped_column(BINARY(32))
+    result_json: Mapped[str] = mapped_column(Text)
+    result_payload: Mapped[bytes] = mapped_column(LargeBinary)
 
 
 class SqlAlchemySwarmCommitLog:
@@ -103,7 +117,7 @@ class SqlAlchemySwarmCommitLog:
         row = (
             await session.execute(
                 select(SwarmCommitLogRow).where(
-                    SwarmCommitLogRow.commit_id == commit_id
+                    SwarmCommitLogRow.commit_hash == sha256_hash(commit_id)
                 )
             )
         ).scalar_one_or_none()
@@ -132,6 +146,7 @@ class SqlAlchemySwarmCommitLog:
         session.add(
             SwarmCommitLogRow(
                 commit_id=commit_id,
+                commit_hash=sha256_hash(commit_id),
                 operation=operation,
                 swarm_run_id=swarm_run_id,
                 request_hash=request_hash,

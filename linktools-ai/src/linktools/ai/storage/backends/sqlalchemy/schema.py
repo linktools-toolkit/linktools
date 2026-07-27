@@ -22,9 +22,11 @@ local_reference`` is a SQLite-reference convenience, not part of the Protocol.""
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-if False:  # TYPE_CHECKING
+from ...sqlalchemy.conventions import TABLE_PREFIX
+
+if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -45,42 +47,42 @@ class SqlAlchemySchemaProvider(Protocol):
 # (not in the models module) so a downstream reading the Protocol + this list
 # has the full contract without importing the backend's ORM.
 _REQUIRED_TABLES = (
-    "storage_objects",
-    "storage_object_versions",
-    "storage_object_revision",
-    "storage_object_idempotency",
-    "storage_schema_version",
+    f"{TABLE_PREFIX}storage_objects",
+    f"{TABLE_PREFIX}storage_object_versions",
+    f"{TABLE_PREFIX}storage_object_revision",
+    f"{TABLE_PREFIX}storage_object_idempotency",
+    f"{TABLE_PREFIX}storage_schema_version",
 )
 
 _REQUIRED_COLUMNS = {
-    "storage_objects": {"key", "key_hash", "version", "commit_revision", "content"},
-    "storage_object_versions": {"key", "key_hash", "version", "commit_revision", "content"},
-    "storage_object_idempotency": {"key", "key_hash", "operation", "request_hash", "result_key", "result_version", "commit_revision"},
-    "storage_schema_version": {"component", "version", "checksum", "updated_at"},
-    "storage_object_revision": {"id", "value"},
+    f"{TABLE_PREFIX}storage_objects": {"id", "key", "key_hash", "version", "commit_revision", "content", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_versions": {"id", "key", "key_hash", "version", "commit_revision", "content", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_idempotency": {"id", "key", "key_hash", "operation", "request_hash", "result_key", "result_version", "commit_revision", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_schema_version": {"id", "component", "version", "checksum", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_revision": {"id", "value", "created_at", "updated_at"},
 }
 
 _REQUIRED_NON_NULL_COLUMNS = {
-    "storage_objects": {"key", "key_hash", "version", "content", "commit_revision"},
-    "storage_object_versions": {"key", "key_hash", "version", "commit_revision"},
-    "storage_object_idempotency": {"key", "key_hash", "operation", "request_hash", "commit_revision"},
-    "storage_object_revision": {"id", "value"},
-    "storage_schema_version": {"component", "version", "checksum", "updated_at"},
+    f"{TABLE_PREFIX}storage_objects": {"id", "key", "key_hash", "version", "content", "commit_revision", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_versions": {"id", "key", "key_hash", "version", "commit_revision", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_idempotency": {"id", "key", "key_hash", "operation", "request_hash", "commit_revision", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_object_revision": {"id", "value", "created_at", "updated_at"},
+    f"{TABLE_PREFIX}storage_schema_version": {"id", "component", "version", "checksum", "created_at", "updated_at"},
 }
 
 _REQUIRED_INDEXES = {
-    "storage_objects": "ix_storage_objects_key_hash",
-    "storage_object_versions": "ix_storage_object_versions_key_hash",
-    "storage_object_idempotency": "ix_storage_object_idempotency_key_hash",
+    f"{TABLE_PREFIX}storage_objects": "ix_key",
+    f"{TABLE_PREFIX}storage_object_idempotency": "ix_key",
 }
 
 _REQUIRED_UNIQUES = {
-    "storage_objects": "uq_storage_objects_key_hash",
-    "storage_object_versions": "uq_storage_object_versions_key_hash_version",
-    "storage_object_idempotency": "uq_storage_object_idempotency_key_hash",
+    f"{TABLE_PREFIX}storage_objects": "uk_key_hash",
+    f"{TABLE_PREFIX}storage_object_versions": "uk_key_hash_version",
+    f"{TABLE_PREFIX}storage_object_idempotency": "uk_key_hash",
+    f"{TABLE_PREFIX}storage_schema_version": "uk_component",
 }
 _SCHEMA_COMPONENT = "storage_object"
-_SCHEMA_CHECKSUM = "storage-object-schema-v1"
+_SCHEMA_CHECKSUM = "storage-object-schema-v2"
 
 
 class SqliteReferenceSchemaProvider:
@@ -175,7 +177,11 @@ class SqliteReferenceSchemaProvider:
         missing_indexes = {
             table: name
             for table, name in _REQUIRED_INDEXES.items()
-            if name not in indexes.get(table, set())
+            # SQLite's index namespace is database-global, so CreateIndex is
+            # compiled with a table-qualified name on this dialect (see
+            # conventions._sqlite_unique_index_name) -- the short lint name
+            # never appears on-disk here.
+            if f"{table}_{name}" not in indexes.get(table, set())
         }
         if missing_indexes:
             raise StorageSchemaNotReadyError(
@@ -200,11 +206,11 @@ class SqliteReferenceSchemaProvider:
         missing_primary_keys = {
             table: sorted(required)
             for table, required in {
-                "storage_objects": {"id"},
-                "storage_object_versions": {"id"},
-                "storage_object_idempotency": {"id"},
-                "storage_object_revision": {"id"},
-                "storage_schema_version": {"component"},
+                f"{TABLE_PREFIX}storage_objects": {"id"},
+                f"{TABLE_PREFIX}storage_object_versions": {"id"},
+                f"{TABLE_PREFIX}storage_object_idempotency": {"id"},
+                f"{TABLE_PREFIX}storage_object_revision": {"id"},
+                f"{TABLE_PREFIX}storage_schema_version": {"id"},
             }.items()
             if not required.intersection(primary_keys.get(table, []))
         }

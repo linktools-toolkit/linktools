@@ -343,7 +343,7 @@ def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
             async def _seed(session):
                 await session.execute(
                     insert(MemoryRow).values(
-                        id="legacy-1",
+                        memory_id="legacy-1",
                         tenant_id=None,
                         owner_id="alice",
                         content="legacy hello secret",

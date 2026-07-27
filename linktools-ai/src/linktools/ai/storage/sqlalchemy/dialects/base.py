@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-if False:  # TYPE_CHECKING only -- avoid importing SQLAlchemy at module load
+if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 

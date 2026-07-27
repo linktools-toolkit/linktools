@@ -97,7 +97,7 @@ class SqlAlchemyArtifactRecordStore:
                 .values(
                     artifact_id=record.ref.id,
                     tenant_id=record.tenant_id,
-                    sha256=record.ref.sha256,
+                    content_hash=record.ref.sha256,
                     producer_kind=record.provenance.producer_kind,
                     producer_id=record.provenance.producer_id or None,
                     run_id=record.provenance.run_id,
@@ -107,7 +107,13 @@ class SqlAlchemyArtifactRecordStore:
             )
             result = await session.execute(stmt)
             if result.rowcount == 0:
-                existing = await session.get(ArtifactRecordRow, record.ref.id)
+                existing = (
+                    await session.execute(
+                        select(ArtifactRecordRow).where(
+                            ArtifactRecordRow.artifact_id == record.ref.id
+                        )
+                    )
+                ).scalar_one_or_none()
                 if existing is None:
                     # Conflict vanished after the no-op insert -- only possible
                     # if another writer deleted the row mid-flight. Fail closed.
@@ -132,7 +138,13 @@ class SqlAlchemyArtifactRecordStore:
         self, artifact_id: str, *, tenant_id: str
     ) -> "ArtifactRecord | None":
         async def _action(session: AsyncSession) -> "ArtifactRecord | None":
-            row = await session.get(ArtifactRecordRow, artifact_id)
+            row = (
+                await session.execute(
+                    select(ArtifactRecordRow).where(
+                        ArtifactRecordRow.artifact_id == artifact_id
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None or row.tenant_id != tenant_id:
                 return None
             return _row_to_record(row)
@@ -141,7 +153,13 @@ class SqlAlchemyArtifactRecordStore:
 
     async def delete(self, artifact_id: str, *, tenant_id: str) -> bool:
         async def _action(session: AsyncSession) -> bool:
-            row = await session.get(ArtifactRecordRow, artifact_id)
+            row = (
+                await session.execute(
+                    select(ArtifactRecordRow).where(
+                        ArtifactRecordRow.artifact_id == artifact_id
+                    )
+                )
+            ).scalar_one_or_none()
             if row is None or row.tenant_id != tenant_id:
                 return False
             await session.delete(row)
@@ -153,7 +171,7 @@ class SqlAlchemyArtifactRecordStore:
         """Yield every sha256 referenced by some record (across tenants), for
         orphan sweeping -- the set of blobs that are NOT orphans."""
         async def _action(session: AsyncSession) -> "list[str]":
-            rows = await session.execute(select(ArtifactRecordRow.sha256))
+            rows = await session.execute(select(ArtifactRecordRow.content_hash))
             return list(rows.scalars().all())
 
         digests = await self._run(_action)
@@ -167,8 +185,8 @@ class SqlAlchemyArtifactRecordStore:
         snapshot taken before the lock."""
         async def _action(session: AsyncSession) -> bool:
             result = await session.execute(
-                select(ArtifactRecordRow.sha256)
-                .where(ArtifactRecordRow.sha256 == digest.value)
+                select(ArtifactRecordRow.content_hash)
+                .where(ArtifactRecordRow.content_hash == digest.value)
                 .limit(1)
             )
             return result.first() is not None

@@ -38,12 +38,12 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
     # A NULL tenant_id is a legacy row (pre-tenant). It is read back under the
     # reserved legacy tenant so it never matches a real tenant's search.
     return MemoryRecord(
-        id=row.id,
+        id=row.memory_id,
         tenant_id=row.tenant_id or LEGACY_TENANT_ID,
         owner_id=row.owner_id,
         content=row.content,
         category=row.category,
-        confidence=row.confidence,
+        confidence=None if row.confidence is None else float(row.confidence),
         version=row.version,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -100,7 +100,7 @@ class SqlAlchemyMemoryStore:
     async def get(self, memory_id: str) -> "MemoryRecord | None":
         async def _do(session):
             result = await session.execute(
-                select(MemoryRow).where(MemoryRow.id == memory_id)
+                select(MemoryRow).where(MemoryRow.memory_id == memory_id)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
@@ -172,7 +172,7 @@ class SqlAlchemyMemoryStore:
         async def _do(session):
             session.add(
                 MemoryRow(
-                    id=record.id,
+                    memory_id=record.id,
                     tenant_id=record.tenant_id,
                     owner_id=record.owner_id,
                     content=record.content,
@@ -210,7 +210,7 @@ class SqlAlchemyMemoryStore:
     ) -> MemoryRecord:
         async def _do(session):
             query_result = await session.execute(
-                select(MemoryRow).where(MemoryRow.id == memory_id)
+                select(MemoryRow).where(MemoryRow.memory_id == memory_id)
             )
             row = query_result.scalar_one_or_none()
             if row is None:
@@ -239,7 +239,7 @@ class SqlAlchemyMemoryStore:
     async def forget(self, memory_id: str, *, expected_version: int) -> None:
         async def _do(session):
             query_result = await session.execute(
-                select(MemoryRow).where(MemoryRow.id == memory_id)
+                select(MemoryRow).where(MemoryRow.memory_id == memory_id)
             )
             row = query_result.scalar_one_or_none()
             if row is None:

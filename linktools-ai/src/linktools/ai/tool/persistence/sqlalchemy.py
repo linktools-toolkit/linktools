@@ -23,6 +23,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
 from linktools.ai.storage.sqlalchemy.models import ToolIdempotencyRow
 from ...json import canonical_json
 from ..idempotency import (
@@ -45,13 +46,13 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
     return IdempotencyRecord(
-        id=row.id,
+        id=row.idempotency_id,
         scope=row.scope,
         key=row.key,
         request_hash=row.request_hash,
         status=IdempotencyStatus(row.status),
         result=None if row.result_json is None else json.loads(row.result_json),
-        error=row.error_text,
+        error=row.error_message,
         created_at=_as_utc(row.created_at),
         completed_at=_as_utc(row.completed_at),
         owner_id=row.owner_id,
@@ -196,13 +197,14 @@ class SqlAlchemyIdempotencyStore:
             row = q.scalar_one_or_none()
             if row is None:
                 fresh = ToolIdempotencyRow(
-                    id=str(uuid.uuid4()),
+                    idempotency_id=str(uuid.uuid4()),
                     scope=scope,
                     key=key,
+                    scope_key_hash=sha256_hash(scope + key),
                     request_hash=request_hash,
                     status=IdempotencyStatus.RESERVED.value,
                     result_json=None,
-                    error_text=None,
+                    error_message=None,
                     created_at=now,
                     completed_at=None,
                     expires_at=None,
@@ -276,7 +278,7 @@ class SqlAlchemyIdempotencyStore:
                 .values(
                     status=IdempotencyStatus.RESERVED.value,
                     result_json=None,
-                    error_text=None,
+                    error_message=None,
                     completed_at=None,
                     owner_id=owner_id,
                     generation=new_gen,
@@ -361,7 +363,7 @@ class SqlAlchemyIdempotencyStore:
                 .values(
                     status=IdempotencyStatus.COMPLETED.value,
                     result_json=canonical_json(result),
-                    error_text=None,
+                    error_message=None,
                     completed_at=now,
                 )
             )
@@ -394,7 +396,7 @@ class SqlAlchemyIdempotencyStore:
                 .values(
                     status=IdempotencyStatus.EXECUTED.value,
                     result_json=canonical_json(result),
-                    error_text=None,
+                    error_message=None,
                     receipt_artifact_id=receipt_artifact_id,
                     binding_fingerprint=binding_fingerprint,
                     result_processor_revision=result_processor_revision,
@@ -457,7 +459,7 @@ class SqlAlchemyIdempotencyStore:
                 .values(
                     status=IdempotencyStatus.FAILED.value,
                     result_json=None,
-                    error_text=error,
+                    error_message=error,
                     completed_at=now,
                 )
             )

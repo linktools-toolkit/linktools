@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
 from linktools.ai.storage.sqlalchemy.models import EventRow
 from ...errors import EventSequenceConflictError
 from ..envelope import EventEnvelope
@@ -107,9 +108,10 @@ class SqlAlchemyEventStore:
             runnable_id=runnable_id,
             event_type=event_type,
             schema_version=schema_version,
-            payload_json=json.dumps(payload_data),
+            data_json=json.dumps(payload_data),
             metadata_json=json.dumps(meta) if meta else None,
             commit_id=commit_id,
+            commit_hash=sha256_hash(commit_id if commit_id is not None else event_id),
         )
         session.add(row)
         await session.flush()
@@ -229,7 +231,7 @@ class SqlAlchemyEventStore:
                 await session.execute(
                     select(EventRow).where(
                         EventRow.stream_id == stream_id,
-                        EventRow.commit_id == commit_id,
+                        EventRow.commit_hash == sha256_hash(commit_id),
                         EventRow.event_type == event_type,
                     )
                 )
@@ -278,7 +280,7 @@ class SqlAlchemyEventStore:
         # Decode by stable event_type via the shared codec. If a row somehow
         # lacks a schema_version, the codec treats None as the current version.
         payload = self._codec.decode(
-            row.event_type, row.schema_version, json.loads(row.payload_json)
+            row.event_type, row.schema_version, json.loads(row.data_json)
         )
         return EventEnvelope(
             event_id=row.event_id,

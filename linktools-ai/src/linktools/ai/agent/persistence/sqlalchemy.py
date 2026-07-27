@@ -66,13 +66,14 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_request(row: ApprovalRow) -> ApprovalRequest:
     metadata = json.loads(row.metadata_json)
+    data = json.loads(row.data_json)
     return ApprovalRequest(
-        id=row.id,
+        id=row.approval_id,
         run_id=row.run_id,
         tool_call_id=row.tool_call_id,
         tool_name=row.tool_name,
-        reason=row.reason,
-        redacted_arguments=json.loads(row.redacted_arguments_json),
+        reason=data.get("reason"),
+        redacted_arguments=data.get("redacted_arguments", {}),
         arguments_hash=row.arguments_hash,
         status=ApprovalStatus(row.status),
         version=row.version,
@@ -98,9 +99,9 @@ class SqlAlchemyApprovalStore:
 
     Optimistic concurrency on ``approve`` / ``reject`` mirrors
     ``SqlAlchemyMemoryStore.update`` (read-check-mutate-commit in one
-    transaction). ``create`` relies on the primary-key constraint: a duplicate
-    id raises ``IntegrityError``, which is translated to
-    ``ApprovalConflictError``.
+    transaction). ``create`` relies on the ``uk_approval_id`` unique
+    constraint: a duplicate id raises ``IntegrityError``, which is translated
+    to ``ApprovalConflictError``.
     """
 
     def __init__(
@@ -142,7 +143,7 @@ class SqlAlchemyApprovalStore:
     async def get(self, approval_id: str) -> "ApprovalRequest | None":
         async def _do(session):
             result = await session.execute(
-                select(ApprovalRow).where(ApprovalRow.id == approval_id)
+                select(ApprovalRow).where(ApprovalRow.approval_id == approval_id)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_request(row)
@@ -189,10 +190,13 @@ class SqlAlchemyApprovalStore:
             "_binding_payload": dict(request.binding),
             "_binding_fingerprint": request.binding_fingerprint,
             "_binding_result_processor_revision": request.result_processor_revision}
-        return ApprovalRow(id=request.id, run_id=request.run_id,
+        data_json = json.dumps({
+            "reason": request.reason,
+            "redacted_arguments": dict(request.redacted_arguments),
+        })
+        return ApprovalRow(approval_id=request.id, run_id=request.run_id,
             tool_call_id=request.tool_call_id, tool_name=request.tool_name,
-            reason=request.reason,
-            redacted_arguments_json=json.dumps(dict(request.redacted_arguments)),
+            data_json=data_json,
             arguments_hash=request.arguments_hash, status=request.status.value,
             version=request.version, created_at=request.created_at,
             resolved_at=request.resolved_at, resolved_by=request.resolved_by,
@@ -211,7 +215,7 @@ class SqlAlchemyApprovalStore:
         try:
             await self._execute_in_session(_do)
         except IntegrityError as exc:
-            # Duplicate primary key -> conflict, matching FilesystemApprovalStore's
+            # Duplicate approval_id -> conflict, matching FilesystemApprovalStore's
             # "approval already exists" semantics. In UoW mode the IntegrityError
             # has already poisoned the shared transaction (it will roll back);
             # we still translate so callers see the domain error type.
@@ -255,7 +259,7 @@ class SqlAlchemyApprovalStore:
         """Dedup on (run_id, tool_call_id): a retry, a duplicate model drive, or a re-entrant pause for the
         same tool_call reuses the existing request rather than creating a
         second PENDING one. The SELECT-then-INSERT below is only the fast
-        path -- ``ai_approvals``'s ``uq_approval_run_tool_call`` UNIQUE
+        path -- ``ai_approvals``'s ``uk_run_id_tool_call_id`` UNIQUE
         constraint is the actual backstop against two concurrent callers
         both passing the SELECT check and both inserting. On the (rare)
         collision, this method re-selects and returns the winner instead of
@@ -378,7 +382,7 @@ class SqlAlchemyApprovalStore:
     ) -> ApprovalRequest:
         async def _do(session):
             query_result = await session.execute(
-                select(ApprovalRow).where(ApprovalRow.id == approval_id)
+                select(ApprovalRow).where(ApprovalRow.approval_id == approval_id)
             )
             row = query_result.scalar_one_or_none()
             if row is None:

@@ -37,7 +37,7 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_checkpoint(row: RunCheckpointRow) -> RunCheckpoint:
     return RunCheckpoint(
-        id=row.id,
+        id=row.checkpoint_id,
         run_id=row.run_id,
         sequence=row.sequence,
         format=row.format,
@@ -89,7 +89,13 @@ class SqlAlchemyCheckpointStore:
 
     async def append(self, new: NewRunCheckpoint) -> RunCheckpoint:
         async def _do(session):
-            counter = await session.get(RunCheckpointCounterRow, new.run_id)
+            counter = (
+                await session.execute(
+                    select(RunCheckpointCounterRow).where(
+                        RunCheckpointCounterRow.run_id == new.run_id
+                    )
+                )
+            ).scalar_one_or_none()
             if counter is None:
                 counter = RunCheckpointCounterRow(run_id=new.run_id, last_sequence=1)
                 session.add(counter)
@@ -101,7 +107,7 @@ class SqlAlchemyCheckpointStore:
             created_at = datetime.now(timezone.utc)
             session.add(
                 RunCheckpointRow(
-                    id=checkpoint_id,
+                    checkpoint_id=checkpoint_id,
                     run_id=new.run_id,
                     sequence=sequence,
                     format=new.format,
@@ -142,7 +148,9 @@ class SqlAlchemyCheckpointStore:
     async def get(self, checkpoint_id: str) -> "RunCheckpoint | None":
         async def _do(session):
             result = await session.execute(
-                select(RunCheckpointRow).where(RunCheckpointRow.id == checkpoint_id)
+                select(RunCheckpointRow).where(
+                    RunCheckpointRow.checkpoint_id == checkpoint_id
+                )
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_checkpoint(row)

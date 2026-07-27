@@ -19,6 +19,7 @@ from linktools.ai.storage.object.models import ObjectInfo, StorageKey, StoredObj
 from linktools.ai.storage.object.store import ObjectStore
 from linktools.ai.storage.filesystem.artifact import FilesystemArtifactBlobStore
 from linktools.ai.artifact.persistence.filesystem import FilesystemArtifactRecordStore
+from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
 from linktools.ai.storage.sqlalchemy.models import Base, TaskRow
 from linktools.ai.jobs.persistence.sqlalchemy import (
     TASK_ENVELOPE_SCHEMA_VERSION,
@@ -158,7 +159,13 @@ def test_sql_task_envelope_carries_schema_version(tmp_path) -> None:
         await store.create_job(job, _envelope_task(now, depth=0))
         factory = store._session_factory
         async with factory() as session:
-            row = await session.get(TaskRow, "t1")
+            from sqlalchemy import select
+
+            row = (
+                await session.execute(
+                    select(TaskRow).where(TaskRow.task_id == "t1")
+                )
+            ).scalar_one_or_none()
             env = json.loads(row.data_json)
         assert env["schema_version"] == TASK_ENVELOPE_SCHEMA_VERSION
 
@@ -270,10 +277,11 @@ async def _insert_task_row(store, task_id, now, env, *, key="k") -> None:
     async with factory() as session:
         session.add(
             TaskRow(
-                id=task_id,
+                task_id=task_id,
                 job_id="j1",
                 parent_task_id=None,
                 key=key,
+                job_key_hash=sha256_hash("j1" + key),
                 handler="h",
                 status=TaskStatus.READY.value,
                 input_artifact_id=None,
@@ -284,7 +292,7 @@ async def _insert_task_row(store, task_id, now, env, *, key="k") -> None:
                 lease_expires_at=None,
                 fencing_token=0,
                 active_attempt_id=None,
-                timeout_seconds=None,
+                timeout_ms=None,
                 version=1,
                 created_at=_store_dt(now),
                 updated_at=_store_dt(now),

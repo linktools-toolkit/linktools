@@ -159,7 +159,7 @@ async def _force_job_status(store, job_id: str, status: JobStatus) -> None:
         async with store._session_factory() as session:
             await session.execute(
                 sa_update(TaskJobRow)
-                .where(TaskJobRow.id == job_id)
+                .where(TaskJobRow.job_id == job_id)
                 .values(status=status.value)
             )
             await session.commit()
@@ -179,16 +179,18 @@ async def _inject_ready_sibling(store, job_id: str, task_id: str, clock) -> None
     else:
         import json
 
+        from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
         from linktools.ai.storage.sqlalchemy.models import TaskRow
         from linktools.ai.jobs.persistence.sqlalchemy import _store_dt, _task_envelope
 
         async with store._session_factory() as session:
             session.add(
                 TaskRow(
-                    id=task_id,
+                    task_id=task_id,
                     job_id=job_id,
                     parent_task_id=None,
                     key=task_id,
+                    job_key_hash=sha256_hash(job_id + task_id),
                     handler="runtime",
                     status=TaskStatus.READY.value,
                     input_artifact_id=None,
@@ -199,7 +201,7 @@ async def _inject_ready_sibling(store, job_id: str, task_id: str, clock) -> None
                     lease_expires_at=None,
                     fencing_token=0,
                     active_attempt_id=None,
-                    timeout_seconds=None,
+                    timeout_ms=None,
                     version=1,
                     created_at=_store_dt(clock.now()),
                     updated_at=_store_dt(clock.now()),

@@ -42,6 +42,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
 from linktools.ai.storage.sqlalchemy.models import SessionMessageRow, SessionRow
 from ...storage.features import ComponentCapabilities
 
@@ -70,7 +71,7 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 
 def _row_to_record(row: SessionRow) -> SessionRecord:
     return SessionRecord(
-        id=row.id,
+        id=row.session_id,
         parent_id=row.parent_id,
         user_id=row.user_id,
         tenant_id=row.tenant_id,
@@ -84,11 +85,11 @@ def _row_to_record(row: SessionRow) -> SessionRecord:
 
 def _row_to_message(row: SessionMessageRow) -> SessionMessage:
     return SessionMessage(
-        id=row.id,
+        id=row.message_id,
         session_id=row.session_id,
         sequence=row.sequence,
         role=MessageRole(row.role),
-        content=json.loads(row.content_json),
+        content=json.loads(row.data_json),
         run_id=row.run_id,
         created_at=_as_utc(row.created_at),
         metadata=json.loads(row.metadata_json),
@@ -127,7 +128,7 @@ class SqlAlchemySessionStore:
         async def _do(db_session):
             db_session.add(
                 SessionRow(
-                    id=session.id,
+                    session_id=session.id,
                     parent_id=session.parent_id,
                     user_id=session.user_id,
                     tenant_id=session.tenant_id,
@@ -145,7 +146,7 @@ class SqlAlchemySessionStore:
     async def get(self, session_id: str) -> "SessionRecord | None":
         async def _do(db_session):
             result = await db_session.execute(
-                select(SessionRow).where(SessionRow.id == session_id)
+                select(SessionRow).where(SessionRow.session_id == session_id)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_record(row)
@@ -179,16 +180,17 @@ class SqlAlchemySessionStore:
             row_id = str(uuid.uuid4())
             session.add(
                 SessionMessageRow(
-                    id=row_id,
+                    message_id=row_id,
                     session_id=session_id,
                     sequence=sequence,
                     role=message.role.value,
-                    content_json=json.dumps(message.content),
+                    data_json=json.dumps(message.content),
                     run_id=message.run_id,
                     created_at=now,
                     metadata_json=json.dumps(dict(message.metadata)),
                     commit_id=commit_id,
-                    batch_index=offset if commit_id is not None else None,
+                    commit_hash=sha256_hash(commit_id if commit_id is not None else row_id),
+                    batch_index=offset if commit_id is not None else 0,
                 )
             )
             persisted.append(
@@ -270,7 +272,7 @@ class SqlAlchemySessionStore:
                     select(SessionMessageRow)
                     .where(
                         SessionMessageRow.session_id == session_id,
-                        SessionMessageRow.commit_id == commit_id,
+                        SessionMessageRow.commit_hash == sha256_hash(commit_id),
                     )
                     .order_by(SessionMessageRow.batch_index.asc())
                 )
@@ -330,7 +332,7 @@ class SqlAlchemySessionStore:
     ) -> SessionRecord:
         async def _do(db_session):
             result = await db_session.execute(
-                select(SessionRow).where(SessionRow.id == session_id)
+                select(SessionRow).where(SessionRow.session_id == session_id)
             )
             row = result.scalar_one_or_none()
             if row is None:

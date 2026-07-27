@@ -57,7 +57,7 @@ def _as_utc(dt: "datetime | None") -> "datetime | None":
 def _row_to_run(row: SwarmRunRow) -> SwarmRun:
     cost = Decimal(row.total_cost)
     return SwarmRun(
-        id=row.id,
+        id=row.swarm_run_id,
         run_id=row.run_id,
         round=row.round,
         status=SwarmStatus(row.status),
@@ -78,57 +78,62 @@ def _row_to_run(row: SwarmRunRow) -> SwarmRun:
 
 
 def _row_to_task(row: SwarmStepRow) -> SwarmStep:
+    env = json.loads(row.data_json)
     return SwarmStep(
-        id=row.id,
+        id=row.task_id,
         swarm_run_id=row.swarm_run_id,
         parent_task_id=row.parent_task_id,
         assigned_agent_id=row.assigned_agent_id,
-        description=row.description,
+        description=env["description"],
         status=SwarmStepStatus(row.status),
-        dependencies=tuple(json.loads(row.dependencies_json)),
-        input=TaskInput(**json.loads(row.input_json)),
-        result=None
-        if row.result_json is None
-        else RunResult(**json.loads(row.result_json)),
-        error=None
-        if row.error_json is None
-        else RunErrorInfo(**json.loads(row.error_json)),
+        dependencies=tuple(env["dependencies"]),
+        input=TaskInput(**env["input"]),
+        result=None if env["result"] is None else RunResult(**env["result"]),
+        error=None if env["error"] is None else RunErrorInfo(**env["error"]),
         attempts=row.attempts,
         version=row.version,
         claimed_at=_as_utc(row.claimed_at),
         lease_expires_at=_as_utc(row.lease_expires_at),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
-        # getattr covers rows written before the column was added (raw
-        # SQL rows from an old DB won't have it; SQLAlchemy unmapped-column
-        # access raises AttributeError).
-        active_run_id=getattr(row, "active_run_id", None),
+        active_run_id=row.active_run_id,
     )
 
 
-def _result_to_json(result: RunResult) -> str:
-    return json.dumps(
-        {
-            "output": result.output,
-            "token_usage": dict(result.token_usage),
-            "metadata": dict(result.metadata),
-        }
-    )
+def _result_to_json(result: RunResult) -> dict:
+    return {
+        "output": result.output,
+        "token_usage": dict(result.token_usage),
+        "metadata": dict(result.metadata),
+    }
 
 
-def _error_to_json(error: RunErrorInfo) -> str:
+def _error_to_json(error: RunErrorInfo) -> dict:
+    return {
+        "error_type": error.error_type,
+        "message": error.message,
+        "detail": dict(error.detail),
+    }
+
+
+def _task_envelope(task: SwarmStep) -> str:
     return json.dumps(
         {
-            "error_type": error.error_type,
-            "message": error.message,
-            "detail": dict(error.detail),
+            "description": task.description,
+            "dependencies": list(task.dependencies),
+            "input": {
+                "prompt": task.input.prompt,
+                "metadata": dict(task.input.metadata),
+            },
+            "result": None if task.result is None else _result_to_json(task.result),
+            "error": None if task.error is None else _error_to_json(task.error),
         }
     )
 
 
 def _row_to_attempt(row: SwarmStepAttemptRow) -> SwarmStepAttempt:
     return SwarmStepAttempt(
-        id=row.id,
+        id=row.attempt_id,
         task_id=row.task_id,
         run_id=row.run_id,
         agent_id=row.agent_id,
@@ -190,7 +195,7 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             session.add(
                 SwarmRunRow(
-                    id=run.id,
+                    swarm_run_id=run.id,
                     run_id=run.run_id,
                     round=run.round,
                     status=run.status.value,
@@ -213,7 +218,7 @@ class SqlAlchemySwarmStore:
     async def get_run(self, swarm_run_id: str) -> "SwarmRun | None":
         async def _do(session):
             result = await session.execute(
-                select(SwarmRunRow).where(SwarmRunRow.id == swarm_run_id)
+                select(SwarmRunRow).where(SwarmRunRow.swarm_run_id == swarm_run_id)
             )
             row = result.scalar_one_or_none()
             return None if row is None else _row_to_run(row)
@@ -248,7 +253,7 @@ class SqlAlchemySwarmStore:
             result = await session.execute(
                 update(SwarmRunRow)
                 .where(
-                    SwarmRunRow.id == swarm_run_id,
+                    SwarmRunRow.swarm_run_id == swarm_run_id,
                     SwarmRunRow.execution_generation == required,
                 )
                 .values(
@@ -280,7 +285,7 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             result = await session.execute(
                 select(SwarmRunRow)
-                .where(SwarmRunRow.id == swarm_run_id)
+                .where(SwarmRunRow.swarm_run_id == swarm_run_id)
                 .with_for_update()
             )
             row = result.scalar_one_or_none()
@@ -348,7 +353,7 @@ class SqlAlchemySwarmStore:
 
             stmt = (
                 update(SwarmRunRow)
-                .where(SwarmRunRow.id == swarm_run_id)
+                .where(SwarmRunRow.swarm_run_id == swarm_run_id)
                 .where(SwarmRunRow.version == expected_version)
                 .where(SwarmRunRow.execution_token == expected_token)
             )
@@ -358,7 +363,7 @@ class SqlAlchemySwarmStore:
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmRunRow).where(SwarmRunRow.id == swarm_run_id)
+                    select(SwarmRunRow).where(SwarmRunRow.swarm_run_id == swarm_run_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
@@ -376,7 +381,7 @@ class SqlAlchemySwarmStore:
                     f"cannot transition {current} -> {status}"
                 )
             query_result = await session.execute(
-                select(SwarmRunRow).where(SwarmRunRow.id == swarm_run_id)
+                select(SwarmRunRow).where(SwarmRunRow.swarm_run_id == swarm_run_id)
             )
             row = query_result.scalar_one()
             return _row_to_run(row)
@@ -389,25 +394,12 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             session.add(
                 SwarmStepRow(
-                    id=task.id,
+                    task_id=task.id,
                     swarm_run_id=task.swarm_run_id,
                     parent_task_id=task.parent_task_id,
                     assigned_agent_id=task.assigned_agent_id,
-                    description=task.description,
                     status=task.status.value,
-                    dependencies_json=json.dumps(list(task.dependencies)),
-                    input_json=json.dumps(
-                        {
-                            "prompt": task.input.prompt,
-                            "metadata": dict(task.input.metadata),
-                        }
-                    ),
-                    result_json=None
-                    if task.result is None
-                    else _result_to_json(task.result),
-                    error_json=None
-                    if task.error is None
-                    else _error_to_json(task.error),
+                    data_json=_task_envelope(task),
                     attempts=task.attempts,
                     version=task.version,
                     claimed_at=task.claimed_at,
@@ -454,11 +446,11 @@ class SqlAlchemySwarmStore:
             candidates = candidates_result.scalars().all()
             for candidate in candidates:
                 # Dependencies gate: every dependency task must be SUCCEEDED.
-                deps = json.loads(candidate.dependencies_json)
+                deps = json.loads(candidate.data_json).get("dependencies", [])
                 deps_ok = True
                 for dep_id in deps:
                     dep_result = await session.execute(
-                        select(SwarmStepRow.status).where(SwarmStepRow.id == dep_id)
+                        select(SwarmStepRow.status).where(SwarmStepRow.task_id == dep_id)
                     )
                     dep_status = dep_result.scalar_one_or_none()
                     if dep_status != SwarmStepStatus.SUCCEEDED.value:
@@ -478,7 +470,7 @@ class SqlAlchemySwarmStore:
                 # race-decider.
                 claim_result = await session.execute(
                     update(SwarmStepRow)
-                    .where(SwarmStepRow.id == candidate.id)
+                    .where(SwarmStepRow.task_id == candidate.task_id)
                     .where(SwarmStepRow.status == SwarmStepStatus.PENDING.value)
                     .values(
                         status=SwarmStepStatus.CLAIMED.value,
@@ -516,7 +508,7 @@ class SqlAlchemySwarmStore:
         async def _do(session):
             result = await session.execute(
                 update(SwarmStepRow)
-                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.task_id == task_id)
                 .where(SwarmStepRow.version == expected_version)
                 .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
                 .values(
@@ -528,7 +520,7 @@ class SqlAlchemySwarmStore:
             if result.rowcount == 0:
                 # Missing, version mismatch, or not CLAIMED -- read to discriminate.
                 query_result = await session.execute(
-                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
@@ -541,7 +533,7 @@ class SqlAlchemySwarmStore:
                     f"task {task_id} is not claimed (status={row.status})"
                 )
             query_result = await session.execute(
-                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
@@ -569,9 +561,23 @@ class SqlAlchemySwarmStore:
         # happened to match.
         async def _do(session):
             now = datetime.now(timezone.utc)
+            # The CAS UPDATE below only ever changes the "result" key of the
+            # envelope, so merging it onto a pre-read snapshot is safe: if the
+            # row changed between this read and the UPDATE, the UPDATE's own
+            # WHERE (version=:expected) fails to match and rowcount==0 -- the
+            # merge is never applied against a stale envelope.
+            pre = (
+                await session.execute(
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
+                )
+            ).scalar_one_or_none()
+            if pre is None:
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
+            env = json.loads(pre.data_json)
+            env["result"] = _result_to_json(result)
             stmt = (
                 update(SwarmStepRow)
-                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.task_id == task_id)
                 .where(SwarmStepRow.version == expected_version)
                 .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
             )
@@ -579,14 +585,14 @@ class SqlAlchemySwarmStore:
                 stmt = stmt.where(SwarmStepRow.active_run_id == active_run_id)
             stmt = stmt.values(
                 status=SwarmStepStatus.SUCCEEDED.value,
-                result_json=_result_to_json(result),
+                data_json=json.dumps(env),
                 version=SwarmStepRow.version + 1,
                 updated_at=now,
             )
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
@@ -604,7 +610,7 @@ class SqlAlchemySwarmStore:
                     f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
-                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
 
@@ -621,9 +627,22 @@ class SqlAlchemySwarmStore:
         # same mandatory fencing as complete_task.
         async def _do(session):
             now = datetime.now(timezone.utc)
+            # Same pre-read merge as complete_task: the CAS UPDATE's own
+            # WHERE (version=:expected) fails the write if the row moved
+            # between this read and the UPDATE, so the merge is never
+            # applied against a stale envelope.
+            pre = (
+                await session.execute(
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
+                )
+            ).scalar_one_or_none()
+            if pre is None:
+                raise SwarmStepNotFoundError(f"swarm task not found: {task_id}")
+            env = json.loads(pre.data_json)
+            env["error"] = _error_to_json(error)
             stmt = (
                 update(SwarmStepRow)
-                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.task_id == task_id)
                 .where(SwarmStepRow.version == expected_version)
                 .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
             )
@@ -631,7 +650,7 @@ class SqlAlchemySwarmStore:
                 stmt = stmt.where(SwarmStepRow.active_run_id == active_run_id)
             stmt = stmt.values(
                 status=SwarmStepStatus.FAILED.value,
-                error_json=_error_to_json(error),
+                data_json=json.dumps(env),
                 attempts=SwarmStepRow.attempts + 1,
                 version=SwarmStepRow.version + 1,
                 updated_at=now,
@@ -639,7 +658,7 @@ class SqlAlchemySwarmStore:
             result_proxy = await session.execute(stmt)
             if result_proxy.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
@@ -657,7 +676,7 @@ class SqlAlchemySwarmStore:
                     f"found {row.active_run_id!r}"
                 )
             query_result = await session.execute(
-                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
             )
             return _row_to_task(query_result.scalar_one())
 
@@ -688,13 +707,13 @@ class SqlAlchemySwarmStore:
                     version=SwarmStepRow.version + 1,
                     updated_at=now,
                 )
-                .returning(SwarmStepRow.id)
+                .returning(SwarmStepRow.task_id)
             )
-            reclaimed_ids = [row.id for row in (await session.execute(stmt))]
+            reclaimed_ids = [row.task_id for row in (await session.execute(stmt))]
             if not reclaimed_ids:
                 return ()
             query_result = await session.execute(
-                select(SwarmStepRow).where(SwarmStepRow.id.in_(reclaimed_ids))
+                select(SwarmStepRow).where(SwarmStepRow.task_id.in_(reclaimed_ids))
             )
             return tuple(_row_to_task(row) for row in query_result.scalars())
 
@@ -714,7 +733,7 @@ class SqlAlchemySwarmStore:
             new_lease = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
             result = await session.execute(
                 update(SwarmStepRow)
-                .where(SwarmStepRow.id == task_id)
+                .where(SwarmStepRow.task_id == task_id)
                 .where(SwarmStepRow.version == expected_version)
                 .where(SwarmStepRow.status == SwarmStepStatus.CLAIMED.value)
                 .values(
@@ -725,7 +744,7 @@ class SqlAlchemySwarmStore:
             )
             if result.rowcount == 0:
                 query_result = await session.execute(
-                    select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                    select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
                 )
                 row = query_result.scalar_one_or_none()
                 if row is None:
@@ -738,7 +757,7 @@ class SqlAlchemySwarmStore:
                     f"renew_lease requires CLAIMED, task {task_id} is {row.status}"
                 )
             query_result = await session.execute(
-                select(SwarmStepRow).where(SwarmStepRow.id == task_id)
+                select(SwarmStepRow).where(SwarmStepRow.task_id == task_id)
             )
             row = query_result.scalar_one()
             return _row_to_task(row)
@@ -755,16 +774,18 @@ class SqlAlchemySwarmStore:
         # same id, so this path always sees exactly one prior row on the update.
         async def _do(session):
             query_result = await session.execute(
-                select(SwarmStepAttemptRow).where(SwarmStepAttemptRow.id == attempt.id)
+                select(SwarmStepAttemptRow).where(SwarmStepAttemptRow.attempt_id == attempt.id)
             )
             row = query_result.scalar_one_or_none()
             error_json = (
-                None if attempt.error is None else _error_to_json(attempt.error)
+                None
+                if attempt.error is None
+                else json.dumps(_error_to_json(attempt.error))
             )
             if row is None:
                 session.add(
                     SwarmStepAttemptRow(
-                        id=attempt.id,
+                        attempt_id=attempt.id,
                         task_id=attempt.task_id,
                         run_id=attempt.run_id,
                         agent_id=attempt.agent_id,

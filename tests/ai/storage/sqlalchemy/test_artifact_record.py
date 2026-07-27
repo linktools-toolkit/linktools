@@ -227,10 +227,18 @@ def test_row_stores_metadata_not_blob_bytes(tmp_path) -> None:
             created_at=rec.created_at,
         )
         await store.put(rec)
+        from sqlalchemy import select
+
         from linktools.ai.storage.sqlalchemy.models import ArtifactRecordRow
 
         async with factory() as session:
-            row = await session.get(ArtifactRecordRow, "art-1")
+            row = (
+                await session.execute(
+                    select(ArtifactRecordRow).where(
+                        ArtifactRecordRow.artifact_id == "art-1"
+                    )
+                )
+            ).scalar_one_or_none()
             assert row is not None
             envelope = json.loads(row.data_json)
             assert envelope["tenant_id"] == "t1"

@@ -52,7 +52,7 @@ def _row_to_run(row: EvalRunRow) -> EvalRun:
     env = json.loads(row.data_json)
     baseline = env.get("baseline_target")
     return EvalRun(
-        id=row.id,
+        id=row.eval_run_id,
         suite_id=row.suite_id,
         target=from_jsonable(EvalTarget, env["target"]),
         status=EvalRunStatus(row.status),
@@ -71,7 +71,7 @@ def _result_envelope(result: EvalResult) -> str:
 def _row_to_result(row: EvalResultRow) -> EvalResult:
     env = json.loads(row.data_json)
     return EvalResult(
-        id=row.id,
+        id=row.result_id,
         eval_run_id=row.eval_run_id,
         case_id=row.case_id,
         run_id=row.run_id,
@@ -118,12 +118,16 @@ class SqlAlchemyEvalStore:
 
     async def create_run(self, run: EvalRun) -> EvalRun:
         async def do(session: AsyncSession) -> EvalRun:
-            existing = await session.get(EvalRunRow, run.id)
+            existing = (
+                await session.execute(
+                    select(EvalRunRow).where(EvalRunRow.eval_run_id == run.id)
+                )
+            ).scalar_one_or_none()
             if existing is not None:
                 raise EvalResultConflictError(f"eval run already exists: {run.id}")
             session.add(
                 EvalRunRow(
-                    id=run.id,
+                    eval_run_id=run.id,
                     suite_id=run.suite_id,
                     status=run.status.value,
                     created_at=_store_dt(run.created_at),
@@ -138,7 +142,11 @@ class SqlAlchemyEvalStore:
 
     async def get_run(self, run_id: str) -> "EvalRun | None":
         async def do(session: AsyncSession):
-            row = await session.get(EvalRunRow, run_id)
+            row = (
+                await session.execute(
+                    select(EvalRunRow).where(EvalRunRow.eval_run_id == run_id)
+                )
+            ).scalar_one_or_none()
             return _row_to_run(row) if row is not None else None
 
         return await self._in_session(do)
@@ -152,7 +160,11 @@ class SqlAlchemyEvalStore:
         finished_at: "datetime | None" = None,
     ) -> EvalRun:
         async def do(session: AsyncSession) -> EvalRun:
-            row = await session.get(EvalRunRow, run_id)
+            row = (
+                await session.execute(
+                    select(EvalRunRow).where(EvalRunRow.eval_run_id == run_id)
+                )
+            ).scalar_one_or_none()
             if row is None:
                 raise EvalRunNotFoundError(f"eval run not found: {run_id}")
             row.status = status.value
@@ -166,14 +178,18 @@ class SqlAlchemyEvalStore:
 
     async def append_result(self, result: EvalResult) -> EvalResult:
         async def do(session: AsyncSession) -> EvalResult:
-            existing = await session.get(EvalResultRow, result.id)
+            existing = (
+                await session.execute(
+                    select(EvalResultRow).where(EvalResultRow.result_id == result.id)
+                )
+            ).scalar_one_or_none()
             if existing is not None:
                 raise EvalResultConflictError(
                     f"eval result already exists: {result.id}"
                 )
             session.add(
                 EvalResultRow(
-                    id=result.id,
+                    result_id=result.id,
                     eval_run_id=result.eval_run_id,
                     case_id=result.case_id,
                     run_id=result.run_id,
@@ -197,7 +213,7 @@ class SqlAlchemyEvalStore:
                     await session.execute(
                         select(EvalResultRow)
                         .where(EvalResultRow.eval_run_id == run_id)
-                        .order_by(EvalResultRow.id)
+                        .order_by(EvalResultRow.result_id)
                     )
                 )
                 .scalars()
@@ -209,7 +225,11 @@ class SqlAlchemyEvalStore:
 
     async def get_result(self, result_id: str) -> "EvalResult | None":
         async def do(session: AsyncSession):
-            row = await session.get(EvalResultRow, result_id)
+            row = (
+                await session.execute(
+                    select(EvalResultRow).where(EvalResultRow.result_id == result_id)
+                )
+            ).scalar_one_or_none()
             return _row_to_result(row) if row is not None else None
 
         return await self._in_session(do)

@@ -24,9 +24,17 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
 
-from sqlalchemy import Column, DateTime, LargeBinary, String
+from sqlalchemy import BINARY, Index, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
 
+from linktools.ai.storage.sqlalchemy.conventions import (
+    BIGSERIAL,
+    TABLE_PREFIX,
+    TimestampMixin,
+    sha256_hash,
+    timestamp_indexes,
+)
 from linktools.ai.storage.sqlalchemy.models import Base
 
 from .._replay import canonical_request_hash as _canonical_request_hash
@@ -51,25 +59,32 @@ class RunCommitConflictError(LinktoolsAIError):
     to silently collapse)."""
 
 
-class RunCommitLogRow(Base):
-    """One row per committed Run lifecycle point. ``commit_id`` is
-    primary + unique (caller-supplied deterministic id, e.g.
-    ``pause:{run_id}:{approval_id}``); ``request_hash`` lets a replay detect
-    a same-id-different-payload conflict; ``result_json`` carries the
-    deserializable result the original commit returned."""
+class RunCommitLogRow(TimestampMixin, Base):
+    """One row per committed Run lifecycle point. ``commit_id`` is the caller-
+    supplied deterministic id (e.g. ``pause:{run_id}:{approval_id}``);
+    uniqueness is carried by ``commit_hash`` (sha256(commit_id)) so the wide
+    commit_id column stays out of the unique index; ``request_hash`` lets a
+    replay detect a same-id-different-payload conflict."""
 
-    __tablename__ = "run_commit_log"
-
-    commit_id = Column(String(200), primary_key=True)
-    operation = Column(String(64), nullable=False)
-    run_id = Column(String(200), nullable=False, index=True)
-    # SHA-256 of the canonical-serialized command. 32 raw bytes.
-    request_hash = Column(LargeBinary(32), nullable=False)
-    result_json = Column(String, nullable=False)
-    result_payload = Column(LargeBinary, nullable=True)
-    created_at = Column(
-        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc)
+    __tablename__ = f"{TABLE_PREFIX}run_commit_log"
+    __table_args__ = (
+        UniqueConstraint("commit_hash", name="uk_commit_hash"),
+        # A MySQL deployment prefix-lengths `commit_id` in this index (see
+        # migrations/init_schema.sql) -- kept out of the vendor-neutral core.
+        Index("ix_commit_id", "commit_id"),
+        Index("ix_run_id", "run_id"),
+        *timestamp_indexes(),
     )
+
+    id: Mapped[int] = mapped_column(BIGSERIAL, primary_key=True, autoincrement=True)
+    commit_id: Mapped[str] = mapped_column(String(200))
+    commit_hash: Mapped[bytes] = mapped_column(BINARY(32))
+    operation: Mapped[str] = mapped_column(String(64))
+    run_id: Mapped[str] = mapped_column(String(128))
+    # SHA-256 of the canonical-serialized command. 32 raw bytes.
+    request_hash: Mapped[bytes] = mapped_column(BINARY(32))
+    result_json: Mapped[str] = mapped_column(Text)
+    result_payload: Mapped["bytes | None"] = mapped_column(LargeBinary, nullable=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +131,9 @@ class SqlAlchemyRunCommitLog:
 
         row = (
             await session.execute(
-                select(RunCommitLogRow).where(RunCommitLogRow.commit_id == commit_id)
+                select(RunCommitLogRow).where(
+                RunCommitLogRow.commit_hash == sha256_hash(commit_id)
+            )
             )
         ).scalar_one_or_none()
         return _row_to_record(row) if row is not None else None
@@ -135,6 +152,7 @@ class SqlAlchemyRunCommitLog:
         session.add(
             RunCommitLogRow(
                 commit_id=commit_id,
+                commit_hash=sha256_hash(commit_id),
                 operation=operation,
                 run_id=run_id,
                 request_hash=request_hash,
