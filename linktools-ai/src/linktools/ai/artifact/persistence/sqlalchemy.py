@@ -28,6 +28,7 @@ from ..digest import ArtifactDigest
 from ..models import ArtifactRecord
 from ..store import record_from_jsonable, record_to_jsonable
 from ...errors import ArtifactRecordConflictError
+from ...storage.sqlalchemy.dialects import resolve_dialect
 from linktools.ai.storage.sqlalchemy.models import ArtifactRecordRow
 
 if TYPE_CHECKING:
@@ -66,11 +67,10 @@ class SqlAlchemyArtifactRecordStore:
         self._dialect = dialect
 
     def _dialect_for(self, session: AsyncSession) -> "SqlAlchemyDialect":
-        if self._dialect is not None:
-            return self._dialect
-        from ...storage.sqlalchemy.dialects import resolve_dialect
-
-        return resolve_dialect(session)
+        # Memoize: resolve_dialect(session, self._dialect) is a no-op once
+        # self._dialect is set (explicit override or a prior resolution).
+        self._dialect = resolve_dialect(session, self._dialect)
+        return self._dialect
 
     @property
     def capabilities(self) -> "ComponentCapabilities":

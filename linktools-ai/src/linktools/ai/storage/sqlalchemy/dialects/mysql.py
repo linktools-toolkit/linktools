@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
 
 # MySQL error codes (mysqlclient/PyMySQL/aiomysql/asyncmy all surface these as
 # error.orig.args[0]).
@@ -69,14 +69,9 @@ class MySQLDialect:
             return IntegrityViolationKind.CHECK
         # Fall back to message sniffing for drivers that don't expose a
         # numeric error code the same way (or wrap it differently).
-        message = str(orig or error).lower()
-        if "duplicate entry" in message:
-            return IntegrityViolationKind.UNIQUE_CONFLICT
-        if "foreign key constraint" in message:
-            return IntegrityViolationKind.FOREIGN_KEY
-        if "check constraint" in message:
-            return IntegrityViolationKind.CHECK
-        return IntegrityViolationKind.UNKNOWN
+        return classify_integrity_error_by_message(
+            error, unique_markers=("duplicate entry",)
+        )
 
 
 __all__: "list[str]" = ["MySQLDialect"]

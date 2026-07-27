@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
 
 # Postgres SQLSTATE codes (asyncpg exposes these as error.sqlstate; psycopg2
 # as error.orig.pgcode; psycopg3 as error.orig.sqlstate / .diag.sqlstate_).
@@ -65,14 +65,9 @@ class PostgreSQLDialect:
             return IntegrityViolationKind.CHECK
         # Fall back to message sniffing for drivers that don't expose a
         # SQLSTATE the same way (or wrap it differently).
-        message = str(orig or error).lower()
-        if "unique constraint" in message or "duplicate key" in message:
-            return IntegrityViolationKind.UNIQUE_CONFLICT
-        if "foreign key constraint" in message:
-            return IntegrityViolationKind.FOREIGN_KEY
-        if "check constraint" in message:
-            return IntegrityViolationKind.CHECK
-        return IntegrityViolationKind.UNKNOWN
+        return classify_integrity_error_by_message(
+            error, unique_markers=("unique constraint", "duplicate key")
+        )
 
 
 __all__: "list[str]" = ["PostgreSQLDialect"]

@@ -34,15 +34,22 @@ _BUILTIN_DIALECTS: "dict[str, SqlAlchemyDialect]" = {
 }
 
 
-def resolve_dialect(session: Any) -> SqlAlchemyDialect:
-    """Auto-detect the dialect from an open session's bound engine
-    (``session.bind.dialect.name``) and return the matching built-in
-    :class:`SqlAlchemyDialect`.
+def resolve_dialect(
+    session: Any, dialect: "SqlAlchemyDialect | None" = None
+) -> SqlAlchemyDialect:
+    """Return ``dialect`` if given; otherwise auto-detect one from an open
+    session's bound engine (``session.bind.dialect.name``) and return the
+    matching built-in :class:`SqlAlchemyDialect`. This is the one seam every
+    store/backend's "explicit override, else auto-resolve" fallback should
+    call -- callers that already have a resolved instance may pass it back in
+    as ``dialect`` to memoize it (this function is then a no-op).
 
-    Raises ``ValueError`` when the session has no bound engine (a per-call
-    bind rather than a sessionmaker-level one) or the resolved name has no
-    built-in -- in either case the caller passes an explicit ``dialect``
-    instead."""
+    Raises ``ValueError`` when ``dialect`` is not given and the session has
+    no bound engine (a per-call bind rather than a sessionmaker-level one) or
+    the resolved name has no built-in -- in either case the caller passes an
+    explicit ``dialect`` instead."""
+    if dialect is not None:
+        return dialect
     bind = session.bind
     if bind is None:
         raise ValueError(

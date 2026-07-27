@@ -97,8 +97,35 @@ class SqlAlchemyDialect(Protocol):
         ...
 
 
+def classify_integrity_error_by_message(
+    error: BaseException,
+    *,
+    unique_markers: "Sequence[str]",
+    foreign_key_markers: "Sequence[str]" = ("foreign key constraint",),
+    check_markers: "Sequence[str]" = ("check constraint",),
+) -> IntegrityViolationKind:
+    """Shared message-sniffing fallback for dialects whose structured
+    error-code path missed. Every vendor-specific dialect's
+    ``classify_integrity_error`` ends with the same lowercased-substring
+    check; this helper owns that shape once so the vendor files only supply
+    their own marker lists. ``unique_markers`` is vendor-specific (the
+    wording differs between SQLite's "unique constraint", MySQL's "duplicate
+    entry", and PostgreSQL's "duplicate key"); the FK/check markers happen to
+    match across the three built-ins and default to the common substrings."""
+    orig = getattr(error, "orig", None)
+    message = str(orig or error).lower()
+    if any(m in message for m in unique_markers):
+        return IntegrityViolationKind.UNIQUE_CONFLICT
+    if any(m in message for m in foreign_key_markers):
+        return IntegrityViolationKind.FOREIGN_KEY
+    if any(m in message for m in check_markers):
+        return IntegrityViolationKind.CHECK
+    return IntegrityViolationKind.UNKNOWN
+
+
 __all__: "list[str]" = (
     "InsertResult",
     "IntegrityViolationKind",
     "SqlAlchemyDialect",
+    "classify_integrity_error_by_message",
 )

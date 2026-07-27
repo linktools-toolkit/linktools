@@ -51,7 +51,7 @@ from ...tool.idempotency import IdempotencyStore
 from .features import StorageFeatures
 from .facade import Storage
 from ...agent.persistence.sqlalchemy import SqlAlchemyApprovalStore
-from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
+from ...storage.sqlalchemy.dialects import SqlAlchemyDialect, resolve_dialect
 from ...storage.features import CoordinationScope, StorageComponent, TransactionScope
 from ...run.persistence.sqlalchemy.checkpoint import SqlAlchemyCheckpointStore
 from ...run.persistence.sqlalchemy.definition import SqlAlchemyRunDefinitionStore
@@ -305,10 +305,12 @@ class _SqlAlchemyTransactionManager:
     @asynccontextmanager
     async def transaction(self) -> "AsyncIterator[StorageUnitOfWork]":
         from ...storage.backends.sqlalchemy.object import _SqlAlchemyTransactionBackend
-        from ...storage.sqlalchemy.dialects import resolve_dialect
 
         async with self._session_factory() as session:
-            dialect = self._dialect if self._dialect is not None else resolve_dialect(session)
+            # Memoize: resolve_dialect(session, self._dialect) is a no-op
+            # once self._dialect is set (explicit override or a prior
+            # resolution), so later transactions skip the lookup entirely.
+            self._dialect = dialect = resolve_dialect(session, self._dialect)
             async with session.begin():
                 yield _UnitOfWork(
                     session=session,

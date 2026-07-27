@@ -53,7 +53,7 @@ from ...object.models import (
     StoredObject,
     WriteOptions,
 )
-from ...sqlalchemy.dialects import SqlAlchemyDialect
+from ...sqlalchemy.dialects import SqlAlchemyDialect, resolve_dialect
 from .models import (
     Base,
     StorageObjectIdempotencyRow,
@@ -133,11 +133,10 @@ class SqlAlchemyObjectBackend:
         self._dialect = dialect
 
     def _dialect_for(self, session: AsyncSession) -> "SqlAlchemyDialect":
-        if self._dialect is not None:
-            return self._dialect
-        from ...sqlalchemy.dialects import resolve_dialect
-
-        return resolve_dialect(session)
+        # Memoize: resolve_dialect(session, self._dialect) is a no-op once
+        # self._dialect is set (explicit override or a prior resolution).
+        self._dialect = resolve_dialect(session, self._dialect)
+        return self._dialect
 
     # --- session plumbing ----------------------------------------------------
 

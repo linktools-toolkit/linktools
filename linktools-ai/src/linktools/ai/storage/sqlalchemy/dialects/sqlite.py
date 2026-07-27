@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
 
 
 class SqliteDialect:
@@ -51,16 +51,11 @@ class SqliteDialect:
     def classify_integrity_error(
         self, error: BaseException
     ) -> IntegrityViolationKind:
-        orig = getattr(error, "orig", None)
-        message = str(orig or error).lower()
-        # SQLite's unique-constraint message names the constraint column.
-        if "unique constraint" in message:
-            return IntegrityViolationKind.UNIQUE_CONFLICT
-        if "foreign key constraint" in message or "foreignkey" in message:
-            return IntegrityViolationKind.FOREIGN_KEY
-        if "check constraint" in message:
-            return IntegrityViolationKind.CHECK
-        return IntegrityViolationKind.UNKNOWN
+        return classify_integrity_error_by_message(
+            error,
+            unique_markers=("unique constraint",),
+            foreign_key_markers=("foreign key constraint", "foreignkey"),
+        )
 
 
 __all__: "list[str]" = ["SqliteDialect"]
