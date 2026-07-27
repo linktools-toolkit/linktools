@@ -389,6 +389,14 @@ class OverlayObjectStore:
         if self._primary is None:
             raise StorageObjectError("this overlay has no writable primary backend")
 
+    async def purge(self, key: StorageKey) -> None:
+        """Physically delete the primary's current-state row so overlay
+        defaults become visible again. Only the primary is purged; overlay
+        content is untouched."""
+        self._require_primary()
+        _require_persistable_key(key)
+        await self._primary.raw_purge(key)
+
 
 class RevisionedOverlayObjectStore(OverlayObjectStore):
     """An OverlayObjectStore that exposes a composite revision token: a digest

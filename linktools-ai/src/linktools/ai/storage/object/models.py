@@ -114,6 +114,7 @@ class ObjectInfo:
     modified_at: datetime
     metadata: Mapping[str, object] = field(default_factory=dict)
     tombstoned: bool = False
+    row_id: "int | None" = None
 
     def __post_init__(self) -> None:
         # Freeze the mapping so the frozen dataclass is genuinely immutable.

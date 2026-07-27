@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import AsyncIterator
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import delete, distinct, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,6 +82,7 @@ def _row_to_info(row: StorageObjectRow) -> ObjectInfo:
         modified_at=row.modified_at,
         metadata=json.loads(row.metadata_json),
         tombstoned=row.tombstone,
+        row_id=row.id,
     )
 
 
@@ -430,6 +431,7 @@ class SqlAlchemyObjectBackend:
                 commit_revision=row.commit_revision, content_type=row.content_type,
                 size=row.size, modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
+                tombstoned=row.tombstone,
             ),
             content=row.content or b"",
         )
@@ -721,6 +723,24 @@ class SqlAlchemyObjectBackend:
                 await self._save_idempotency(session, idem_key, request_hash, None)
             return None
 
+    # --- PURGE (physical delete, no tombstone) -------------------------------
+
+    async def raw_purge(self, key: StorageKey) -> None:
+        """Physically delete the current-state row for ``key`` — no tombstone,
+        no version-history entry, no idempotency record. The row is gone from
+        ``ai_storage_objects``, so a subsequent ``get`` misses and an
+        ``OverlayObjectStore`` falls through to the next overlay (this is the
+        "restore factory defaults" path: purge the DB tombstone so the
+        filesystem overlay's default becomes visible again). Version history
+        in ``ai_storage_object_versions`` is NOT touched — purge only affects
+        the current-state row."""
+        async with self._write_session() as session:
+            await session.execute(
+                delete(StorageObjectRow).where(
+                    StorageObjectRow.key_hash == _key_hash(key)
+                )
+            )
+
     # --- MOVE (one transaction) ---------------------------------------------
 
     async def raw_move_checked(
@@ -900,6 +920,7 @@ class SqlAlchemyObjectBackend:
                 size=row.size,
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
+                tombstoned=row.tombstone,
             ),
             content=row.content or b"",
         )
@@ -932,6 +953,7 @@ class SqlAlchemyObjectBackend:
                 size=row.size,
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
+                tombstoned=row.tombstone,
             ),
             content=row.content or b"",
         )
@@ -961,6 +983,7 @@ class SqlAlchemyObjectBackend:
                 size=row.size,
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
+                tombstoned=row.tombstone,
             )
             for row in page_rows
         )
@@ -999,6 +1022,27 @@ class SqlAlchemyObjectBackend:
             )
         out.sort(key=lambda i: i.key.value)
         return tuple(out)
+
+    async def raw_list_version_keys(self, prefix: StorageKey) -> "tuple[StorageKey, ...]":
+        """Return the distinct set of keys that have EVER existed under
+        ``prefix`` according to the version-history table — including keys
+        whose current state is a tombstone or has been purged. Used to answer
+        "what keys has this capability written over its lifetime" without a
+        raw SQL ``SELECT DISTINCT key``."""
+        prefix_str = prefix.value.rstrip("/") + "/"
+        escaped = prefix_str.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        candidate_clause = or_(
+            StorageObjectVersionRow.key == prefix.value,
+            StorageObjectVersionRow.key.like(f"{escaped}%", escape="\\"),
+        )
+        async with self._read_session() as session:
+            result = await session.execute(
+                select(StorageObjectVersionRow.key)
+                .where(candidate_clause)
+                .distinct()
+                .order_by(StorageObjectVersionRow.key)
+            )
+            return tuple(StorageKey(row[0]) for row in result.all())
 
 
 class _SqlAlchemyTransactionBackend(SqlAlchemyObjectBackend):

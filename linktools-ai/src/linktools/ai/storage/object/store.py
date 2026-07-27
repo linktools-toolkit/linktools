@@ -268,6 +268,15 @@ class ObjectStore:
             request_hash=_move_request_hash(source, target, options),
         )
 
+    async def purge(self, key: StorageKey) -> None:
+        """Physically delete the current-state row — no tombstone, no version
+        history entry. The key reverts to "never existed" for the current
+        state, so an ``OverlayObjectStore`` falls through to the next overlay
+        (the "restore factory defaults" path). Only backends that implement
+        ``raw_purge`` support this; others raise ``AttributeError``."""
+        _require_persistable_key(key)
+        await self._primary.raw_purge(key)
+
     # --- transaction ---------------------------------------------------------
 
     @asynccontextmanager
