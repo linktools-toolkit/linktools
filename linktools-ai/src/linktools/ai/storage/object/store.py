@@ -32,6 +32,13 @@ def _request_hash(*parts: bytes) -> str:
     return hasher.hexdigest()
 
 
+def _content_cache_key(key: str, version: int, etag: str) -> str:
+    """Versioned content-cache key. Embedding both ``version`` and ``etag``
+    guarantees a new version can never be satisfied by an old cache entry —
+    write invalidation is automatic, no explicit eviction needed."""
+    return f"object:{hashlib.sha256(key.encode('utf-8')).hexdigest()}:v{version}:{etag}"
+
+
 def _require_persistable_key(key: StorageKey) -> None:
     """Reject the namespace root for any content operation (get/put/delete/
     move). The root is a synthetic directory, not a persistable object; only
@@ -86,13 +93,23 @@ def _move_request_hash(
 class ObjectStore:
     """Single-backend ObjectStore. The primary backend must be an
     ``ObjectWriterBackend`` (a read-only backend lacks the write methods and
-    cannot be a primary). Read-only-ness is structural, not a flag."""
+    cannot be a primary). Read-only-ness is structural, not a flag.
+
+    An optional ``cache`` (ContentCache) + ``index`` (RevisionedObjectIndex)
+    pair wires a read-through cache: ``stat`` serves from the revision-gated
+    index (0 SQL on hot path after first sync), and ``get`` checks the
+    content cache keyed by version+etag (0 SQL on hit). Write invalidation
+    is automatic — a new version produces a new cache key, so stale entries
+    are never served. Transaction-bound stores (from ``transaction()``)
+    bypass cache+index to preserve read-your-writes within the tx."""
 
     def __init__(
         self,
         *,
         primary: ObjectWriterBackend,
         metrics: Any = None,
+        cache: Any = None,
+        index: Any = None,
     ) -> None:
         if not isinstance(primary, ObjectWriterBackend):
             raise StorageObjectError(
@@ -101,6 +118,8 @@ class ObjectStore:
             )
         self._primary = primary
         self._metrics = metrics
+        self._cache = cache
+        self._index = index
 
     @classmethod
     def _from_transaction_backend(
@@ -112,10 +131,13 @@ class ObjectStore:
         """Build a lightweight ObjectStore wrapper around a transaction-bound
         child backend. The child is NOT re-validated (it was already validated
         by the parent's constructor); ``backend_id`` is whatever the child
-        declares."""
+        declares. Cache+index are NOT copied: a transaction must see its own
+        staged writes (read-your-writes), which a cache layer would bypass."""
         instance = object.__new__(cls)
         instance._primary = backend
         instance._metrics = metrics
+        instance._cache = None
+        instance._index = None
         return instance
 
     @property
@@ -167,12 +189,28 @@ class ObjectStore:
 
     async def get(self, key: StorageKey) -> "StoredObject | None":
         _require_persistable_key(key)
+        if self._cache is not None and self._index is not None:
+            info = await self._index.stat(key)
+            if info is not None:
+                cache_key = _content_cache_key(key.value, info.version, info.etag)
+                cached = await self._cache.get(cache_key)
+                if cached is not None:
+                    return StoredObject(info=info, content=cached)
+            # index miss or cache miss → fall through to origin
         lookup = await self._primary.raw_get(key)
-        return lookup.object if isinstance(lookup, Found) else None
+        obj = lookup.object if isinstance(lookup, Found) else None
+        if obj is not None and self._cache is not None:
+            cache_key = _content_cache_key(
+                key.value, obj.info.version, obj.info.etag
+            )
+            await self._cache.put(cache_key, obj.content)
+        return obj
 
     async def stat(self, key: StorageKey) -> "ObjectInfo | None":
         if key.is_root:
             return None
+        if self._index is not None:
+            return await self._index.stat(key)
         return await self._primary.raw_stat(key)
 
     async def list(

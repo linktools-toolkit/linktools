@@ -18,7 +18,10 @@ test exempts this module from its create_async_engine scan."""
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ...storage.cache.protocols import ContentCache
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
@@ -77,6 +80,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         *,
         database: "str | Path",
         artifact_root: "Path | None" = None,
+        cache: "ContentCache | None" = None,
     ) -> None:
         raise TypeError("SqliteStorage must be created with await create()")
 
@@ -85,6 +89,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         *,
         database: "str | Path",
         artifact_root: "Path | None" = None,
+        cache: "ContentCache | None" = None,
     ) -> None:
         database_str = str(database)
         # An in-memory or URI database has no filesystem path to derive a
@@ -135,6 +140,7 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
             # resolve_dialect auto-detects it from the bound engine without
             # constructing anything here.
             schema_provider=SqliteReferenceSchemaProvider(),
+            cache=cache,
         )
 
     @classmethod
@@ -143,10 +149,11 @@ class SqliteStorage(SqlAlchemyStorageAdapter):
         *,
         database: "str | Path",
         artifact_root: "Path | None" = None,
+        cache: "ContentCache | None" = None,
     ) -> "SqliteStorage":
         """Construct and validate the reference composition asynchronously."""
         instance = cls.__new__(cls)
-        instance._configure(database=database, artifact_root=artifact_root)
+        instance._configure(database=database, artifact_root=artifact_root, cache=cache)
         await instance._schema_provider.create_for_tests_and_local_reference(
             instance._session_factory
         )

@@ -219,8 +219,11 @@ class SqlAlchemyRunStore:
                 raise RunNotFoundError(f"run not found: {run_id}")
             data = json.loads(row.data_json)
             if result is not None:
+                output = result.output
+                if hasattr(output, "model_dump"):
+                    output = output.model_dump(mode="json")
                 data["result"] = {
-                    "output": result.output,
+                    "output": output,
                     "token_usage": dict(result.token_usage),
                     "metadata": dict(result.metadata),
                 }

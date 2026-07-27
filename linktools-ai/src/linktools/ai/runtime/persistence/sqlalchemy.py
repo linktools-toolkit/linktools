@@ -13,7 +13,7 @@ can coordinate writes across stores atomically."""
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, TYPE_CHECKING
+from typing import Any, AsyncIterator, TYPE_CHECKING
 
 try:  # optional dependency -- give a clear install hint instead of a raw ImportError
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from ...evaluation.store import EvalStore
     from ...jobs.store import JobStore
     from ...storage.blob.protocols import BlobStore
+    from ...storage.cache.protocols import ContentCache
     from ...storage.coordination.protocols import KeyedCoordinator, LeaseCoordinator
     from .protocols import (
         StorageUnitOfWork,
@@ -134,6 +135,7 @@ class SqlAlchemyStorageAdapter(Storage):
         artifact_coordinator,
         dialect=None,
         schema_provider,
+        cache=None,
     ) -> None:
         raise TypeError("SqlAlchemyStorageAdapter must be created with await create()")
 
@@ -147,6 +149,7 @@ class SqlAlchemyStorageAdapter(Storage):
         artifact_coordinator: "KeyedCoordinator",
         dialect: "SqlAlchemyDialect | None" = None,
         schema_provider: "SqlAlchemySchemaProvider",
+        cache: "ContentCache | None" = None,
     ) -> None:
         from ...artifact.store import ArtifactStore
 
@@ -157,12 +160,21 @@ class SqlAlchemyStorageAdapter(Storage):
         # instead, threaded to every sub-store so they all agree.
         self._dialect = dialect
         self._schema_provider = schema_provider
+        self._cache = cache
 
         assets = ObjectStore(
             primary=SqlAlchemyObjectBackend(
                 session_factory=session_factory, dialect=self._dialect
             )
         )
+        if cache is not None:
+            from ...storage.object.index import RevisionedObjectIndex
+            from ...storage.object.models import StorageKey
+
+            assets._index = RevisionedObjectIndex(
+                source=assets, prefix=StorageKey.root
+            )
+            assets._cache = cache
         super().__init__(
             assets=assets,
             sessions=SqlAlchemySessionStore(session_factory=session_factory),
@@ -202,6 +214,7 @@ class SqlAlchemyStorageAdapter(Storage):
         artifact_blobs: "BlobStore",
         coordination: "LeaseCoordinator | None",
         artifact_coordinator: "KeyedCoordinator",
+        cache: "ContentCache | None" = None,
     ) -> "SqlAlchemyStorageAdapter":
         await schema_provider.validate(session_factory)
         instance = cls.__new__(cls)
@@ -221,6 +234,7 @@ class SqlAlchemyStorageAdapter(Storage):
             artifact_coordinator=artifact_coordinator,
             dialect=dialect,
             schema_provider=schema_provider,
+            cache=cache,
         )
         return instance
 

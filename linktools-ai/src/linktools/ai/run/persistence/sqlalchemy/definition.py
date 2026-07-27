@@ -21,7 +21,7 @@ class SqlAlchemyRunDefinitionStore:
         self._session_factory = session_factory
 
     async def create(self, snapshot: RunDefinitionSnapshot) -> None:
-        from ...json import canonical_json
+        from ....json import canonical_json
 
         async with self._session_factory() as session:
             async with session.begin():
