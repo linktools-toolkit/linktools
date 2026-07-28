@@ -79,7 +79,7 @@ def store_factory(request, tmp_path):
         return file_factory
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from linktools.ai.storage.sqlalchemy.models import Base
+    from linktools.ai.memory.persistence.sqlalchemy import Base
     from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
 
     counter = {"n": 0}

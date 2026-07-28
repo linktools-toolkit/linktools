@@ -1,486 +1,97 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""SqlAlchemyIdempotencyStore: DB-backed IdempotencyStore (Protocol in
-tool/idempotency.py). Mirrors SqlAlchemyApprovalStore's structure:
-``session_factory: Callable[[], AsyncSession]`` constructor, ``_as_utc``
-helper for aiosqlite's naive-datetime round-trip, and the
-``_execute_in_session`` UoW hook so the store can participate in cross-store
-transactions through the SQLAlchemy storage transaction manager.
+"""SQLAlchemy ToolStateStore with one fenced operation aggregate."""
 
-``reserve`` handles the race via the unique (scope, key) constraint:
-INSERT a RESERVED row; on IntegrityError (concurrent insert from another
-process) SELECT the winner and hash-check it. This is the multi-process
-equivalent of FilesystemIdempotencyStore's asyncio.Lock -- both backends enforce
-"at most one RESERVED per (scope, key)" but the SQL backend does it via the
-schema rather than an in-process lock."""
+from dataclasses import asdict
+from datetime import datetime
+from typing import Any
 
-import json
-import uuid
-from datetime import datetime, timezone
-from typing import Any, Callable
+from sqlalchemy import JSON, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column
 
-from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from linktools.ai.storage.sqlalchemy.conventions import sha256_hash
-from linktools.ai.storage.sqlalchemy.models import ToolIdempotencyRow
-from ...json import canonical_json
-from ..idempotency import (
-    ClaimDisposition,
-    ClaimResult,
-    IdempotencyClaim,
-    IdempotencyRecord,
-    IdempotencyStatus,
-)
+from ...storage.sqlalchemy.base import Base
+from ...storage.sqlalchemy.conventions import TABLE_PREFIX
+from ..state import ToolOperation, ToolOperationStatus
 
 
-def _as_utc(dt: "datetime | None") -> "datetime | None":
-    # SQLite (aiosqlite) round-trips datetimes as naive values regardless of
-    # tzinfo, so reattach UTC on read to match the timezone-aware datetimes
-    # IdempotencyRecord is constructed with everywhere else.
-    if dt is None or dt.tzinfo is not None:
-        return dt
-    return dt.replace(tzinfo=timezone.utc)
+class OperationRow(Base):
+    __tablename__ = f"{TABLE_PREFIX}tool_operations"
+    __table_args__ = (UniqueConstraint("run_id", "tool_call_id", name="uq_tool_operation_call"),)
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(255))
+    run_id: Mapped[str] = mapped_column(String(255), index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(255))
+    idempotency_key: Mapped[str] = mapped_column(String(255))
+    tool_name: Mapped[str] = mapped_column(String(255))
+    arguments_hash: Mapped[str] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    owner: Mapped[str | None] = mapped_column(String(255))
+    fence: Mapped[int] = mapped_column(Integer, default=0)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    result: Mapped[Any] = mapped_column(JSON, nullable=True)
+    error: Mapped[Any] = mapped_column(JSON, nullable=True)
 
 
-def _row_to_record(row: ToolIdempotencyRow) -> IdempotencyRecord:
-    return IdempotencyRecord(
-        id=row.idempotency_id,
-        scope=row.scope,
-        key=row.key,
-        request_hash=row.request_hash,
-        status=IdempotencyStatus(row.status),
-        result=None if row.result_json is None else json.loads(row.result_json),
-        error=row.error_message,
-        created_at=_as_utc(row.created_at),
-        completed_at=_as_utc(row.completed_at),
-        owner_id=row.owner_id,
-        generation=row.generation or 0,
-        claimed_at=_as_utc(row.claimed_at),
-        lease_expires_at=_as_utc(row.lease_expires_at),
-        receipt_artifact_id=row.receipt_artifact_id,
-        binding_fingerprint=row.binding_fingerprint,
-        result_processor_revision=row.result_processor_revision,
-    )
+class SqlAlchemyToolStateStore:
+    def __init__(self, session_factory) -> None:
+        self.session_factory = session_factory
 
+    async def initialize_storage(self, engine) -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
 
-class SqlAlchemyIdempotencyStore:
-    """Multi-process IdempotencyStore backed by SQLAlchemy/AsyncSession.
+    @staticmethod
+    def _operation(row: OperationRow) -> ToolOperation:
+        return ToolOperation(row.id, row.tenant_id, row.run_id, row.tool_call_id, row.idempotency_key, row.tool_name, row.arguments_hash, ToolOperationStatus(row.status), row.owner, row.fence, row.lease_expires_at, row.result, row.error)
 
-    Mirrors SqlAlchemyApprovalStore: ``session_factory`` constructor,
-    optional shared ``session`` for UoW mode (every method reuses it instead
-    of opening its own transaction). The unique (scope, key) constraint
-    backs the reserve() race: a duplicate insert raises IntegrityError,
-    which we translate into a SELECT of the existing row + hash check."""
+    @staticmethod
+    def _check_fence(row: OperationRow | None, owner: str, fence: int) -> None:
+        if row is None or row.owner != owner or row.fence != fence:
+            raise ValueError("tool operation fence conflict")
 
-    def __init__(
-        self,
-        *,
-        session_factory: "Callable[[], AsyncSession]",
-        session: "AsyncSession | None" = None,
-    ) -> None:
-        self._session_factory = session_factory
-        # UoW mode: when set, every method uses this shared session directly
-        # and does NOT open its own session or call session.begin() -- the
-        # UoW owns the transaction. None means normal mode.
-        self._session = session
-
-    @property
-    def capabilities(self):
-        from ...storage.features import ComponentCapabilities
-
-        return ComponentCapabilities(
-            transaction_participation=True,
-            optimistic_concurrency=True,
-            idempotency=True,
-        )
-
-    async def _execute_in_session(self, fn):
-        """Run ``fn(session)`` in own transaction (normal mode) or against
-        the shared session (UoW mode). See SqlAlchemyRunStore."""
-        if self._session is not None:
-            result = await fn(self._session)
-            await self._session.flush()
-            return result
-        async with self._session_factory() as session:
+    async def prepare(self, operation: ToolOperation) -> ToolOperation:
+        async with self.session_factory() as session:
             async with session.begin():
-                return await fn(session)
+                row = await session.get(OperationRow, operation.id, with_for_update=True)
+                if row is not None:
+                    if row.idempotency_key != operation.idempotency_key or row.arguments_hash != operation.arguments_hash:
+                        raise ValueError("tool operation idempotency conflict")
+                    return self._operation(row)
+                session.add(OperationRow(**asdict(operation)))
+                return operation
 
-    # -- read ----------------------------------------------------------
+    async def get(self, operation_id: str) -> ToolOperation | None:
+        async with self.session_factory() as session:
+            row = await session.get(OperationRow, operation_id)
+            return None if row is None else self._operation(row)
 
-    async def get(self, scope: str, key: str) -> "IdempotencyRecord | None":
-        async def _do(session):
-            result = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == scope,
-                    ToolIdempotencyRow.key == key,
-                )
-            )
-            row = result.scalar_one_or_none()
-            return None if row is None else _row_to_record(row)
+    async def claim(self, operation_id: str, *, owner: str) -> ToolOperation:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await session.get(OperationRow, operation_id, with_for_update=True)
+                if row is None:
+                    raise KeyError(operation_id)
+                if row.status == ToolOperationStatus.COMPLETED.value:
+                    return self._operation(row)
+                row.status, row.owner, row.fence = ToolOperationStatus.CLAIMED.value, owner, row.fence + 1
+                return self._operation(row)
 
-        return await self._execute_in_session(_do)
+    async def renew(self, operation_id: str, *, owner: str, fence: int) -> ToolOperation:
+        async with self.session_factory() as session:
+            row = await session.get(OperationRow, operation_id)
+            self._check_fence(row, owner, fence)
+            return self._operation(row)
 
-    async def renew(
-        self,
-        claim: IdempotencyClaim,
-        *,
-        now: "datetime",
-        lease_seconds: float,
-    ) -> IdempotencyRecord:
-        """CAS-extend the lease on a RESERVED claim the caller owns. A stolen /
-        superseded claim (rowcount != 1) is rejected, never silently renewed."""
-        new_lease_naive = (
-            now.timestamp() + lease_seconds
-        )
-        new_lease = datetime.fromtimestamp(new_lease_naive, tz=timezone.utc)
+    async def complete(self, operation_id: str, *, owner: str, fence: int, result: Any) -> ToolOperation:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await session.get(OperationRow, operation_id, with_for_update=True)
+                self._check_fence(row, owner, fence)
+                row.status, row.result = ToolOperationStatus.COMPLETED.value, result
+                return self._operation(row)
 
-        async def _do(session):
-            proxy = await session.execute(
-                update(ToolIdempotencyRow)
-                .where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                    ToolIdempotencyRow.request_hash == claim.request_hash,
-                    ToolIdempotencyRow.owner_id == claim.owner_id,
-                    ToolIdempotencyRow.generation == claim.generation,
-                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
-                )
-                .values(
-                    lease_expires_at=new_lease.replace(tzinfo=None),
-                    claimed_at=now.replace(tzinfo=None),
-                )
-            )
-            if proxy.rowcount != 1:
-                from ...errors import LostIdempotencyClaimError
-
-                raise LostIdempotencyClaimError(
-                    f"renew lost the claim for ({claim.scope}, {claim.key})"
-                )
-            result = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                )
-            )
-            return _row_to_record(result.scalar_one())
-
-        return await self._execute_in_session(_do)
-
-    # -- claim / complete / fail (fenced) ---------------------------------
-
-    async def claim(
-        self,
-        *,
-        scope: str,
-        key: str,
-        request_hash: str,
-        owner_id: str,
-        lease_seconds: float = 300.0,
-    ) -> ClaimResult:
-        """Fenced claim: read-decide-write in one transaction. Re-claims (lease
-        expired or FAILED) use a CAS UPDATE on the prior generation so a
-        concurrent claimant cannot clobber a winner."""
-
-        async def _do(session):
-            now = datetime.now(timezone.utc)
-            lease_at = datetime.fromtimestamp(
-                now.timestamp() + lease_seconds, tz=timezone.utc
-            )
-            q = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == scope,
-                    ToolIdempotencyRow.key == key,
-                )
-            )
-            row = q.scalar_one_or_none()
-            if row is None:
-                fresh = ToolIdempotencyRow(
-                    idempotency_id=str(uuid.uuid4()),
-                    scope=scope,
-                    key=key,
-                    scope_key_hash=sha256_hash(scope + key),
-                    request_hash=request_hash,
-                    status=IdempotencyStatus.RESERVED.value,
-                    result_json=None,
-                    error_message=None,
-                    created_at=now,
-                    completed_at=None,
-                    expires_at=None,
-                    owner_id=owner_id,
-                    generation=1,
-                    claimed_at=now,
-                    lease_expires_at=lease_at,
-                )
-                session.add(fresh)
-                await session.flush()
-                return ClaimResult(
-                    disposition=ClaimDisposition.ACQUIRED,
-                    claim=_claim_from_record(_row_to_record(fresh)),
-                )
-            if row.request_hash != request_hash:
-                return ClaimResult(disposition=ClaimDisposition.CONFLICT)
-            if row.status == IdempotencyStatus.COMPLETED.value:
-                return ClaimResult(
-                    disposition=ClaimDisposition.REPLAY,
-                    record=_row_to_record(row),
-                )
-            if row.status == IdempotencyStatus.EXECUTED.value:
-                # Handler already ran; result held on the record. Safe to replay
-                # (the side effect happened); only the final commit is outstanding.
-                return ClaimResult(
-                    disposition=ClaimDisposition.REPLAY,
-                    record=_row_to_record(row),
-                )
-            if row.status == IdempotencyStatus.UNKNOWN.value:
-                # Unknowable outcome -- never silently re-drive the Handler.
-                return ClaimResult(disposition=ClaimDisposition.CONFLICT)
-            if row.status == IdempotencyStatus.RESERVED.value:
-                lease_valid = (
-                    row.lease_expires_at is not None
-                    and _as_utc(row.lease_expires_at) > now
-                )
-                if lease_valid and row.owner_id == owner_id:
-                    return ClaimResult(
-                        disposition=ClaimDisposition.ACQUIRED,
-                        claim=_claim_from_record(_row_to_record(row)),
-                    )
-                if lease_valid:
-                    return ClaimResult(
-                        disposition=ClaimDisposition.IN_PROGRESS,
-                        record=_row_to_record(row),
-                    )
-            # RESERVED+lease-expired OR FAILED: re-claim with generation+1 via a
-            # CAS that pins the SOURCE state we read. The WHERE must include
-            # status + request_hash + generation (and, for the RESERVED path,
-            # that the lease is still expired) -- otherwise a record a concurrent
-            # worker moved to COMPLETED (same generation) could be flipped back
-            # to RESERVED and its side effect re-run.
-            new_gen = (row.generation or 0) + 1
-            where_clauses = [
-                ToolIdempotencyRow.scope == scope,
-                ToolIdempotencyRow.key == key,
-                ToolIdempotencyRow.request_hash == request_hash,
-                ToolIdempotencyRow.status == row.status,
-                ToolIdempotencyRow.generation == (row.generation or 0),
-            ]
-            if row.status == IdempotencyStatus.RESERVED.value:
-                # Only steal if the lease is still expired (a concurrent worker
-                # may have re-leased it between our read and the UPDATE). The
-                # column round-trips naive on sqlite, so compare against a naive
-                # now to avoid the in-memory evaluator's tz mismatch.
-                now_naive = now.replace(tzinfo=None)
-                where_clauses.append(ToolIdempotencyRow.lease_expires_at <= now_naive)
-            upd = (
-                update(ToolIdempotencyRow)
-                .where(*where_clauses)
-                .values(
-                    status=IdempotencyStatus.RESERVED.value,
-                    result_json=None,
-                    error_message=None,
-                    completed_at=None,
-                    owner_id=owner_id,
-                    generation=new_gen,
-                    claimed_at=now,
-                    lease_expires_at=lease_at,
-                )
-            )
-            proxy = await session.execute(upd)
-            refreshed = await session.execute(
-                select(ToolIdempotencyRow).where(
-                    ToolIdempotencyRow.scope == scope,
-                    ToolIdempotencyRow.key == key,
-                )
-            )
-            winner = refreshed.scalar_one()
-            if proxy.rowcount == 0:
-                # The source state moved under us: re-classify the fresh record
-                # so we never return ACQUIRED for a record we no longer own.
-                if winner.request_hash != request_hash:
-                    return ClaimResult(disposition=ClaimDisposition.CONFLICT)
-                if winner.status == IdempotencyStatus.COMPLETED.value:
-                    return ClaimResult(
-                        disposition=ClaimDisposition.REPLAY,
-                        record=_row_to_record(winner),
-                    )
-                return ClaimResult(
-                    disposition=ClaimDisposition.IN_PROGRESS,
-                    record=_row_to_record(winner),
-                )
-            return ClaimResult(
-                disposition=ClaimDisposition.ACQUIRED,
-                claim=_claim_from_record(_row_to_record(winner)),
-            )
-
-        try:
-            return await self._execute_in_session(_do)
-        except IntegrityError:
-            # Concurrent fresh-INSERT collision: another worker inserted the
-            # (scope, key) row between our SELECT and our INSERT, so the
-            # unique constraint turned our INSERT into IntegrityError. The
-            # only INSERT in ``_do`` is the fresh-row path above (the re-claim
-            # branch uses a CAS UPDATE, which cannot raise a unique-constraint
-            # IntegrityError), so this exception unambiguously means "lost
-            # the insert race". The failed transaction (and its session) is
-            # poisoned and must not be reused.
-            if self._session is not None:
-                # UoW mode: the shared transaction is poisoned too -- there is
-                # no fresh session to recover in, so propagate (mirrors
-                # ApprovalStore.create_or_get_pending).
-                raise
-            # Normal mode: re-run the fenced read-decide-write in a FRESH
-            # session. The row now exists, so this takes the existing-record
-            # branch (CONFLICT / REPLAY / IN_PROGRESS / CAS re-claim) instead
-            # of inserting again -- there is no second fresh INSERT, hence no
-            # second IntegrityError, and the loser gets a stable disposition.
-            return await self._execute_in_session(_do)
-
-    async def complete(self, claim: IdempotencyClaim, result: Any) -> None:
-        """CAS to COMPLETED only if owner_id + generation still match the claim.
-        rowcount != 1 raises LostIdempotencyClaimError (the claim was stolen) --
-        never silently succeed."""
-        now = datetime.now(timezone.utc)
-
-        async def _do(session):
-            proxy = await session.execute(
-                update(ToolIdempotencyRow)
-                .where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                    ToolIdempotencyRow.request_hash == claim.request_hash,
-                    ToolIdempotencyRow.owner_id == claim.owner_id,
-                    ToolIdempotencyRow.generation == claim.generation,
-                    # complete resolves either the EXECUTED receipt or the
-                    # RESERVED fast path to COMPLETED.
-                    ToolIdempotencyRow.status.in_(
-                        [
-                            IdempotencyStatus.RESERVED.value,
-                            IdempotencyStatus.EXECUTED.value,
-                        ]
-                    ),
-                )
-                .values(
-                    status=IdempotencyStatus.COMPLETED.value,
-                    result_json=canonical_json(result),
-                    error_message=None,
-                    completed_at=now,
-                )
-            )
-            if proxy.rowcount != 1:
-                from ...errors import LostIdempotencyClaimError
-
-                raise LostIdempotencyClaimError(
-                    f"complete lost the claim for ({claim.scope}, {claim.key}): "
-                    f"owner/generation no longer match"
-                )
-
-        await self._execute_in_session(_do)
-
-    async def mark_executed(self, claim: IdempotencyClaim, result: Any, *, receipt_artifact_id=None, binding_fingerprint=None, result_processor_revision=None) -> None:
-        """CAS RESERVED -> EXECUTED, storing the result as the execution receipt.
-        rowcount != 1 raises LostIdempotencyClaimError."""
-        now = datetime.now(timezone.utc)
-
-        async def _do(session):
-            proxy = await session.execute(
-                update(ToolIdempotencyRow)
-                .where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                    ToolIdempotencyRow.request_hash == claim.request_hash,
-                    ToolIdempotencyRow.owner_id == claim.owner_id,
-                    ToolIdempotencyRow.generation == claim.generation,
-                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
-                )
-                .values(
-                    status=IdempotencyStatus.EXECUTED.value,
-                    result_json=canonical_json(result),
-                    error_message=None,
-                    receipt_artifact_id=receipt_artifact_id,
-                    binding_fingerprint=binding_fingerprint,
-                    result_processor_revision=result_processor_revision,
-                )
-            )
-            if proxy.rowcount != 1:
-                from ...errors import LostIdempotencyClaimError
-
-                raise LostIdempotencyClaimError(
-                    f"mark_executed lost the claim for ({claim.scope}, {claim.key})"
-                )
-
-        await self._execute_in_session(_do)
-
-    async def mark_unknown(self, claim: IdempotencyClaim) -> None:
-        """CAS RESERVED -> UNKNOWN: mark_executed could not be confirmed, so the
-        outcome is unknowable. RESERVED only -- an EXECUTED receipt is
-        recoverable and must not be downgraded. Never resolves to a re-run."""
-        now = datetime.now(timezone.utc)
-
-        async def _do(session):
-            proxy = await session.execute(
-                update(ToolIdempotencyRow)
-                .where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                    ToolIdempotencyRow.request_hash == claim.request_hash,
-                    ToolIdempotencyRow.owner_id == claim.owner_id,
-                    ToolIdempotencyRow.generation == claim.generation,
-                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
-                )
-                .values(
-                    status=IdempotencyStatus.UNKNOWN.value,
-                    completed_at=now,
-                )
-            )
-            if proxy.rowcount != 1:
-                from ...errors import LostIdempotencyClaimError
-
-                raise LostIdempotencyClaimError(
-                    f"mark_unknown lost the claim for ({claim.scope}, {claim.key})"
-                )
-
-        await self._execute_in_session(_do)
-
-    async def fail(self, claim: IdempotencyClaim, error: str) -> None:
-        now = datetime.now(timezone.utc)
-
-        async def _do(session):
-            proxy = await session.execute(
-                update(ToolIdempotencyRow)
-                .where(
-                    ToolIdempotencyRow.scope == claim.scope,
-                    ToolIdempotencyRow.key == claim.key,
-                    ToolIdempotencyRow.request_hash == claim.request_hash,
-                    ToolIdempotencyRow.owner_id == claim.owner_id,
-                    ToolIdempotencyRow.generation == claim.generation,
-                    ToolIdempotencyRow.status == IdempotencyStatus.RESERVED.value,
-                )
-                .values(
-                    status=IdempotencyStatus.FAILED.value,
-                    result_json=None,
-                    error_message=error,
-                    completed_at=now,
-                )
-            )
-            if proxy.rowcount != 1:
-                from ...errors import LostIdempotencyClaimError
-
-                raise LostIdempotencyClaimError(
-                    f"fail lost the claim for ({claim.scope}, {claim.key}): "
-                    f"owner/generation no longer match"
-                )
-
-        await self._execute_in_session(_do)
-
-
-def _claim_from_record(record: IdempotencyRecord) -> IdempotencyClaim:
-    return IdempotencyClaim(
-        scope=record.scope,
-        key=record.key,
-        request_hash=record.request_hash,
-        owner_id=record.owner_id or "",
-        generation=record.generation,
-        claimed_at=record.claimed_at or record.created_at,
-        lease_expires_at=record.lease_expires_at or record.created_at,
-    )
+    async def fail(self, operation_id: str, *, owner: str, fence: int, error: Any) -> ToolOperation:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await session.get(OperationRow, operation_id, with_for_update=True)
+                self._check_fence(row, owner, fence)
+                row.status, row.error = ToolOperationStatus.FAILED.value, error
+                return self._operation(row)

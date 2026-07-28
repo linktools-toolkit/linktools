@@ -20,7 +20,7 @@ from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
 from linktools.ai.memory.models import MemoryRecord
 from linktools.ai.memory.scope import MemoryScope
 from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
-from linktools.ai.storage.sqlalchemy.models import Base
+from linktools.ai.memory.persistence.sqlalchemy import Base
 
 
 def _now() -> datetime:
@@ -335,7 +335,7 @@ def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
     # only an explicit legacy-scope search does.
     async def _run_case():
         from linktools.ai.memory.scope import LEGACY_TENANT_ID
-        from linktools.ai.storage.sqlalchemy.models import MemoryRow
+        from linktools.ai.memory.persistence.sqlalchemy import MemoryRow
         from sqlalchemy import insert
 
         async with _store_ctx(tmp_path) as store:

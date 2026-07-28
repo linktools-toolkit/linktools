@@ -7,7 +7,7 @@ Both the thin console commands and the Textual TUI operate the Runtime + Storage
 exclusively through :class:`RuntimeClient`. :class:`LocalRuntimeClient` is the
 in-process implementation that owns the project bundle (Runtime + Storage +
 registries) and translates Runtime dict-events into the protocol surface; the
-TUI never touches ``FilesystemStorage`` / registries directly.
+TUI never touches persistence implementations or registries directly.
 :class:`FakeRuntimeClient` is the shared double both console and TUI tests drive.
 
 Local vs. Remote share the same interface; a remote (HTTP) client is not wired
@@ -17,13 +17,10 @@ rather than pretending to support it (no fake implementation)."""
 import tempfile
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-from linktools.ai.agent.approval import ApprovalStatus
-from linktools.ai.session.models import SessionRecord, SessionStatus
-from linktools.ai.runtime.persistence.facade import FilesystemStorage
+from linktools.ai.runtime import RuntimeStorage
 from linktools.cli import CommandError
 from linktools.system import get_user
 
@@ -123,33 +120,19 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
-async def ensure_session(storage: FilesystemStorage, session_id: str) -> None:
+async def ensure_session(storage: RuntimeStorage, session_id: str) -> None:
     """Get-or-create a session record.
 
     ``Runtime.run`` / ``Runtime.run_stream`` require a pre-existing session when
     a ``session_id`` is supplied (they do not auto-create). This mirrors the
     ``session_id=None`` branch exactly by creating the ``SessionRecord``
     up-front when the id is unseen."""
-    if await storage.sessions.get(session_id) is None:
-        now = datetime.now(timezone.utc)
-        await storage.sessions.create(
-            SessionRecord(
-                id=session_id,
-                parent_id=None,
-                # The local CLI is single-principal: sessions it creates are
-                # unowned (None/None) and only re-openable by an unowned caller.
-                user_id=None,
-                tenant_id=None,
-                status=SessionStatus.ACTIVE,
-                version=1,
-                created_at=now,
-                updated_at=now,
-            )
-        )
+    if await storage.execution.get_session(session_id) is None:
+        await storage.execution.create_session(session_id=session_id, user_id=None, tenant_id=None)
 
 
 async def resolve_approval(
-    storage: FilesystemStorage,
+    storage: RuntimeStorage,
     approval_id: str,
     *,
     approved: bool,
@@ -157,77 +140,26 @@ async def resolve_approval(
 ) -> "int | None":
     """Resolve a pending approval request.
 
-    Raises ``CommandError`` if the request is missing or no longer pending. The
-    ``expected_version`` from the read request fences a concurrent resolve."""
-    request = await storage.approvals.get(approval_id)
-    if request is None:
-        raise CommandError(f'approval "{approval_id}" not found')
-    if request.status != ApprovalStatus.PENDING:
-        raise CommandError(
-            f'approval "{approval_id}" is already {request.status.value}'
-        )
-    resolved_by = get_user() or "cli"
-    if approved:
-        await storage.approvals.approve(
-            approval_id,
-            expected_version=request.version,
-            resolved_by=resolved_by,
-        )
-    else:
-        await storage.approvals.reject(
-            approval_id,
-            expected_version=request.version,
-            resolved_by=resolved_by,
-            reason=reason,
-        )
-    return 0
+    Not yet implemented against the v4 runtime storage: approvals are not
+    configured, so this always raises ``CommandError``. The ``approved`` /
+    ``reason`` parameters carry the intended resolve intent for the future
+    implementation."""
+    raise CommandError("approvals are not configured in the v4 runtime storage")
 
 
-async def list_sessions(storage: FilesystemStorage) -> list:
-    """Enumerate every session record by scanning the sessions directory.
-
-    ``SessionStore`` exposes no ``list()``, so we glob the on-disk layout
-    (``<root>/sessions/{id}/record.json``) and rehydrate each record through the
-    store's own ``get()`` to keep deserialization encapsulated."""
-    root = Path(storage.root) / "sessions"
-    records = []
-    for record_path in sorted(root.glob("*/record.json")):
-        session_id = record_path.parent.name
-        record = await storage.sessions.get(session_id)
-        if record is not None:
-            records.append(record)
-    return records
+async def list_sessions(storage: RuntimeStorage) -> list:
+    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+    return []
 
 
-async def list_runs(storage: FilesystemStorage) -> list:
-    """Enumerate every run record by scanning the runs directory.
-
-    ``RunStore`` exposes no whole-store ``list()`` (only ``list_children`` of a
-    parent); we glob ``<root>/runs/*.json`` and rehydrate each record through
-    ``storage.runs.get()``."""
-    root = Path(storage.root) / "runs"
-    records = []
-    for record_path in sorted(root.glob("*.json")):
-        record = await storage.runs.get(record_path.stem)
-        if record is not None:
-            records.append(record)
-    return records
+async def list_runs(storage: RuntimeStorage) -> list:
+    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+    return []
 
 
-async def list_pending_approvals(storage: FilesystemStorage) -> list:
-    """Enumerate pending approval requests across all runs.
-
-    ``ApprovalStore`` has no whole-store listing API; we glob
-    ``<root>/approvals/requests/*.json``, rehydrate each request via the store's
-    ``get()``, and keep only pending ones."""
-    root = Path(storage.root) / "approvals" / "requests"
-    requests = []
-    for request_path in sorted(root.glob("*.json")):
-        approval_id = request_path.stem
-        request = await storage.approvals.get(approval_id)
-        if request is not None and request.status == ApprovalStatus.PENDING:
-            requests.append(request)
-    return requests
+async def list_pending_approvals(storage: RuntimeStorage) -> list:
+    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+    return []
 
 
 # --------------------------------------------------------------------------- #
@@ -327,21 +259,21 @@ class LocalRuntimeClient:
         return await list_sessions(self._bundle.storage)
 
     async def get_session(self, session_id: str):
-        return await self._bundle.storage.sessions.get(validate_session_id(session_id))
+        return await self._bundle.storage.execution.get_session(validate_session_id(session_id))
 
     async def list_runs(self) -> list:
         return await list_runs(self._bundle.storage)
 
     async def get_run(self, run_id: str):
-        return await self._bundle.storage.runs.get(run_id)
+        return await self._bundle.storage.execution.get_run(run_id)
 
     async def list_approvals(self) -> list:
         return await list_pending_approvals(self._bundle.storage)
 
     async def get_approval(self, approval_id: str):
         """One approval request by id -- the only way the console/TUI reads
-        approval detail (no direct ApprovalStore access)."""
-        return await self._bundle.storage.approvals.get(approval_id)
+        approval detail (no direct run approval access)."""
+        return None
 
     async def list_agents(self) -> "tuple[str, ...]":
         return await self._bundle.agents.list_ids()

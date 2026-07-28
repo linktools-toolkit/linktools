@@ -226,7 +226,7 @@ class AssetChanged:
 
 
 # --- Capability Runtime lifecycle events ---
-# These let a downstream EventStore observe the capability/skill/mcp/subagent/
+# These let a downstream event consumer observe the capability/skill/mcp/subagent/
 # package/prompt/tool-exposure lifecycle without coupling to internal classes.
 
 
@@ -411,10 +411,11 @@ class SecurityDegraded:
 @dataclass(frozen=True, slots=True)
 class TruncatedSecurityEvent:
     """Replaces an oversized security event so the audit store still receives a
-    valid dataclass payload (FilesystemEventStore persists via dataclasses.asdict and
-    reconstructs by class name -- a plain dict would TypeError there). Carries
-    only the original type name and the measured size; the original payload is
-    deliberately dropped so a too-large event can never re-bloat the store."""
+    valid dataclass payload (the event persistence layer persists via
+    dataclasses.asdict and reconstructs by class name -- a plain dict would
+    TypeError there). Carries only the original type name and the measured size;
+    the original payload is deliberately dropped so a too-large event can never
+    re-bloat the store."""
     event_type: ClassVar[str] = 'TruncatedSecurityEvent'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
 
@@ -481,7 +482,7 @@ class ToolPipelineAfter:
 
 
 # Union of every event payload type. This is the type of the ``payload`` field
-# EventStore.append accepts -- callers pass a concrete
+# the event store's ``append`` accepts -- callers pass a concrete
 # payload instance and the store wraps it in an EventEnvelope.
 EventPayload = Union[
     RunStarted,

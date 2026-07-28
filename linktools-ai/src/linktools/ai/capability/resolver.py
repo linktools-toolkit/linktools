@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 async def _emit(context: CapabilityContext, payload) -> None:
     """Emit a capability-lifecycle event through the context's
     SecurityEventEmitter when one is wired; a no-op otherwise so resolution
-    stays side-effect-free by default. Never a direct EventStore reference.
+    stays side-effect-free by default. Never a direct event store reference.
 
     Routing follows the payload's criticality: a SECURITY_CRITICAL event
     (e.g. ToolExposureDenied -- an audit record of an exposure-policy denial)
@@ -157,7 +157,7 @@ class CapabilityResolver:
             names = tuple(
                 d.name
                 for c in exposed_contributions
-                for d in _contribution_descriptors(c)
+                for d in contribution_descriptors(c)
             )
             await _emit(
                 context,
@@ -206,7 +206,7 @@ class CapabilityResolver:
         )
 
 
-def _contribution_descriptors(contrib) -> "tuple":
+def contribution_descriptors(contrib) -> "tuple":
     """The descriptors on a contribution -- one per ManagedToolDefinition in
     ``tools``. The single source for counting, conflict detection, and exposure
     accounting (no toolset introspection)."""
@@ -220,7 +220,7 @@ def filter_contribution(contrib, policy):
     by descriptor; an empty result returns ``None`` (the contribution is dropped
     entirely) rather than raising.
     """
-    descs = _contribution_descriptors(contrib)
+    descs = contribution_descriptors(contrib)
     if not descs:
         return None, []
     allowed = tuple(d for d in descs if is_descriptor_exposable(d, policy))

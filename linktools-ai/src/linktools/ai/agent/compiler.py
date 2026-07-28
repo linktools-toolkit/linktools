@@ -12,16 +12,16 @@ spec's static instructions (``PromptSpec.instructions``) only.
 The compiler never bakes in a default command denylist. The default
 SecurityBaseline (including its CommandRule) is resolved exactly once, by
 ``build_runtime`` -- the compiler only ever consumes the ``tool_executor`` it
-is given, which is REQUIRED: there is no rule-less ALLOW-all fallback, so a
-directly-constructed compiler without an explicit executor fails loudly rather
-than silently governing nothing."""
+is given. ``tool_executor`` is OPTIONAL: when omitted, the compiled Agent
+carries no ``PolicyCapability`` (no command governance). The engine still
+rejects a tool-less run that actually needs tools, so a compiler without an
+executor is legal for tool-free agents and fails loudly at execution time
+rather than silently governing nothing."""
 
-from ..errors import RuntimeInitializationError
 from ..middleware.capability import build_middleware_capability
 from ..middleware.pipeline import MiddlewarePipeline
 from ..model.resolver import ModelResolver, ResolvedModel
 from ..tool.pydantic import build_policy_capability
-from ..tool.executor import GovernedToolInvoker
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
 from .spec import AgentSpec
@@ -34,22 +34,17 @@ class AgentCompiler:
         self,
         *,
         model_resolver: ModelResolver,
-        tool_executor: GovernedToolInvoker,
+        tool_executor: object | None = None,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
     ) -> None:
-        if tool_executor is None:
-            raise RuntimeInitializationError(
-                "AgentCompiler requires a GovernedToolInvoker; build_runtime is the "
-                "single source of the baseline-governed executor"
-            )
         self._model_resolver = model_resolver
         self._tool_executor = tool_executor
         self._middleware_pipeline = middleware_pipeline
 
     async def compile(self, spec: AgentSpec) -> CompiledAgent:
         resolved: ResolvedModel = self._model_resolver.resolve(spec.model)
-        capability = build_policy_capability(self._tool_executor)
-        capabilities = [capability]
+        capability = build_policy_capability(self._tool_executor) if self._tool_executor is not None else None
+        capabilities = [capability] if capability is not None else []
         if self._middleware_pipeline is not None:
             middleware_capability = build_middleware_capability(
                 self._middleware_pipeline

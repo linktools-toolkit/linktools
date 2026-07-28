@@ -16,8 +16,7 @@ import os
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.storage.sqlalchemy.models import Base
-from linktools.ai.storage.backends.sqlalchemy.models import Base as ObjectBase
+from linktools.ai.memory.persistence.sqlalchemy import Base
 
 _DIALECTS = ["sqlite", "mysql", "postgresql"]
 
@@ -41,8 +40,6 @@ async def _build(dialect: str, tmp_path):
     engine = create_async_engine(url, future=True)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.run_sync(ObjectBase.metadata.create_all)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     return engine, session_factory
-
 

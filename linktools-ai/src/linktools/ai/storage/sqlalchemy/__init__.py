@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQLAlchemy naming, dialect and row-model helpers.
+"""Shared SQLAlchemy foundation and naming helpers."""
 
-Storage composition lives exclusively in ``runtime.persistence``; this
-kernel package intentionally exports no convenience Storage class.
-"""
+from .base import Base
 
-__all__: list[str] = []
+__all__ = ["Base"]

@@ -78,7 +78,7 @@ class ManagedToolAdapter:
             security_audit_failure_mode, "value", security_audit_failure_mode
         )
         # The emitter is the single seam for security/observability events --
-        # never a direct EventStore reference. None means no emission (the
+        # never a direct event store reference. None means no emission (the
         # caller -- RunCoordinator -- always wires a durable, per-Run sink).
         self._security_event_emitter = security_event_emitter
 
@@ -173,14 +173,14 @@ class ManagedToolAdapter:
             """Resume gate for managed-path approval: a re-driven call after
             external approval must NOT re-raise RunPaused (a stateless pipeline
             otherwise would, looping the run forever)."""
-            from ..agent.approval import compute_arguments_hash
+            from .state import compute_arguments_hash
             binding = {"tool_name": self._descriptor.name,
                        "arguments_hash": compute_arguments_hash(self._descriptor.name, arguments),
                        "schema_version": 1}
             binding.update({key: binding_metadata.get(key) for key in (
                 "descriptor_fingerprint", "handler_revision", "provider_revision",
                 "policy_revision", "capability_revision", "result_processor_revision")})
-            return await self._tool_executor._is_approved_binding(run_id, call_id, binding=binding)
+            return await self._tool_executor.is_approved_binding(run_id, call_id, binding=binding)
 
         # 1. Resolve + merge policy, then collapse the tri-state result to
         # concrete values. A layer that never declared a field (e.g. no
@@ -218,7 +218,7 @@ class ManagedToolAdapter:
             "result_processor_revision": str(self._descriptor.metadata.get("result_processor_revision") or "security-pipeline-v1"),
         }
         def _binding_for(payload):
-            from ..agent.approval import compute_arguments_hash
+            from .state import compute_arguments_hash
             return {**binding_metadata, "schema_version": 1,
                     "arguments_hash": compute_arguments_hash(self._descriptor.name, payload)}
         # Audit: the finalized policy governing this call -- emitted BEFORE the
@@ -403,7 +403,7 @@ class ManagedToolAdapter:
             # idempotency key (run + tool + canonical args + schema_version)
             # so replays return the cached result; pass schema_version so a
             # contract change is a fresh idempotency record. The executor
-            # fail-closes if no IdempotencyStore is wired.
+            # fail-closes if no tool state is wired.
             idempotency_key = None
             if policy.idempotent:
                 from .idempotency import DefaultIdempotencyKeyBuilder

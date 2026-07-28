@@ -108,4 +108,14 @@ class AgentSpecCodec:
         return parse_agent_spec(item_id, payload, body)
 
 
-__all__: "list[str]" = ["AgentSpecCodec", "parse_agent_spec", "parse_middleware_refs"]
+def parse_agent_spec_markdown(content: str, *, agent_id: str) -> AgentSpec:
+    """Decode one AgentSpec from Markdown without touching the filesystem."""
+    return AgentSpecCodec().decode(agent_id, content)
+
+
+__all__: "list[str]" = [
+    "AgentSpecCodec",
+    "parse_agent_spec",
+    "parse_agent_spec_markdown",
+    "parse_middleware_refs",
+]

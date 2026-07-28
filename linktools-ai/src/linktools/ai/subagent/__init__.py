@@ -3,7 +3,6 @@
 """linktools.ai.subagent: tree-style delegation. Distinct from Swarm --
 a subagent call is one parent -> one named child -> synchronous result."""
 
-from .executor import SubagentExecutor
 from .models import SubagentResult, SubagentStatus
 from .provider import SubagentProvider
 from .runner import (
@@ -20,7 +19,6 @@ from .toolset import build_subagent_toolset
 __all__ = [
     "SubagentResult",
     "SubagentStatus",
-    "SubagentExecutor",
     "SubagentExecutorProtocol",
     "enforce_depth",
     "current_depth",

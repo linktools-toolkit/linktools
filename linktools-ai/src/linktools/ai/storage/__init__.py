@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Storage kernel: the lowest layer of the storage stack. Holds only generic
-storage-kernel machinery -- object / cache / blob / coordination / backends --
-with NO dependency on any domain package (asset / artifact / run / jobs /
-runtime / capability). Domains depend on this kernel's narrow Protocols; the
-kernel never depends back.
+"""Storage infrastructure and reusable content primitives."""
 
-The runtime composition (``Storage`` + ``FilesystemStorage`` +
-the SQLAlchemy adapter + ``StorageFeatures`` + ``StorageUnitOfWork``) lives at
-``linktools.ai.runtime.persistence``. Importing ``linktools.ai.storage`` pulls
-only the storage kernel; it never pulls a domain package or a runtime
-composition."""
+from .cache import (
+    ContentCache,
+    ContentCacheKey,
+    FilesystemContentCache,
+    MemoryContentCache,
+    TieredContentCache,
+)
+from .revision import MetadataSnapshot, MetadataState, RevisionSource, SnapshotRequired, VersionedMetadataRepository
 
-__all__: "list[str]" = []
+__all__ = [
+    "ContentCache",
+    "ContentCacheKey",
+    "FilesystemContentCache",
+    "MemoryContentCache",
+    "TieredContentCache",
+    "MetadataSnapshot",
+    "MetadataState",
+    "RevisionSource",
+    "SnapshotRequired",
+    "VersionedMetadataRepository",
+]

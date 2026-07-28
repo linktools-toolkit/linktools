@@ -9,10 +9,6 @@ is the single helper."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
-if TYPE_CHECKING:
-    from .store import EventStore
-
-
 class _RunContextLike(Protocol):
     """Structural shape ``from_run_context`` reads. Defined here (rather than
     importing ``run.context.RunContext``) so the ``events`` package does not
@@ -57,7 +53,7 @@ class EventStreamContext:
 
 
 async def append_event(
-    store: "EventStore",
+    store: Any,
     context: EventStreamContext,
     payload: Any,
     *,
@@ -81,7 +77,7 @@ async def append_event(
 
 
 async def append_event_once(
-    store: "EventStore",
+    store: Any,
     context: EventStreamContext,
     payload: Any,
     *,

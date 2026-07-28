@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Run domain models: RunStatus/RunnableType/RunInput/RunResult/RunErrorInfo/RunRecord,
-and the allowed-transition table RunStore.transition() validates against."""
+and the allowed-transition table the execution store validates run-state moves against."""
 
 from dataclasses import dataclass, field
 from datetime import datetime

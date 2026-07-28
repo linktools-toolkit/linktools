@@ -14,7 +14,6 @@ from pydantic_ai.exceptions import SkipToolExecution
 from pydantic_ai.toolsets import AbstractToolset, WrapperToolset
 
 from ..errors import RunPaused, ToolDeniedError
-from .executor import GovernedToolInvoker
 from .managed import ManagedToolAdapter
 from .models import ManagedToolDefinition, ToolDescriptor
 
@@ -40,7 +39,7 @@ class PolicyCapability(AbstractCapability[None]):
     (``ctx.deps.tool_context``); no mutable per-Run field on the capability, so
     a single CompiledAgent/PolicyCapability is safe across concurrent Runs."""
 
-    executor: GovernedToolInvoker
+    executor: Any
 
     async def before_tool_execute(
         self,
@@ -90,7 +89,7 @@ class PolicyCapability(AbstractCapability[None]):
         ) from error
 
 
-def build_policy_capability(executor: GovernedToolInvoker) -> PolicyCapability:
+def build_policy_capability(executor: Any) -> PolicyCapability:
     return PolicyCapability(executor=executor)
 
 

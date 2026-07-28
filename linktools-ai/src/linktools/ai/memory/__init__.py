@@ -8,5 +8,6 @@ storage/filesystem and storage/sqlalchemy. MemoryService is the domain facade
 over MemoryStore (recall/remember/forget)."""
 
 from .service import MemoryService
+from .store import MemoryPort, MemoryStore
 
-__all__ = ["MemoryService"]
+__all__ = ["MemoryPort", "MemoryService", "MemoryStore"]

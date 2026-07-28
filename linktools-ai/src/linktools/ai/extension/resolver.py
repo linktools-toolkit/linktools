@@ -104,13 +104,11 @@ class DirectoryEntrypointResolver:
             )
         # Reuse the canonical agent parser so scoped agents honor the same
         # frontmatter/tools/model contract as global agents.
-        from ..catalog.parsing import parse_markdown_text
-        from ..agent.codec import parse_agent_spec
+        from ..agent.codec import parse_agent_spec_markdown
 
         text = candidate.read_text(encoding="utf-8")
-        payload, body = parse_markdown_text(text, source=str(candidate))
         scoped_id = f"extension:{scope.extension_id}:agent:{name}"
-        agent = parse_agent_spec(scoped_id, payload, body)
+        agent = parse_agent_spec_markdown(text, agent_id=scoped_id)
         return agent
 
 

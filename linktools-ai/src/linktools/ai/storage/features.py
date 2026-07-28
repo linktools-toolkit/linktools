@@ -28,26 +28,6 @@ class CoordinationScope(str, Enum):
     DISTRIBUTED = "distributed"
 
 
-class StorageComponent(str, Enum):
-    """The store components a Storage may group into one transaction or offer
-    optimistic concurrency for. Used by ``transactional_components`` and
-    ``optimistic_concurrency`` so capabilities are declared per-store, not as
-    a single global flag."""
-
-    ASSETS = "assets"
-    ARTIFACT_RECORDS = "artifact_records"
-    RUNS = "runs"
-    SESSIONS = "sessions"
-    EVENTS = "events"
-    APPROVALS = "approvals"
-    CHECKPOINTS = "checkpoints"
-    JOBS = "jobs"
-    SWARMS = "swarms"
-    MEMORIES = "memories"
-    IDEMPOTENCY = "idempotency"
-    EVALUATIONS = "evaluations"
-
-
 @dataclass(frozen=True, slots=True)
 class ComponentCapabilities:
     """Per-component capability declaration. Each domain store adapter exposes
@@ -67,6 +47,5 @@ class ComponentCapabilities:
 __all__: "list[str]" = [
     "ComponentCapabilities",
     "CoordinationScope",
-    "StorageComponent",
     "TransactionScope",
 ]

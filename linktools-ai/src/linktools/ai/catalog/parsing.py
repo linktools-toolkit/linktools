@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 """Shared text parsers and strict registry configuration helpers."""
 
-import hashlib
 import json
 import math
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, Sequence
+from typing import Any
 
 from ..errors import InvalidSpecError, RegistryNotFoundError, RegistryParseError
 from ._config import load_markdown_text, load_yaml_text
@@ -42,32 +41,8 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
     return data
 
 
-def _stable_object_revision(items: "Sequence[Any]") -> int:
-    """Process-stable revision over an ObjectInfo set: a SHA-256 digest of
-    each item's key/etag/version/modified_at/size, so changing one item,
-    adding one, or removing one yields a different revision and a registry
-    refreshes its cache. Sorted by key so reordering does not perturb the
-    hash; ``sort_keys=True`` makes the JSON deterministic."""
-    state = [
-        {
-            "key": info.key.value,
-            "etag": info.etag,
-            "version": info.version,
-            "modified_at": (
-                info.modified_at.isoformat() if info.modified_at is not None else None
-            ),
-            "size": info.size,
-        }
-        for info in sorted(items, key=lambda v: v.key.value)
-    ]
-    digest = hashlib.sha256(
-        json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).digest()
-    return int.from_bytes(digest[:8], "big")
-
-
 class SpecLoader:
-    """Reads spec text + lists ids from either the filesystem or an ObjectStore."""
+    """Reads spec text and lists ids from a filesystem or capability source."""
 
     def __init__(self, *, read, list_ids, revision) -> None:
         self._read = read
@@ -121,56 +96,30 @@ class SpecLoader:
         return cls(read=read, list_ids=list_ids, revision=revision)
 
     @classmethod
-    def from_objects(cls, object_store: Any, *, prefix: str) -> "SpecLoader":
-        # An ObjectStore exposes get(StorageKey) + list(StorageKey); there is
-        # no global revision() to call on a plain (non-revisioned) store, so
-        # the revision below is a stable hash over the live metadata. Build
-        # keys via StorageKey so the store's own normalization applies. The
-        # hash is over key/etag/version/modified_at/size so the registry
-        # cache refreshes after any add/modify/delete instead of pinning to
-        # a constant.
-        from ..storage.object.models import Depth, StorageKey
-
+    def from_capabilities(cls, repository: Any, *, prefix: str) -> "SpecLoader":
         base = prefix.strip("/")
 
-        def _full(path: str) -> "StorageKey":
+        def _full(path: str) -> str:
             joined = f"{base}/{path.strip('/')}" if base else path.strip("/")
             if not joined or ".." in joined.split("/"):
-                raise RegistryNotFoundError(f"invalid spec object key: {path!r}")
-            return StorageKey(f"/{joined}")
-
-        async def _list_items() -> "list[Any]":
-            # Follow list cursor pagination so the full object set is read
-            # (the revision must reflect every item, not just the first page).
-            root = StorageKey(f"/{base}") if base else StorageKey("/")
-            items: "list[Any]" = []
-            cursor = None
-            while True:
-                page = await object_store.list(
-                    root, depth=Depth.ONE, limit=1000, cursor=cursor
-                )
-                items.extend(page.items)
-                if page.next_cursor is None:
-                    return items
-                cursor = page.next_cursor
+                raise RegistryNotFoundError(f"invalid capability path: {path!r}")
+            return joined
 
         async def read(path: str) -> str:
-            full = _full(path)
-            obj = await object_store.get(full)
-            if obj is None:
-                raise RegistryNotFoundError(f"spec object not found: {full.value}")
-            return obj.content.decode("utf-8")
+            resource = await repository.get(_full(path))
+            if resource is None:
+                raise RegistryNotFoundError(f"capability resource not found: {path}")
+            return resource.content.decode("utf-8")
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
             ids: "list[str]" = []
-            for item in await _list_items():
-                name = item.key.value.rstrip("/").rsplit("/", 1)[-1]
-                if name.endswith(suffix):
-                    ids.append(name[: -len(suffix)])
+            for item in await repository.list_info():
+                if item.path.startswith(base + "/") and item.path.endswith(suffix):
+                    ids.append(item.path.rsplit("/", 1)[-1][: -len(suffix)])
             return tuple(sorted(ids))
 
         async def revision() -> int:
-            return _stable_object_revision(await _list_items())
+            return await repository.current_revision()
 
         return cls(read=read, list_ids=list_ids, revision=revision)
 

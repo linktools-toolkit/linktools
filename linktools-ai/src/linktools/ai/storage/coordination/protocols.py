@@ -31,7 +31,7 @@ class LeaseToken:
 
     ``fencing_token`` is monotonically increasing across (re)acquisitions of
     the same key; a re-acquire after expiry must yield a LARGER token.
-    Renewing a held lease must NOT change the token. JobStore state commits
+    Renewing a held lease must NOT change the token. Fenced state commits
     check the fencing token rather than trusting the coordinator's claim that
     the lock is still held.
     """

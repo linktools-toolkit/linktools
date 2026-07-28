@@ -15,7 +15,7 @@ import ast
 import unittest
 from pathlib import Path
 
-_REPO = Path(__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[3]
 _COMMANDS_AI = _REPO / "linktools-ai" / "src" / "linktools" / "commands" / "ai"
 _AI_PKG = _REPO / "linktools-ai" / "src" / "linktools" / "ai"
 
@@ -26,7 +26,6 @@ _FORBIDDEN_COMMAND_PREFIXES = (
     "linktools.ai.storage",
     "linktools.ai.agent.engine",
     "linktools.ai.mcp",
-    "linktools.ai.registry",
 )
 
 

@@ -14,11 +14,12 @@ touches the flat layout, so old data is never silently exposed (the migration
 quarantine). ``get``/``update``/``forget`` look up by memory_id across both
 layouts (the id is the capability); they are not the isolation boundary.
 
-Mirrors FilesystemSwarmStore/FilesystemRunStore's atomic-write + path-traversal-guard
-patterns (see storage/filesystem/run.py). The tenant and memory id segments are both
-validated via ``_validate_id_segment`` so a caller-controlled value can never
-escape the store root. The ``asyncio.Lock`` serializes ``update``/``forget`` so
-that optimistic-concurrency invariants hold within one process.
+Mirrors the atomic-write + path-traversal-guard patterns shared across the
+filesystem persistence backends (see ``storage/filesystem/__init__.py``). The
+tenant and memory id segments are both validated via ``validate_id_segment`` so
+a caller-controlled value can never escape the store root. The ``asyncio.Lock``
+serializes ``update``/``forget`` so that optimistic-concurrency invariants hold
+within one process.
 
 Each public async method delegates to a ``_*_sync`` private method via
 ``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
@@ -31,8 +32,8 @@ from pathlib import Path
 from ...errors import MemoryConflictError, MemoryNotFoundError
 from ..models import MemoryMatch, MemoryRecord
 from ..scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
-from ..store import _UNSET
-from linktools.ai.storage.filesystem._util import _atomic_write, _validate_id_segment
+from ..store import UNSET
+from ...storage.filesystem import atomic_write, validate_id_segment
 
 
 def _record_to_json(record: MemoryRecord) -> dict:
@@ -121,18 +122,18 @@ class FilesystemMemoryStore:
     def _tenant_subdir(self, tenant_id: str) -> Path:
         # Validate the tenant segment so a caller-controlled tenant_id can never
         # escape the store root via "../".
-        segment = _validate_id_segment(tenant_id, kind="tenant_id")
+        segment = validate_id_segment(tenant_id, kind="tenant_id")
         path = self._root / segment
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _partitioned_path(self, tenant_id: str, memory_id: str) -> Path:
-        memory_id = _validate_id_segment(memory_id, kind="memory_id")
+        memory_id = validate_id_segment(memory_id, kind="memory_id")
         return self._tenant_subdir(tenant_id) / f"{memory_id}.json"
 
     def _legacy_path(self, memory_id: str) -> Path:
         # Pre-tenant flat layout: root/{memory_id}.json (no tenant subdir).
-        memory_id = _validate_id_segment(memory_id, kind="memory_id")
+        memory_id = validate_id_segment(memory_id, kind="memory_id")
         return self._root / f"{memory_id}.json"
 
     def _locate_sync(self, memory_id: str) -> "Path | None":
@@ -142,7 +143,7 @@ class FilesystemMemoryStore:
         legacy = self._legacy_path(memory_id)
         if legacy.exists():
             return legacy
-        safe_id = _validate_id_segment(memory_id, kind="memory_id")
+        safe_id = validate_id_segment(memory_id, kind="memory_id")
         for path in self._root.glob(f"*/{safe_id}.json"):
             return path
         return None
@@ -210,7 +211,7 @@ class FilesystemMemoryStore:
         path = self._partitioned_path(record.tenant_id, record.id)
         if path.exists():
             raise MemoryConflictError(f"memory already exists: {record.id}")
-        _atomic_write(path, json.dumps(_record_to_json(record)).encode("utf-8"))
+        atomic_write(path, json.dumps(_record_to_json(record)).encode("utf-8"))
         return record
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord:
@@ -234,13 +235,13 @@ class FilesystemMemoryStore:
             raise MemoryConflictError(
                 f"expected version {expected_version}, found {current.version}"
             )
-        # Apply ONLY fields explicitly passed (i.e. `is not _UNSET`); a
+        # Apply ONLY fields explicitly passed (i.e. `is not UNSET`); a
         # None value means "clear this field" (e.g. category=None). The
         # tenant / sub-scope identity fields are immutable here.
-        new_content = current.content if content is _UNSET else content
-        new_category = current.category if category is _UNSET else category
-        new_confidence = current.confidence if confidence is _UNSET else confidence
-        new_metadata = current.metadata if metadata is _UNSET else metadata
+        new_content = current.content if content is UNSET else content
+        new_category = current.category if category is UNSET else category
+        new_confidence = current.confidence if confidence is UNSET else confidence
+        new_metadata = current.metadata if metadata is UNSET else metadata
         updated = MemoryRecord(
             id=current.id,
             tenant_id=current.tenant_id,
@@ -256,7 +257,7 @@ class FilesystemMemoryStore:
             workspace_id=current.workspace_id,
             session_id=current.session_id,
         )
-        _atomic_write(path, json.dumps(_record_to_json(updated)).encode("utf-8"))
+        atomic_write(path, json.dumps(_record_to_json(updated)).encode("utf-8"))
         return updated
 
     async def update(
@@ -264,10 +265,10 @@ class FilesystemMemoryStore:
         memory_id: str,
         *,
         expected_version: int,
-        content: object = _UNSET,
-        category: object = _UNSET,
-        confidence: object = _UNSET,
-        metadata: object = _UNSET,
+        content: object = UNSET,
+        category: object = UNSET,
+        confidence: object = UNSET,
+        metadata: object = UNSET,
     ) -> MemoryRecord:
         async with self._lock:
             updated = await asyncio.to_thread(

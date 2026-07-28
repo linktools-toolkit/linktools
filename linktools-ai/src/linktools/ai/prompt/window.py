@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Session window policies: context-window trimming as a pluggable
-policy, separate from SessionStore (which only stores/retrieves).
+policy, separate from the session store (which only stores/retrieves).
 
 - NoopWindowPolicy: pass every message through (default).
 - RecentWindowPolicy: keep the most recent N messages.

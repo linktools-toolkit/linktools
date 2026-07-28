@@ -81,7 +81,7 @@ async def inspect_capabilities(
     descriptors, merged prompt sections, and any warnings. Leaks no mutable
     internal state (no handlers). A capability that degrades during resolution
     emits a SecurityDegraded event into an in-memory collector rather than an
-    EventStore; those events are surfaced as warnings so inspection reflects
+    event store; those events are surfaced as warnings so inspection reflects
     the same degradation a real run would observe."""
     from ...capability.models import CapabilityInspection
     from ...governance.security.emitter import CollectingSecurityEventEmitter

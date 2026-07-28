@@ -13,6 +13,7 @@ from .models import CapabilityInspection, CapabilityRef, CapabilityRuntimeOption
 from .provider import CapabilityProvider
 from .registry import CapabilityProviderRegistry
 from .resolver import CapabilityResolver
+from .store import CapabilityPort, CapabilityStore
 
 __all__ = [
     "CapabilityRef",
@@ -22,4 +23,6 @@ __all__ = [
     "CapabilityProviderRegistry",
     "CapabilityResolver",
     "CapabilityToolExposurePolicy",
+    "CapabilityPort",
+    "CapabilityStore",
 ]

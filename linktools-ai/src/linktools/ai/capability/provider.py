@@ -17,7 +17,6 @@ from .models import CapabilityRef
 
 if TYPE_CHECKING:
     from ..sandbox.protocols import Sandbox
-    from ..events.store import EventStore
 
 
 @dataclass(frozen=True)
@@ -27,7 +26,7 @@ class CapabilityContext:
     cover the builtin path. Identity fields make resolution failures precise.
     ``security_event_emitter`` (optional) lets providers emit capability-
     lifecycle events through the SecurityEventEmitter Protocol -- never a direct
-    EventStore reference."""
+    event store reference."""
 
     agent_id: str
     exposure_policy: CapabilityToolExposurePolicy
@@ -84,7 +83,7 @@ def make_event_emitter(context: "CapabilityContext | None"):
     SecurityEventEmitter, or a no-op when none is wired. Capability toolset
     closures use this to fire per-operation events (skill.list,
     extension.content.read, ...). The emitter is the single seam -- never a
-    direct EventStore reference."""
+    direct event store reference."""
     if context is None or context.security_event_emitter is None:
         return _noop_emit
     return context.security_event_emitter.emit_observability

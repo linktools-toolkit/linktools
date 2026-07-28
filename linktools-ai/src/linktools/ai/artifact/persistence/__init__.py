@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Artifact persistence: the ArtifactRecordStore Protocol (the artifact
-domain's own access-control + provenance fact source) plus the in-repo
-reference adapters. Concrete adapters live here, not in storage/, so storage
-never imports the artifact domain."""
+"""Artifact persistence ports and local/SQL implementations."""
 
-from .protocols import ArtifactRecordStore
+from .local import LocalArtifactStore
 
-__all__: "list[str]" = ["ArtifactRecordStore"]
+__all__ = ["LocalArtifactStore"]

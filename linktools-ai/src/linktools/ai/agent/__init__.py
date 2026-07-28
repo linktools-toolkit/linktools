@@ -7,5 +7,6 @@ types; the compiler/runner that turn it into Runs live in their submodules
 (from ``linktools.ai.run``), not an agent-local type."""
 
 from .spec import AgentSpec, PromptSpec, ToolRef
+from .codec import parse_agent_spec_markdown
 
-__all__ = ["AgentSpec", "PromptSpec", "ToolRef"]
+__all__ = ["AgentSpec", "PromptSpec", "ToolRef", "parse_agent_spec_markdown"]

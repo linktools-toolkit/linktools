@@ -84,7 +84,7 @@ class StorageError(LinktoolsAIError):
 class StorageCapabilityError(StorageError):
     """Raised when an operation requires a StorageFeatures capability the
     active Storage does not expose (e.g. database-scoped transactions on
-    FilesystemStorage, which is process-local)."""
+    local directory storage, which is process-local)."""
 
 
 class StorageRequirementsNotMetError(StorageCapabilityError):
@@ -132,22 +132,6 @@ class StorageCoordinationNotSupportedError(StorageCapabilityError):
     a non-POSIX platform), or when a deployment that needs a distributed
     coordinator did not inject one. Fail-closed: never silently degrade to a
     lockless fallback."""
-
-
-class StorageBlobError(StorageError):
-    """Base for BlobStore-level errors. Generic and domain-agnostic -- the
-    BlobStore Protocol has no artifact-domain type, so it raises these rather
-    than an artifact-specific error; a domain facade (e.g. ArtifactStore)
-    translates at its own boundary into its own error types."""
-
-
-class StorageBlobNotFoundError(StorageBlobError):
-    """Raised when a requested blob does not exist at the given digest."""
-
-
-class StorageBlobIntegrityError(StorageBlobError):
-    """Raised when a blob's actual bytes do not match the digest it was
-    stored or requested under (missing, truncated, or tampered)."""
 
 
 class IdempotencyConflictError(LinktoolsAIError):
@@ -240,7 +224,7 @@ class RunPaused(RunError):
     handler will actually persist. ``run_id`` is already resolved through
     GovernedToolInvoker.run_id_resolver. The remaining fields carry everything the
     suspension handler needs to construct and persist the ApprovalRequest
-    without GovernedToolInvoker touching the ApprovalStore. Only primitive types are
+    without GovernedToolInvoker touching the approval store. Only primitive types are
     used here (no domain dataclass import) to keep this module dependency-free."""
 
     def __init__(
@@ -280,7 +264,7 @@ class SessionAccessDeniedError(SessionError):
 
 
 class SessionSequenceConflictError(SessionError):
-    """Raised when the SessionStore cannot reserve a unique message sequence
+    """Raised when the session store cannot reserve a unique message sequence
     after repeated conflicts (the store is the sole sequence
     authority, mirroring EventSequenceConflictError)."""
 

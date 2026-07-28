@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Artifact domain: immutable, content-addressed run products over the
-ArtifactBlobStore / ArtifactRecordStore Protocols (decoupled from any specific
-backend -- asset store, filesystem, or external object store).
-
-Public types for downstream and for the task / evaluation domains.
-"""
+"""Immutable, content-addressed run products."""
 
 from .digest import ArtifactDigest
 from .models import (
@@ -19,13 +14,15 @@ from .models import (
     ArtifactStagingError,
     AssetSnapshotRef,
 )
-from .store import ArtifactStore
+from .store import ArtifactPort, ArtifactService, ArtifactStore
 
 __all__: "list[str]" = [
     "ArtifactDigest",
     "ArtifactRef",
     "ArtifactProvenance",
     "ArtifactRecord",
+    "ArtifactService",
+    "ArtifactPort",
     "ArtifactStore",
     "ArtifactBlobNotFoundError",
     "ArtifactIntegrityError",

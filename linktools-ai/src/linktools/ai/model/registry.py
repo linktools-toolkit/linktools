@@ -17,8 +17,7 @@ This module owns:
 `build_mcp_toolset`, mapping `MCPServerSpec` onto pydantic-ai `MCPToolset`s, now
 lives in `..mcp.client` alongside the rest of the MCP wiring.
 
-Session history persistence (context.json / per-call prompt sidecars) now lives in
-`session/history.py`.
+Execution history is stored by the v4 execution persistence layer.
 """
 
 from dataclasses import dataclass

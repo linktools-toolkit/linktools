@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SqlAlchemyMemoryStore: DB-backed MemoryStore (the Protocol in
-memory/store.py). Mirrors SqlAlchemySwarmStore's structure:
+memory/store.py). Mirrors ``SqlAlchemyTaskStore``'s structure:
 `session_factory: Callable[[], AsyncSession]` constructor, `_as_utc` helper for
 aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions.
 
 Search uses ``content LIKE`` with optional ``owner_id`` / ``category`` filters
-(category is indexed for selectivity). The `_UNSET` sentinel distinguishes
+(category is indexed for selectivity). The `UNSET` sentinel distinguishes
 "omit this field" from `category=None` meaning "explicitly clear" (same
 semantics as FilesystemMemoryStore)."""
 
@@ -14,15 +14,38 @@ import json
 from datetime import datetime, timezone
 from typing import Callable
 
-from sqlalchemy import or_, select
+from sqlalchemy import DECIMAL, Index, Integer, String, Text, UniqueConstraint, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Mapped, mapped_column
 
-from linktools.ai.storage.sqlalchemy.models import MemoryRow
 from ...errors import MemoryConflictError, MemoryNotFoundError
+from ...storage.sqlalchemy.base import Base
+from ...storage.sqlalchemy.conventions import TABLE_PREFIX, timestamp_indexes
 from ..models import MemoryMatch, MemoryRecord
 from ..scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
-from ..store import _UNSET
+from ..store import UNSET
+
+
+class MemoryRow(Base):
+    __tablename__ = f"{TABLE_PREFIX}memories"
+    __table_args__ = (
+        UniqueConstraint("memory_id", name="uk_memory_id"),
+        Index("ix_tenant_id", "tenant_id"),
+        *timestamp_indexes(),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(128), comment="Memory id")
+    tenant_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Tenant id")
+    owner_id: Mapped[str] = mapped_column(String(128), comment="Owner id")
+    content: Mapped[str] = mapped_column(Text, comment="Memory content")
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="Category")
+    confidence: Mapped[float | None] = mapped_column(DECIMAL(5, 4), nullable=True, comment="Confidence [0,1]")
+    version: Mapped[int] = mapped_column(Integer, comment="Version (optimistic lock)")
+    metadata_json: Mapped[str] = mapped_column(Text, comment="Metadata (JSON)")
+    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="User id")
+    workspace_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Workspace id")
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Session id")
 
 
 def _as_utc(dt: "datetime | None") -> "datetime | None":
@@ -57,9 +80,9 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
 class SqlAlchemyMemoryStore:
     """Multi-process MemoryStore backed by SQLAlchemy/AsyncSession.
 
-    Optimistic concurrency on ``update`` / ``forget`` mirrors
-    ``SqlAlchemySwarmStore.update_run`` (read-check-mutate-commit in one
-    transaction). ``remember`` relies on the primary-key constraint: a duplicate
+    Optimistic concurrency on ``update`` / ``forget`` uses the same
+    read-check-mutate-commit-in-one-transaction pattern as the other
+    SQLAlchemy stores. ``remember`` relies on the primary-key constraint: a duplicate
     id raises ``IntegrityError``, which is translated to ``MemoryConflictError``.
     """
 
@@ -85,8 +108,8 @@ class SqlAlchemyMemoryStore:
         )
 
     async def _execute_in_session(self, fn):
-        """Run ``fn(session)`` in own transaction (normal mode) or against the
-        shared session (UoW mode). See SqlAlchemyRunStore._execute_in_session."""
+        """Run ``fn(session)`` in its own transaction (normal mode) or against
+        the shared session (UoW mode)."""
         if self._session is not None:
             result = await fn(self._session)
             await self._session.flush()
@@ -203,10 +226,10 @@ class SqlAlchemyMemoryStore:
         memory_id: str,
         *,
         expected_version: int,
-        content: object = _UNSET,
-        category: object = _UNSET,
-        confidence: object = _UNSET,
-        metadata: object = _UNSET,
+        content: object = UNSET,
+        category: object = UNSET,
+        confidence: object = UNSET,
+        metadata: object = UNSET,
     ) -> MemoryRecord:
         async def _do(session):
             query_result = await session.execute(
@@ -219,15 +242,15 @@ class SqlAlchemyMemoryStore:
                 raise MemoryConflictError(
                     f"expected version {expected_version}, found {row.version}"
                 )
-            # Apply ONLY fields explicitly passed (i.e. `is not _UNSET`); a
+            # Apply ONLY fields explicitly passed (i.e. `is not UNSET`); a
             # None value means "clear this field" (e.g. category=None).
-            if content is not _UNSET:
+            if content is not UNSET:
                 row.content = content
-            if category is not _UNSET:
+            if category is not UNSET:
                 row.category = category
-            if confidence is not _UNSET:
+            if confidence is not UNSET:
                 row.confidence = confidence
-            if metadata is not _UNSET:
+            if metadata is not UNSET:
                 row.metadata_json = json.dumps(metadata)
             row.version = row.version + 1
             row.updated_at = datetime.now(timezone.utc)

@@ -9,7 +9,7 @@ so a record, once written, cannot be mutated in place -- the store is the only
 thing that moves them between states.
 
 State-machine legality lives here as transition tables plus validators; the
-JobStore enforces them inside its atomic domain operations (claim / commit /
+task store enforces them inside its atomic domain operations (claim / commit /
 recover), never as ad-hoc field writes.
 """
 

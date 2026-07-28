@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """MemoryStore Protocol: persistence + search contract for MemoryRecord.
-Method signatures mirror the optimistic-concurrency shape of
-RunStore/SwarmStore. update/forget take
-expected_version because both backends advertise optimistic_concurrency=True.
+Method signatures mirror the optimistic-concurrency shape of the execution
+store and task store. update/forget take expected_version because both
+backends advertise optimistic_concurrency=True.
 
 ``search`` is tenant-scoped: it takes a required :class:`MemoryScope` and no
 ``scope=None`` global-search path exists. ``category`` is retained as an
@@ -15,13 +15,13 @@ from ..storage.features import ComponentCapabilities
 from .models import MemoryMatch, MemoryRecord
 from .scope import MemoryScope
 
-_UNSET = (
+UNSET = (
     object()
 )  # sentinel: passing category=None CLEARS the field; omitting leaves unchanged.
 
 
 @runtime_checkable
-class MemoryStore(Protocol):
+class MemoryPort(Protocol):
     @property
     def capabilities(self) -> ComponentCapabilities: ...
 
@@ -43,10 +43,18 @@ class MemoryStore(Protocol):
         memory_id: str,
         *,
         expected_version: int,
-        content: object = _UNSET,
-        category: object = _UNSET,
-        confidence: object = _UNSET,
-        metadata: object = _UNSET,
+        content: object = UNSET,
+        category: object = UNSET,
+        confidence: object = UNSET,
+        metadata: object = UNSET,
     ) -> MemoryRecord: ...
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None: ...
+
+
+class MemoryStore:
+    def __init__(self, backend: MemoryPort) -> None:
+        self.backend = backend
+
+    def __getattr__(self, name: str):
+        return getattr(self.backend, name)

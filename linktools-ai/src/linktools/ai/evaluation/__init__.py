@@ -18,7 +18,6 @@ from .protocols import EvalExecutor, Evaluator
 from .replay import SnapshotValidationError, replay, validate_snapshot
 from .runner import EvalRunner
 from .snapshot import RunSnapshot
-from .store import EvalStore, InMemoryEvalStore
 from .targets import MappingTargetResolver
 
 __all__: "list[str]" = [
@@ -34,8 +33,6 @@ __all__: "list[str]" = [
     "EvalExecutor",
     "Evaluator",
     "EvalRunner",
-    "EvalStore",
-    "InMemoryEvalStore",
     "DirectEvalExecutor",
     "TaskEvalExecutor",
     "MappingTargetResolver",

@@ -17,7 +17,6 @@ from pydantic_ai.messages import ModelMessage
 
 from ..model.resolver import ResolvedModel
 from ..run.models import RunErrorInfo, RunResult
-from ..session.models import NewSessionMessage
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
 
@@ -48,7 +47,7 @@ class CompiledAgent:
     spec: AgentSpec
     pydantic_agent: PydanticAgent
     model_bundle: ResolvedModel
-    policy_capability: PolicyCapability
+    policy_capability: "PolicyCapability | None"
     middleware_capability: "MiddlewareCapability | None" = None
 
 
@@ -63,7 +62,7 @@ class AgentInput:
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
     # Session history RunCoordinator already loaded (via SessionReader) and
     # converted to pydantic-ai's message shape -- AgentEngine folds it into
-    # the model prompt but never reads SessionStore itself. Empty (default)
+    # the model prompt but never reads persistence itself. Empty (default)
     # means a new run with no prior turns.
     message_history: "tuple[ModelMessage, ...]" = ()
     # True when this execution resumes a paused run from a checkpoint: the
@@ -88,7 +87,7 @@ class RunUsage:
 class PauseRequest:
     """Everything RunCoordinator needs to persist an ApprovalRequest and
     checkpoint on a PAUSED outcome, without AgentEngine touching
-    ApprovalStore/CheckpointStore itself. Mirrors the fields
+    persistence itself. Mirrors the fields
     ``errors.RunPaused`` already carries (see errors.py) -- this is the
     typed, Store-free equivalent surfaced on ``AgentExecutionOutcome``
     instead of the exception, once AgentEngine stops raising it as control
@@ -105,28 +104,27 @@ class PauseRequest:
 
 @dataclass(frozen=True, slots=True)
 class AgentCompleted:
-    """AgentEngine ran to a successful final output. ``checkpoint_payload`` is
-    the serialized full message history at completion -- RunCoordinator
-    persists it alongside the SUCCEEDED transition so a later resume/replay
-    has the same message state a paused run would have checkpointed."""
+    """AgentEngine ran to a successful final output. The serialized message
+    history at completion travels on ``snapshot`` (the trace collector's
+    resume snapshot), which RunCoordinator persists alongside the SUCCEEDED
+    transition so a later resume/replay has the same message state a paused
+    run would have checkpointed."""
 
     result: RunResult
-    messages: "tuple[NewSessionMessage, ...]"
-    checkpoint_payload: bytes
     usage: RunUsage
+    snapshot: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class AgentPaused:
     """AgentEngine suspended on a tool call awaiting approval. Carries
     everything RunCoordinator needs to persist the ApprovalRequest and
-    checkpoint without AgentEngine touching ApprovalStore/CheckpointStore
+    snapshot without AgentEngine touching persistence
     itself."""
 
     request: PauseRequest
-    messages: "tuple[NewSessionMessage, ...]"
-    checkpoint_payload: bytes
     usage: RunUsage
+    snapshot: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +138,7 @@ class AgentFailed:
     error: RunErrorInfo
     retryable: bool
     usage: RunUsage
+    snapshot: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +149,7 @@ class AgentCancelled:
 
     reason: "str | None"
     usage: RunUsage
+    snapshot: Any = None
 
 
 AgentExecutionOutcome: TypeAlias = (

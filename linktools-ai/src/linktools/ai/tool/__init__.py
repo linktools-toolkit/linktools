@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.tool: the tool domain's public model. GovernedToolInvoker
-+ idempotency records live in their submodules (``tool.executor``,
-``tool.idempotency``); the package re-exports only the descriptor / definition /
-policy types callers need."""
+"""Tool declarations and optional execution state."""
 
 from .models import ManagedToolDefinition, ToolDescriptor
 from .policy import (
@@ -11,6 +8,9 @@ from .policy import (
     ResolvedToolPolicy,
     ToolPolicyProvider,
 )
+from .state import ToolOperation, ToolOperationStatus
+from .persistence.local import LocalToolStateStore
+from .store import ToolPort, ToolStateStore
 
 __all__ = [
     "ToolDescriptor",
@@ -18,4 +18,9 @@ __all__ = [
     "ResolvedToolPolicy",
     "EffectiveToolPolicy",
     "ToolPolicyProvider",
+    "ToolOperation",
+    "ToolOperationStatus",
+    "ToolStateStore",
+    "ToolPort",
+    "LocalToolStateStore",
 ]

@@ -24,7 +24,7 @@ class _Executor:
     """Minimal GovernedToolInvoker stand-in: runs the handler, then the adapter's
     result_processor (mirrors the real GovernedToolInvoker.execute contract)."""
 
-    async def _is_approved_binding(self, run_id, call_id, *, binding):
+    async def is_approved_binding(self, run_id, call_id, *, binding):
         return False
 
     async def execute(self, request, context, handler, **kwargs):

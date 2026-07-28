@@ -9,14 +9,14 @@ requires the core to ship. It is correct within a single process: acquires are
 mutually exclusive per key, the fencing token is monotonic across
 (re)acquisitions, and an expired lease can be reclaimed. It is NOT correct
 across processes or hosts; a deployment that needs that must inject a
-distributed coordinator (Redis, etcd, a DB-backed lease table) implementing the
-same Protocol. The RuntimeBuilder capability-gates on
+distributed coordinator implementing the same Protocol. The runtime composition
+layer capability-gates on
 ``StorageFeatures.coordination`` so a multi-worker Job or multi-process Swarm
 configured against process-local coordination fails fast at build time rather
 than silently racing.
 
 Fencing monotonicity is the defining guarantee: the integer counter strictly
-increases on every grant, so a JobStore state commit that records the token it
+increases on every grant, so a fenced state commit that records the token it
 observed can reject a stale write from a holder whose lease expired and was
 reclaimed -- even though the stale holder still believes it owns the lock.
 """

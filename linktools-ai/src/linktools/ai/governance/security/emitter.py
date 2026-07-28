@@ -70,9 +70,10 @@ class DefaultSecurityEventSanitizer:
             # return it as-is rather than synthesizing a placeholder.
             return result
         if size > self._MAX_PAYLOAD:
-            # Return a valid EventPayload dataclass (not a dict): FilesystemEventStore
-            # persists via dataclasses.asdict and reconstructs by class name, so a
-            # dict here would TypeError and break the security audit trail.
+            # Return a valid EventPayload dataclass (not a dict): the event
+            # persistence layer persists via dataclasses.asdict and reconstructs
+            # by class name, so a dict here would TypeError and break the
+            # security audit trail.
             from ...events.payloads import TruncatedSecurityEvent
 
             return TruncatedSecurityEvent(
@@ -136,7 +137,7 @@ class DefaultSecurityEventSanitizer:
         return value
 
 
-class EventStoreSecurityEventEmitter:
+class DurableSecurityEventEmitter:
     def __init__(
         self,
         event_store: Any,
@@ -199,7 +200,7 @@ class CollectingSecurityEventEmitter:
     under inspection as under a real run -- the degradation is observable, not
     silently swallowed or turned into a hard failure.
 
-    Nothing is written to an EventStore: inspection has no run_id and must not
+    Nothing is written to an event store: inspection has no run_id and must not
     produce audit side effects. The sanitizer still runs so any secret in an
     event field is redacted before the event is exposed via the warnings API."""
 

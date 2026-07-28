@@ -3,8 +3,7 @@
 """AgentEngine: the Store-free per-invocation model/tool loop (FS-29).
 
 The engine owns ONLY the prompt-build → model/tool drive → outcome path. It
-touches NO Run-lifecycle Store (no RunStore / SessionStore / EventStore /
-CheckpointStore / ApprovalStore), no commit_coordinator, no run_controller --
+ touches no run-lifecycle persistence and no coordinator or controller --
 RunRecord create/transition, checkpoint/session/approval persistence, pause/
 cancel/stream events, and the cross-store commit are RunCoordinator's sole
 job (see run/coordinator.py). The single public entry point is
@@ -33,7 +32,7 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
   sink (text / tool / model_progress); state events (paused / completed /
   failed / cancelled) are the RunCoordinator's job, published only AFTER the
   durable commit succeeds. Security+observability events route through the
-  injected ``security_events`` sink (no direct EventStore reference).
+  injected ``security_events`` sink.
 
 Optional Observability: when ``observability`` is wired, execute_pure wraps the
 loop in an outer ``agent.run`` span and the iter() drive in a nested
@@ -71,8 +70,10 @@ from ..run.models import (
     RunErrorInfo,
     RunResult,
 )
-from ..session.recorder import SessionRecorder
-from .checkpoint import serialize_messages
+from ..execution.store import RunTraceOps
+from ..execution.trace import SemanticTraceCollector
+from ..execution.models import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
+from ..model.recording import SemanticRecordingModel
 from .dependencies import AgentDependencies
 from .models import (
     AgentCancelled,
@@ -102,6 +103,14 @@ if TYPE_CHECKING:
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _semantic_messages(messages: Any) -> tuple[Any, ...]:
+    values = []
+    for message in messages or ():
+        dump = getattr(message, "model_dump", None)
+        values.append(dump(mode="json") if dump is not None else message)
+    return tuple(values)
 
 # Exception types that count as EXPECTED provider/model/tool failures for the
 # pure execution loop's outcome classification. Only these are turned into an
@@ -149,6 +158,7 @@ class AgentEngine:
         managed_tool_executor: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
         pricing_provider: Any = None,
+        trace_store: "RunTraceOps | None" = None,
     ) -> None:
         self._middleware_pipeline = middleware_pipeline
         self._memory_store = memory_store
@@ -164,7 +174,7 @@ class AgentEngine:
         self._tool_executor_for_managed = managed_tool_executor
         self._security_audit_failure_mode = security_audit_failure_mode
         self._pricing_provider = pricing_provider
-        self._session_recorder = SessionRecorder()
+        self._trace_store = trace_store
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -216,7 +226,7 @@ class AgentEngine:
     ) -> AgentExecutionOutcome:
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- RunCoordinator
-        owns RunRecord creation/transition, checkpoint/session persistence,
+        owns RunRecord creation/transition, checkpoint and session storage,
         and execution claim/heartbeat/fencing; this method only assembles
         the prompt, drives the model/tool loop, and returns a value
         (never a Store write).
@@ -224,7 +234,7 @@ class AgentEngine:
         Every security/observability event the capability and tool layers
         emit (tool-pipeline decisions, exposure/catalog/window markers) flows
         through the injected ``security_events`` sink via a
-        ``SecurityEventSinkEmitter`` -- this method holds no EventStore
+        ``SecurityEventSinkEmitter`` -- this method holds no durable store
         reference.
 
         Exception classification (no ``except Exception: return FAILED``
@@ -254,6 +264,40 @@ class AgentEngine:
         metrics = self._metrics
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
         started = time.monotonic()
+
+        trace_collector = (
+            SemanticTraceCollector(context.run_id, self._trace_store)
+            if self._trace_store is not None
+            else None
+        )
+
+        current_run = None
+
+        def resume_messages() -> tuple[Any, ...]:
+            current = current_run
+            if current is None:
+                return ()
+            try:
+                return _semantic_messages(current.all_messages())
+            except Exception:
+                return ()
+
+        async def _snapshot(
+            status: ExecutionRunStatus,
+            *,
+            messages: tuple[Any, ...],
+            final_output: Any = None,
+            usage: "ExecutionRunUsage | None" = None,
+        ) -> Any:
+            if trace_collector is None:
+                return None
+            return await trace_collector.build_snapshot(
+                resume_messages=messages,
+                final_output=final_output,
+                status=status,
+                usage=usage or ExecutionRunUsage(),
+                revision=0,
+            )
 
         try:
             async with self._span("agent.run", attrs=run_attrs):
@@ -364,9 +408,9 @@ class AgentEngine:
 
                     # The security/observability emitter for this Run is built
                     # from the injected SecurityEventSink (durable, RunCoordinator-
-                    # owned) -- NOT from a held EventStore. Capabilities/tools/
+                    # owned) -- NOT from a held durable store. Capabilities/tools/
                     # governance depend only on this emitter (SecurityEventEmitter
-                    # shape), with no direct EventStore reference.
+                    # shape), with no direct persistence reference.
                     security_emitter = SecurityEventSinkEmitter(security_events)
 
                     cap_ctx = CapabilityContext(
@@ -394,12 +438,12 @@ class AgentEngine:
                     cap_bundle = await self._capability_resolver.resolve(
                         effective_spec, cap_ctx
                     )
-                    from ..capability.resolver import _contribution_descriptors
+                    from ..capability.resolver import contribution_descriptors
 
                     descriptor_lookup = {
                         d.name: d
                         for contrib in cap_bundle.tool_contributions
-                        for d in _contribution_descriptors(contrib)
+                        for d in contribution_descriptors(contrib)
                     }
                     if descriptor_lookup:
                         deps = dataclasses.replace(
@@ -472,6 +516,11 @@ class AgentEngine:
                         run_id=context.run_id,
                         agent_id=agent.spec.id,
                     )
+                if trace_collector is not None:
+                    iter_model = SemanticRecordingModel(
+                        iter_model or agent.pydantic_agent.model,
+                        trace_collector,
+                    )
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
                         message_history=message_history,
@@ -492,6 +541,7 @@ class AgentEngine:
                 try:
                     async with self._span("agent.model"):
                         async with run_iter as run:
+                            current_run = run
                             try:
                                 while True:
                                     try:
@@ -594,6 +644,14 @@ class AgentEngine:
                                                                 ev.part, ToolReturnPart
                                                             ),
                                                         }
+                                                        if trace_collector is not None:
+                                                            await trace_collector.tool_result(
+                                                                {
+                                                                    "call_id": getattr(ev.part, "tool_call_id", None),
+                                                                    "tool_name": ev.part.tool_name,
+                                                                    "result": getattr(ev.part, "content", None),
+                                                                }
+                                                            )
                                                     if tool_event is not None:
                                                         await live_events.publish(
                                                             tool_event
@@ -602,9 +660,12 @@ class AgentEngine:
                                         except BaseException:
                                             raise
                             except RunPaused as paused:
-                                checkpoint_payload = serialize_messages(
-                                    run.all_messages()
-                                )
+                                snapshot = None
+                                if trace_collector is not None:
+                                    snapshot = await _snapshot(
+                                        ExecutionRunStatus.PAUSED,
+                                        messages=_semantic_messages(run.all_messages()),
+                                    )
                                 # The engine does NOT publish a "paused" state
                                 # event: per the state-event split, state events
                                 # (paused/completed/failed/cancelled) are the
@@ -624,11 +685,8 @@ class AgentEngine:
                                         idempotency_key=paused.idempotency_key,
                                         binding=paused.binding,
                                     ),
-                                    messages=self._session_recorder.paused_messages(
-                                        run_id=context.run_id
-                                    ),
-                                    checkpoint_payload=checkpoint_payload,
                                     usage=RunUsage(),
+                                    snapshot=snapshot,
                                 )
                             else:
                                 if not timed_out:
@@ -698,10 +756,6 @@ class AgentEngine:
                             kind="budget",
                         )
 
-                messages_to_append = self._session_recorder.completed_messages(
-                    user_prompt=input.prompt, output=output, run_id=context.run_id
-                )
-                checkpoint_payload = serialize_messages(run.all_messages())
                 run_result = RunResult(
                     output=output,
                     token_usage={
@@ -709,6 +763,18 @@ class AgentEngine:
                         "output_tokens": usage.output_tokens if usage else 0,
                     },
                 )
+                snapshot = None
+                if trace_collector is not None:
+                    snapshot = await _snapshot(
+                        ExecutionRunStatus.COMPLETED,
+                        messages=_semantic_messages(run.all_messages()),
+                        final_output=output,
+                        usage=ExecutionRunUsage(
+                            input_tokens=usage.input_tokens if usage else 0,
+                            output_tokens=usage.output_tokens if usage else 0,
+                            total_tokens=(usage.input_tokens + usage.output_tokens) if usage else 0,
+                        ),
+                    )
 
                 if self._middleware_pipeline is not None:
                     await cancellation.raise_if_cancelled()
@@ -729,16 +795,21 @@ class AgentEngine:
 
                 return AgentCompleted(
                     result=run_result,
-                    messages=messages_to_append,
-                    checkpoint_payload=checkpoint_payload,
                     usage=RunUsage(
                         input_tokens=usage.input_tokens if usage else 0,
                         output_tokens=usage.output_tokens if usage else 0,
                     ),
+                    snapshot=snapshot,
                 )
         except asyncio.CancelledError:
             if cancellation.is_cancelled():
-                return AgentCancelled(reason=None, usage=RunUsage())
+                snapshot = None
+                if trace_collector is not None:
+                    snapshot = await _snapshot(
+                        ExecutionRunStatus.CANCELLED,
+                        messages=resume_messages(),
+                    )
+                return AgentCancelled(reason=None, usage=RunUsage(), snapshot=snapshot)
             raise
         except _EXPECTED_RUN_FAILURES as exc:
             # A malformed tool schema is a contract/config violation, not a
@@ -760,8 +831,15 @@ class AgentEngine:
                     _LOGGER.exception(
                         "failure metrics failed for run %s", context.run_id
                     )
+            snapshot = None
+            if trace_collector is not None:
+                snapshot = await _snapshot(
+                    ExecutionRunStatus.FAILED,
+                    messages=resume_messages(),
+                )
             return AgentFailed(
                 error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),
                 retryable=False,
                 usage=RunUsage(),
+                snapshot=snapshot,
             )
