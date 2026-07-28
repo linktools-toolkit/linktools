@@ -95,6 +95,14 @@ class OverlayObjectStore:
             return self._overlays
         return (self._primary,) + self._overlays
 
+    @property
+    def primary(self) -> "ObjectWriterBackend | None":
+        """The writable primary backend, or None for an overlay-only store.
+        Public API — callers that need backend-specific methods (raw_list with
+        include_tombstones, raw_purge, etc.) use this instead of reaching into
+        ``_primary``."""
+        return self._primary
+
     # --- read ----------------------------------------------------------------
 
     async def _lookup(self, key: StorageKey, *, include_content: bool = True):
@@ -396,6 +404,14 @@ class OverlayObjectStore:
         self._require_primary()
         _require_persistable_key(key)
         await self._primary.raw_purge(key)
+
+    async def purge_prefix(self, prefix: StorageKey) -> int:
+        """Batch-purge every primary row under ``prefix`` in one query.
+        Returns the number of rows deleted. Use this instead of list + per-key
+        purge to avoid N+1 round trips (e.g., restoring all factory defaults
+        for an entire capability kind at once)."""
+        self._require_primary()
+        return await self._primary.raw_purge_prefix(prefix)
 
 
 class RevisionedOverlayObjectStore(OverlayObjectStore):

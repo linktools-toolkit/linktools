@@ -55,8 +55,17 @@ _ARTIFACT_VALUES = {
 
 
 class _FakeResult:
-    def __init__(self, rowcount: int) -> None:
+    """Fake execute() result. When ``rowcount=1``, simulates a landed INSERT:
+    SQLite/PG dialects call ``.first()`` (RETURNING), MySQL reads
+    ``.lastrowid`` (driver-set auto-increment). Both return the fake row_id."""
+
+    def __init__(self, rowcount: int, *, row_id: int = 42) -> None:
         self.rowcount = rowcount
+        self.lastrowid = row_id if rowcount > 0 else 0
+        self._row_id = row_id
+
+    def first(self):
+        return (self._row_id,) if self.rowcount > 0 else None
 
 
 class _FakeSession:
@@ -98,6 +107,7 @@ class TestMySQLDialect:
         )
 
         assert result.inserted is True
+        assert result.row_id == 42  # lastrowid populated
         compiled = str(session.executed_stmt.compile(dialect=mysql.dialect()))
         assert "ON DUPLICATE KEY UPDATE" in compiled
 
@@ -111,6 +121,7 @@ class TestMySQLDialect:
         )
 
         assert result.inserted is False
+        assert result.row_id is None
 
     @pytest.mark.asyncio
     async def test_insert_ignore_conflict_landed_on_artifact_record_row(self):
@@ -172,6 +183,7 @@ class TestPostgreSQLDialect:
         )
 
         assert result.inserted is True
+        assert result.row_id == 42  # RETURNING populated
         compiled = str(session.executed_stmt.compile(dialect=postgresql.dialect()))
         assert "ON CONFLICT" in compiled
         assert "DO NOTHING" in compiled
@@ -186,6 +198,7 @@ class TestPostgreSQLDialect:
         )
 
         assert result.inserted is False
+        assert result.row_id is None
 
     @pytest.mark.asyncio
     async def test_insert_ignore_conflict_landed_on_artifact_record_row(self):

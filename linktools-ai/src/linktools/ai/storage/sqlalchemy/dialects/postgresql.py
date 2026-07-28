@@ -44,9 +44,14 @@ class PostgreSQLDialect:
             insert(model)
             .values(**values)
             .on_conflict_do_nothing(index_elements=list(index_elements))
+            .returning(model.id)
         )
         result = await session.execute(stmt)
-        return InsertResult(inserted=result.rowcount == 1)
+        row = result.first()
+        return InsertResult(
+            inserted=row is not None,
+            row_id=row[0] if row is not None else None,
+        )
 
     def classify_integrity_error(
         self, error: BaseException

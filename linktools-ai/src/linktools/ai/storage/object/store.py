@@ -277,6 +277,13 @@ class ObjectStore:
         _require_persistable_key(key)
         await self._primary.raw_purge(key)
 
+    async def purge_prefix(self, prefix: StorageKey) -> int:
+        """Physically delete every current-state row under ``prefix`` in one
+        query. Returns the number of rows deleted. The batch equivalent of
+        :meth:`purge` — use this instead of listing + per-key purge to avoid
+        N+1 round trips."""
+        return await self._primary.raw_purge_prefix(prefix)
+
     # --- transaction ---------------------------------------------------------
 
     @asynccontextmanager

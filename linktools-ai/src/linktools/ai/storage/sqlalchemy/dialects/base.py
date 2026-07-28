@@ -40,9 +40,14 @@ if TYPE_CHECKING:
 class InsertResult:
     """Outcome of an ``insert_ignore_conflict`` attempt. ``inserted`` is True
     when a fresh row was committed; False when a row already existed with the
-    same unique-column values (so the caller reconciles against that row)."""
+    same unique-column values (so the caller reconciles against that row).
+    ``row_id`` carries the auto-generated primary key when the dialect's
+    RETURNING clause supplied it (SQLite/PostgreSQL); None when the dialect
+    has no RETURNING support (MySQL) — the caller then does a fallback SELECT
+    if it needs the id."""
 
     inserted: bool
+    row_id: "int | None" = None
 
 
 class IntegrityViolationKind(str, Enum):

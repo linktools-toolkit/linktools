@@ -33,6 +33,7 @@ from typing import AsyncIterator
 from sqlalchemy import delete, distinct, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from ...object.errors import (
     StorageHashCollisionError,
@@ -232,6 +233,7 @@ class SqlAlchemyObjectBackend:
             async with self._read_session() as session:
                 result = await session.execute(
                     select(StorageObjectRow)
+                    .options(defer(StorageObjectRow.content))
                     .where(*conditions)
                     .order_by(StorageObjectRow.key)
                     .limit(_LIST_BATCH)
@@ -311,6 +313,7 @@ class SqlAlchemyObjectBackend:
         metadata_json: str,
         tombstone: bool,
         commit_revision: int,
+        row_id: "int | None" = None,
     ) -> ObjectInfo:
         """Append one history row and return the ObjectInfo for this write,
         built directly from the values just written -- NOT from a re-SELECT.
@@ -353,6 +356,8 @@ class SqlAlchemyObjectBackend:
             size=size,
             modified_at=modified_at,
             metadata=json.loads(metadata_json),
+            tombstoned=tombstone,
+            row_id=row_id,
         )
 
     # --- idempotency ---------------------------------------------------------
@@ -432,6 +437,7 @@ class SqlAlchemyObjectBackend:
                 size=row.size, modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
                 tombstoned=row.tombstone,
+                row_id=row.id,
             ),
             content=row.content or b"",
         )
@@ -508,6 +514,9 @@ class SqlAlchemyObjectBackend:
             )
             if not insert_outcome.inserted:
                 return None  # retry-able: a concurrent writer just inserted
+            # row_id comes from RETURNING (SQLite/PG) — zero extra query.
+            # MySQL has no RETURNING: row_id is None, and the caller that
+            # needs it does a stat() (indexed, cheap).
             return await self._record_version(
                 session,
                 key=key,
@@ -520,6 +529,7 @@ class SqlAlchemyObjectBackend:
                 metadata_json=metadata_json,
                 tombstone=False,
                 commit_revision=commit_revision,
+                row_id=insert_outcome.row_id,
             )
         if if_none_match and not row.tombstone:
             raise StoragePreconditionFailedError(f"if_none_match failed: {key.value!r} already exists")
@@ -579,6 +589,7 @@ class SqlAlchemyObjectBackend:
             metadata_json=metadata_json,
             tombstone=False,
             commit_revision=commit_revision,
+            row_id=row.id,
         )
 
     async def _put_with_retry(
@@ -692,6 +703,7 @@ class SqlAlchemyObjectBackend:
             metadata_json="{}",
             tombstone=True,
             commit_revision=commit_revision,
+            row_id=row.id,
         )
         return True
 
@@ -741,6 +753,25 @@ class SqlAlchemyObjectBackend:
                 )
             )
 
+    async def raw_purge_prefix(self, prefix: StorageKey) -> int:
+        """Physically delete every current-state row under ``prefix`` in one
+        query — the batch equivalent of calling :meth:`raw_purge` per key.
+        Returns the number of rows deleted. Like ``raw_purge``: no tombstones,
+        no version-history changes — overlay defaults under this prefix become
+        visible again (the "restore factory defaults" path for a whole
+        capability kind at once, not one file at a time)."""
+        prefix_str = prefix.value.rstrip("/") + "/"
+        escaped = prefix_str.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        candidate_clause = or_(
+            StorageObjectRow.key == prefix.value,
+            StorageObjectRow.key.like(f"{escaped}%", escape="\\"),
+        )
+        async with self._write_session() as session:
+            result = await session.execute(
+                delete(StorageObjectRow).where(candidate_clause)
+            )
+            return result.rowcount
+
     # --- MOVE (one transaction) ---------------------------------------------
 
     async def raw_move_checked(
@@ -779,6 +810,7 @@ class SqlAlchemyObjectBackend:
             # and touching an expired ORM attribute outside an awaited
             # context raises MissingGreenlet under aiosqlite.
             source_expected_version = source_row.version
+            source_row_id = source_row.id
 
             target_row = await self._get_row(session, target)
             if options.if_none_match and target_row is not None and not target_row.tombstone:
@@ -814,8 +846,10 @@ class SqlAlchemyObjectBackend:
                         f"move target changed concurrently: {target.value!r}"
                     )
                 new_target_version = 1
+                target_row_id = insert_outcome.row_id
             else:
                 new_target_version = target_row.version + 1
+                target_row_id = target_row.id
                 stmt = (
                     update(StorageObjectRow)
                     .where(
@@ -853,6 +887,7 @@ class SqlAlchemyObjectBackend:
                 metadata_json=target_metadata_json,
                 tombstone=False,
                 commit_revision=commit_revision,
+                row_id=target_row_id,
             )
 
             source_new_version = source_expected_version + 1
@@ -887,6 +922,7 @@ class SqlAlchemyObjectBackend:
                 metadata_json="{}",
                 tombstone=True,
                 commit_revision=commit_revision,
+                row_id=source_row_id,
             )
 
             if idem_key is not None:
@@ -921,6 +957,7 @@ class SqlAlchemyObjectBackend:
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
                 tombstoned=row.tombstone,
+                row_id=row.id,
             ),
             content=row.content or b"",
         )
@@ -954,6 +991,7 @@ class SqlAlchemyObjectBackend:
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
                 tombstoned=row.tombstone,
+                row_id=row.id,
             ),
             content=row.content or b"",
         )
@@ -984,6 +1022,7 @@ class SqlAlchemyObjectBackend:
                 modified_at=row.modified_at,
                 metadata=json.loads(row.metadata_json),
                 tombstoned=row.tombstone,
+                row_id=row.id,
             )
             for row in page_rows
         )
@@ -1018,6 +1057,8 @@ class SqlAlchemyObjectBackend:
                     size=row.size,
                     modified_at=row.modified_at,
                     metadata=json.loads(row.metadata_json),
+                    tombstoned=row.tombstone,
+                    row_id=row.id,
                 )
             )
         out.sort(key=lambda i: i.key.value)

@@ -53,7 +53,15 @@ class MySQLDialect:
             **{no_op_column: getattr(stmt.inserted, no_op_column)}
         )
         result = await session.execute(stmt)
-        return InsertResult(inserted=result.rowcount == 1)
+        if result.rowcount == 1:
+            # rowcount==1 means a fresh INSERT landed. The MySQL driver sets
+            # cursor.lastrowid to the new auto-increment PK — this is
+            # connection-local state set by the INSERT itself, zero extra
+            # queries. (rowcount==2 would mean an existing row was updated;
+            # rowcount==0 is impossible with ON DUPLICATE KEY UPDATE.)
+            lastrowid = getattr(result, "lastrowid", None)
+            return InsertResult(inserted=True, row_id=lastrowid or None)
+        return InsertResult(inserted=False)
 
     def classify_integrity_error(
         self, error: BaseException
