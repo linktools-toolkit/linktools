@@ -11,8 +11,8 @@ from .domain import RunnableType
 @dataclass(frozen=True, slots=True)
 class RunContext:
     run_id: str
-    root_run_id: str
-    parent_run_id: "str | None"
+    root_execution_id: str
+    parent_execution_id: "str | None"
     session_id: str
     runnable_id: str
     runnable_type: RunnableType

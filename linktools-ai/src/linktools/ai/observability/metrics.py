@@ -27,9 +27,9 @@ HARDENING_METRICS = (
     "context_injection_flagged_total",
     # Observability floor. Each name is a category the runtime counts. Names stay
     # flat (no labels); attributes carry the bounded low-cardinality dimensions
-    # (which capability fell short, which codec phase failed, etc.).
+    # (which feature fell short, which codec phase failed, etc.).
     "runtime_build_failure_total",
-    "storage_capability_validation_failure_total",
+    "storage_feature_validation_failure_total",
     "event_codec_failure_total",
     "critical_event_persist_failure_total",
     "artifact_digest_mismatch_total",

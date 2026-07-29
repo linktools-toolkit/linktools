@@ -12,7 +12,7 @@ from typing import Any, Mapping, TypeAlias
 
 from ...execution.domain import RunErrorInfo
 from ...agent.models import RunResult
-from ...execution.session import NewSessionMessage
+from ...json import JsonValue
 
 
 class SwarmStatus(str, Enum):
@@ -227,7 +227,7 @@ class SwarmCompleted:
     the cross-worker aggregate."""
 
     result: RunResult
-    aggregate_messages: "tuple[NewSessionMessage, ...]"
+    aggregate_messages: "tuple[JsonValue, ...]"
     usage: SwarmUsage
 
 

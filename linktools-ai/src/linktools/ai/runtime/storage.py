@@ -1,4 +1,4 @@
-"""Runtime storage composition with lazy optional capabilities."""
+"""Runtime storage composition with lazy optional stores."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ..artifact.store import ArtifactStore
     from ..agent.memory.store import MemoryStore
     from ..tasks.store import TaskStore
-    from ..tool.store import ToolStateStore
+    from ..agent.tool.state.store import ToolStateStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ class LocalDirectoryStorage(RuntimeStorage):
     def __init__(self, root: str | Path = ".linktools", *, tools=None, tasks=None, memory=None, artifacts=None) -> None:
         object.__setattr__(self, "root", Path(root))
         super().__init__(
-            execution=ExecutionStore(LocalExecutionBackend(root)),
+            execution=LocalExecutionBackend(root),
             tools=tools,
             tasks=tasks,
             memory=memory,

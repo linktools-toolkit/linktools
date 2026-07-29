@@ -3,7 +3,7 @@
 import hashlib
 from typing import Any
 
-from ..json import canonical_json
+from ..json import canonical_json_bytes
 from ..errors import ManifestDriftError
 
 
@@ -15,7 +15,7 @@ class OutputSchemaRegistry:
         if not schema_id or not revision:
             raise ValueError("schema_id and revision are required")
         schema = model.model_json_schema() if hasattr(model, "model_json_schema") else {}
-        fingerprint = hashlib.sha256(canonical_json(schema).encode()).hexdigest()
+        fingerprint = hashlib.sha256(canonical_json_bytes(schema)).hexdigest()
         key = (schema_id, revision)
         current = self._entries.get(key)
         if current is not None and current[1] != fingerprint:

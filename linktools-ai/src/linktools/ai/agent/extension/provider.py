@@ -1,190 +1,166 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DirectoryExtensionContentSource: the default file-backed
-ExtensionContentSource. Reads assets from a per-extension root directory with
-the safety guarantees: path sandbox (no ``..`` escape), pagination,
-and a max_bytes read clamp."""
+"""ExtensionProvider: the AgentFeatureProvider for ``extension`` / ``extension-asset``
+/ ``extension-entrypoint`` tool refs.
 
-from pathlib import Path
-from typing import Mapping
+- ``extension:<id>``            -> prompt catalog only (Level 0), no tools.
+- ``extension-asset:<id>``   -> Level-1 list/read asset tools for that extension.
+- ``extension-entrypoint:<id>`` -> Level-1 list-entrypoints tool (+ opt-in call).
 
-from ...errors import (
-    ExtensionNotFoundError,
-    ExtensionContentAccessDeniedError,
-    ExtensionContentNotFoundError,
-)
+An extension NEVER auto-exposes all its assets/entrypoints as tools: only the
+explicitly declared extension ids become reachable, and only the read/list tools
+are added by default."""
+
+from dataclasses import dataclass
+from typing import ClassVar
+
+
+from ..assembly.models import AgentContribution, AgentFeatureRef
+from ..assembly.provider import AgentFeatureContext
 from .spec import ExtensionContentSource
-from .content import (
-    ExtensionContent,
-    ExtensionContentInfo,
-    ExtensionContentPage,
-    ExtensionContentRef,
-    sanitize_extension_path,
+from ...execution.identity import ParentRunIdentity
+from ...governance.policy.rule import RiskLevel, SideEffectKind
+from ..tool.models import (
+    ToolCategory,
+    ToolDescriptor,
+    ToolSource,
+    declared_tool_definitions,
 )
+from ..subagent.runner import SubagentExecutorProtocol
+from .resolver import EntrypointResolver
 from .scope import ExtensionScope
-
-DEFAULT_MAX_READ_BYTES = 65536
-DEFAULT_LIST_LIMIT = 50
+from .toolset import build_extension_entrypoint_toolset, build_extension_resource_toolset
 
 
-class DirectoryExtensionContentSource:
-    """ExtensionContentSource over a ``extension_id -> root Path`` mapping.
+@dataclass
+class ExtensionProvider:
+    """AgentFeatureProvider for extension-scoped features. Depends only on the
+    ExtensionContentSource / EntrypointResolver Protocols (the Directory
+    implementations are one possible Provider, not a type boundary). The
+    entrypoint executor is injected at construction so call_extension_entrypoint
+    can run scoped agents without runtime mutation."""
 
-    ``from_base(base_dir)`` builds a provider whose roots are discovered lazily
-    as ``<base_dir>/<extension_id>``; ``(roots=...)`` takes an explicit mapping
-    for deployments where extension ids do not map 1:1 to directory names."""
+    kind: str = "extension"
+    # Declares every kind this one provider handles, so the runtime registers
+    # it once under all three instead of alias-registering three copies.
+    supported_kinds: "ClassVar[tuple[str, ...]]" = (
+        "extension",
+        "extension-asset",
+        "extension-entrypoint",
+    )
+    content_source: "ExtensionContentSource | None" = None
+    entrypoint_resolver: "EntrypointResolver | None" = None
+    entrypoint_executor: "SubagentExecutorProtocol | None" = None
 
-    def __init__(
+    async def resolve(
         self,
-        roots: "Mapping[str, Path | str]",
-        *,
-        allow_extensions: "tuple[str, ...] | None" = None,
-        deny_extensions: "tuple[str, ...]" = (),
-    ) -> None:
-        self._roots: "dict[str, Path]" = {pid: Path(p) for pid, p in roots.items()}
-        # Extension allow/deny lists, normalized lowercase with
-        # a leading dot. When set, read_content refuses disallowed extensions.
-        self._allow_ext = (
-            tuple(e.lower() for e in allow_extensions) if allow_extensions else None
-        )
-        self._deny_ext = tuple(e.lower() for e in deny_extensions)
-
-    @staticmethod
-    def _ext_ok(
-        path: str, allow: "tuple[str, ...] | None", deny: "tuple[str, ...]"
-    ) -> bool:
-        ext = (
-            "." + path.rsplit(".", 1)[-1].lower()
-            if "." in path.rsplit("/", 1)[-1]
-            else ""
-        )
-        if deny and ext in deny:
-            return False
-        if allow is not None and ext not in allow:
-            return False
-        return True
-
-    @classmethod
-    def from_base(cls, base_dir: "Path | str") -> "DirectoryExtensionContentSource":
-        # Roots resolve lazily on demand; store a single base and look extensions
-        # up under it. Implemented by subclassing-style via a sentinel-free
-        # mapping populated on first access is avoided -- instead we treat the
-        # base dir as the roots provider by overriding _root_for.
-        return _BaseDirExtensionContentSource(Path(base_dir))
-
-    def _root_for(self, extension_id: str) -> "Path | None":
-        return self._roots.get(extension_id)
-
-    async def list_entries(
-        self,
-        scope: ExtensionScope,
-        path: str = "",
-        *,
-        limit: int = DEFAULT_LIST_LIMIT,
-        cursor: "str | None" = None,
-    ) -> ExtensionContentPage:
-        root = self._root_for(scope.extension_id)
-        if root is None:
-            raise ExtensionNotFoundError(f"extension not found: {scope.extension_id}")
-        rel = sanitize_extension_path(path)
-        target = root / rel if rel else root
-        if not target.exists() or not target.is_dir():
-            return ExtensionContentPage(items=[], next_cursor=None)
-
-        root_resolved = root.resolve()
-        # Defense-in-depth: rglob may follow symlinked directories (pre-3.13),
-        # yielding paths outside the extension root. Skip any entry that does not
-        # resolve under root rather than letting relative_to() raise (which would
-        # also leak the absolute outside-root path in the error message).
-        files: "list[str]" = []
-        for p in target.rglob("*"):
-            if not p.is_file():
-                continue
-            try:
-                if p.resolve().relative_to(root_resolved) is None:
-                    continue
-            except ValueError:
-                continue
-            files.append(p.relative_to(root).as_posix())
-        files.sort()
-        offset = int(cursor) if cursor else 0
-        page = files[offset : offset + max(1, limit)]
-        next_cursor = (
-            str(offset + len(page)) if offset + len(page) < len(files) else None
-        )
-        items = [
-            ExtensionContentInfo(path=p, kind="file", size_bytes=(root / p).stat().st_size)
-            for p in page
-        ]
-        return ExtensionContentPage(items=items, next_cursor=next_cursor)
-
-    async def read_content(
-        self,
-        ref: ExtensionContentRef,
-        *,
-        max_bytes: "int | None" = None,
-    ) -> ExtensionContent:
-        if ref.scope is None:
-            raise ExtensionContentAccessDeniedError("asset ref has no extension scope")
-        root = self._root_for(ref.scope.extension_id)
-        if root is None:
-            raise ExtensionNotFoundError(f"extension not found: {ref.scope.extension_id}")
-        rel = sanitize_extension_path(ref.path)
-        if not rel:
-            raise ExtensionContentAccessDeniedError("empty asset path")
-        if not self._ext_ok(rel, self._allow_ext, self._deny_ext):
-            raise ExtensionContentAccessDeniedError(
-                f"asset extension not allowed: {ref.path!r}"
+        ref: AgentFeatureRef,
+        context: AgentFeatureContext,
+    ) -> AgentContribution:
+        # ``extension:<id>`` (this provider's own kind) -> prompt catalog only.
+        if ref.kind == "extension":
+            return AgentContribution(
+                prompt_sections={
+                    "extensions": f"Extension declared: {ref.name}. Use extension-asset / "
+                    f"extension-entrypoint tools to inspect it when enabled.",
+                }
             )
-        target = (root / rel).resolve()
-        # Defense-in-depth: confirm the resolved target stays under root even
-        # though sanitize_extension_path already rejected ``..``.
-        try:
-            target.relative_to(root.resolve())
-        except ValueError:
-            raise ExtensionContentAccessDeniedError(
-                f"path escapes extension root: {ref.path!r}"
+
+        scope = ExtensionScope(extension_id=ref.name)
+        allowed: "dict[str, ExtensionScope]" = {ref.name: scope}
+        cfg = dict(ref.config)
+        emit = None
+
+        if ref.kind == "extension-asset":
+            if self.content_source is None:
+                return AgentContribution()
+            ts = build_extension_resource_toolset(
+                self.content_source,
+                allowed=allowed,
+                max_resources_per_list=cfg.get(
+                    "max_resources_per_list", 50
+                ),
+                max_read_bytes=cfg.get("max_read_bytes", 65536),
+                emit=emit,
             )
-        if not target.is_file():
-            raise ExtensionContentNotFoundError(f"asset not found: {ref.path!r}")
+            pkw = dict(
+                source=ToolSource.EXTENSION,
+                feature=ref,
+                category=ToolCategory.EXTENSION_READ,
+                risk=RiskLevel.LOW,
+                side_effect=SideEffectKind.READ_ONLY,
+            )
+            descriptors = (
+                ToolDescriptor(name="list_extension_content", **pkw),
+                ToolDescriptor(name="read_extension_content", **pkw),
+            )
+            return AgentContribution(
+                tools=declared_tool_definitions(ts, descriptors)
+            )
 
-        cap = max_bytes if max_bytes is not None else DEFAULT_MAX_READ_BYTES
-        true_size = target.stat().st_size
-        # Bound the read itself (read one byte past the cap to detect truncation)
-        # so a multi-GB asset cannot OOM the process regardless of max_bytes.
-        with target.open("rb") as fh:
-            data = fh.read(cap + 1)
-        truncated = len(data) > cap
-        payload: "bytes | str" = data[:cap] if truncated else data
-        return ExtensionContent(
-            path=rel,
-            content=payload,
-            content_type="application/octet-stream",
-            size_bytes=true_size,
-            metadata={"truncated": truncated} if truncated else {},
-        )
+        if ref.kind == "extension-entrypoint":
+            if self.entrypoint_resolver is None:
+                return AgentContribution()
+            allowed_kinds = tuple(
+                cfg.get("allowed_kinds", ("agent",))
+            )
+            allowed_names = cfg.get("allowed_names")
+            expose_call = (
+                bool(cfg.get("expose_call_tool", False))
+            )
+            # Same ParentRunIdentity shape every spawner builds -- root_execution_id
+            # comes from context.root_execution_id (the ACTUAL root of the chain),
+            # not context.run_id, so an extension entrypoint nested under an
+            # existing subagent chain doesn't truncate lineage to itself.
+            parent = None
+            if context.execution_id and context.session_id:
+                parent = ParentRunIdentity(
+                    run_id=context.execution_id,
+                    root_execution_id=context.root_execution_id,
+                    session_id=context.session_id,
+                    user_id=context.user_id,
+                    tenant_id=context.tenant_id,
+                    workspace=context.workspace,
+                )
+            ts = build_extension_entrypoint_toolset(
+                self.entrypoint_resolver,
+                allowed=allowed,
+                allowed_kinds=allowed_kinds,
+                allowed_names=tuple(allowed_names) if allowed_names else None,
+                expose_call_tool=expose_call,
+                max_entrypoints_per_list=cfg.get(
+                    "max_entrypoints_per_extension", 20
+                ),
+                emit=emit,
+                executor=self.entrypoint_executor,
+                parent=parent,
+            )
+            ekw = dict(
+                source=ToolSource.EXTENSION,
+                feature=ref,
+            )
+            descs = [
+                ToolDescriptor(
+                    name="list_extension_entrypoints",
+                    category=ToolCategory.DISCOVERY,
+                    risk=RiskLevel.LOW,
+                    side_effect=SideEffectKind.READ_ONLY,
+                    **ekw,
+                )
+            ]
+            if expose_call:
+                descs.append(
+                    ToolDescriptor(
+                        name="call_extension_entrypoint",
+                        category=ToolCategory.EXTENSION_EXECUTE,
+                        risk=RiskLevel.HIGH,
+                        side_effect=SideEffectKind.NAMESPACE_MUTATING,
+                        **ekw,
+                    )
+                )
+            return AgentContribution(
+                tools=declared_tool_definitions(ts, tuple(descs))
+            )
 
-
-class _BaseDirExtensionContentSource(DirectoryExtensionContentSource):
-    """Roots resolve as ``<base>/<extension_id>`` on demand."""
-
-    def __init__(self, base: Path) -> None:
-        self._base = base
-
-    def _root_for(self, extension_id: str) -> "Path | None":
-        candidate = (self._base / extension_id).resolve()
-        # Only admit directories that actually live under base.
-        try:
-            candidate.relative_to(self._base.resolve())
-        except ValueError:
-            return None
-        return candidate if candidate.is_dir() else None
-
-
-# Re-export the Protocol alongside the default implementation.
-__all__ = [
-    "ExtensionContentSource",
-    "DirectoryExtensionContentSource",
-    "DEFAULT_MAX_READ_BYTES",
-    "DEFAULT_LIST_LIMIT",
-]
+        # An unknown extension-* kind slipped through; nothing to expose.
+        return AgentContribution()

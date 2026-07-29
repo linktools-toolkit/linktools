@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.tool.sandbox import local as local_module
-from linktools.ai.tool.sandbox.local import LocalSandbox
-from linktools.ai.tool.sandbox.protocols import Sandbox, ExecutionIsolationLevel
+from linktools.ai.agent.tool.sandbox import local as local_module
+from linktools.ai.agent.tool.sandbox.local import LocalSandbox
+from linktools.ai.agent.tool.sandbox.protocols import Sandbox, ExecutionIsolationLevel
 
 
 @pytest.fixture()
@@ -137,22 +137,22 @@ def test_apply_patch_rejects_empty_diff(backend):
 def test_apply_patch_rejects_non_ab_prefix_targeting_forbidden_path(backend, tmp_path):
     # -reported bypass: a non-git first path component (here "zzz")
     # is not "a"/"b", so the old _strip_patch_prefix left it unstripped as
-    # "zzz/capabilities/x.txt", which does not start with the forbidden
-    # "capabilities/" prefix and so passed validation. But real `patch -p1`
+    # "zzz/features/x.txt", which does not start with the forbidden
+    # "features/" prefix and so passed validation. But real `patch -p1`
     # unconditionally strips the first component and writes to
-    # runtime_dir/capabilities/x.txt, bypassing the denylist entirely.
-    (tmp_path / "capabilities").mkdir()
-    (tmp_path / "capabilities" / "x.txt").write_text("orig\n")
+    # runtime_dir/features/x.txt, bypassing the denylist entirely.
+    (tmp_path / "features").mkdir()
+    (tmp_path / "features" / "x.txt").write_text("orig\n")
     diff = (
-        "--- zzz/capabilities/x.txt\n"
-        "+++ zzz/capabilities/x.txt\n"
+        "--- zzz/features/x.txt\n"
+        "+++ zzz/features/x.txt\n"
         "@@ -1 +1 @@\n"
         "-orig\n"
         "+pwned\n"
     )
     result = asyncio.run(backend.apply_patch(diff))
     assert "error" in result
-    assert (tmp_path / "capabilities" / "x.txt").read_text() == "orig\n"
+    assert (tmp_path / "features" / "x.txt").read_text() == "orig\n"
 
 
 def test_apply_patch_timeout(backend, tmp_path, monkeypatch):

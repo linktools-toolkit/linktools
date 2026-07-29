@@ -19,6 +19,7 @@ from linktools.ai.execution import service as execution_service
 from linktools.ai.execution.domain import RunStatus
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import LocalDirectoryStorage, build_runtime
+from linktools.ai.governance.identity import trusted_local_principal
 from tests.ai.fakes.model import make_hanging_router, make_raising_router
 
 
@@ -29,32 +30,34 @@ def _spec() -> AgentSpec:
 @pytest.mark.asyncio
 async def test_cancel_interrupts_a_hung_model_call(tmp_path):
     started = asyncio.Event()
-    runtime = build_runtime(storage=LocalDirectoryStorage(tmp_path), model_resolver=make_hanging_router(started))
+    storage = LocalDirectoryStorage(tmp_path)
+    runtime = build_runtime(storage=storage, model_resolver=make_hanging_router(started))
+    principal = trusted_local_principal(tenant_id="t1")
 
-    run_task = asyncio.ensure_future(runtime.run(_spec(), "hi", session_id="s", run_id="r1", tenant_id="t1"))
+    run_task = asyncio.ensure_future(runtime.run(_spec(), "hi", session_id="s", execution_id="r1", principal=principal))
     await asyncio.wait_for(started.wait(), timeout=5)
 
-    await runtime.cancel("r1", tenant_id="t1")
+    await runtime.cancel("r1", principal=principal)
 
     # Before the RunController wiring, cancel() only set a token nothing
     # inside the hung `await Event().wait()` was checking -- this would hang
     # forever. task.cancel() makes it resolve promptly.
-    result = await asyncio.wait_for(run_task, timeout=5)
-    assert result is None
+    assert await asyncio.wait_for(run_task, timeout=5) is None
 
-    record = await runtime.execution.store.get_run("r1")
+    record = await storage.execution.get_run("r1")
     assert record.status is RunStatus.CANCELLED
     await runtime.aclose()
 
 
 @pytest.mark.asyncio
 async def test_unexpected_model_error_aborts_the_run_with_persisted_error(tmp_path):
-    runtime = build_runtime(storage=LocalDirectoryStorage(tmp_path), model_resolver=make_raising_router(RuntimeError("boom")))
+    storage = LocalDirectoryStorage(tmp_path)
+    runtime = build_runtime(storage=storage, model_resolver=make_raising_router(RuntimeError("boom")))
 
     with pytest.raises(RuntimeError, match="boom"):
-        await runtime.run(_spec(), "hi", session_id="s", run_id="r1", tenant_id="t1")
+        await runtime.run(_spec(), "hi", session_id="s", execution_id="r1", principal=trusted_local_principal(tenant_id="t1"))
 
-    record = await runtime.execution.store.get_run("r1")
+    record = await storage.execution.get_run("r1")
     assert record.status is RunStatus.FAILED
     assert record.error.error_type == "RuntimeError"
     assert record.error.message == "boom"
@@ -69,20 +72,22 @@ async def test_heartbeat_renews_the_lease_of_a_long_running_execution(tmp_path, 
     # an abandoned one. Shrink the interval so the test doesn't wait minutes.
     monkeypatch.setattr(execution_service, "_HEARTBEAT_INTERVAL", timedelta(milliseconds=10))
     started = asyncio.Event()
-    runtime = build_runtime(storage=LocalDirectoryStorage(tmp_path), model_resolver=make_hanging_router(started))
+    storage = LocalDirectoryStorage(tmp_path)
+    runtime = build_runtime(storage=storage, model_resolver=make_hanging_router(started))
+    principal = trusted_local_principal(tenant_id="t1")
 
-    run_task = asyncio.ensure_future(runtime.run(_spec(), "hi", session_id="s", run_id="r1", tenant_id="t1"))
+    run_task = asyncio.ensure_future(runtime.run(_spec(), "hi", session_id="s", execution_id="r1", principal=principal))
     await asyncio.wait_for(started.wait(), timeout=5)
 
-    record = await runtime.execution.store.get_run("r1")
+    record = await storage.execution.get_run("r1")
     first_expiry = record.lease.expires_at
     for _ in range(50):
         await asyncio.sleep(0.01)
-        record = await runtime.execution.store.get_run("r1")
+        record = await storage.execution.get_run("r1")
         if record.lease.expires_at > first_expiry:
             break
     assert record.lease.expires_at > first_expiry
 
-    await runtime.cancel("r1", tenant_id="t1")
-    await asyncio.wait_for(run_task, timeout=5)
+    await runtime.cancel("r1", principal=principal)
+    assert await asyncio.wait_for(run_task, timeout=5) is None
     await runtime.aclose()

@@ -7,7 +7,7 @@ from linktools.ai.tasks.store import TaskStore
 
 @pytest.mark.asyncio
 async def test_task_store_uses_one_fenced_claim_path():
-    store = TaskStore(LocalTaskBackend())
+    store = LocalTaskBackend()
     await store.save_plan(TaskPlan("plan", ()))
     await store.add_execution(TaskExecution("execution", "plan", "node", "ready"))
     claimed = await store.claim("execution", owner="worker")

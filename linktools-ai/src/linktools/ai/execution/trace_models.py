@@ -51,15 +51,21 @@ class ModelInteractionTrace:
 
 @dataclass(frozen=True, slots=True)
 class ToolResultTrace:
-    call_id: str
-    interaction_sequence: int
+    tool_call_id: str
     tool_name: str
-    arguments: JsonValue
+    operation_id: str
+    status: Literal[
+        "completed",
+        "failed",
+        "denied",
+        "result_denied",
+        "indeterminate",
+    ]
     result: JsonValue | None
-    status: str
-    error: TraceError | None
+    error: JsonValue | None
+    replayed: bool
     started_at: datetime | None
-    completed_at: datetime | None
+    completed_at: datetime
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,7 @@ Flat records are read with a synthesized ``DEFAULT_TENANT_ID`` tenant and
 are visible ONLY to an explicit legacy scope -- a real tenant's search never
 touches the flat layout, so old data is never silently exposed (the migration
 quarantine). ``get``/``update``/``forget`` look up by memory_id across both
-layouts (the id is the capability); they are not the isolation boundary.
+layouts (the id is the lookup key); they are not the isolation boundary.
 
 Mirrors the atomic-write + path-traversal-guard patterns shared across the
 filesystem persistence backends (see ``storage/filesystem/__init__.py``). The
@@ -133,7 +133,7 @@ class FilesystemMemoryBackend:
         return self._root / f"{memory_id}.json"
 
     def _locate_sync(self, memory_id: str) -> "Path | None":
-        # get/update/forget key off memory_id alone (the id is the capability),
+        # get/update/forget key off memory_id alone (the id is the lookup key),
         # so the record may live in any tenant subdir or the flat legacy layout.
         # Search the flat legacy path first, then the one-level tenant subdirs.
         legacy = self._legacy_path(memory_id)

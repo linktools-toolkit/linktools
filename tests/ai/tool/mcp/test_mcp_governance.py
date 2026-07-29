@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCPProvider governance at resolve time (enabled/disabled/prefix/conflict/
+"""MCPToolProvider governance at resolve time (enabled/disabled/prefix/conflict/
 max_tools) via a fake connection manager that yields canned tool names."""
 
 import pytest
 
-from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.agent.capability.provider import CapabilityContext
-from linktools.ai.agent.capability.models import CapabilityRef
-from linktools.ai.errors import CapabilityConflictError
-from linktools.ai.tool.mcp.client import MCPConnectionRef
-from linktools.ai.tool.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
-from linktools.ai.tool.mcp.spec import MCPServerSpec
+from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+from linktools.ai.agent.assembly.provider import AgentFeatureContext
+from linktools.ai.agent.assembly.models import AgentFeatureRef
+from linktools.ai.errors import AgentFeatureConflictError
+from linktools.ai.agent.integrations.mcp.models import MCPConnectionRef
+from linktools.ai.agent.integrations.mcp.tool_provider import MCPDiscoveryResult, MCPToolProvider, MCPToolInfo
+from linktools.ai.agent.integrations.mcp.models import MCPRuntimePolicy
+from linktools.ai.agent.integrations.mcp.spec import MCPServerSpec
 
 
 class _FakeMgr:
@@ -40,8 +41,16 @@ def _spec(sid, **kw):
 
 
 def _ctx():
-    return CapabilityContext(
-        agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+    return AgentFeatureContext(
+        agent_id="a1",
+        execution_id="e1",
+        root_execution_id="e1",
+        parent_execution_id=None,
+        session_id="s1",
+        tenant_id="t1",
+        user_id="u1",
+        workspace=None,
+        sandbox=None,
     )
 
 
@@ -49,31 +58,31 @@ def _ctx():
 async def test_enabled_tools_filters():
     spec = _spec("risk", enabled_tools=("query_user",))
     mgr = _FakeMgr({"risk": ("query_user", "query_device", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
-    bundle = await p.resolve(CapabilityRef("mcp", "risk"), _ctx())
+    p = MCPToolProvider(_FakeSrc({"risk": spec}), mgr)
+    bundle = await p.resolve(AgentFeatureRef("mcp", "risk"), _ctx())
     # No conflict -> resolves; governance applied (query_user kept, others dropped).
-    assert len(bundle.tool_contributions) == 1
+    assert [tool.descriptor.name for tool in bundle.tools] == ["risk.query_user"]
 
 
 @pytest.mark.asyncio
 async def test_disabled_tools_filters():
     spec = _spec("risk", disabled_tools=("secret",))
     mgr = _FakeMgr({"risk": ("query_user", "secret")})
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
-    await p.resolve(CapabilityRef("mcp", "risk"), _ctx())  # no raise
+    p = MCPToolProvider(_FakeSrc({"risk": spec}), mgr)
+    await p.resolve(AgentFeatureRef("mcp", "risk"), _ctx())  # no raise
 
 
 @pytest.mark.asyncio
 async def test_max_tools_per_capability_enforced():
     spec = _spec("risk")
     mgr = _FakeMgr({"risk": tuple(f"t{i}" for i in range(20))})
-    ctx = CapabilityContext(
-        agent_id="a1",
-        exposure_policy=CapabilityToolExposurePolicy(max_tools_per_capability=5),
+    p = MCPToolProvider(
+        _FakeSrc({"risk": spec}),
+        mgr,
+        policy=MCPRuntimePolicy(max_tools_per_server=5),
     )
-    p = MCPProvider(_FakeSrc({"risk": spec}), mgr)
-    with pytest.raises(CapabilityConflictError, match="max_tools_per_capability"):
-        await p.resolve(CapabilityRef("mcp", "risk"), ctx)
+    with pytest.raises(AgentFeatureConflictError, match="max_tools_per_server"):
+        await p.resolve(AgentFeatureRef("mcp", "risk"), _ctx())
 
 
 @pytest.mark.asyncio
@@ -83,9 +92,13 @@ async def test_cross_server_conflict_detected():
     s1 = _spec("a", tool_prefix=False)
     s2 = _spec("b", tool_prefix=False)
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
-    with pytest.raises(CapabilityConflictError, match="exposed by both"):
-        await p.resolve(CapabilityRef("mcp", "*"), _ctx())
+    p = MCPToolProvider(
+        _FakeSrc({"a": s1, "b": s2}),
+        mgr,
+        policy=MCPRuntimePolicy(allow_wildcard=True),
+    )
+    with pytest.raises(AgentFeatureConflictError, match="exposed by both"):
+        await p.resolve(AgentFeatureRef("mcp", "*"), _ctx())
 
 
 @pytest.mark.asyncio
@@ -94,9 +107,13 @@ async def test_tool_prefix_default_avoids_conflict():
     s1 = _spec("a")
     s2 = _spec("b")
     mgr = _FakeMgr({"a": ("dup",), "b": ("dup",)})
-    p = MCPProvider(_FakeSrc({"a": s1, "b": s2}), mgr, allow_mcp_wildcard=True)
-    bundle = await p.resolve(CapabilityRef("mcp", "*"), _ctx())
-    assert len(bundle.tool_contributions) == 2
+    p = MCPToolProvider(
+        _FakeSrc({"a": s1, "b": s2}),
+        mgr,
+        policy=MCPRuntimePolicy(allow_wildcard=True),
+    )
+    bundle = await p.resolve(AgentFeatureRef("mcp", "*"), _ctx())
+    assert len(bundle.tools) == 2
 
 
 class _FakeSrc:

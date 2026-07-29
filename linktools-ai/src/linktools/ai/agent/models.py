@@ -18,19 +18,19 @@ from pydantic_ai.messages import ModelMessage
 from ..model.resolver import ResolvedModel
 from ..execution.domain import RunErrorInfo
 from ..json import JsonValue
-from ..tool.pydantic import PolicyCapability
+from .tool.adapters.pydantic_ai import ToolPolicyCapability
 from .spec import AgentSpec
 
 
 @runtime_checkable
-class ModelStreamCapability(Protocol):
+class ModelStreamSupport(Protocol):
     @property
     def supports_streaming(self) -> bool:
         ...
 
 
 def model_supports_streaming(model: object) -> bool:
-    # Explicit flag for custom model wrappers that declare their capability.
+    # Explicit flag for custom model wrappers that declare streaming support.
     if getattr(model, "supports_streaming", False) is True:
         return True
     # FunctionModel: stream only when a stream_function was provided.
@@ -48,7 +48,7 @@ class CompiledAgent:
     spec: AgentSpec
     pydantic_agent: PydanticAgent
     model_bundle: ResolvedModel
-    policy_capability: "PolicyCapability | None"
+    policy_capability: "ToolPolicyCapability | None"
     middleware_capability: "MiddlewareCapability | None" = None
 
 
@@ -71,6 +71,8 @@ class AgentInput:
     # prompt is already baked into ``message_history`` and must not be
     # re-fed alongside it.
     resuming: bool = False
+    approved_tool_call_id: str | None = None
+    approved_binding_fingerprint: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

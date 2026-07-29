@@ -24,8 +24,8 @@ class StartExecution:
     kind: RunKind
     definition: RunDefinition
     input: JsonValue
-    root_run_id: str | None = None
-    parent_run_id: str | None = None
+    root_execution_id: str | None = None
+    parent_execution_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

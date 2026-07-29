@@ -5,9 +5,9 @@ resolves via the EntrypointResolver and never pollutes the global namespace."""
 
 import pytest
 
-from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.agent.capability.provider import CapabilityContext
-from linktools.ai.agent.capability.models import CapabilityRef
+from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+from linktools.ai.agent.assembly.provider import AgentFeatureContext
+from linktools.ai.agent.assembly.models import AgentFeatureRef
 from linktools.ai.errors import SubagentNotFoundError
 from linktools.ai.agent.extension.resolver import DirectoryEntrypointResolver
 from linktools.ai.agent.subagent import SubagentProvider, SubagentResult
@@ -42,11 +42,16 @@ def env(tmp_path):
 
 
 def _ctx():
-    return CapabilityContext(
+    return AgentFeatureContext(
         agent_id="parent",
-        exposure_policy=CapabilityToolExposurePolicy(),
-        run_id="pr",
+        execution_id="pr",
+        root_execution_id="pr",
+        parent_execution_id=None,
         session_id="ps",
+        tenant_id="tenant",
+        user_id="user",
+        workspace=None,
+        sandbox=None,
     )
 
 
@@ -55,12 +60,12 @@ async def test_scoped_subagent_resolves_via_entrypoint(env):
     provider = env
     # Scoped calls require the scenario be declared on the ref (confinement).
     bundle = await provider.resolve(
-        CapabilityRef(
+        AgentFeatureRef(
             "subagent", "grader", config={"allowed_extensions": ["skill-creator"]}
         ),
         _ctx(),
     )
-    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
+    call = next(md.handler for md in bundle.tools)
     out = await call(
         "grader",
         "grade it",
@@ -74,8 +79,8 @@ async def test_scoped_subagent_resolves_via_entrypoint(env):
 async def test_scoped_subagent_undeclared_extension_rejected(env):
     provider = env
     # No allowed_extensions declared -> a scoped call to any scenario refused.
-    bundle = await provider.resolve(CapabilityRef("subagent", "grader"), _ctx())
-    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
+    bundle = await provider.resolve(AgentFeatureRef("subagent", "grader"), _ctx())
+    call = next(md.handler for md in bundle.tools)
     with pytest.raises(SubagentNotFoundError, match="extension scope not allowed"):
         await call("grader", "t", scope={"extension_id": "skill-creator"})
 
@@ -84,12 +89,12 @@ async def test_scoped_subagent_undeclared_extension_rejected(env):
 async def test_scoped_subagent_missing_in_extension_raises(env):
     provider = env
     bundle = await provider.resolve(
-        CapabilityRef(
+        AgentFeatureRef(
             "subagent", "grader", config={"allowed_extensions": ["skill-creator"]}
         ),
         _ctx(),
     )
-    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
+    call = next(md.handler for md in bundle.tools)
     with pytest.raises(SubagentNotFoundError):
         # 'grader' is allowed by name + scenario, but the scenario no 'ghost'.
         await call("ghost", "t", scope={"extension_id": "skill-creator"})
@@ -100,8 +105,8 @@ async def test_scoped_subagent_does_not_register_globally(env):
     # A scoped call resolves only through the entrypoint resolver; the global
     # subagent_provider is None, so an unscoped call cannot resolve.
     provider = env
-    bundle = await provider.resolve(CapabilityRef("subagent", "grader"), _ctx())
-    call = next(md.handler for c in bundle.tool_contributions for md in c.tools)
+    bundle = await provider.resolve(AgentFeatureRef("subagent", "grader"), _ctx())
+    call = next(md.handler for md in bundle.tools)
     from linktools.ai.errors import SubagentExecutionError
 
     with pytest.raises(SubagentExecutionError):

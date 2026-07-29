@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """linktools.ai.governance.security: the security domain's public surface.
 SecurityBaseline + the pipeline types. ToolDescriptor lives in
-``linktools.ai.tool.models``; the event/pipeline event classes live in
+``linktools.ai.agent.tool.models``; the event/pipeline event classes live in
 ``security.pipeline``."""
 
 from .baseline import SecurityBaseline

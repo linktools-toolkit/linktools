@@ -30,7 +30,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 
 from ..errors import ModelRoutingError, ModelRetryConfigurationError
-from ..json import canonical_json
+from ..json import canonical_json_bytes
 from .policy import ModelPolicy
 from .registry import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
 
@@ -148,7 +148,7 @@ def _resolved_revision(
         }
         for b in bundles
     ]
-    return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
 
 __all__: "list[str]" = [

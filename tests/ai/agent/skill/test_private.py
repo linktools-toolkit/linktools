@@ -112,7 +112,7 @@ class TestParseSkillSubagent(unittest.TestCase):
             "---\n"
             "name: grader\n"
             "description: Grade an evaluation.\n"
-            "tools:\n"
+            "features:\n"
             "  - kind: builtin\n"
             "    name: file-read\n"
             "timeout_seconds: 60\n"

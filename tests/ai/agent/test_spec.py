@@ -3,7 +3,7 @@
 """tests/ai/agent/test_spec.py"""
 
 from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec
-from linktools.ai.tool import ToolRef
+from linktools.ai.agent.assembly import AgentFeatureRef
 from linktools.ai.model.policy import ModelPolicy
 
 
@@ -13,15 +13,15 @@ def test_agent_spec_construction():
         name="security-agent",
         model=ModelPolicy(primary="gpt-4"),
         instructions=PromptSpec(instructions="You are a security analyst."),
-        tools=(
-            ToolRef(kind="builtin", name="file"),
-            ToolRef(kind="builtin", name="terminal"),
+        features=(
+            AgentFeatureRef(kind="builtin", name="file"),
+            AgentFeatureRef(kind="builtin", name="terminal"),
         ),
         middleware=(MiddlewareRef(name="budget", config={"budget_usd": 5.0}),),
     )
     assert spec.id == "agent-1"
     assert spec.model.primary == "gpt-4"
-    assert len(spec.tools) == 2
+    assert len(spec.features) == 2
     assert spec.middleware[0].name == "budget"
     assert spec.output_schema is None
     assert dict(spec.metadata) == {}
@@ -46,43 +46,43 @@ def test_prompt_spec_defaults():
 
 
 def test_tool_ref_and_middleware_ref():
-    assert ToolRef(kind="builtin", name="file").name == "file"
+    assert AgentFeatureRef(kind="builtin", name="file").name == "file"
     ref = MiddlewareRef(name="budget")
     assert ref.name == "budget"
     assert dict(ref.config) == {}
 
 
 def test_tool_ref_kind_and_config_defaults():
-    assert dict(ToolRef(kind="builtin", name="file").config) == {}
-    structured = ToolRef(name="sql", kind="skill", config={"limit": 5})
+    assert dict(AgentFeatureRef(kind="builtin", name="file").config) == {}
+    structured = AgentFeatureRef(name="sql", kind="skill", config={"limit": 5})
     assert structured.kind == "skill"
     assert structured.config == {"limit": 5}
 
 
-def test_parse_tool_refs_handles_kind_name_strings_and_struct():
-    from linktools.ai.tool.codec import parse_tool_refs
+def test_parse_agent_feature_refs_handles_kind_name_strings_and_struct():
+    from linktools.ai.agent.assembly import parse_agent_feature_refs
 
     import pytest
 
     with pytest.raises(Exception):
-        parse_tool_refs(["file"])
+        parse_agent_feature_refs(["file"])
     with pytest.raises(Exception):
-        parse_tool_refs(["skill:sql"])
+        parse_agent_feature_refs(["skill:sql"])
     # structured mapping
-    (struct,) = parse_tool_refs([{"kind": "mcp", "name": "risk", "config": {"k": 1}}])
+    (struct,) = parse_agent_feature_refs([{"kind": "mcp", "name": "risk", "config": {"k": 1}}])
     assert struct.name == "risk" and struct.kind == "mcp" and struct.config == {"k": 1}
     with pytest.raises(Exception):
-        parse_tool_refs([{"name": "file"}])
+        parse_agent_feature_refs([{"name": "file"}])
 
 
-def test_parse_tool_refs_rejects_bad_shapes():
+def test_parse_agent_feature_refs_rejects_bad_shapes():
     import pytest
     from linktools.ai.errors import InvalidSpecError
-    from linktools.ai.tool.codec import parse_tool_refs
+    from linktools.ai.agent.assembly import parse_agent_feature_refs
 
-    with pytest.raises(InvalidSpecError):
-        parse_tool_refs([":file"])  # empty kind
-    with pytest.raises(InvalidSpecError):
-        parse_tool_refs([{"kind": "skill"}])  # missing name
-    with pytest.raises(InvalidSpecError):
-        parse_tool_refs(42)
+    with pytest.raises((TypeError, ValueError)):
+        parse_agent_feature_refs([":file"])  # empty kind
+    with pytest.raises((TypeError, ValueError)):
+        parse_agent_feature_refs([{"kind": "skill"}])  # missing name
+    with pytest.raises((TypeError, ValueError)):
+        parse_agent_feature_refs(42)

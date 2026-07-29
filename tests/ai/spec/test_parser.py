@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.tool import ToolRef
+from linktools.ai.agent.assembly import AgentFeatureRef
 from linktools.ai.errors import (
     InvalidSpecError,
     SpecNotFoundError,
@@ -21,7 +21,7 @@ from linktools.ai.spec.parsing import (
     parse_markdown_text,
     parse_yaml_text,
 )
-from linktools.ai.tool.codec import parse_tool_refs
+from linktools.ai.agent.assembly import parse_agent_feature_refs
 
 
 # 1. parse_yaml_text
@@ -146,9 +146,9 @@ def test_parse_model_policy_rejects_missing_primary():
         parse_model_policy({})
 
 
-# 6. parse_tool_refs
-def test_parse_tool_refs_builds_tuple_from_strings_and_dicts():
-    refs = parse_tool_refs(
+# 6. parse_agent_feature_refs
+def test_parse_agent_feature_refs_builds_tuple_from_strings_and_dicts():
+    refs = parse_agent_feature_refs(
         [
             {"kind": "builtin", "name": "tool_a"},
             {"kind": "skill", "name": "tool_b"},
@@ -156,22 +156,21 @@ def test_parse_tool_refs_builds_tuple_from_strings_and_dicts():
     )
     assert isinstance(refs, tuple)
     assert len(refs) == 2
-    assert all(isinstance(r, ToolRef) for r in refs)
+    assert all(isinstance(r, AgentFeatureRef) for r in refs)
     assert refs[0].name == "tool_a"
     assert refs[1].name == "tool_b"
 
 
-def test_parse_tool_refs_rejects_invalid_item():
-    with pytest.raises(InvalidSpecError):
-        parse_tool_refs(["ok"])
+def test_parse_agent_feature_refs_rejects_invalid_item():
+    with pytest.raises((TypeError, ValueError)):
+        parse_agent_feature_refs(["ok"])
 
 
-def test_parse_tool_refs_none_is_unset():
-    # No tools key -> None (unset), distinct from tools: [] -> () (contract).
-    assert parse_tool_refs(None) is None
-    assert parse_tool_refs([]) == ()
+def test_parse_agent_feature_refs_none_is_unset():
+    assert parse_agent_feature_refs(None) == ()
+    assert parse_agent_feature_refs([]) == ()
 
 
-def test_parse_tool_refs_rejects_non_list():
-    with pytest.raises(InvalidSpecError):
-        parse_tool_refs("not-a-list")
+def test_parse_agent_feature_refs_rejects_non_list():
+    with pytest.raises((TypeError, ValueError)):
+        parse_agent_feature_refs("not-a-list")

@@ -14,16 +14,16 @@ from linktools.ai.agent.codec import AgentSpecCodec, OutputTypeRegistry
 from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec
 from linktools.ai.errors import InvalidSpecError
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.tool.models import ToolRef
+from linktools.ai.agent.assembly import AgentFeatureRef
 
 
-def _spec(*, output_schema=None, tools=None) -> AgentSpec:
+def _spec(*, output_schema=None, features=()) -> AgentSpec:
     return AgentSpec(
         id="agent-1",
         name="Agent One",
         model=ModelPolicy(primary="gpt-test", fallbacks=("gpt-fallback",)),
         instructions=PromptSpec(instructions="do the thing", sections={"safety": "be careful"}),
-        tools=tools,
+        features=features,
         middleware=(MiddlewareRef(name="logger", config={"level": "info"}),),
         output_schema=output_schema,
         metadata={"env": "test", "count": 3},
@@ -31,7 +31,7 @@ def _spec(*, output_schema=None, tools=None) -> AgentSpec:
 
 
 def test_codec_round_trips_every_field() -> None:
-    spec = _spec(tools=(ToolRef(kind="builtin", name="shell"),))
+    spec = _spec(features=(AgentFeatureRef(kind="builtin", name="shell"),))
     codec = AgentSpecCodec()
     decoded = codec.decode(codec.encode(spec))
     assert decoded.id == spec.id
@@ -39,19 +39,17 @@ def test_codec_round_trips_every_field() -> None:
     assert decoded.model == spec.model
     assert decoded.instructions.instructions == spec.instructions.instructions
     assert dict(decoded.instructions.sections) == dict(spec.instructions.sections)
-    assert decoded.tools is not None and len(decoded.tools) == 1
-    assert decoded.tools[0].kind == "builtin" and decoded.tools[0].name == "shell"
+    assert decoded.features is not None and len(decoded.features) == 1
+    assert decoded.features[0].kind == "builtin" and decoded.features[0].name == "shell"
     assert decoded.middleware == spec.middleware
     assert dict(decoded.metadata) == dict(spec.metadata)
     assert decoded.output_schema is None
 
 
-def test_codec_round_trips_tools_three_state() -> None:
+def test_codec_round_trips_empty_features() -> None:
     codec = AgentSpecCodec()
-    # None (unset) stays None; () (explicit empty) stays ().
-    assert codec.decode(codec.encode(_spec(tools=None))).tools is None
-    explicit_empty = codec.decode(codec.encode(_spec(tools=())))
-    assert explicit_empty.tools == ()
+    explicit_empty = codec.decode(codec.encode(_spec(features=())))
+    assert explicit_empty.features == ()
 
 
 def test_codec_round_trips_structured_output_via_registry() -> None:
@@ -80,7 +78,7 @@ def test_codec_rejects_unknown_output_ref_on_decode() -> None:
     encoded = {"schema": "agent-spec.v1", "id": "a", "name": "a",
                "model": {"primary": "m", "fallbacks": []},
                "instructions": {"instructions": "x", "sections": {}},
-               "tools": None, "middleware": [], "output_ref": "missing.v1", "metadata": {}}
+               "features": [], "middleware": [], "output_ref": "missing.v1", "metadata": {}}
     with pytest.raises(InvalidSpecError):
         codec.decode(encoded)
 

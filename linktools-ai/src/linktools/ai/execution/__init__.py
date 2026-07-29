@@ -18,7 +18,7 @@ from .query import ExecutionDetailView, ExecutionQueryService, ExecutionResultVi
 from .domain import RunApproval, RunDefinition, RunKind, RunRecord, RunStatus
 from .session import SessionRecord, SessionTurn
 from .snapshots import AgentSnapshotData, RunSnapshot
-from .store import ExecutionBackend, ExecutionStore
+from .store import ExecutionStore
 from .trace_models import RunTraceStep
 
 __all__ = [
@@ -27,7 +27,6 @@ __all__ = [
     "ClaimExecution",
     "CompleteExecution",
     "DecideApproval",
-    "ExecutionBackend",
     "ExecutionDetailView",
     "ExecutionQueryService",
     "ExecutionResultView",

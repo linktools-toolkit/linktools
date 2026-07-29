@@ -9,8 +9,8 @@ from linktools.ai.execution.domain import RunnableType
 def test_run_context_construction():
     ctx = RunContext(
         run_id="run-1",
-        root_run_id="run-1",
-        parent_run_id=None,
+        root_execution_id="run-1",
+        parent_execution_id=None,
         session_id="session-1",
         runnable_id="agent-1",
         runnable_type=RunnableType.AGENT,
@@ -29,8 +29,8 @@ def test_run_context_is_frozen():
 
     ctx = RunContext(
         run_id="run-1",
-        root_run_id="run-1",
-        parent_run_id=None,
+        root_execution_id="run-1",
+        parent_execution_id=None,
         session_id="session-1",
         runnable_id="agent-1",
         runnable_type=RunnableType.AGENT,

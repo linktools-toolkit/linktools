@@ -29,11 +29,12 @@ from ..spec.parsing import (
     parse_markdown_text,
     resolved_name,
 )
-from ..json import JsonValue, from_jsonable, to_jsonable
+from decimal import Decimal
+
+from ..json import JsonValue
 from ..model.codec import parse_model_policy
 from ..model.policy import ModelPolicy
-from ..tool.codec import parse_tool_refs
-from ..tool.models import ToolRef
+from .assembly.models import AgentFeatureRef
 from ..errors import InvalidSpecError
 from .spec import AgentSpec, MiddlewareRef, PromptSpec
 
@@ -70,9 +71,33 @@ def parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
     return tuple(refs)
 
 
+def _parse_feature_refs(items: Any) -> tuple[AgentFeatureRef, ...]:
+    if items is None:
+        return ()
+    if not isinstance(items, (list, tuple)):
+        raise InvalidSpecError("features must be a list")
+    refs: list[AgentFeatureRef] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            raise InvalidSpecError(f"features[{index}]: invalid feature ref")
+        reader = StrictConfigReader(
+            item,
+            allowed={"kind", "name", "config"},
+            context=f"features[{index}]",
+        )
+        refs.append(
+            AgentFeatureRef(
+                kind=reader.required_str("kind").strip(),
+                name=reader.required_str("name").strip(),
+                config=reader.mapping("config") or {},
+            )
+        )
+    return tuple(refs)
+
+
 def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> AgentSpec:
     """Build an AgentSpec from a parsed frontmatter dict + markdown body."""
-    allowed = {"name", "model", "tools", "sections", "middleware", "metadata"}
+    allowed = {"name", "model", "features", "sections", "middleware", "metadata"}
     reader = StrictConfigReader(payload, allowed=allowed, context=f"agent {agent_id}")
     name = resolved_name(reader, agent_id)
     model_payload = payload.get("model")
@@ -84,10 +109,8 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
         instructions=body.strip(),
         sections=sections,
     )
-    # tools/middleware are parsed by value, so distinguish a missing key (unset
-    # / empty-list) from an explicit null here -- null is rejected.
-    if "tools" in payload and payload["tools"] is None:
-        raise InvalidSpecError(f"agent {agent_id}: 'tools' must not be null")
+    if "features" in payload and payload["features"] is None:
+        raise InvalidSpecError(f"agent {agent_id}: 'features' must not be null")
     if "middleware" in payload and payload["middleware"] is None:
         raise InvalidSpecError(f"agent {agent_id}: 'middleware' must not be null")
     return AgentSpec(
@@ -95,7 +118,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
         name=name,
         model=model,
         instructions=instructions,
-        tools=parse_tool_refs(payload.get("tools")),
+        features=_parse_feature_refs(payload.get("features")),
         middleware=parse_middleware_refs(payload.get("middleware")),
         output_schema=None,
         metadata=reader.mapping("metadata") or {},
@@ -169,12 +192,26 @@ class AgentSpecCodec:
             "schema": "agent-spec.v1",
             "id": spec.id,
             "name": spec.name,
-            "model": to_jsonable(spec.model),
+            "model": {
+                "primary": spec.model.primary,
+                "fallbacks": list(spec.model.fallbacks),
+                "request_retries": spec.model.request_retries,
+                "timeout_seconds": spec.model.timeout_seconds,
+                "max_tokens": spec.model.max_tokens,
+                "budget": (
+                    format(spec.model.budget, "f")
+                    if spec.model.budget is not None
+                    else None
+                ),
+            },
             "instructions": {
                 "instructions": spec.instructions.instructions,
                 "sections": dict(spec.instructions.sections),
             },
-            "tools": None if spec.tools is None else [to_jsonable(item) for item in spec.tools],
+            "features": [
+                {"kind": item.kind, "name": item.name, "config": dict(item.config)}
+                for item in spec.features
+            ],
             "middleware": [{"name": item.name, "config": dict(item.config)} for item in spec.middleware],
             "output_ref": output_ref,
             "metadata": dict(spec.metadata),
@@ -182,7 +219,7 @@ class AgentSpecCodec:
 
     def decode(self, value: JsonValue) -> AgentSpec:
         data = dict(value)
-        raw_tools = data.get("tools")
+        raw_features = data.get("features") or ()
         instructions = data["instructions"]
         output_schema = None
         output_ref = data.get("output_ref")
@@ -193,12 +230,30 @@ class AgentSpecCodec:
         return AgentSpec(
             id=data["id"],
             name=data["name"],
-            model=from_jsonable(ModelPolicy, data["model"]),
+            model=ModelPolicy(
+                primary=data["model"]["primary"],
+                fallbacks=tuple(data["model"].get("fallbacks") or ()),
+                request_retries=data["model"].get("request_retries"),
+                timeout_seconds=data["model"].get("timeout_seconds"),
+                max_tokens=data["model"].get("max_tokens"),
+                budget=(
+                    Decimal(data["model"]["budget"])
+                    if data["model"].get("budget") is not None
+                    else None
+                ),
+            ),
             instructions=PromptSpec(
                 instructions=instructions["instructions"],
                 sections=instructions.get("sections") or {},
             ),
-            tools=None if raw_tools is None else tuple(from_jsonable(ToolRef, item) for item in raw_tools),
+            features=tuple(
+                AgentFeatureRef(
+                    kind=item["kind"],
+                    name=item["name"],
+                    config=item.get("config") or {},
+                )
+                for item in raw_features
+            ),
             middleware=tuple(
                 MiddlewareRef(name=item["name"], config=item.get("config") or {})
                 for item in data.get("middleware") or ()

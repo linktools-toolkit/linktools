@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
 
-from ..errors import StorageCapabilityError
+from ..errors import StorageFeatureSupportError
 from .cache import ContentCache, ContentCacheKey, read_cache, write_cache
 from .multi import MultiBackend, StorageLayer, StorageReader
 from .revision import (
@@ -51,7 +51,7 @@ class StorageInitializer(Protocol):
 class StorageComposition(
     Generic[PrimaryT, KeyT, ValueT, InfoT, ChangeT, WriterT]
 ):
-    """Compose optional storage capabilities without imposing them on backends."""
+    """Compose optional storage features without imposing them on backends."""
 
     def __init__(
         self,
@@ -70,7 +70,7 @@ class StorageComposition(
         if changes is not None and revision is None:
             raise ValueError("a change source requires a primary revision source")
         if adapter is None and (overlays or revision or changes or cache):
-            raise ValueError("composed storage capabilities require an adapter")
+            raise ValueError("composed storage features require an adapter")
         if cache is not None and cache_adapter is None:
             raise ValueError("a content cache requires a cache adapter")
         if preload_batch_size < 1:
@@ -115,10 +115,6 @@ class StorageComposition(
                 change_value=adapter.change_value,
             )
 
-    @property
-    def backend(self) -> PrimaryT:
-        return self.primary
-
     async def initialize(self, *args: object) -> None:
         components = (
             (self.primary, None),
@@ -140,7 +136,7 @@ class StorageComposition(
 
     def require_writer(self) -> WriterT:
         if self.writer is None:
-            raise StorageCapabilityError("storage is read-only")
+            raise StorageFeatureSupportError("storage is read-only")
         return self.writer
 
     def _require_reader(
@@ -151,7 +147,7 @@ class StorageComposition(
         StorageAdapter[KeyT, ValueT, InfoT, ChangeT],
     ]:
         if self.reader is None or self.snapshot is None or self.adapter is None:
-            raise StorageCapabilityError("storage composition has no reader adapter")
+            raise StorageFeatureSupportError("storage composition has no reader adapter")
         return self.reader, self.snapshot, self.adapter
 
     async def refresh(
@@ -172,11 +168,11 @@ class StorageComposition(
         reader, snapshot, adapter = self._require_reader()
         cache_adapter = self.cache_adapter
         if self.cache is None or cache_adapter is None:
-            raise StorageCapabilityError(
+            raise StorageFeatureSupportError(
                 "storage composition has no content cache"
             )
         if self.revision is None:
-            raise StorageCapabilityError(
+            raise StorageFeatureSupportError(
                 "content preload requires a revision source"
             )
         if not state.cacheable:

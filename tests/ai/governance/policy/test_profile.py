@@ -20,7 +20,7 @@ from linktools.ai.governance.policy.rule import (
     ToolRequest,
 )
 from linktools.ai.spec.parsing import SpecLoader
-from linktools.ai.tool.index import ToolSpecIndex
+from linktools.ai.agent.tool.policy.index import ToolSpecIndex
 
 
 def _write_tools(tmp_path) -> None:

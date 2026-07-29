@@ -14,17 +14,20 @@ from linktools.ai.governance.policy.rule import (
     SideEffectKind,
     ToolPolicyMetadata,
 )
-from linktools.ai.tool.models import ToolDescriptor
-from linktools.ai.tool.policy import MetadataBackedPolicyProvider
+from linktools.ai.agent.tool.models import ToolDescriptor
+from linktools.ai.agent.assembly import AgentFeatureRef
+from linktools.ai.agent.tool.models import ToolCategory, ToolSource
+from linktools.ai.agent.tool.policy import MetadataBackedPolicyProvider
 
 
 def _descriptor(name="my_tool"):
     return ToolDescriptor(
         name=name,
-        source="builtin",
-        category="file-read",
-        risk="low",
-        mutating=False,
+        source=ToolSource.BUILTIN,
+        category=ToolCategory.FILE_READ,
+        risk=RiskLevel.LOW,
+        side_effect=SideEffectKind.READ_ONLY,
+        feature=AgentFeatureRef("builtin", "file-read"),
     )
 
 
@@ -103,7 +106,7 @@ async def test_unknown_tool_returns_all_undeclared_layer():
 @pytest.mark.asyncio
 async def test_provider_failure_raises_policy_resolution_error():
     """A metadata-source failure fails closed: the provider raises
-    ToolPolicyResolutionError (the contract default) so the ManagedToolAdapter can
+    ToolPolicyResolutionError so the execution service can
     emit a SecurityDegraded event and deny the call -- it never returns a
     silently-degraded policy."""
     from linktools.ai.errors import ToolPolicyResolutionError

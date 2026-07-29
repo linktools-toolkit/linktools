@@ -16,9 +16,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
-import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import uuid4
 
 from ...storage.local.paths import Sha256Digest, safe_child
 from ..models import ArtifactBlobNotFoundError, ArtifactIntegrityError, ArtifactRef
@@ -28,19 +28,24 @@ _BATCH_SIZE = 4 * 1024 * 1024
 
 class FilesystemArtifactBlobStore:
     def __init__(self, root: "str | Path") -> None:
-        self.root = Path(root)
+        self._root = Path(root)
+        self._temp = self._root / "temp"
+        self._blobs = self._root / "blobs"
 
     async def initialize_storage(self) -> None:
-        await asyncio.to_thread((self.root / "blobs").mkdir, parents=True, exist_ok=True)
+        await asyncio.gather(
+            asyncio.to_thread(self._temp.mkdir, parents=True, exist_ok=True),
+            asyncio.to_thread(self._blobs.mkdir, parents=True, exist_ok=True),
+        )
 
     def _blob_path(self, digest: str) -> Path:
-        return safe_child(self.root, "blobs", Sha256Digest.parse(digest))
+        return safe_child(self._blobs, Sha256Digest.parse(digest))
 
     async def put(self, *, ref: ArtifactRef, content: AsyncIterator[bytes]) -> None:
         blob = self._blob_path(ref.sha256)
         if await asyncio.to_thread(blob.exists):
             return
-        temporary = await asyncio.to_thread(self._temporary_path)
+        temporary = safe_child(self._temp, f"{uuid4().hex}.part")
         digest = hashlib.sha256()
         size = 0
         buffer = bytearray()
@@ -84,18 +89,12 @@ class FilesystemArtifactBlobStore:
         await asyncio.to_thread(self._blob_path(digest).unlink, missing_ok=True)
 
     @staticmethod
-    def _temporary_path() -> Path:
-        fd, path = tempfile.mkstemp(prefix="linktools-artifact-")
-        os.close(fd)
-        return Path(path)
-
-    @staticmethod
     def _publish(temporary: Path, blob: Path) -> None:
         blob.parent.mkdir(parents=True, exist_ok=True)
         if blob.exists():
             temporary.unlink(missing_ok=True)
             return
-        temporary.replace(blob)
+        os.replace(temporary, blob)
 
 
 __all__: "list[str]" = ["FilesystemArtifactBlobStore"]

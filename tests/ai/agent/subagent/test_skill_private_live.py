@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from linktools.ai.tool import ToolRef
+from linktools.ai.agent.assembly import AgentFeatureRef
 from linktools.ai.errors import SubagentExecutionError, SubagentResolutionError
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.agent.skill.private import (
@@ -103,7 +103,7 @@ class TestCallSubagentInstructionPath(unittest.IsolatedAsyncioTestCase):
                     active_skill_provider=get_active_skill,
                     child_model_policy=ModelPolicy(primary="standard"),
                 )
-                call = toolset.tools["call_subagent"].function
+                call = toolset.handlers["call_subagent"]
                 result = await call(
                     instruction_path="agents/grader.md", task="grade it"
                 )
@@ -125,7 +125,7 @@ class TestCallSubagentInstructionPath(unittest.IsolatedAsyncioTestCase):
             timeout_seconds=120.0,
             parent=_DummyParent(),
         )
-        call = toolset.tools["call_subagent"].function
+        call = toolset.handlers["call_subagent"]
         with self.assertRaises(SubagentExecutionError):
             await call(instruction_path="agents/grader.md", task="t")
 
@@ -151,7 +151,7 @@ class TestCallSubagentInstructionPath(unittest.IsolatedAsyncioTestCase):
                 skill_resolver=resolver,
                 active_skill_provider=get_active_skill,
             )
-            call = toolset.tools["call_subagent"].function
+            call = toolset.handlers["call_subagent"]
             with self.assertRaises(SubagentResolutionError):
                 await call(instruction_path="agents/grader.md", task="t")
         finally:
@@ -177,9 +177,9 @@ class TestPermissionIntersection(unittest.TestCase):
     def test_requested_tools_filtered_to_parent_delegated(self):
         spec = self._spec(
             (
-                ToolRef(kind="builtin", name="file-read"),
-                ToolRef(kind="builtin", name="terminal"),
-                ToolRef(kind="builtin", name="file-write"),
+                AgentFeatureRef(kind="builtin", name="file-read"),
+                AgentFeatureRef(kind="builtin", name="terminal"),
+                AgentFeatureRef(kind="builtin", name="file-write"),
             )
         )
         agent = skill_subagent_to_agent_spec(
@@ -188,14 +188,14 @@ class TestPermissionIntersection(unittest.TestCase):
             parent_delegated={"file-read"},
         )
         # terminal + file-write dropped: the parent cannot delegate them.
-        self.assertEqual([t.name for t in agent.tools], ["file-read"])
+        self.assertEqual([t.name for t in agent.features], ["file-read"])
 
     def test_no_constraint_keeps_all_requested(self):
-        spec = self._spec((ToolRef(kind="builtin", name="file-read"),))
+        spec = self._spec((AgentFeatureRef(kind="builtin", name="file-read"),))
         agent = skill_subagent_to_agent_spec(
             spec, model_policy=ModelPolicy(primary="standard")
         )
-        self.assertEqual([t.name for t in agent.tools], ["file-read"])
+        self.assertEqual([t.name for t in agent.features], ["file-read"])
 
 
 class TestReadSkillActivatesSkill(unittest.IsolatedAsyncioTestCase):
@@ -227,7 +227,7 @@ class TestReadSkillActivatesSkill(unittest.IsolatedAsyncioTestCase):
                 toolset = build_skill_toolset(
                     _Prov(), authorized={"skill-creator"}, active_skill_lookup=lookup
                 )
-                read = toolset.tools["read_skill"].function
+                read = toolset.handlers["read_skill"]
                 await read("skill-creator")
                 active = get_active_skill()
                 self.assertIsNotNone(active)
@@ -252,7 +252,7 @@ class TestLivePermissionIntersection(unittest.IsolatedAsyncioTestCase):
             (root / "agents" / "grader.md").write_text(
                 "---\n"
                 "name: grader\n"
-                "tools:\n"
+                "features:\n"
                 "  - kind: builtin\n"
                 "    name: file-read\n"
                 "  - kind: builtin\n"
@@ -293,11 +293,11 @@ class TestLivePermissionIntersection(unittest.IsolatedAsyncioTestCase):
                     child_model_policy=ModelPolicy(primary="standard"),
                     parent_delegated_tools={"file-read"},
                 )
-                call = toolset.tools["call_subagent"].function
+                call = toolset.handlers["call_subagent"]
                 await call(instruction_path="agents/grader.md", task="grade")
                 self.assertEqual(len(executor.specs), 1)
                 self.assertEqual(
-                    [t.name for t in executor.specs[0].tools], ["file-read"]
+                    [t.name for t in executor.specs[0].features], ["file-read"]
                 )
             finally:
                 reset_active_skill(token)
@@ -337,7 +337,7 @@ class TestReadThenCallInSameTask(unittest.IsolatedAsyncioTestCase):
                 authorized={"skill-creator"},
                 active_skill_lookup=lookup,
             )
-            read = skill_toolset.tools["read_skill"].function
+            read = skill_toolset.handlers["read_skill"]
 
             resolver = UnifiedSubagentResolver(
                 project_agents=_NoneAgents(),
@@ -359,7 +359,7 @@ class TestReadThenCallInSameTask(unittest.IsolatedAsyncioTestCase):
                 active_skill_provider=get_active_skill,
                 child_model_policy=ModelPolicy(primary="standard"),
             )
-            call = sub_toolset.tools["call_subagent"].function
+            call = sub_toolset.handlers["call_subagent"]
 
             token = set_active_skill(None)
             try:
@@ -379,11 +379,11 @@ class TestSubagentProviderDerivesParentDelegated(unittest.IsolatedAsyncioTestCas
     and FAILS CLOSED (empty set, not None) when the parent can't be read."""
 
     def _fake_build(self, captured):
-        from pydantic_ai.toolsets import FunctionToolset
+        from linktools.ai.agent.tool.models import ToolHandlerSet
 
         def _build(**kwargs):
             captured.update(kwargs)
-            ts = FunctionToolset()
+            ts = ToolHandlerSet()
 
             async def call_subagent(**kw):
                 return {}
@@ -394,16 +394,24 @@ class TestSubagentProviderDerivesParentDelegated(unittest.IsolatedAsyncioTestCas
         return _build
 
     async def _resolve(self, agents, agent_id, ref_name):
-        from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-        from linktools.ai.agent.capability.models import CapabilityRef
-        from linktools.ai.agent.capability.provider import CapabilityContext
+        from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+        from linktools.ai.agent.assembly.models import AgentFeatureRef
+        from linktools.ai.agent.assembly.provider import AgentFeatureContext
         from linktools.ai.agent.subagent.provider import SubagentProvider
 
         captured: dict = {}
         provider = SubagentProvider(subagent_provider=agents, executor=object())
-        ref = CapabilityRef(kind="subagent", name=ref_name)
-        ctx = CapabilityContext(
-            agent_id=agent_id, exposure_policy=CapabilityToolExposurePolicy()
+        ref = AgentFeatureRef(kind="subagent", name=ref_name)
+        ctx = AgentFeatureContext(
+            agent_id=agent_id,
+            execution_id="e1",
+            root_execution_id="e1",
+            parent_execution_id=None,
+            session_id="s1",
+            tenant_id="t1",
+            user_id="u1",
+            workspace=None,
+            sandbox=None,
         )
         with mock.patch(
             "linktools.ai.agent.subagent.provider.build_subagent_toolset",
@@ -421,9 +429,9 @@ class TestSubagentProviderDerivesParentDelegated(unittest.IsolatedAsyncioTestCas
             name="parent",
             model=ModelPolicy(primary="standard"),
             instructions=PromptSpec(instructions="x"),
-            tools=(
-                ToolRef(kind="builtin", name="file-read"),
-                ToolRef(kind="builtin", name="terminal"),
+            features=(
+                AgentFeatureRef(kind="builtin", name="file-read"),
+                AgentFeatureRef(kind="builtin", name="terminal"),
             ),
         )
 

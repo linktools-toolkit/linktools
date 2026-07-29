@@ -21,8 +21,8 @@ class EventEnvelope(Generic[TEvent]):
     sequence: int
     occurred_at: datetime
     run_id: str
-    root_run_id: str
-    parent_run_id: "str | None"
+    root_execution_id: str
+    parent_execution_id: "str | None"
     session_id: str
     runnable_id: str
     payload: TEvent

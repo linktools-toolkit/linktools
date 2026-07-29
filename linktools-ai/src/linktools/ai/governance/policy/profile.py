@@ -21,7 +21,7 @@ from .risk import RiskRule
 from .rule import Permission, RiskLevel, SideEffectKind
 
 if TYPE_CHECKING:
-    from ...tool.index import ToolSpecIndex
+    from ...agent.tool.policy.index import ToolSpecIndex
 
 
 # Default allowed permission set: read/write/execute are the routine agent

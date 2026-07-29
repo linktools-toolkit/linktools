@@ -12,20 +12,34 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import hmac
 from uuid import uuid4
 
 from ..agent.codec import AgentSpecCodec
 from ..agent.compiler import AgentCompiler
 from ..agent.engine import AgentEngine
+from ..agent.assembly.assembler import AgentAssembler
+from ..agent.assembly.models import AgentAssembly
+from ..agent.assembly.provider import AgentFeatureContext
 from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
+from ..agent.tool.sandbox.protocols import Sandbox
 from ..agent.spec import AgentSpec
-from ..errors import PrincipalAccessDeniedError, StorageError
+from ..governance.identity import PrincipalContext
+from ..governance.authorization import AuthorizationPolicy, ExecutionAction
+from ..errors import (
+    PrincipalAccessDeniedError,
+    RunDefinitionError,
+    RunDefinitionIntegrityError,
+    StorageError,
+)
 from ..json import canonical_json_bytes
+from ..observability.events.payloads import SecurityDegraded
 from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
-from .domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType
+from .domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
 from .context import RunContext
 from .cancellation import CancellationToken
-from .controller import RunController
+from .controller import ExecutionControllerRegistry
+from .live_events import RunLiveEventSink, SecurityEventSink
 from .query import ExecutionResultView
 from .session import SessionRecord
 from .snapshots import AgentSnapshotData
@@ -34,17 +48,21 @@ from . import trace_codec
 from .trace_collector import SemanticTraceCollector
 
 
-class _Events:
-    async def emit(self, event: object) -> None:
-        return None
-
-    async def publish(self, event: object) -> None:
-        return None
-
-
 def _definition(spec: AgentSpec, codec: AgentSpecCodec) -> RunDefinition:
     value = codec.encode(spec)
     return RunDefinition(spec.id, RunnableType.AGENT, "agent-spec.v1", value, sha256(canonical_json_bytes(value)).hexdigest())
+
+
+def _decode_definition(
+    definition: RunDefinition,
+    codec: AgentSpecCodec,
+) -> AgentSpec:
+    if definition.schema != "agent-spec.v1":
+        raise RunDefinitionError("unsupported definition schema")
+    actual = sha256(canonical_json_bytes(definition.spec)).hexdigest()
+    if not hmac.compare_digest(actual, definition.spec_hash):
+        raise RunDefinitionIntegrityError("definition hash mismatch")
+    return codec.decode(definition.spec)
 
 
 def _snapshot(outcome: object) -> AgentSnapshotData:
@@ -65,93 +83,181 @@ _LEASE_DURATION = timedelta(minutes=5)
 _HEARTBEAT_INTERVAL = min(max(_LEASE_DURATION / 3, timedelta(seconds=1)), timedelta(seconds=10))
 
 
-def _ownership_mismatch(owned: "SessionRecord | RunRecord", user_id: str | None, tenant_id: str | None) -> bool:
-    # An unowned session/run (None principal) stays single-principal and
-    # reusable; only a principal that conflicts with the recorded owner is
-    # rejected. Shared by session reuse (run()) and by resume()/cancel()/
-    # decide_approval() so a caller who knows a run_id cannot act on another
-    # tenant's run.
-    if user_id is not None and owned.user_id is not None and owned.user_id != user_id:
-        return True
-    if tenant_id is not None and owned.tenant_id is not None and owned.tenant_id != tenant_id:
-        return True
-    return False
-
-
 class ExecutionService:
-    def __init__(self, store: ExecutionStore, compiler: AgentCompiler, *, spec_codec: AgentSpecCodec | None = None, controller: RunController | None = None) -> None:
-        self.store = store
+    def __init__(
+        self,
+        store: ExecutionStore,
+        compiler: AgentCompiler,
+        *,
+        engine: AgentEngine,
+        assembler: AgentAssembler,
+        tool_execution_ready: bool,
+        sandbox: Sandbox | None,
+        spec_codec: AgentSpecCodec,
+        authorization: AuthorizationPolicy,
+        live_events: RunLiveEventSink,
+        security_events: SecurityEventSink,
+        controller: ExecutionControllerRegistry | None = None,
+    ) -> None:
+        self._store = store
         self._compiler = compiler
-        self._codec = spec_codec or AgentSpecCodec()
+        self._engine = engine
+        self._assembler = assembler
+        self._tool_execution_ready = tool_execution_ready
+        self._sandbox = sandbox
+        self._codec = spec_codec
+        self._authorization = authorization
+        self._live_events = live_events
+        self._security_events = security_events
         # In-process registry of the currently executing runs' driving
         # asyncio.Task + CancellationToken, so cancel() can actually interrupt
         # a suspended model/tool await (task.cancel()), not just flip the
         # token that's only checked between execution points.
-        self._controller = controller or RunController()
+        self._controller = controller or ExecutionControllerRegistry()
 
-    async def run(self, spec: AgentSpec, prompt: str, *, session_id: str, run_id: str | None = None, user_id: str | None = None, tenant_id: str | None = None) -> object:
-        session = await self.store.get_session(session_id)
-        if session is None:
-            await self.store.create_session(session_id=session_id, user_id=user_id, tenant_id=tenant_id)
-        elif _ownership_mismatch(session, user_id, tenant_id):
-            raise PrincipalAccessDeniedError("session is not owned by this principal")
-        record = await self.store.start_run(StartExecution(run_id or uuid4().hex, session_id, RunKind.USER_TURN, _definition(spec, self._codec), prompt))
+    async def run(
+        self,
+        spec: AgentSpec,
+        prompt: str,
+        *,
+        principal: PrincipalContext,
+        session_id: str | None = None,
+        execution_id: str | None = None,
+    ) -> object:
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
+        session_id = session_id or uuid4().hex
+        execution_id = execution_id or uuid4().hex
+        assembly = await self._preflight(
+            spec,
+            execution_id=execution_id,
+            session_id=session_id,
+            root_execution_id=execution_id,
+            parent_execution_id=None,
+            principal=principal,
+        )
+        session = await self._store.create_session(
+            session_id=session_id,
+            user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+        )
+        self._authorization.assert_session_access(
+            principal=principal,
+            session=session,
+        )
+        record = await self._store.start_run(StartExecution(execution_id, session_id, RunKind.USER_TURN, _definition(spec, self._codec), prompt))
         # Claiming the just-started run and loading the session's latest
         # completed snapshot (so the next turn sees the prior turn's context;
         # resume uses the target run's own snapshot, not this path) don't
         # depend on each other -- run concurrently.
         claimed, messages = await asyncio.gather(
-            self.store.claim_run(ClaimExecution(record.id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
-            self.store.load_session_context(session_id),
+            self._store.claim_run(ClaimExecution(record.id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
+            self._store.load_session_context(session_id),
         )
-        return await self._execute(spec, prompt, claimed, resuming=False, message_history=messages)
+        return await self._execute(
+            spec,
+            prompt,
+            claimed,
+            resuming=False,
+            message_history=messages,
+            assembly=assembly,
+        )
 
-    async def resume(self, run_id: str, *, user_id: str | None = None, tenant_id: str | None = None) -> object:
+    async def resume(self, run_id: str, *, principal: PrincipalContext) -> object:
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
         record = await self._required(run_id)
-        if _ownership_mismatch(record, user_id, tenant_id):
-            raise PrincipalAccessDeniedError("run is not owned by this principal")
-        spec = self._codec.decode(record.definition.spec)
+        self._authorize(principal, record, ExecutionAction.RESUME)
+        spec = _decode_definition(record.definition, self._codec)
+        assembly = await self._preflight(
+            spec,
+            execution_id=record.id,
+            session_id=record.session_id,
+            root_execution_id=record.root_execution_id,
+            parent_execution_id=record.parent_execution_id,
+            principal=principal,
+        )
         # A paused run must transition PAUSED -> PENDING (its approval already
         # decided) before it can be claimed; claiming PAUSED directly is not
         # claimable. Resume then restores the target run's OWN snapshot, not the
         # session's latest completed snapshot.
-        await self.store.resume_run(ResumeExecution(run_id))
+        await self._store.resume_run(ResumeExecution(run_id))
         # Claiming the now-PENDING run and loading its own snapshot don't
         # depend on each other -- run concurrently.
         claimed, snapshot = await asyncio.gather(
-            self.store.claim_run(ClaimExecution(run_id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
-            self.store.get_snapshot(run_id),
+            self._store.claim_run(ClaimExecution(run_id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
+            self._store.get_snapshot(run_id),
         )
         messages = snapshot.resume_messages if snapshot is not None else ()
-        return await self._execute(spec, "", claimed, resuming=True, message_history=messages)
+        return await self._execute(
+            spec,
+            "",
+            claimed,
+            resuming=True,
+            message_history=messages,
+            assembly=assembly,
+        )
 
-    async def cancel(self, run_id: str, *, user_id: str | None = None, tenant_id: str | None = None) -> None:
+    async def _preflight(
+        self,
+        spec: AgentSpec,
+        *,
+        execution_id: str,
+        session_id: str,
+        root_execution_id: str,
+        parent_execution_id: str | None,
+        principal: PrincipalContext,
+    ) -> AgentAssembly:
+        self._assembler.validate_features(spec)
+        assembly = await self._assembler.assemble(
+            spec,
+            AgentFeatureContext(
+                agent_id=spec.id,
+                execution_id=execution_id,
+                root_execution_id=root_execution_id,
+                parent_execution_id=parent_execution_id,
+                session_id=session_id,
+                tenant_id=principal.tenant_id,
+                user_id=principal.user_id,
+                workspace=None,
+                sandbox=self._sandbox,
+            ),
+        )
+        if assembly.tools and not self._tool_execution_ready:
+            raise RuntimeInitializationError(
+                "agent tools require ToolStateStore and ToolPolicyResolver"
+            )
+        return assembly
+
+    async def cancel(self, run_id: str, *, principal: PrincipalContext) -> None:
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
         record = await self._required(run_id)
-        if _ownership_mismatch(record, user_id, tenant_id):
-            raise PrincipalAccessDeniedError("run is not owned by this principal")
+        self._authorize(principal, record, ExecutionAction.CANCEL)
         if record.status in {RunStatus.PENDING, RunStatus.PAUSED}:
             # PENDING/PAUSED cancel is terminal: no live execution to signal,
             # no lease to release (PENDING was never claimed; PAUSED lease was
             # already released by _finish). The store transitions directly
             # to CANCELLED.
-            await self.store.request_cancel(RequestCancellation(run_id, record.lease.owner or "runtime", record.lease.fence, datetime.now(timezone.utc)))
+            await self._store.request_cancel(RequestCancellation(run_id, record.lease.owner or "runtime", record.lease.fence, datetime.now(timezone.utc)))
             return
         if record.lease.owner is None:
             raise StorageError("run has no active owner")
-        await self.store.request_cancel(RequestCancellation(run_id, record.lease.owner, record.lease.fence, datetime.now(timezone.utc)))
+        await self._store.request_cancel(RequestCancellation(run_id, record.lease.owner, record.lease.fence, datetime.now(timezone.utc)))
         # Persisted CANCELLING; also signal the live execution -- both the
         # token (checked between execution points) and task.cancel() (unblocks
         # a currently-suspended await, e.g. a hanging model call).
         await self._controller.cancel(run_id)
 
-    async def decide_approval(self, run_id: str, *, approval_id: str, decision: ApprovalDecision, decided_by: str, user_id: str | None = None, tenant_id: str | None = None) -> RunRecord:
+    async def decide_approval(self, run_id: str, *, approval_id: str, decision: ApprovalDecision, principal: PrincipalContext) -> RunRecord:
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
         record = await self._required(run_id)
-        if _ownership_mismatch(record, user_id, tenant_id):
-            raise PrincipalAccessDeniedError("run is not owned by this principal")
+        self._authorize(principal, record, ExecutionAction.DECIDE_APPROVAL)
         # ALLOW leaves the run PAUSED (resumable via resume()); DENY is
         # terminal -- the store transitions it straight to CANCELLED and no
         # further resume is possible.
-        return await self.store.decide_approval(DecideApproval(run_id, approval_id, decision, decided_by))
+        return await self._store.decide_approval(DecideApproval(run_id, approval_id, decision, principal.resolved_by))
 
     async def _heartbeat(self, run_id: str, owner: str, fence: int, token: CancellationToken) -> None:
         # Renews the lease periodically so a still-RUNNING execution that
@@ -161,29 +267,83 @@ class ExecutionService:
         # If the renewal fails (lease lost), same: cancel and stop.
         while True:
             await asyncio.sleep(_HEARTBEAT_INTERVAL.total_seconds())
-            try:
-                updated = await self.store.heartbeat_run(HeartbeatExecution(run_id, owner, fence, datetime.now(timezone.utc), _LEASE_DURATION))
-                if updated.status is RunStatus.CANCELLING:
-                    token.cancel()
-                    return
-            except StorageError:
-                token.cancel()
+            updated = await self._store.heartbeat_run(HeartbeatExecution(run_id, owner, fence, datetime.now(timezone.utc), _LEASE_DURATION))
+            if updated.status is RunStatus.CANCELLING:
+                await self._controller.cancel(run_id)
                 return
 
-    async def _execute(self, spec: AgentSpec, prompt: str, record: RunRecord, *, resuming: bool, message_history: tuple[object, ...] = ()) -> object:
+    async def _execute(self, spec: AgentSpec, prompt: str, record: RunRecord, *, resuming: bool, message_history: tuple[object, ...] = (), assembly: AgentAssembly | None = None) -> object:
         owner = record.lease.owner or "runtime"
         compiled = await self._compiler.compile(spec)
-        context = RunContext(record.id, record.root_run_id, record.parent_run_id, record.session_id, record.runnable_id, record.definition.runnable_type, record.user_id, record.tenant_id, None)
-        collector = SemanticTraceCollector(record.id, self.store, record.trace_sequence)
-        engine = AgentEngine(trace_collector=collector, trace_codec=trace_codec)
+        context = RunContext(record.id, record.root_execution_id, record.parent_execution_id, record.session_id, record.runnable_id, record.definition.runnable_type, record.user_id, record.tenant_id, None)
+        collector = SemanticTraceCollector(record.id, self._store, record.trace_sequence)
         decoded_history = decode_model_messages(message_history) if message_history else ()
         token = CancellationToken()
-        task = asyncio.ensure_future(engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming), context, cancellation=token, live_events=_Events(), security_events=_Events(), trace_sequence=record.trace_sequence))
-        await self._controller.register(record.id, task, token)
+        approved = record.approval if resuming else None
+        task = await self._controller.start(
+            record.id,
+            self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector),
+            token,
+        )
         heartbeat = asyncio.ensure_future(self._heartbeat(record.id, owner, record.lease.fence, token))
         try:
+            done, _ = await asyncio.wait(
+                {task, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in done:
+                heartbeat_error = heartbeat.exception()
+                if heartbeat_error is not None:
+                    await self._controller.cancel(record.id)
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise heartbeat_error
             outcome = await task
         except asyncio.CancelledError:
+            token.cancel()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            try:
+                latest = await self._required(record.id)
+                if latest.status is RunStatus.RUNNING:
+                    await self._store.request_cancel(
+                        RequestCancellation(
+                            record.id,
+                            owner,
+                            record.lease.fence,
+                            datetime.now(timezone.utc),
+                        )
+                    )
+                    latest = await self._required(record.id)
+                if latest.status is RunStatus.CANCELLING:
+                    await self._store.acknowledge_cancel(
+                        AcknowledgeCancellation(
+                            record.id,
+                            owner,
+                            record.lease.fence,
+                            AgentSnapshotData((), None, RunUsage(), collector.next_sequence),
+                        )
+                    )
+            except Exception as cleanup_error:
+                try:
+                    await asyncio.shield(
+                        self._security_events.emit(
+                            SecurityDegraded(
+                                run_id=record.id,
+                                component="execution_cancel_cleanup",
+                                reason=str(cleanup_error),
+                                error_code=type(cleanup_error).__name__,
+                            )
+                        )
+                    )
+                except Exception:
+                    pass
             raise
         except Exception as exc:
             # A programming/config/protocol error (as opposed to a modeled
@@ -194,7 +354,7 @@ class ExecutionService:
             # what the caller must see.
             try:
                 await collector.flush()
-                await self.store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), collector.next_sequence))
+                await self._store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), collector.next_sequence))
             except Exception:
                 pass
             raise
@@ -204,28 +364,79 @@ class ExecutionService:
                 await heartbeat
             except asyncio.CancelledError:
                 pass
-            await self._controller.unregister(record.id)
+            await self._controller.unregister(record.id, task=task)
         snapshot = _snapshot(outcome)
+        latest = await self._required(record.id)
+        if latest.status in {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            return None
+        if (
+            latest.status is RunStatus.CANCELLING
+            and not isinstance(outcome, AgentFailed)
+        ):
+            await self._store.acknowledge_cancel(
+                AcknowledgeCancellation(
+                    record.id,
+                    owner,
+                    record.lease.fence,
+                    snapshot,
+                )
+            )
+            return None
         if isinstance(outcome, AgentCompleted):
-            await self.store.complete_run(CompleteExecution(record.id, owner, record.lease.fence, snapshot))
+            await self._store.complete_run(CompleteExecution(record.id, owner, record.lease.fence, snapshot))
             return ExecutionResultView(record.id, outcome.result.output)
         if isinstance(outcome, AgentPaused):
             approval = outcome.request
-            await self.store.pause_run(PauseExecution(record.id, owner, record.lease.fence, snapshot, RunApproval(approval.approval_id, approval.tool_call_id or "", approval.tool_name or "", dict(approval.arguments))))
+            binding_fingerprint = str(
+                approval.binding.get("fingerprint", "")
+                if approval.binding
+                else ""
+            )
+            await self._store.pause_run(
+                PauseExecution(
+                    record.id,
+                    owner,
+                    record.lease.fence,
+                    snapshot,
+                    RunApproval(
+                        approval.approval_id,
+                        approval.tool_call_id or "",
+                        approval.tool_name or "",
+                        binding_fingerprint,
+                    ),
+                )
+            )
             return None
         if isinstance(outcome, AgentCancelled):
-            await self.store.acknowledge_cancel(AcknowledgeCancellation(record.id, owner, record.lease.fence, snapshot))
+            await self._store.acknowledge_cancel(AcknowledgeCancellation(record.id, owner, record.lease.fence, snapshot))
             return None
         if isinstance(outcome, AgentFailed):
-            await self.store.fail_run(FailExecution(record.id, owner, record.lease.fence, snapshot, outcome.error))
+            await self._store.fail_run(FailExecution(record.id, owner, record.lease.fence, snapshot, outcome.error))
             raise RuntimeError(outcome.error.message)
         raise AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
 
     async def _required(self, run_id: str) -> RunRecord:
-        record = await self.store.get_run(run_id)
+        record = await self._store.get_run(run_id)
         if record is None:
             raise KeyError(run_id)
         return record
+
+    def _authorize(
+        self,
+        principal: PrincipalContext,
+        record: RunRecord,
+        action: ExecutionAction,
+    ) -> None:
+        self._authorization.assert_execution_access(
+            principal=principal,
+            tenant_id=record.tenant_id,
+            user_id=record.user_id,
+            action=action,
+        )
 
 
 def spec_type(record: RunRecord) -> RunnableType:

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """LoopGuardMiddleware: blocks a tool call whose (tool_name, arguments) signature
-has failed max_repeats times in a row. Ports stuck_loop/capability.py's
-StuckLoopCapability logic to the new Middleware Protocol (that pre-vNext module
+has failed max_repeats times in a row. Ports the former stuck-loop hook's
+stuck-loop logic to the new Middleware Protocol (that pre-vNext module
 is untouched)."""
 
 import json

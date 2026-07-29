@@ -13,9 +13,9 @@ from linktools.ai.errors import LinktoolsAIError
 @pytest.mark.parametrize(
     "exc_cls",
     [
-        E.CapabilityResolutionError,
-        E.CapabilityNotFoundError,
-        E.CapabilityConflictError,
+        E.AgentAssemblyError,
+        E.AgentFeatureNotFoundError,
+        E.AgentFeatureConflictError,
         E.SkillNotFoundError,
         E.MCPServerNotFoundError,
         E.MCPConnectionError,
@@ -40,8 +40,8 @@ def test_all_errors_are_linktools_ai_errors(exc_cls):
 
 
 def test_capability_tree():
-    assert issubclass(E.CapabilityNotFoundError, E.CapabilityResolutionError)
-    assert issubclass(E.CapabilityConflictError, E.CapabilityResolutionError)
+    assert issubclass(E.AgentFeatureNotFoundError, E.AgentAssemblyError)
+    assert issubclass(E.AgentFeatureConflictError, E.AgentAssemblyError)
     for leaf in (
         E.SkillNotFoundError,
         E.MCPServerNotFoundError,
@@ -50,7 +50,7 @@ def test_capability_tree():
         E.ExtensionEntrypointNotFoundError,
         E.SubagentNotFoundError,
     ):
-        assert issubclass(leaf, E.CapabilityNotFoundError)
+        assert issubclass(leaf, E.AgentFeatureNotFoundError)
 
 
 def test_policy_backed_errors():
@@ -64,8 +64,8 @@ def test_policy_backed_errors():
     assert issubclass(E.PolicyError, LinktoolsAIError)
 
 
-def test_storage_capability_tree():
-    base = E.StorageCapabilityError
+def test_storage_feature_error_tree():
+    base = E.StorageFeatureSupportError
     for leaf in (
         E.StorageTransactionNotSupportedError,
         E.StorageConcurrencyNotSupportedError,

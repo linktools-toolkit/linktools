@@ -11,16 +11,15 @@ from typing import TYPE_CHECKING, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
     from ...model.policy import ModelPolicy
-    from ...execution.session import SessionMessage
 
 
 @runtime_checkable
 class SessionWindowPolicy(Protocol):
     async def select_messages(
         self,
-        messages: "Sequence[SessionMessage]",
+        messages: "Sequence[object]",
         model_policy: "ModelPolicy",
-    ) -> "Sequence[SessionMessage]": ...
+    ) -> "Sequence[object]": ...
 
 
 class NoopWindowPolicy:

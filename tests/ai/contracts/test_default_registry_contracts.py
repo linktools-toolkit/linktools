@@ -8,10 +8,10 @@ import pytest
 
 from linktools.ai.spec.parsing import SpecLoader
 from linktools.ai.agent.index import AgentSpecIndex
-from linktools.ai.tool.mcp.index import MCPServerSpecIndex
+from linktools.ai.agent.integrations.mcp.index import MCPServerSpecIndex
 from linktools.ai.agent.skill.index import SkillSpecIndex
 from linktools.ai.agent.skill.spec import SkillSpec
-from linktools.ai.tool.index import ToolSpecIndex
+from linktools.ai.agent.tool.policy.index import ToolSpecIndex
 
 from ._assertions import (
     assert_spec_provider_contract,
@@ -65,7 +65,7 @@ async def test_skill_registry_contract(base):
 
 @pytest.mark.asyncio
 async def test_mcp_registry_contract(base):
-    from linktools.ai.tool.mcp.spec import MCPServerSpec
+    from linktools.ai.agent.integrations.mcp.spec import MCPServerSpec
 
     reg = MCPServerSpecIndex.from_specloader(SpecLoader.from_filesystem(base / "mcp"))
     await assert_spec_provider_contract(

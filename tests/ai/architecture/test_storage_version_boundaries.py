@@ -11,7 +11,7 @@ def test_new_storage_protocols_do_not_import_backends():
         "execution/store.py",
         "agent/memory/store.py",
         "tasks/store.py",
-        "tool/store.py",
+        "agent/tool/state/store.py",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "persistence.local" not in text
@@ -39,15 +39,15 @@ def test_storage_kernel_contains_no_domain_models_or_backend_rows():
 
 def test_domain_stores_bind_a_backend_directly_without_composition():
     # The generic StorageComposition indirection is gone from the domain stores:
-    # each binds its backend directly and exposes it via ``.backend``.
+    # each binds its backend directly without exposing it publicly.
     # spec/store.py is the one place composition remains (it owns the
     # spec-specific revision/cache/overlay capabilities), so it is absent here.
     expected = {
-        "tool/store.py": ("ToolStateBackend", "ToolStateStore"),
-        "tasks/store.py": ("TaskBackend", "TaskStore"),
+        "agent/tool/state/store.py": ("ToolStateStore",),
+        "tasks/store.py": ("TaskStore",),
         "agent/memory/store.py": ("MemoryBackend", "MemoryStore"),
-        "artifact/store.py": ("ArtifactBackend", "ArtifactStore"),
-        "execution/store.py": ("ExecutionBackend", "ExecutionStore"),
+        "artifact/store.py": ("ArtifactStore",),
+        "execution/store.py": ("ExecutionStore",),
     }
     for relative, names in expected.items():
         text = (ROOT / relative).read_text(encoding="utf-8")
@@ -68,7 +68,7 @@ def test_sqlalchemy_adapters_share_one_declarative_base():
         "execution/persistence/sqlalchemy.py",
         "agent/memory/persistence/sqlalchemy.py",
         "tasks/persistence/sqlalchemy.py",
-        "tool/persistence/sqlalchemy.py",
+        "agent/tool/state/persistence/sqlalchemy.py",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "storage.sqlalchemy.base import Base" in text

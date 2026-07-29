@@ -1,4 +1,4 @@
-"""Specification storage assembled from independent storage capabilities."""
+"""Specification storage assembled from independent storage features."""
 
 from typing import Protocol
 
@@ -92,10 +92,6 @@ class SpecStore:
             adapter=adapter,
             cache_adapter=adapter,
         )
-
-    @property
-    def backend(self) -> SpecReader:
-        return self._storage.primary
 
     @property
     def writer(self) -> SpecWriter | None:

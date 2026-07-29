@@ -15,7 +15,7 @@ import uuid
 from typing import Protocol
 
 from ....artifact.models import ArtifactProvenance
-from ....json import to_jsonable
+from ....json import normalize_json
 from ..models import EvalCase, EvalExecution, EvalTarget, normalize_usage
 from ..snapshot import EvalSnapshot
 
@@ -110,7 +110,7 @@ class DirectEvalExecutor:
         generic encoder cannot handle is coerced to its str form so sealing
         never crashes."""
         try:
-            text = json.dumps(to_jsonable({"value": value}))
+            text = json.dumps(normalize_json({"value": value}))
         except TypeError:
             text = json.dumps({"value": str(value), "_value_coerced": True})
         try:

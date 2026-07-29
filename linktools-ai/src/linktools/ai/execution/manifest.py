@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ExecutionManifest: the immutable record of WHAT a run was prepared against --
 the revisions / fingerprints of the runnable, model provider, tool handlers,
-skills/subagents, MCP servers, policy, and capabilities. Persisted into the
+skills/subagents, MCP servers, policy, and features. Persisted into the
 RunDefinition at prepare time so resume can detect environment drift
 instead of silently re-resolving "latest".
 
@@ -17,7 +17,7 @@ execution time, not prepare time, so their revisions layer in once tool
 resolution moves earlier; asset snapshotting is handled separately.
 
 Revision helpers:
-- ``descriptor_fingerprint`` -- content hash of a tool declaration (the ToolRef
+- ``descriptor_fingerprint`` -- content hash of a tool declaration (the AgentFeatureRef
   at prepare time, or a resolved descriptor post-compile).
 - ``handler_revision`` -- a tool handler's revision: an explicit ``revision``
   attribute if the handler exposes one, else derived from its module / qualname
@@ -33,7 +33,7 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Mapping, Protocol, runtime_checkable
 
 from ..errors import ManifestDriftError
-from ..json import canonical_json
+from ..json import canonical_json_bytes
 
 
 # --- resumability ------------------------------------------------------------
@@ -87,17 +87,17 @@ def provider_revision(provider: Any) -> "str | None":
 
 def descriptor_fingerprint(descriptor: Any) -> str:
     """Stable content hash of a tool declaration. Operates on whatever the
-    caller has at the time: a spec-level ToolRef (pre-compile) or a resolved
+    caller has at the time: a spec-level AgentFeatureRef (pre-compile) or a resolved
     descriptor (post-compile). The fingerprint covers the declaration's
     identity-defining fields (kind / name / config) so two declarations that
     differ in any of them fingerprint differently."""
     kind = getattr(descriptor, "kind", None)
     name = getattr(descriptor, "name", None)
     config = getattr(descriptor, "config", None)
-    payload = canonical_json(
+    payload = canonical_json_bytes(
         {"kind": kind, "name": name, "config": _json_safe(config)}
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def handler_revision(handler: Any) -> "str | None":
@@ -163,7 +163,7 @@ class ToolManifest:
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityRevision:
+class FeatureRevision:
     """A pinned skill / subagent asset: its path + revision + etag +
     sha256 + artifact_id, so resume restores the EXACT asset instead of
     re-reading latest."""
@@ -201,12 +201,12 @@ class ExecutionManifest:
     model_provider: "str | None"
     model_revision: "str | None"
     tool_descriptors: "tuple[ToolManifest, ...]" = field(default_factory=tuple)
-    skill_revisions: "tuple[CapabilityRevision, ...]" = field(default_factory=tuple)
-    subagent_revisions: "tuple[CapabilityRevision, ...]" = field(default_factory=tuple)
+    skill_revisions: "tuple[FeatureRevision, ...]" = field(default_factory=tuple)
+    subagent_revisions: "tuple[FeatureRevision, ...]" = field(default_factory=tuple)
     mcp_servers: "tuple[MCPManifest, ...]" = field(default_factory=tuple)
     policy_revision: "str | None" = None
     security_baseline_revision: "str | None" = None
-    capability_revision: "str | None" = None
+    feature_revision: "str | None" = None
     output_schema_id: "str | None" = None
     output_schema_revision: "str | None" = None
 
@@ -237,22 +237,22 @@ def manifest_to_dict(manifest: ExecutionManifest) -> "dict[str, Any]":
             }
             for t in manifest.tool_descriptors
         ],
-        "skill_revisions": [_capability_revision_to_dict(r) for r in manifest.skill_revisions],
+        "skill_revisions": [_feature_revision_to_dict(r) for r in manifest.skill_revisions],
         "subagent_revisions": [
-            _capability_revision_to_dict(r) for r in manifest.subagent_revisions
+            _feature_revision_to_dict(r) for r in manifest.subagent_revisions
         ],
         "mcp_servers": [
             {"name": m.name, "revision": m.revision} for m in manifest.mcp_servers
         ],
         "policy_revision": manifest.policy_revision,
         "security_baseline_revision": manifest.security_baseline_revision,
-        "capability_revision": manifest.capability_revision,
+        "feature_revision": manifest.feature_revision,
         "output_schema_id": manifest.output_schema_id,
         "output_schema_revision": manifest.output_schema_revision,
     }
 
 
-def _capability_revision_to_dict(asset: CapabilityRevision) -> "dict[str, Any]":
+def _feature_revision_to_dict(asset: FeatureRevision) -> "dict[str, Any]":
     return {
         "path": asset.path,
         "revision": asset.revision,
@@ -283,10 +283,10 @@ def manifest_from_dict(data: "Mapping[str, Any]") -> ExecutionManifest:
             for t in data.get("tool_descriptors", ())
         ),
         skill_revisions=tuple(
-            _capability_revision_from_dict(r) for r in data.get("skill_revisions", ())
+            _feature_revision_from_dict(r) for r in data.get("skill_revisions", ())
         ),
         subagent_revisions=tuple(
-            _capability_revision_from_dict(r) for r in data.get("subagent_revisions", ())
+            _feature_revision_from_dict(r) for r in data.get("subagent_revisions", ())
         ),
         mcp_servers=tuple(
             MCPManifest(name=m["name"], revision=m.get("revision"))
@@ -294,14 +294,14 @@ def manifest_from_dict(data: "Mapping[str, Any]") -> ExecutionManifest:
         ),
         policy_revision=data.get("policy_revision"),
         security_baseline_revision=data.get("security_baseline_revision"),
-        capability_revision=data.get("capability_revision"),
+        feature_revision=data.get("feature_revision"),
         output_schema_id=data.get("output_schema_id"),
         output_schema_revision=data.get("output_schema_revision"),
     )
 
 
-def _capability_revision_from_dict(data: "Mapping[str, Any]") -> CapabilityRevision:
-    return CapabilityRevision(
+def _feature_revision_from_dict(data: "Mapping[str, Any]") -> FeatureRevision:
+    return FeatureRevision(
         path=data.get("path") or "",
         revision=data.get("revision"),
         etag=data.get("etag"),
@@ -322,9 +322,9 @@ def build_execution_manifest(
     tool_handlers: "Mapping[str, Any] | None" = None,
     policy_revision: "str | None" = None,
     security_baseline_revision: "str | None" = None,
-    capability_revision: "str | None" = None,
-    skill_revisions: "tuple[CapabilityRevision, ...]" = (),
-    subagent_revisions: "tuple[CapabilityRevision, ...]" = (),
+    feature_revision: "str | None" = None,
+    skill_revisions: "tuple[FeatureRevision, ...]" = (),
+    subagent_revisions: "tuple[FeatureRevision, ...]" = (),
     mcp_servers: "tuple[MCPManifest, ...]" = (),
     output_schema_id: "str | None" = None,
     output_schema_revision: "str | None" = None,
@@ -332,7 +332,7 @@ def build_execution_manifest(
     """Construct an ExecutionManifest from the available inputs.
 
     ``spec`` supplies the runnable id, the model name (``spec.model.primary``),
-    and the tool declarations (``spec.tools`` -- spec-level ToolRefs).
+    and the feature declarations (``spec.features``).
     ``model_provider`` is the resolved model bundle (its revision is recorded
     when supplied; the prepare path passes the compiled bundle). ``tool_handlers``
     maps tool name -> handler; when supplied, each tool's handler_revision is
@@ -342,7 +342,7 @@ def build_execution_manifest(
     """
     model_policy = getattr(spec, "model", None)
     model_name = getattr(model_policy, "primary", None)
-    tool_refs = getattr(spec, "tools", None) or ()
+    tool_refs = getattr(spec, "features", ())
     handlers = dict(tool_handlers) if tool_handlers is not None else {}
     tool_descriptors = tuple(
         ToolManifest(
@@ -375,7 +375,7 @@ def build_execution_manifest(
         mcp_servers=mcp_servers,
         policy_revision=policy_revision,
         security_baseline_revision=security_baseline_revision,
-        capability_revision=capability_revision,
+        feature_revision=feature_revision,
         output_schema_id=output_schema_id,
         output_schema_revision=output_schema_revision,
     )

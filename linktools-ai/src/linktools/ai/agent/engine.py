@@ -16,13 +16,13 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
   via the wired MiddlewarePipeline -- after_run fires before the outcome is
   returned, so it always precedes the ExecutionService commit;
 * builds the model prompt via :class:`~linktools.ai.agent.prompt.builder.PromptBuilder`
-  (memory + knowledge sections from their async policies, then capability-
+  (memory + knowledge sections from their async policies, then feature-
   resolved sections folded in via PromptBuilder.combine). Prior-turn history
   arrives as native pydantic-ai ``message_history`` on AgentInput (loaded by
   ExecutionService), NOT via a Store read here;
 * threads the per-Run ToolContext through pydantic-ai dependency injection
   (``deps=AgentDependencies(tool_context=...)`` -> ``ctx.deps``), never a
-  mutable capability field;
+  mutable SDK hook field;
 * enforces ModelPolicy.timeout_seconds / max_tokens / budget;
 * classifies exceptions via the narrow ``_EXPECTED_RUN_FAILURES`` allowlist
   (model routing/policy/output denials, ToolError, MCPToolError) -> AgentFailed;
@@ -90,27 +90,29 @@ if TYPE_CHECKING:
 
     from pydantic_ai.toolsets import AbstractToolset
 
-    from .capability.resolver import CapabilityResolver
-    from .capability.models import CapabilityRuntimeOptions
-    from ..tool.sandbox.protocols import Sandbox
+    from .assembly.assembler import AgentAssembler
+    from .assembly.models import AgentAssembly
+    from .tool.adapters.pydantic_ai import PydanticAIToolAdapter
+    from .tool.sandbox.protocols import Sandbox
     from .retrieval.retriever import Retriever
     from .memory.store import MemoryStore
+    from .prompt.window import SessionWindowPolicy
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
     from ..execution.live_events import RunLiveEventSink, SecurityEventSink
+    from ..execution.trace_collector import SemanticTraceCollector
+    from ..governance.security.pipeline import SecurityPipeline
+    from ..model.pricing import ModelPricingProvider
 
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _semantic_messages(messages: Any) -> tuple[Any, ...]:
-    raise RuntimeError("semantic message codec must be injected")
-
 # Exception types that count as EXPECTED provider/model/tool failures for the
 # pure execution loop's outcome classification. Only these are turned into an
 # AgentFailed outcome; every other exception (configuration / invariant /
 # protocol violations such as RuntimeInitializationError, RunInvariantError,
-# CapabilityResolutionError, MCPConnectionError, ModelRetryConfigurationError,
+# AgentAssemblyError, MCPConnectionError, ModelRetryConfigurationError,
 # and all unknown programming errors like TypeError/AttributeError/KeyError)
 # propagates unchanged -- the spec explicitly forbids an except-Exception
 # catch-all that swallows them into a FAILED outcome. ToolError is the base for
@@ -139,37 +141,29 @@ class AgentEngine:
         self,
         *,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
+        session_window: "SessionWindowPolicy | None" = None,
         memory_store: "MemoryStore | None" = None,
         retriever: "Retriever | None" = None,
         observability: "ObservabilitySink | None" = None,
         metrics: "ObservabilityMetrics | None" = None,
         sandbox: "Sandbox | None" = None,
-        capability_resolver: "CapabilityResolver | None" = None,
-        capability_options: "CapabilityRuntimeOptions | None" = None,
-        security_pipeline: Any = None,
-        baseline_policy: Any = None,
-        tool_policy_provider: Any = None,
-        managed_tool_executor: Any = None,
-        security_audit_failure_mode: Any = "fail_closed",
-        pricing_provider: Any = None,
-        trace_collector: Any = None,
-        trace_codec: Any = None,
+        assembler: "AgentAssembler | None" = None,
+        tool_adapter: "PydanticAIToolAdapter | None" = None,
+        security_pipeline: "SecurityPipeline | None" = None,
+        pricing_provider: "ModelPricingProvider | None" = None,
+        trace_codec: object | None = None,
     ) -> None:
         self._middleware_pipeline = middleware_pipeline
+        self._session_window = session_window
         self._memory_store = memory_store
         self._retriever = retriever
         self._observability = observability
         self._metrics = metrics
         self._sandbox = sandbox
-        self._capability_resolver = capability_resolver
-        self._capability_options = capability_options
+        self._assembler = assembler
+        self._tool_adapter = tool_adapter
         self._security_pipeline = security_pipeline
-        self._baseline_policy = baseline_policy
-        self._tool_policy_provider = tool_policy_provider
-        self._tool_executor_for_managed = managed_tool_executor
-        self._security_audit_failure_mode = security_audit_failure_mode
         self._pricing_provider = pricing_provider
-        self._trace_collector = trace_collector
         self._trace_codec = trace_codec
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
@@ -183,9 +177,6 @@ class AgentEngine:
     def _effective_memory_policy(self):
         """Explicit policy from options, else the default built from the wired
         memory store, else None (no memory injection)."""
-        opts = self._capability_options
-        if opts is not None and opts.memory_policy is not None:
-            return opts.memory_policy
         if self._memory_store is not None:
             from .context_policies import DefaultMemoryPolicy
 
@@ -193,9 +184,6 @@ class AgentEngine:
         return None
 
     def _effective_retrieval_policy(self):
-        opts = self._capability_options
-        if opts is not None and opts.retrieval_policy is not None:
-            return opts.retrieval_policy
         if self._retriever is not None:
             from .context_policies import DefaultRetrievalPolicy
 
@@ -203,9 +191,6 @@ class AgentEngine:
         return None
 
     def _prompt_formatter(self):
-        opts = self._capability_options
-        if opts is not None and opts.prompt_context_formatter is not None:
-            return opts.prompt_context_formatter
         from .context_policies import DefaultPromptContextFormatter
 
         return DefaultPromptContextFormatter()
@@ -219,8 +204,9 @@ class AgentEngine:
         cancellation: CancellationToken,
         live_events: "RunLiveEventSink",
         security_events: "SecurityEventSink",
+        assembly: "AgentAssembly | None" = None,
         trace_sequence: int = 0,
-        trace_collector: Any = None,
+        trace_collector: "SemanticTraceCollector | None" = None,
     ) -> AgentExecutionOutcome:
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- ExecutionService
@@ -229,7 +215,7 @@ class AgentEngine:
         the prompt, drives the model/tool loop, and returns a value
         (never a Store write).
 
-        Every security/observability event the capability and tool layers
+        Every security/observability event the feature and tool layers
         emit (tool-pipeline decisions, exposure/catalog/window markers) flows
         through the injected ``security_events`` sink via a
         ``SecurityEventSinkEmitter`` -- this method holds no durable store
@@ -243,7 +229,7 @@ class AgentEngine:
         denials, runtime tool failures, MCP tool errors) is returned as
         AgentFailed. Everything else -- configuration/invariant/protocol
         violations (RuntimeInitializationError, RunInvariantError,
-        CapabilityResolutionError, MCPConnectionError, ToolSchemaError, ...)
+        AgentAssemblyError, MCPConnectionError, ToolSchemaError, ...)
         AND unknown programming errors (TypeError, AttributeError, ...) --
         propagates unchanged. The classification is an allowlist of expected
         failures, not a denylist, so a new programming bug surfaces as a real
@@ -263,18 +249,15 @@ class AgentEngine:
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
         started = time.monotonic()
 
-        trace_collector = trace_collector or self._trace_collector
-
         current_run = None
 
         def resume_messages() -> tuple[Any, ...]:
             current = current_run
             if current is None:
                 return ()
-            try:
-                return self._trace_codec.encode_model_messages(tuple(current.all_messages()))
-            except Exception:
-                return ()
+            return self._trace_codec.encode_model_messages(
+                tuple(current.all_messages())
+            )
 
         async def _snapshot(
             status: ExecutionRunStatus,
@@ -303,11 +286,7 @@ class AgentEngine:
                     await self._middleware_pipeline.run_before_run(context)
 
                 message_history = input.message_history or None
-                window_policy = (
-                    self._capability_options.session_window_policy
-                    if self._capability_options is not None
-                    else None
-                )
+                window_policy = self._session_window
                 if window_policy is not None:
                     # The policy is invoked even when history is empty (a fresh
                     # session) so the wiring is observable and a policy that
@@ -364,123 +343,71 @@ class AgentEngine:
                     sandbox=self._sandbox,
                 )
                 toolsets: "list[AbstractToolset]" = []
-                cap_bundle = None
-                has_resolver = self._capability_resolver is not None
-                builtin_flag = getattr(
-                    self._capability_options, "enable_builtin_tools", None
-                )
-                needs_default = (
-                    agent.spec.tools is None
-                    and deps.sandbox is not None
-                    and builtin_flag is not False
-                )
-                from .capability.models import requires_capability_resolver
-
-                requires_tools = requires_capability_resolver(
-                    tools=(agent.spec.tools if not needs_default else ("builtin",)),
-                    sandbox=deps.sandbox,
-                )
-                if requires_tools and not has_resolver:
+                if agent.spec.features and self._assembler is None:
                     raise RuntimeInitializationError(
-                        "AgentEngine requires a CapabilityResolver to resolve tools"
+                        "AgentEngine requires an AgentAssembler for declared features"
                     )
-                if requires_tools and self._tool_executor_for_managed is None:
+                if agent.spec.features and self._tool_adapter is None:
                     raise RuntimeInitializationError(
-                        "AgentEngine requires a GovernedToolInvoker for managed tool execution"
+                        "AgentEngine requires a PydanticAIToolAdapter for feature tools"
                     )
-                if requires_tools:
-                    from .capability.exposure import CapabilityToolExposurePolicy
-                    from .capability.provider import CapabilityContext
+                if agent.spec.features:
+                    from .assembly.provider import AgentFeatureContext
+                    from .tool.execution.models import ToolExecutionContext
 
-                    exposure = (
-                        self._capability_options.tool_exposure
-                        if self._capability_options is not None
-                        else CapabilityToolExposurePolicy()
-                    )
-                    from ..execution.live_events import SecurityEventSinkEmitter
-
-                    # The security/observability emitter for this Run is built
-                    # from the injected SecurityEventSink (durable, ExecutionService-
-                    # owned) -- NOT from a held durable store. Capabilities/tools/
-                    # governance depend only on this emitter (SecurityEventEmitter
-                    # shape), with no direct persistence reference.
-                    security_emitter = SecurityEventSinkEmitter(security_events)
-
-                    cap_ctx = CapabilityContext(
+                    feature_context = AgentFeatureContext(
                         agent_id=agent.spec.id,
-                        exposure_policy=exposure,
                         sandbox=deps.sandbox,
-                        run_id=context.run_id,
-                        root_run_id=context.root_run_id,
-                        parent_run_id=context.parent_run_id,
+                        execution_id=context.run_id,
+                        root_execution_id=context.root_execution_id,
+                        parent_execution_id=context.parent_execution_id,
                         session_id=context.session_id,
-                        security_event_emitter=security_emitter,
                         user_id=context.user_id,
                         tenant_id=context.tenant_id,
                         workspace=context.workspace,
                     )
-                    if needs_default:
-                        from .spec import ToolRef as _TR
-
-                        effective_spec = dataclasses.replace(
+                    if assembly is None:
+                        assembly = await self._assembler.assemble(
                             agent.spec,
-                            tools=(_TR(kind="builtin", name="*"),),
+                            feature_context,
                         )
-                    else:
-                        effective_spec = agent.spec
-                    cap_bundle = await self._capability_resolver.resolve(
-                        effective_spec, cap_ctx
-                    )
-                    from .capability.resolver import contribution_descriptors
-
-                    descriptor_lookup = {
-                        d.name: d
-                        for contrib in cap_bundle.tool_contributions
-                        for d in contribution_descriptors(contrib)
+                    tool_descriptors = {
+                        definition.descriptor.name: definition.descriptor
+                        for definition in assembly.tools
                     }
-                    if descriptor_lookup:
+                    if tool_descriptors:
                         deps = dataclasses.replace(
-                            deps, descriptor_lookup=descriptor_lookup
+                            deps, tool_descriptors=tool_descriptors
                         )
-                    effective_pipeline = self._security_pipeline
-                    if cap_bundle.tool_contributions:
-                        from ..tool.pydantic import (
-                            ManagedToolsetWrapper,
-                            build_managed_toolset,
+                    if assembly.tools:
+                        toolsets.append(
+                            self._tool_adapter.build_toolset(
+                                assembly.tools,
+                                context=ToolExecutionContext(
+                                    execution_id=context.run_id,
+                                    tool_call_id="",
+                                    dependencies=deps,
+                                    run_context=context,
+                                    approved_tool_call_id=input.approved_tool_call_id,
+                                    approved_binding_fingerprint=(
+                                        input.approved_binding_fingerprint
+                                    ),
+                                    trace_sink=trace_collector,
+                                ),
+                            )
                         )
-
-                        wrap_kw = dict(
-                            security_pipeline=effective_pipeline,
-                            tool_executor=self._tool_executor_for_managed,
-                            policy_provider=self._tool_policy_provider,
-                            baseline_policy=self._baseline_policy,
-                            run_context=context,
-                            security_audit_failure_mode=self._security_audit_failure_mode,
-                            security_event_emitter=security_emitter,
-                        )
-                        for contrib in cap_bundle.tool_contributions:
-                            for md in contrib.tools:
-                                toolsets.append(
-                                    ManagedToolsetWrapper(
-                                        build_managed_toolset(md),
-                                        descriptors={md.descriptor.name: md.descriptor},
-                                        **wrap_kw,
-                                    )
-                                )
-                if cap_bundle is not None:
+                if assembly is not None:
                     from ..observability.events.payloads import (
                         PromptCatalogInjected,
                         ToolExposureApplied,
                     )
 
-                    total = 0
-                    for c in cap_bundle.tool_contributions:
-                        total += len(c.tools)
+                    total = len(assembly.tools)
                     await security_events.emit(
                         ToolExposureApplied(agent_id=agent.spec.id, total_tools=total)
                     )
-                    if cap_bundle.prompt_sections:
-                        for section in cap_bundle.prompt_sections:
+                    if assembly.prompt_sections:
+                        for section in assembly.prompt_sections:
                             await security_events.emit(
                                 PromptCatalogInjected(
                                     agent_id=agent.spec.id, section=section
@@ -493,8 +420,8 @@ class AgentEngine:
                 await cancellation.raise_if_cancelled()
                 effective_prompt = PromptBuilder.combine(
                     base_prompt=prompt,
-                    capability_sections=(
-                        cap_bundle.prompt_sections if cap_bundle is not None else {}
+                    feature_sections=(
+                        assembly.prompt_sections if assembly is not None else {}
                     ),
                     static_sections=agent.spec.instructions.sections,
                     resuming=input.resuming,
@@ -574,7 +501,7 @@ class AgentEngine:
                                     # nodes (CallToolsNode) always stream -- their
                                     # event stream (FunctionToolCallEvent /
                                     # FunctionToolResultEvent) does not depend on
-                                    # the model's streaming capability, only on
+                                    # the model's streaming support, only on
                                     # pydantic-ai's graph iteration.
                                     if (
                                         not model_supports_streaming(model)
@@ -638,14 +565,6 @@ class AgentEngine:
                                                                 ev.part, ToolReturnPart
                                                             ),
                                                         }
-                                                        if trace_collector is not None:
-                                                            await trace_collector.tool_result(
-                                                                {
-                                                                    "call_id": getattr(ev.part, "tool_call_id", None),
-                                                                    "tool_name": ev.part.tool_name,
-                                                                    "result": getattr(ev.part, "content", None),
-                                                                }
-                                                            )
                                                     if tool_event is not None:
                                                         await live_events.publish(
                                                             tool_event

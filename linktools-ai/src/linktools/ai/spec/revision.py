@@ -1,4 +1,4 @@
-"""Optional revision, delta, and metadata snapshot capabilities."""
+"""Optional revision, delta, and metadata snapshot features."""
 
 from __future__ import annotations
 

@@ -13,7 +13,7 @@ from linktools.ai.agent.spec import (
     AgentSpec,
     MiddlewareRef,
     PromptSpec,
-    ToolRef,
+    AgentFeatureRef,
 )
 from linktools.ai.errors import (
     InvalidSpecError,
@@ -35,7 +35,7 @@ def _write_agents(tmp_path) -> None:
         "model:\n"
         "  primary: gpt-4o\n"
         "  fallbacks: [gpt-4o-mini]\n"
-        "tools:\n"
+        "features:\n"
         "  - {kind: builtin, name: file}\n"
         "  - {kind: builtin, name: terminal}\n"
         "middleware:\n"
@@ -69,9 +69,9 @@ def test_get_returns_agent_spec_from_markdown(tmp_path):
     assert isinstance(spec.instructions, PromptSpec)
     assert spec.instructions.instructions == "You are a careful writer. Be concise."
     # tools / middleware refs
-    assert len(spec.tools) == 2
-    assert all(isinstance(t, ToolRef) for t in spec.tools)
-    assert tuple(t.name for t in spec.tools) == ("file", "terminal")
+    assert len(spec.features) == 2
+    assert all(isinstance(t, AgentFeatureRef) for t in spec.features)
+    assert tuple(t.name for t in spec.features) == ("file", "terminal")
     assert len(spec.middleware) == 1
     assert all(isinstance(m, MiddlewareRef) for m in spec.middleware)
     assert spec.middleware[0].name == "budget"
@@ -180,7 +180,7 @@ def test_get_malformed_frontmatter_raises_parse_error(tmp_path):
         asyncio.run(run())
 
 
-# 7. Defaults: an agent with only name + minimal model + body -> tools==(), middleware==().
+# 7. Defaults: an agent with only name + minimal model + body -> features==(), middleware==().
 def test_get_applies_defaults_when_minimal(tmp_path):
     _write_agents(tmp_path)
     registry = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(tmp_path / "agents"))
@@ -191,7 +191,7 @@ def test_get_applies_defaults_when_minimal(tmp_path):
     spec = asyncio.run(run())
     assert spec.name == "minimal"
     assert spec.model.primary == "gpt-4o-mini"
-    assert spec.tools is None  # no tools key -> unset (three-state, contract)
+    assert spec.features == ()
     assert spec.middleware == ()
     assert spec.instructions.instructions == "Just do the thing."
 
@@ -212,19 +212,17 @@ def test_parse_agent_spec_supports_dict_middleware():
 # -- explicit null vs missing for tools/middleware -------------------
 
 
-def test_parse_agent_spec_tools_null_rejected_missing_ok():
-    """tools:null is an explicit null (reject); tools absent is unset (None);
-    tools:[] is an explicit empty list (())."""
+def test_parse_agent_spec_features_null_rejected_missing_ok():
+    """features absent and an explicit empty list both mean no features."""
     from linktools.ai.agent.codec import parse_agent_spec
 
     model = {"primary": "gpt"}
-    # missing -> None
-    assert parse_agent_spec("a", {"model": model}, "body").tools is None
+    assert parse_agent_spec("a", {"model": model}, "body").features == ()
     # [] -> ()
-    assert parse_agent_spec("a", {"model": model, "tools": []}, "body").tools == ()
+    assert parse_agent_spec("a", {"model": model, "features": []}, "body").features == ()
     # null -> reject
-    with pytest.raises(InvalidSpecError, match="tools"):
-        parse_agent_spec("a", {"model": model, "tools": None}, "body")
+    with pytest.raises(InvalidSpecError, match="features"):
+        parse_agent_spec("a", {"model": model, "features": None}, "body")
 
 
 def test_parse_agent_spec_middleware_null_rejected():

@@ -11,6 +11,16 @@ class SecurityEventSink(Protocol):
     async def emit(self, event: Any) -> None: ...
 
 
+class NoopRunLiveEventSink:
+    async def publish(self, event: Any) -> None:
+        return None
+
+
+class NoopSecurityEventSink:
+    async def emit(self, event: Any) -> None:
+        return None
+
+
 class SecurityEventSinkEmitter:
     def __init__(self, sink: SecurityEventSink) -> None:
         self._sink = sink
@@ -20,3 +30,12 @@ class SecurityEventSinkEmitter:
 
     async def emit_observability(self, event: Any) -> None:
         await self._sink.emit(event)
+
+
+__all__ = [
+    "NoopRunLiveEventSink",
+    "NoopSecurityEventSink",
+    "RunLiveEventSink",
+    "SecurityEventSink",
+    "SecurityEventSinkEmitter",
+]

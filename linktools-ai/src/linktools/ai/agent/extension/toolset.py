@@ -8,17 +8,16 @@ layer (an agent may only touch extensions it declared). Execution tools
 
 from typing import Any, Mapping
 
-from pydantic_ai.toolsets import FunctionToolset
-
 from ...errors import (
     ExtensionEntrypointDeniedError,
     ExtensionEntrypointNotFoundError,
     ExtensionContentAccessDeniedError,
 )
+from ..tool.models import ToolHandlerSet
 from .spec import ExtensionContentSource
 from ...execution.identity import ParentRunIdentity
 from .entrypoint import EntrypointRef
-from .provider import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
+from .content_source import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
 from .resolver import EntrypointResolver
 from .scope import ExtensionScope
 
@@ -41,13 +40,13 @@ def build_extension_resource_toolset(
     max_resources_per_list: int = DEFAULT_LIST_LIMIT,
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES,
     emit=None,
-) -> FunctionToolset:
+) -> ToolHandlerSet:
     """Level-1 read tools: list_extension_content / read_extension_content.
     ``allowed`` maps a declared extension_id to its scope; undeclared ids are
     refused before any filesystem access."""
     from ...observability.events.payloads import ExtensionContentListed, ExtensionContentRead
 
-    toolset: FunctionToolset = FunctionToolset()
+    toolset = ToolHandlerSet()
     cap_list = max_resources_per_list
     cap_read = max_read_bytes
 
@@ -114,13 +113,13 @@ def build_extension_entrypoint_toolset(
     emit=None,
     executor=None,
     parent: "ParentRunIdentity | None" = None,
-) -> FunctionToolset:
+) -> ToolHandlerSet:
     """Level-1 list tool for extension entrypoints (``list_extension_entrypoints``).
     Calling an entrypoint is opt-in (``expose_call_tool``) and is wired through
     the subagent runner elsewhere; here it is reserved."""
     from ...observability.events.payloads import ExtensionEntrypointListed
 
-    toolset: FunctionToolset = FunctionToolset()
+    toolset = ToolHandlerSet()
     cap = max_entrypoints_per_list
 
     async def list_extension_entrypoints(
@@ -201,8 +200,8 @@ def build_extension_entrypoint_toolset(
                     "identity; entrypoint tools cannot run outside a live Run"
                 )
             # Reuse the SAME ParentRunIdentity the caller built -- in
-            # particular parent.root_run_id, never re-derived here as
-            # "= parent_run_id" (that would truncate lineage to one hop
+            # particular parent.root_execution_id, never re-derived here as
+            # "= parent_execution_id" (that would truncate lineage to one hop
             # whenever this extension entrypoint is itself already nested under
             # a subagent/entrypoint chain).
             result = await executor.execute(

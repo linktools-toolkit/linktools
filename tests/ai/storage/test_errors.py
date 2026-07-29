@@ -7,7 +7,7 @@ import pytest
 from linktools.ai.errors import (
     LinktoolsAIError,
     StorageError,
-    StorageCapabilityError,
+    StorageFeatureSupportError,
     IdempotencyConflictError,
 )
 
@@ -16,7 +16,7 @@ from linktools.ai.errors import (
     "exc_type,base_type",
     [
         (StorageError, LinktoolsAIError),
-        (StorageCapabilityError, StorageError),
+        (StorageFeatureSupportError, StorageError),
         (IdempotencyConflictError, LinktoolsAIError),
     ],
 )

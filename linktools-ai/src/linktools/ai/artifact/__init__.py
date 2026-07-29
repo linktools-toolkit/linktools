@@ -14,14 +14,13 @@ from .models import (
     ArtifactStagingError,
     AssetSnapshotRef,
 )
-from .store import ArtifactBackend, ArtifactStore
+from .store import ArtifactStore
 
 __all__: "list[str]" = [
     "ArtifactDigest",
     "ArtifactRef",
     "ArtifactProvenance",
     "ArtifactRecord",
-    "ArtifactBackend",
     "ArtifactStore",
     "ArtifactBlobNotFoundError",
     "ArtifactIntegrityError",

@@ -12,7 +12,7 @@ from ..policy.command import DEFAULT_DENIED_COMMAND_PATTERNS
 from enum import Enum
 
 if TYPE_CHECKING:
-    from ...agent.capability.exposure import CapabilityToolExposurePolicy
+    from ...agent.tool.exposure import ToolExposurePolicy
     from .pipeline import SecurityPipeline
 
 
@@ -37,6 +37,6 @@ class SecurityBaseline:
 
     enabled: bool = True
     command_policy: "CommandPolicy | None" = field(default_factory=CommandPolicy)
-    tool_exposure_policy: "CapabilityToolExposurePolicy | None" = None
+    tool_exposure_policy: "ToolExposurePolicy | None" = None
     pipeline: "SecurityPipeline | None" = None
     audit_failure_mode: SecurityAuditFailureMode = SecurityAuditFailureMode.FAIL_CLOSED

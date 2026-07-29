@@ -160,17 +160,10 @@ def _two_cycles() -> "set[tuple[str, str]]":
 #   governance's policy/security types; governance's only reference back is a
 #   TYPE_CHECKING-only annotation (agent.capability.exposure), not a runtime
 #   dependency.
-# - (agent, tool): agent compiles tool policy capabilities from tool.pydantic;
-#   tool's builtin/sandbox toolsets reach agent's dependency/context types.
-# - (governance, tool): governance's command/path policy governs tool
-#   execution; tool's security pipeline wiring reaches governance types.
-#
 # New cycles beyond this set must not appear.
 _BASELINE_TWO_CYCLES: "frozenset[tuple[str, str]]" = frozenset({
     ("agent", "execution"),
     ("agent", "governance"),
-    ("agent", "tool"),
-    ("governance", "tool"),
 })
 
 

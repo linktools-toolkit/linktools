@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """EventStreamContext + append_event. Bundles the six lineage fields every
 event-store append needs, so callers stop repeating ``stream_id=...,
-run_id=..., root_run_id=..., parent_run_id=..., session_id=...,
+run_id=..., root_execution_id=..., parent_execution_id=..., session_id=...,
 runnable_id=...`` at each call site. ``append_event(store, context, payload)``
 is the single helper."""
 
@@ -18,8 +18,8 @@ class _RunContextLike(Protocol):
     ``RunContext`` satisfies this Protocol structurally."""
 
     run_id: str
-    root_run_id: "str | None"
-    parent_run_id: "str | None"
+    root_execution_id: "str | None"
+    parent_execution_id: "str | None"
     session_id: str
     runnable_id: str
 
@@ -28,8 +28,8 @@ class _RunContextLike(Protocol):
 class EventStreamContext:
     stream_id: str
     run_id: str
-    root_run_id: str
-    parent_run_id: "str | None"
+    root_execution_id: str
+    parent_execution_id: "str | None"
     session_id: str
     runnable_id: str
 
@@ -41,12 +41,12 @@ class EventStreamContext:
         defaults to the run_id (the common case -- every current caller passes
         stream_id == run_id)."""
         run_id = ctx.run_id
-        root = ctx.root_run_id or run_id
+        root = ctx.root_execution_id or run_id
         return cls(
             stream_id=stream_id or run_id,
             run_id=run_id,
-            root_run_id=root,
-            parent_run_id=ctx.parent_run_id,
+            root_execution_id=root,
+            parent_execution_id=ctx.parent_execution_id,
             session_id=ctx.session_id,
             runnable_id=ctx.runnable_id,
         )
@@ -67,8 +67,8 @@ async def append_event(
     await store.append(
         stream_id=context.stream_id,
         run_id=context.run_id,
-        root_run_id=context.root_run_id,
-        parent_run_id=context.parent_run_id,
+        root_execution_id=context.root_execution_id,
+        parent_execution_id=context.parent_execution_id,
         session_id=context.session_id,
         runnable_id=context.runnable_id,
         payload=payload,
@@ -97,8 +97,8 @@ async def append_event_once(
     await store.append_once(
         stream_id=context.stream_id,
         run_id=context.run_id,
-        root_run_id=context.root_run_id,
-        parent_run_id=context.parent_run_id,
+        root_execution_id=context.root_execution_id,
+        parent_execution_id=context.parent_execution_id,
         session_id=context.session_id,
         runnable_id=context.runnable_id,
         payload=payload,

@@ -4,7 +4,7 @@
 
 import pytest
 
-from linktools.ai.tool.sandbox.workspace import (
+from linktools.ai.agent.tool.sandbox.workspace import (
     Workspace,
     LocalWorkspaceManager,
     WorkspaceManager,
@@ -17,8 +17,8 @@ from linktools.ai.execution.domain import RunnableType
 def _run_context(run_id="run-1") -> RunContext:
     return RunContext(
         run_id=run_id,
-        root_run_id=run_id,
-        parent_run_id=None,
+        root_execution_id=run_id,
+        parent_execution_id=None,
         session_id="session-1",
         runnable_id="agent-1",
         runnable_type=RunnableType.AGENT,

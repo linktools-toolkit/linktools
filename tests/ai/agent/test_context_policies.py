@@ -20,8 +20,8 @@ def _ctx(*, tenant_id=None, user_id=None, session_id="sess-1", workspace_key=Non
     metadata = {} if workspace_key is None else {"workspace_key": workspace_key}
     return RunContext(
         run_id="run-1",
-        root_run_id="run-1",
-        parent_run_id=None,
+        root_execution_id="run-1",
+        parent_execution_id=None,
         session_id=session_id,
         runnable_id="agent-1",
         runnable_type=RunnableType.AGENT,

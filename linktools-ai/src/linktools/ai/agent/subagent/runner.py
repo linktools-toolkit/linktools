@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Subagent execution contract. A subagent run creates a child
-session (parent_id = parent session) and a child run recording parent_run_id /
-root_run_id, then executes the resolved AgentSpec and returns a SubagentResult.
+session (parent_id = parent session) and a child run recording parent_execution_id /
+root_execution_id, then executes the resolved AgentSpec and returns a SubagentResult.
 
 The Runtime supplies the real executor (it owns the AgentEngine + Storage); the
 SubagentProvider accepts any executor implementing this Protocol so the

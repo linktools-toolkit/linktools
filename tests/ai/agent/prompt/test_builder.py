@@ -4,29 +4,30 @@
 the prompt domain per ; the runner hands in already-fetched sections
 and the builder only composes."""
 
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from enum import StrEnum
 
 from linktools.ai.agent.prompt.builder import PromptBuilder
-from linktools.ai.execution.session import MessageRole, SessionMessage
-
-_NOW = datetime.now(timezone.utc)
 
 
-def _msg(role: MessageRole, content, mid: str = "m"):
-    return SessionMessage(
-        id=mid,
-        session_id="s",
-        sequence=0,
-        role=role,
-        content=content,
-        run_id=None,
-        created_at=_NOW,
-    )
+class Role(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+@dataclass(frozen=True)
+class Message:
+    role: Role
+    content: object
+
+
+def _msg(role: Role, content: object) -> Message:
+    return Message(role, content)
 
 
 def test_format_session_history_uses_role_prefixes():
     out = PromptBuilder.format_session_history(
-        [_msg(MessageRole.ASSISTANT, "hi"), _msg(MessageRole.USER, "ok")]
+        [_msg(Role.ASSISTANT, "hi"), _msg(Role.USER, "ok")]
     )
     # An assistant turn must NOT be disguised as user content.
     assert out == "ASSISTANT: hi\nUSER: ok"
@@ -34,7 +35,7 @@ def test_format_session_history_uses_role_prefixes():
 
 def test_format_session_history_reprs_non_string_content():
     out = PromptBuilder.format_session_history(
-        [_msg(MessageRole.USER, {"k": "v"})]
+        [_msg(Role.USER, {"k": "v"})]
     )
     assert "USER:" in out and "k" in out and "v" in out
 
@@ -51,7 +52,7 @@ def test_build_base_prompt_user_only():
 def test_build_base_prompt_prepends_history():
     out = PromptBuilder.build_base_prompt(
         user_prompt="hello",
-        prior_messages=[_msg(MessageRole.USER, "prior")],
+        prior_messages=[_msg(Role.USER, "prior")],
     )
     assert out == "USER: prior\nhello"
 
@@ -60,7 +61,7 @@ def test_build_base_prompt_memory_and_knowledge_order():
     # Final order top-to-bottom: knowledge, memory, history, user.
     out = PromptBuilder.build_base_prompt(
         user_prompt="u",
-        prior_messages=[_msg(MessageRole.USER, "h")],
+        prior_messages=[_msg(Role.USER, "h")],
         memory_section="## Memory",
         knowledge_section="## Knowledge",
     )
@@ -78,10 +79,10 @@ def test_build_base_prompt_empty_sections_skipped():
     assert out == "u"
 
 
-def test_combine_prepends_capability_sections():
+def test_combine_prepends_feature_sections():
     out = PromptBuilder.combine(
         base_prompt="base",
-        capability_sections={"skills": "## Skills", "mcp": "## MCP"},
+        feature_sections={"skills": "## Skills", "mcp": "## MCP"},
         resuming=False,
     )
     assert out == "## Skills\n\n## MCP\n\nbase"
@@ -90,7 +91,7 @@ def test_combine_prepends_capability_sections():
 def test_combine_no_sections_returns_base():
     assert (
         PromptBuilder.combine(
-            base_prompt="base", capability_sections={}, resuming=False
+            base_prompt="base", feature_sections={}, resuming=False
         )
         == "base"
     )
@@ -102,7 +103,7 @@ def test_combine_returns_none_on_resume():
     assert (
         PromptBuilder.combine(
             base_prompt="base",
-            capability_sections={"skills": "## Skills"},
+            feature_sections={"skills": "## Skills"},
             resuming=True,
         )
         is None
@@ -114,7 +115,7 @@ def test_combine_prepends_static_sections():
     # same way as capability sections, static first.
     out = PromptBuilder.combine(
         base_prompt="base",
-        capability_sections={"skills": "## Skills"},
+        feature_sections={"skills": "## Skills"},
         static_sections={"persona": "You are a grader."},
         resuming=False,
     )
@@ -125,7 +126,7 @@ def test_combine_static_only():
     assert (
         PromptBuilder.combine(
             base_prompt="base",
-            capability_sections={},
+            feature_sections={},
             static_sections={"persona": "You are a grader."},
             resuming=False,
         )
@@ -133,12 +134,12 @@ def test_combine_static_only():
     )
 
 
-def test_combine_capability_key_overrides_static_on_collision():
+def test_combine_feature_key_overrides_static_on_collision():
     # A colliding key is won by the capability section (dynamic catalog
     # overrides the static declaration).
     out = PromptBuilder.combine(
         base_prompt="base",
-        capability_sections={"persona": "dynamic"},
+        feature_sections={"persona": "dynamic"},
         static_sections={"persona": "static"},
         resuming=False,
     )

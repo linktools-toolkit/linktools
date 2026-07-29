@@ -102,7 +102,7 @@ class ModelBundle:
     def revision(self) -> str:
         import hashlib
 
-        from ..json import canonical_json
+        from ..json import canonical_json_bytes
 
         cfg = self.config
         # Only the non-secret config-identity fields. api_key / auth_token / the
@@ -116,7 +116,7 @@ class ModelBundle:
             "timeout_seconds": cfg.timeout_seconds,
             "base_url_mode": cfg.base_url_mode,
         }
-        return hashlib.sha256(canonical_json(identity).encode("utf-8")).hexdigest()
+        return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
     @classmethod
     def from_config(

@@ -1,0 +1,28 @@
+"""MCP connection, discovery, and tool adaptation."""
+
+from .client import build_mcp_server
+from .connection import MCPConnectionPool, MCPToolsetHandle
+from .codec import parse_mcp_spec
+from .models import (
+    MCPConnectionRef,
+    MCPDiscoveryResult,
+    MCPExposedTool,
+    MCPRuntimePolicy,
+    MCPToolInfo,
+)
+from .spec import MCPServerSpec
+from .tool_provider import MCPToolProvider
+
+__all__ = [
+    "MCPConnectionPool",
+    "MCPConnectionRef",
+    "MCPDiscoveryResult",
+    "MCPExposedTool",
+    "MCPRuntimePolicy",
+    "MCPServerSpec",
+    "MCPToolInfo",
+    "MCPToolProvider",
+    "MCPToolsetHandle",
+    "build_mcp_server",
+    "parse_mcp_spec",
+]

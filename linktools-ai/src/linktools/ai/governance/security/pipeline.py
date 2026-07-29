@@ -55,22 +55,22 @@ class ToolInvocationEvent:
     """Context for a tool-call governance decision. Carries the full identity
     chain a downstream SecurityPipeline needs to audit/decide: the call id, the
     run lineage (root/parent), session, agent, principal (user/tenant/workspace),
-    and the capability that contributed the tool. Fields default to None so
+    and the feature that contributed the tool. Fields default to None so
     existing constructions keep working when only a subset is available."""
 
     tool_name: str
     arguments: "Mapping[str, Any]"
     run_id: "str | None" = None
     call_id: "str | None" = None
-    root_run_id: "str | None" = None
-    parent_run_id: "str | None" = None
+    root_execution_id: "str | None" = None
+    parent_execution_id: "str | None" = None
     session_id: "str | None" = None
     agent_id: "str | None" = None
     user_id: "str | None" = None
     tenant_id: "str | None" = None
     workspace: Any = None
-    capability_kind: "str | None" = None
-    capability_name: "str | None" = None
+    feature_kind: "str | None" = None
+    feature_name: "str | None" = None
     risk: "str | None" = None
     mutating: "bool | None" = None
     # The tool's parameter JSON schema, so a CompositeSecurityPipeline can
@@ -235,7 +235,7 @@ class CompositeSecurityPipeline:
             ):
                 last_modified_payload = decision.modified_payload
                 if schema is not None:
-                    from ...tool.schema import validate_arguments
+                    from ...agent.tool.execution.schema import validate_arguments
 
                     tool_name = getattr(event, "tool_name", "")
                     # Raise as a DENY so the bad MODIFY never propagates.

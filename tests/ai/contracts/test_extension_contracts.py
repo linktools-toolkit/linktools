@@ -6,7 +6,7 @@ DirectoryEntrypointResolver and reusable for business backends."""
 
 import pytest
 
-from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.agent.extension.content_source import DirectoryExtensionContentSource
 from linktools.ai.agent.extension.resolver import DirectoryEntrypointResolver
 
 from ._assertions import (

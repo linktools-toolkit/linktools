@@ -15,7 +15,7 @@ from ..spec import AgentSpec
 from ...errors import ExtensionEntrypointNotFoundError, ExtensionNotFoundError
 
 if TYPE_CHECKING:
-    from .provider import DirectoryExtensionContentSource
+    from .content_source import DirectoryExtensionContentSource
 from .entrypoint import EntrypointInfo, EntrypointListResult, EntrypointRef
 from .content import sanitize_extension_path
 from .scope import ExtensionScope
@@ -126,7 +126,7 @@ class ExtensionRegistry:
         self._content_source: "DirectoryExtensionContentSource | None" = None
 
     def _content(self) -> "DirectoryExtensionContentSource":
-        from .provider import DirectoryExtensionContentSource
+        from .content_source import DirectoryExtensionContentSource
 
         if self._content_source is None:
             roots = (

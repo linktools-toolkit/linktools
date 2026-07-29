@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ...storage.sqlalchemy.base import Base
+from ...storage.database import CoordinationScope
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX
 from ...errors import StorageConflictError
 from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
@@ -36,6 +37,8 @@ class ExecutionRow(Base):
 
 
 class SqlAlchemyTaskBackend:
+    coordination_scope = CoordinationScope.SHARED_DATABASE
+
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 

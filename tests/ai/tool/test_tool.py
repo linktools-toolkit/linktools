@@ -19,8 +19,8 @@ from linktools.ai.governance.policy.rule import (
     ToolPolicyMetadata,
 )
 from linktools.ai.spec.parsing import SpecLoader
-from linktools.ai.tool.index import ToolSpecIndex
-from linktools.ai.tool.spec import ToolSpec
+from linktools.ai.agent.tool.policy.index import ToolSpecIndex
+from linktools.ai.agent.tool.policy.models import ToolSpec
 
 
 def _write_tools(tmp_path) -> None:

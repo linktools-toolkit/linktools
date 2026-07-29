@@ -87,7 +87,7 @@ class ToolRequest:
     tool_name: str
     arguments: "Mapping[str, Any]"
     # Descriptor-sourced classification, when available (e.g. from
-    # ManagedToolAdapter, which always knows its ToolDescriptor, or from
+    # ToolExecutionService, which always knows its ToolDescriptor, or from
     # PolicyCapability when a per-run descriptor lookup is wired). Rules like
     # CommandRule match on these so a tool rename cannot silently evade a
     # category-based policy the way a tool_name string match could.

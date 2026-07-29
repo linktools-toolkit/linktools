@@ -10,10 +10,15 @@ from decimal import Decimal
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec
-from linktools.ai.tool import ToolRef
-from linktools.ai.agent.capability.models import CapabilityBundle, CapabilityRef
+from linktools.ai.agent.assembly import AgentFeatureRef
+from linktools.ai.agent.assembly.models import AgentContribution, AgentFeatureRef
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.tool.models import ToolDescriptor
+from linktools.ai.agent.tool.models import (
+    ToolCategory,
+    ToolDescriptor,
+    ToolSource,
+)
+from linktools.ai.governance.policy.rule import RiskLevel, SideEffectKind
 
 
 # --- ModelPolicy -----------------------------------------------------------
@@ -61,7 +66,7 @@ def test_model_policy_negative_budget_rejected():
         _policy(budget=Decimal("-1"))
 
 
-# --- AgentSpec / PromptSpec / ToolRef / MiddlewareRef ----------------------
+# --- AgentSpec / PromptSpec / AgentFeatureRef / MiddlewareRef ----------------------
 
 
 def _agent(**kw) -> AgentSpec:
@@ -119,14 +124,14 @@ def test_prompt_spec_sections_frozen():
 
 def test_tool_ref_blank_kind_and_name_rejected():
     with pytest.raises(ValueError):
-        ToolRef(kind="  ", name="n")
+        AgentFeatureRef(kind="  ", name="n")
     with pytest.raises(ValueError):
-        ToolRef(kind="k", name="")
+        AgentFeatureRef(kind="k", name="")
 
 
 def test_tool_ref_config_frozen():
     src = {"x": 1}
-    t = ToolRef(kind="k", name="n", config=src)
+    t = AgentFeatureRef(kind="k", name="n", config=src)
     src["x"] = 2
     assert t.config == {"x": 1}
 
@@ -142,10 +147,11 @@ def test_middleware_ref_blank_name_rejected():
 def _descriptor(**kw) -> ToolDescriptor:
     base = {
         "name": "t",
-        "source": "test",
-        "category": "misc",
-        "risk": "low",
-        "mutating": False,
+        "source": ToolSource.EXTENSION,
+        "category": ToolCategory.EXTENSION_READ,
+        "risk": RiskLevel.LOW,
+        "side_effect": SideEffectKind.READ_ONLY,
+        "feature": AgentFeatureRef("extension", "test"),
     }
     base.update(kw)
     return ToolDescriptor(**base)
@@ -155,15 +161,14 @@ def test_tool_descriptor_valid():
     assert _descriptor().name == "t"
 
 
-@pytest.mark.parametrize("field", ["name", "source", "category", "risk"])
-def test_tool_descriptor_blank_field_rejected(field):
+def test_tool_descriptor_blank_name_rejected():
     with pytest.raises(ValueError):
-        _descriptor(**{field: "  "})
+        _descriptor(name="  ")
 
 
-def test_tool_descriptor_mutating_must_be_bool():
-    with pytest.raises(TypeError):
-        _descriptor(mutating="yes")
+def test_tool_descriptor_mutating_is_derived():
+    assert not _descriptor().mutating
+    assert _descriptor(side_effect=SideEffectKind.DESTRUCTIVE).mutating
 
 
 def test_tool_descriptor_metadata_frozen():
@@ -173,23 +178,23 @@ def test_tool_descriptor_metadata_frozen():
     assert d.metadata == {"k": 1}
 
 
-# --- CapabilityRef / CapabilityBundle --------------------------------------
+# --- AgentFeatureRef / AgentContribution --------------------------------------
 
 
-def test_capability_ref_blank_kind_and_name_rejected():
+def test_feature_ref_blank_kind_and_name_rejected():
     with pytest.raises(ValueError):
-        CapabilityRef(kind="  ", name="n")
+        AgentFeatureRef(kind="  ", name="n")
     with pytest.raises(ValueError):
-        CapabilityRef(kind="k", name="")
+        AgentFeatureRef(kind="k", name="")
 
 
-def test_capability_ref_config_frozen():
+def test_feature_ref_config_frozen():
     src = {"x": 1}
-    r = CapabilityRef(kind="k", name="n", config=src)
+    r = AgentFeatureRef(kind="k", name="n", config=src)
     src["x"] = 2
     assert r.config == {"x": 1}
 
 
-def test_capability_bundle_tool_contributions_must_be_tuple():
+def test_agent_contribution_tools_must_be_tuple():
     with pytest.raises(TypeError):
-        CapabilityBundle(tool_contributions=[1, 2])
+        AgentContribution(tools=[1, 2])

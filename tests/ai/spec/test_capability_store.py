@@ -1,6 +1,6 @@
 import pytest
 
-from linktools.ai.errors import StorageCapabilityError
+from linktools.ai.errors import StorageFeatureSupportError
 from linktools.ai.spec.document import SpecDocument, SpecDocumentInfo
 from linktools.ai.spec.store import SpecStore
 from linktools.ai.spec.cache import MemoryContentCache
@@ -61,7 +61,7 @@ async def test_unversioned_reader_refreshes_and_uses_content_cache():
 async def test_writer_is_an_explicit_optional_capability():
     backend = Backend((document("a"),))
     read_only = SpecStore(backend)
-    with pytest.raises(StorageCapabilityError, match="read-only"):
+    with pytest.raises(StorageFeatureSupportError, match="read-only"):
         await read_only.put(document("b"))
 
     writable = SpecStore(backend, writer=backend)

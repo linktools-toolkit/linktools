@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import os
+import json
 import tempfile
 from pathlib import Path
 
-from ...json import JsonValue, decode_json, encode_json
+from ...json import JsonValue, normalize_json
 
 
 def atomic_write_bytes(path: str | Path, content: bytes) -> None:
@@ -24,7 +25,14 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
 
 
 def atomic_write_json(path: str | Path, value: JsonValue) -> None:
-    atomic_write_bytes(path, encode_json(value).encode("utf-8"))
+    atomic_write_bytes(
+        path,
+        json.dumps(
+            normalize_json(value),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
 
 
 def read_bytes(path: str | Path) -> bytes:
@@ -32,7 +40,9 @@ def read_bytes(path: str | Path) -> bytes:
 
 
 def read_json(path: str | Path) -> JsonValue:
-    return decode_json(Path(path).read_text(encoding="utf-8"))
+    return normalize_json(
+        json.loads(Path(path).read_text(encoding="utf-8"))
+    )
 
 
 __all__ = ["atomic_write_bytes", "atomic_write_json", "read_bytes", "read_json"]

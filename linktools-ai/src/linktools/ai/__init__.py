@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """linktools.ai public API. The package root exports exactly one symbol:
 ``Runtime``. Every other type lives behind its domain submodule
-(``linktools.ai.agent``, ``linktools.ai.spec``, ``linktools.ai.tool``,
+(``linktools.ai.agent``, ``linktools.ai.spec``, ``linktools.ai.agent.tool``,
 ...) -- import it from there.
 
 Importing this package has no heavy side effects: no file scans, no DB/MCP

@@ -16,9 +16,8 @@ enabled)."""
 
 from typing import Any, Callable, Mapping
 
-from pydantic_ai.toolsets import FunctionToolset
-
 from ...errors import SubagentExecutionError, SubagentNotFoundError
+from ..tool.models import ToolHandlerSet
 from ..extension.entrypoint import EntrypointRef
 from ..extension.scope import ExtensionScope
 from ...execution.identity import ParentRunIdentity
@@ -74,14 +73,14 @@ def build_subagent_toolset(
     active_skill_provider: "Callable[[], Any] | None" = None,
     child_model_policy=None,
     parent_delegated_tools: "set[str] | None" = None,
-) -> FunctionToolset:
+) -> ToolHandlerSet:
     """Level-2 execution tool: call_subagent. Declared agent ids are admitted via
     ``name``/``agent_id``; ``instruction_path`` resolves a skill-private agent
     through ``skill_resolver``. Depth + authorization are enforced before
     delegation; concurrency is bounded by ``max_concurrency`` (per-ref)."""
     import asyncio
 
-    toolset: FunctionToolset = FunctionToolset()
+    toolset = ToolHandlerSet()
     extension_allowlist = allowed_extensions or set()
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
 

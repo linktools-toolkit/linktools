@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SubagentProvider: the CapabilityProvider for ``subagent:<id>`` / ``subagent:*``.
+"""SubagentProvider: the AgentFeatureProvider for ``subagent:<id>`` / ``subagent:*``.
 Builds a call_subagent toolset scoped to the declared agent ids,
 with depth/concurrency/timeout limits read from the ref config (defaults
 max_depth=3, max_concurrency=1, timeout=120).
@@ -12,9 +12,8 @@ EntrypointResolver; global ones through the SubagentAgentProvider."""
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Protocol, runtime_checkable
 
-from ..capability.models import CapabilityBundle
-from ..capability.provider import CapabilityContext
-from ..capability.models import CapabilityRef
+from ..assembly.models import AgentContribution, AgentFeatureRef
+from ..assembly.provider import AgentFeatureContext
 from ..extension.resolver import EntrypointResolver
 from ...execution.identity import ParentRunIdentity
 from .runner import (
@@ -54,7 +53,7 @@ class AgentBackedSubagentProvider:
 
 @dataclass
 class SubagentProvider:
-    """CapabilityProvider for delegated subagents. ``subagent_provider`` backs
+    """AgentFeatureProvider for delegated subagents. ``subagent_provider`` backs
     global agents, ``entrypoint_resolver`` backs extension-scoped agents, and
     ``executor`` runs the resolved child spec (all injectable for testing)."""
 
@@ -76,9 +75,9 @@ class SubagentProvider:
 
     async def resolve(
         self,
-        ref: CapabilityRef,
-        context: CapabilityContext,
-    ) -> CapabilityBundle:
+        ref: AgentFeatureRef,
+        context: AgentFeatureContext,
+    ) -> AgentContribution:
         cfg = dict(ref.config)
         max_depth = int(cfg.get("max_depth", DEFAULT_MAX_DEPTH))
         max_concurrency = int(cfg.get("max_concurrency", DEFAULT_MAX_CONCURRENCY))
@@ -102,10 +101,10 @@ class SubagentProvider:
         # Assembly can happen outside a live run (e.g. static inspection) --
         # only build an identity when the context actually carries one.
         parent = None
-        if context.run_id is not None and context.session_id is not None:
+        if context.execution_id and context.session_id:
             parent = ParentRunIdentity(
-                run_id=context.run_id,
-                root_run_id=context.root_run_id or context.run_id,
+                run_id=context.execution_id,
+                root_execution_id=context.root_execution_id,
                 session_id=context.session_id,
                 user_id=context.user_id,
                 tenant_id=context.tenant_id,
@@ -127,7 +126,9 @@ class SubagentProvider:
             try:
                 parent_spec = await self.subagent_provider.get(context.agent_id)
                 parent_delegated = {
-                    t.name for t in (getattr(parent_spec, "tools", None) or ())
+                    feature.name
+                    for feature in parent_spec.features
+                    if feature.kind == "builtin"
                 }
             except Exception:
                 parent_delegated = set()
@@ -148,26 +149,29 @@ class SubagentProvider:
             child_model_policy=self.child_model_policy,
             parent_delegated_tools=parent_delegated,
         )
-        from ...tool.models import ToolDescriptor
-        from ...tool.models import ToolContribution, declared_tool_definitions
+        from ...governance.policy.rule import RiskLevel, SideEffectKind
+        from ..tool.models import (
+            ToolCategory,
+            ToolDescriptor,
+            ToolSource,
+            declared_tool_definitions,
+        )
 
         descriptors = (
             ToolDescriptor(
                 name="call_subagent",
-                source="subagent",
-                category="subagent",
-                risk="medium",
-                mutating=True,
-                capability_kind="subagent",
-                capability_name=ref.name,
+                source=ToolSource.SUBAGENT,
+                category=ToolCategory.SUBAGENT,
+                risk=RiskLevel.MEDIUM,
+                side_effect=SideEffectKind.NAMESPACE_MUTATING,
+                feature=ref,
             ),
         )
-        contrib = ToolContribution(
+        return AgentContribution(
             tools=declared_tool_definitions(toolset, descriptors)
         )
-        return CapabilityBundle(tool_contributions=(contrib,))
 
-    async def _allowed_names(self, ref: CapabilityRef) -> "set[str]":
+    async def _allowed_names(self, ref: AgentFeatureRef) -> "set[str]":
         if ref.name == "*":
             if self.subagent_provider is None:
                 return set()

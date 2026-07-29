@@ -9,7 +9,7 @@ from linktools.ai.errors import (
     ExtensionContentAccessDeniedError,
     ExtensionContentNotFoundError,
 )
-from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.agent.extension.content_source import DirectoryExtensionContentSource
 from linktools.ai.agent.extension.content import ExtensionContentRef
 from linktools.ai.agent.extension.scope import ExtensionScope
 
@@ -80,7 +80,7 @@ async def test_read_content_clamps_to_max_bytes(provider):
 async def test_read_content_bounds_io_not_just_payload(tmp_path):
     # A asset larger than max_bytes must not be fully read into memory just to
     # be truncated -- size_bytes reflects cap+1 (the read bound), not the file.
-    from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+    from linktools.ai.agent.extension.content_source import DirectoryExtensionContentSource
 
     root = tmp_path / "pkg"
     root.mkdir()
@@ -142,7 +142,7 @@ def test_sanitize_collapses_dot_and_rejects_parent():
 @pytest.mark.asyncio
 async def test_read_content_extension_allow_deny(tmp_path):
     from linktools.ai.errors import ExtensionContentAccessDeniedError
-    from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+    from linktools.ai.agent.extension.content_source import DirectoryExtensionContentSource
 
     root = tmp_path / "pkg"
     root.mkdir()

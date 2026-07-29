@@ -43,8 +43,8 @@ def assert_resumable(run: RunRecord) -> None:
 
 
 def assert_approval_decided(run: RunRecord) -> None:
-    if run.approval is not None and run.approval.decision not in {ApprovalDecision.ALLOW, ApprovalDecision.DENY}:
-        raise RunConflictError("run approval has not been decided")
+    if run.approval is not None and run.approval.decision is not ApprovalDecision.ALLOW:
+        raise RunConflictError("paused execution is not approved")
 
 
 __all__ = [

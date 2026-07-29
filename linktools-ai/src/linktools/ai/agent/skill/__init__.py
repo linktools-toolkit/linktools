@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """linktools.ai.agent.skill: SkillProvider (prompt catalog + list_skills/read_skill).
-Skills are a read-only discovery capability; execution is left to
+Skills are a read-only discovery feature; execution is left to
 the caller."""
 
 from .models import SkillContent, SkillSummary

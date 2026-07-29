@@ -9,7 +9,7 @@ by ``instruction_path`` RELATIVE TO THE ACTIVE SKILL -- never registered globall
 context, the path resolver (with symlink/escape rejection), and the spec parser.
 
 The provider/resolver that plug into ``call_subagent`` live alongside the
-subagent capability (see :mod:`linktools.ai.agent.subagent`); they compose these
+subagent feature (see :mod:`linktools.ai.agent.subagent`); they compose these
 primitives. Keeping the security-critical path logic here, isolated and
 unit-testable, is the point: ``resolve_skill_agent_path`` is the single choke
 point every skill-private resolution passes through."""
@@ -19,13 +19,13 @@ from hashlib import sha256
 from pathlib import Path
 import contextvars
 
-from ..spec import ToolRef
+from ..spec import AgentFeatureRef
 from ...errors import SkillAssetAccessError, SubagentResolutionError
 from ...spec.parsing import StrictConfigReader, parse_markdown_text
-from ...tool.codec import parse_tool_refs
+from ..assembly.models import parse_agent_feature_refs
 
 # Default tools for a skill-private agent with no ``tools:`` key.
-_DEFAULT_TOOLS: tuple = (ToolRef(kind="builtin", name="file-read"),)
+_DEFAULT_TOOLS: tuple = (AgentFeatureRef(kind="builtin", name="file-read"),)
 
 
 # ---- Active-skill contextvar (set by read_skill, read by call_subagent) ----
@@ -35,7 +35,7 @@ _DEFAULT_TOOLS: tuple = (ToolRef(kind="builtin", name="file-read"),)
 # executor: the child run's drive resets this var to None, so a subagent starts
 # outside any skill and cannot address its parent's active skill. (Structural
 # defense-in-depth: skill-private agents also default to max_depth=0, and the
-# permission intersection strips any subagent capability they did not earn.)
+# permission intersection strips any subagent feature they did not earn.)
 _active_skill_var: "contextvars.ContextVar[ActiveSkillContext | None]" = (
     contextvars.ContextVar("linktools_active_skill", default=None)
 )
@@ -81,7 +81,7 @@ def skill_subagent_to_agent_spec(
         name=spec.name,
         model=model_policy,
         instructions=PromptSpec(instructions=spec.instructions),
-        tools=tools,
+        features=tools,
         output_schema=str,
     )
 
@@ -193,16 +193,15 @@ def parse_skill_subagent(
     if payload:
         reader = StrictConfigReader(
             payload,
-            allowed={"name", "description", "tools", "timeout_seconds", "max_depth"},
+            allowed={"name", "description", "features", "timeout_seconds", "max_depth"},
             context=f"skill agent {skill_id}/{instruction_path}",
         )
         resolved = reader.optional_str("name")
         if resolved is not None:
             name = resolved.strip() or name
         description = reader.optional_str("description")
-        if "tools" in payload:
-            # An explicit tools list (even empty) overrides the default.
-            requested_tools = parse_tool_refs(payload.get("tools"))
+        if "features" in payload:
+            requested_tools = parse_agent_feature_refs(payload.get("features"))
         timeout_seconds = int(
             reader.positive_number(
                 "timeout_seconds", default=float(default_timeout_seconds)

@@ -61,9 +61,10 @@ class RunApproval:
     approval_id: str
     tool_call_id: str
     tool_name: str
-    arguments: JsonValue
+    binding_fingerprint: str
     decision: ApprovalDecision | None = None
     decided_by: str | None = None
+    decided_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +95,8 @@ class RunRecord:
     definition: RunDefinition
     status: RunStatus
     session_turn_sequence: int | None
-    parent_run_id: str | None
-    root_run_id: str
+    parent_execution_id: str | None
+    root_execution_id: str
     approval: RunApproval | None
     lease: Lease
     cancel_requested_at: datetime | None
@@ -107,6 +108,12 @@ class RunRecord:
     error: RunError | None
     created_at: datetime
     updated_at: datetime
+
+    @property
+    def pending_approval(self) -> RunApproval | None:
+        if self.approval is not None and self.approval.decision is None:
+            return self.approval
+        return None
 
 
 ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {

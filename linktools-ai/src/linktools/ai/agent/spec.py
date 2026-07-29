@@ -9,7 +9,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from ..model.policy import ModelPolicy
-from ..tool.models import ToolRef
+from .assembly.models import AgentFeatureRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,10 +44,7 @@ class AgentSpec:
     name: str
     model: ModelPolicy
     instructions: PromptSpec
-    # tools three-state: None = unset (runtime applies its default
-    # builtin toolset when an execution backend is present); () = explicitly no
-    # tools; a non-empty tuple = only the declared capabilities are assembled.
-    tools: "tuple[ToolRef, ...] | None" = None
+    features: "tuple[AgentFeatureRef, ...]" = ()
     middleware: "tuple[MiddlewareRef, ...]" = ()
     output_schema: "type[BaseModel] | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
@@ -61,11 +58,10 @@ class AgentSpec:
             raise TypeError("AgentSpec.model must be a ModelPolicy")
         if not isinstance(self.instructions, PromptSpec):
             raise TypeError("AgentSpec.instructions must be a PromptSpec")
-        if self.tools is not None:
-            if not isinstance(self.tools, tuple) or not all(
-                isinstance(t, ToolRef) for t in self.tools
-            ):
-                raise TypeError("AgentSpec.tools must be None or tuple[ToolRef]")
+        if not isinstance(self.features, tuple) or not all(
+            isinstance(feature, AgentFeatureRef) for feature in self.features
+        ):
+            raise TypeError("AgentSpec.features must be tuple[AgentFeatureRef]")
         if not isinstance(self.middleware, tuple) or not all(
             isinstance(m, MiddlewareRef) for m in self.middleware
         ):

@@ -1,7 +1,9 @@
-"""Runtime capability and topology requirements."""
+"""Runtime component and topology requirements."""
 
 from dataclasses import dataclass
 from enum import StrEnum
+
+from ..agent.tool.exposure import ToolExposurePolicy
 
 
 class RuntimeTopology(StrEnum):
@@ -16,6 +18,7 @@ class RuntimeRequirements:
     memory: bool = False
     artifacts: bool = False
     topology: RuntimeTopology = RuntimeTopology.SINGLE_PROCESS
+    tool_exposure: ToolExposurePolicy = ToolExposurePolicy()
 
 
 __all__ = ["RuntimeRequirements", "RuntimeTopology"]

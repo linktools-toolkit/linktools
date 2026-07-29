@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.agent.extension: extension-scoped capability resolution. An
+"""linktools.ai.agent.extension: extension-scoped feature resolution. An
 extension bundles assets + entrypoints under a ExtensionScope; Skill is one
 built-in extension kind, not a special case."""
 
-from .capability_provider import ExtensionProvider
+from .provider import ExtensionProvider
 from .entrypoint import EntrypointInfo, EntrypointListResult, EntrypointRef
-from .provider import DirectoryExtensionContentSource, ExtensionContentSource
+from .content_source import DirectoryExtensionContentSource, ExtensionContentSource
 from .resolver import (
     DEFAULT_ENTRYPOINT_LIMIT,
     DirectoryEntrypointResolver,

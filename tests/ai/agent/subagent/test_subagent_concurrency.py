@@ -38,7 +38,7 @@ def _toolset(max_concurrency, executor):
         timeout_seconds=None,
         max_concurrency=max_concurrency,
         parent=ParentRunIdentity(
-            run_id="run-1", root_run_id="run-1", session_id="sess-1"
+            run_id="run-1", root_execution_id="run-1", session_id="sess-1"
         ),
     )
 
@@ -54,7 +54,7 @@ async def test_max_concurrency_one_serializes(monkeypatch):
 
     monkeypatch.setattr(ts, "_resolve_spec", lambda *a, **k: _async_none())
     executor = _ConcExecutor()
-    call = _toolset(1, executor).tools["call_subagent"].function
+    call = _toolset(1, executor).handlers["call_subagent"]
     await asyncio.gather(*[call("a", "t") for _ in range(4)])
     assert executor.max_seen == 1
 
@@ -65,7 +65,7 @@ async def test_max_concurrency_two_allows_pair(monkeypatch):
 
     monkeypatch.setattr(ts, "_resolve_spec", lambda *a, **k: _async_none())
     executor = _ConcExecutor()
-    call = _toolset(2, executor).tools["call_subagent"].function
+    call = _toolset(2, executor).handlers["call_subagent"]
     await asyncio.gather(*[call("a", "t") for _ in range(4)])
     assert executor.max_seen == 2
 

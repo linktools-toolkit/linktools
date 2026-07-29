@@ -4,7 +4,7 @@
 AbstractCapability so the four model/tool hooks fire during agent.run().
 
 The per-Run ToolContext arrives via pydantic-ai dependency injection (same
-pattern as tool/capability.py's PolicyCapability): the runner passes
+Pydantic AI capability pattern): the runner passes
 ``deps=AgentDependencies(tool_context=...)`` to ``agent.pydantic_agent.run()`` /
 ``.iter()`` and each hook reads it off ``ctx.deps.tool_context``. No mutable
 per-Run field, so a single capability instance is safe to reuse across many

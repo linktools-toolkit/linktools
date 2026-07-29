@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """ReminderMiddleware: appends a one-shot reminder message once the running
 message count crosses threshold_ratio * max_messages. Ports
-periodic_reminder/capability.py's PeriodicReminderCapability logic to the
+the periodic-reminder middleware logic to the
 Middleware Protocol (that pre-vNext module is untouched)."""
 
 from typing import Any

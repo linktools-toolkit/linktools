@@ -28,16 +28,16 @@ async def _stream(data: bytes):
 async def test_sql_artifact_store_persists_metadata_and_blob(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'artifacts.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ArtifactStore(SqlArtifactBackend(factory, tmp_path / "artifacts"))
+    store = SqlArtifactBackend(factory, tmp_path / "artifacts")
     await store.initialize_storage(engine)
 
     data = b"artifact content"
     record = _record("a", data)
     await store.put(record=record, content=_stream(data))
 
-    assert await store.get_record("a") == record
+    assert await store.get_record("a", tenant_id="tenant") == record
     assert (tmp_path / "artifacts" / "blobs" / record.ref.sha256).exists()
-    chunks = [chunk async for chunk in store.open("a")]
+    chunks = [chunk async for chunk in store.open("a", tenant_id="tenant")]
     assert b"".join(chunks) == data
     await engine.dispose()
 
@@ -46,7 +46,7 @@ async def test_sql_artifact_store_persists_metadata_and_blob(tmp_path):
 async def test_sql_artifact_store_put_is_idempotent_for_identical_content(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'artifacts-retry.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ArtifactStore(SqlArtifactBackend(factory, tmp_path / "artifacts"))
+    store = SqlArtifactBackend(factory, tmp_path / "artifacts")
     await store.initialize_storage(engine)
 
     data = b"same bytes"
@@ -62,7 +62,7 @@ async def test_sql_artifact_store_put_is_idempotent_for_identical_content(tmp_pa
 async def test_sql_artifact_store_rejects_conflicting_content_for_same_id(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'artifacts-conflict.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ArtifactStore(SqlArtifactBackend(factory, tmp_path / "artifacts"))
+    store = SqlArtifactBackend(factory, tmp_path / "artifacts")
     await store.initialize_storage(engine)
 
     await store.put(record=_record("a", b"first"), content=_stream(b"first"))
@@ -75,14 +75,14 @@ async def test_sql_artifact_store_rejects_conflicting_content_for_same_id(tmp_pa
 async def test_sql_artifact_store_deletes_metadata_without_touching_shared_blob(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'artifacts-delete.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ArtifactStore(SqlArtifactBackend(factory, tmp_path / "artifacts"))
+    store = SqlArtifactBackend(factory, tmp_path / "artifacts")
     await store.initialize_storage(engine)
 
     data = b"shared bytes"
     record = _record("a", data)
     await store.put(record=record, content=_stream(data))
-    await store.delete("a")
+    await store.delete("a", tenant_id="tenant")
 
-    assert await store.get_record("a") is None
+    assert await store.get_record("a", tenant_id="tenant") is None
     assert (tmp_path / "artifacts" / "blobs" / record.ref.sha256).exists()
     await engine.dispose()

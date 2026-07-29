@@ -4,11 +4,17 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ...storage.coordination.lease import Lease, assert_active, claim, renew
+from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError
 from ..models import TaskExecution, TaskPlan, TaskStatus
 
 
 class LocalTaskBackend:
+    coordination_scope = CoordinationScope.PROCESS
+
+    async def initialize_storage(self) -> None:
+        return None
+
     def __init__(self) -> None:
         self._plans: dict[str, TaskPlan] = {}
         self._executions: dict[str, TaskExecution] = {}

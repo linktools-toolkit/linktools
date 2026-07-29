@@ -83,7 +83,7 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
 
 
 class SpecLoader:
-    """Reads spec text and lists ids from a filesystem or capability source."""
+    """Reads spec text and lists ids from a filesystem or feature source."""
 
     def __init__(self, *, read, list_ids, revision) -> None:
         self._read = read
@@ -143,7 +143,7 @@ class SpecLoader:
         def _full(path: str) -> str:
             joined = f"{base}/{path.strip('/')}" if base else path.strip("/")
             if not joined or ".." in joined.split("/"):
-                raise SpecNotFoundError(f"invalid capability path: {path!r}")
+                raise SpecNotFoundError(f"invalid feature path: {path!r}")
             return joined
 
         async def read(path: str) -> str:

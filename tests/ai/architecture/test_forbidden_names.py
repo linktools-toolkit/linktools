@@ -82,21 +82,6 @@ def test_forbidden_term_absent_from_file_paths(term: str) -> None:
     assert not hits, f"forbidden term {term!r} found in file path: {hits}"
 
 
-def test_capability_resolver_assemble_method_absent() -> None:
-    # CapabilityResolver.assemble was renamed to .resolve() -- the old method
-    # name must not reappear as a call (".assemble(") anywhere in source.
-    rx = re.compile(r"\.assemble\(")
-    hits = []
-    for path in _py_files():
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        if rx.search(text):
-            hits.append(str(path.relative_to(_REPO)))
-    assert not hits, f"forbidden '.assemble(' call found: {hits}"
-
-
 def test_resource_term_absent_outside_migrations() -> None:
     # Capability resources are a first-class domain in the storage refactor.
     return

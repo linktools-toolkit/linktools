@@ -53,10 +53,6 @@ class MemoryStore:
     def __init__(self, backend: MemoryBackend) -> None:
         self._backend = backend
 
-    @property
-    def backend(self) -> MemoryBackend:
-        return self._backend
-
     async def initialize_storage(self, *args: object) -> None:
         await self._backend.initialize_storage(*args)
 

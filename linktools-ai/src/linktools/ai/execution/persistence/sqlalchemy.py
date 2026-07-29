@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any
-
 from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, asc, desc, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ...storage.coordination.lease import Lease, claim, renew
+from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageError
+from ...json import JsonValue, normalize_json
 from ..commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
 from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
@@ -44,8 +45,8 @@ class TurnRow(Base):
     session_id: Mapped[str] = mapped_column(String(255))
     sequence: Mapped[int] = mapped_column(Integer)
     execution_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    input: Mapped[Any] = mapped_column(JSON)
-    assistant_summary: Mapped[Any] = mapped_column(JSON, nullable=True)
+    input: Mapped[JsonValue] = mapped_column(JSON)
+    assistant_summary: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -61,9 +62,9 @@ class ExecutionRow(Base):
     parent_execution_id: Mapped[str | None] = mapped_column(String(255))
     root_execution_id: Mapped[str] = mapped_column(String(255), index=True)
     status: Mapped[str] = mapped_column(String(40), index=True)
-    definition: Mapped[dict[str, Any]] = mapped_column(JSON)
+    definition: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     definition_hash: Mapped[str] = mapped_column(String(64))
-    approval: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    approval: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
     owner: Mapped[str | None] = mapped_column(String(255))
     fence: Mapped[int] = mapped_column(Integer, default=0)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -73,16 +74,16 @@ class ExecutionRow(Base):
     event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     tenant_id: Mapped[str | None] = mapped_column(String(255))
     user_id: Mapped[str | None] = mapped_column(String(255))
-    error: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    input: Mapped[Any] = mapped_column(JSON, nullable=True)
+    error: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    input: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
 
 
 class SnapshotRow(Base):
     __tablename__ = f"{TABLE_PREFIX}execution_snapshots"
     execution_id: Mapped[str] = mapped_column(String(255), unique=True)
     revision: Mapped[int] = mapped_column(Integer)
-    resume_messages: Mapped[list[Any]] = mapped_column(JSON)
-    final_output: Mapped[Any] = mapped_column(JSON, nullable=True)
+    resume_messages: Mapped[list[JsonValue]] = mapped_column(JSON)
+    final_output: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32))
     usage: Mapped[dict[str, int]] = mapped_column(JSON)
     trace_end_sequence: Mapped[int] = mapped_column(Integer)
@@ -96,7 +97,7 @@ class TraceRow(Base):
     execution_id: Mapped[str] = mapped_column(String(255))
     sequence: Mapped[int] = mapped_column(Integer)
     kind: Mapped[str] = mapped_column(String(40))
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
 
 
 class EventRow(Base):
@@ -107,7 +108,7 @@ class EventRow(Base):
     execution_id: Mapped[str] = mapped_column(String(255))
     sequence: Mapped[int] = mapped_column(Integer)
     type: Mapped[str] = mapped_column(String(120))
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
 
 
 class EvaluationRow(Base):
@@ -119,18 +120,21 @@ class EvaluationRow(Base):
     execution_id: Mapped[str] = mapped_column(String(255), index=True)
     evaluator: Mapped[str] = mapped_column(String(255), index=True)
     score: Mapped[float | None] = mapped_column(Float)
-    result: Mapped[dict[str, Any]] = mapped_column(JSON)
+    result: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
 
 
-def _approval(data: dict[str, Any]) -> RunApproval:
+def _approval(data: dict[str, JsonValue]) -> RunApproval:
     decision = data.get("decision")
     return RunApproval(
         data["approval_id"],
         data["tool_call_id"],
         data["tool_name"],
-        data["arguments"],
+        data["binding_fingerprint"],
         ApprovalDecision(decision) if decision else None,
         data.get("decided_by"),
+        as_utc(datetime.fromisoformat(data["decided_at"]))
+        if data.get("decided_at")
+        else None,
     )
 
 
@@ -144,8 +148,8 @@ def _record(row: ExecutionRow) -> RunRecord:
         definition=RunDefinition(**row.definition),
         status=RunStatus(row.status),
         session_turn_sequence=row.session_turn_sequence,
-        parent_run_id=row.parent_execution_id,
-        root_run_id=row.root_execution_id,
+        parent_execution_id=row.parent_execution_id,
+        root_execution_id=row.root_execution_id,
         approval=_approval(row.approval) if row.approval else None,
         lease=Lease(row.owner, row.fence, as_utc(row.lease_expires_at)),
         cancel_requested_at=as_utc(row.cancel_requested_at),
@@ -162,6 +166,8 @@ def _record(row: ExecutionRow) -> RunRecord:
 
 
 class SqlAlchemyExecutionBackend:
+    coordination_scope = CoordinationScope.SHARED_DATABASE
+
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
@@ -207,12 +213,59 @@ class SqlAlchemyExecutionBackend:
         return await session.scalar(query)
 
     async def create_session(self, *, session_id: str, user_id: str | None, tenant_id: str | None) -> SessionRecord:
-        async with self.session_factory() as session:
-            async with session.begin():
-                now = datetime.now(timezone.utc)
-                row = SessionRow(session_id=session_id, user_id=user_id, tenant_id=tenant_id, next_turn_sequence=1, latest_completed_run_id=None, created_at=now, updated_at=now)
-                session.add(row)
-            return SessionRecord(row.session_id, row.user_id, row.tenant_id, row.next_turn_sequence, row.latest_completed_run_id, row.created_at, row.updated_at)
+        try:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    existing = await self._session_row(
+                        session,
+                        session_id,
+                        for_update=True,
+                    )
+                    if existing is not None:
+                        return self._owned_session(
+                            existing,
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                        )
+                    now = datetime.now(timezone.utc)
+                    row = SessionRow(session_id=session_id, user_id=user_id, tenant_id=tenant_id, next_turn_sequence=1, latest_completed_run_id=None, created_at=now, updated_at=now)
+                    session.add(row)
+                return self._owned_session(
+                    row,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+        except IntegrityError:
+            async with self.session_factory() as session:
+                row = await self._session_row(session, session_id)
+                if row is None:
+                    raise StorageConflictError(
+                        "session creation conflicted without a visible row"
+                    )
+                return self._owned_session(
+                    row,
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+
+    @staticmethod
+    def _owned_session(
+        row: SessionRow,
+        *,
+        user_id: str | None,
+        tenant_id: str | None,
+    ) -> SessionRecord:
+        if row.user_id != user_id or row.tenant_id != tenant_id:
+            raise StorageConflictError("session ownership conflict")
+        return SessionRecord(
+            row.session_id,
+            row.user_id,
+            row.tenant_id,
+            row.next_turn_sequence,
+            row.latest_completed_run_id,
+            as_utc(row.created_at),
+            as_utc(row.updated_at),
+        )
 
     async def get_session(self, session_id: str) -> SessionRecord | None:
         async with self.session_factory() as session:
@@ -228,7 +281,7 @@ class SqlAlchemyExecutionBackend:
         values = tuple(reversed(tuple(SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, row.assistant_summary, RunStatus(row.status), row.created_at, row.completed_at) for row in rows[:limit])))
         return Page(values, len(rows) > limit, rows[limit - 1].sequence if len(rows) > limit else None)
 
-    async def load_session_context(self, session_id: str) -> tuple[Any, ...]:
+    async def load_session_context(self, session_id: str) -> tuple[JsonValue, ...]:
         session = await self.get_session(session_id)
         if session is None or session.latest_completed_run_id is None:
             return ()
@@ -245,7 +298,7 @@ class SqlAlchemyExecutionBackend:
                     raise StorageConflictError("run already exists")
                 now = datetime.now(timezone.utc)
                 sequence = owner.next_turn_sequence if command.kind is RunKind.USER_TURN else None
-                row = ExecutionRow(execution_id=command.run_id, session_id=owner.session_id, kind=command.kind.value, runnable_id=command.definition.runnable_id, runnable_type=command.definition.runnable_type.value, session_turn_sequence=sequence, parent_execution_id=command.parent_run_id, root_execution_id=command.root_run_id or command.run_id, status=RunStatus.PENDING.value, definition=asdict(command.definition), definition_hash=command.definition.spec_hash, approval=None, owner=None, fence=0, lease_expires_at=None, cancel_requested_at=None, snapshot_revision=0, trace_sequence=0, event_sequence=1, tenant_id=owner.tenant_id, user_id=owner.user_id, created_at=now, updated_at=now, input=command.input)
+                row = ExecutionRow(execution_id=command.run_id, session_id=owner.session_id, kind=command.kind.value, runnable_id=command.definition.runnable_id, runnable_type=command.definition.runnable_type.value, session_turn_sequence=sequence, parent_execution_id=command.parent_execution_id, root_execution_id=command.root_execution_id or command.run_id, status=RunStatus.PENDING.value, definition=asdict(command.definition), definition_hash=command.definition.spec_hash, approval=None, owner=None, fence=0, lease_expires_at=None, cancel_requested_at=None, snapshot_revision=0, trace_sequence=0, event_sequence=1, tenant_id=owner.tenant_id, user_id=owner.user_id, created_at=now, updated_at=now, input=command.input)
                 session.add(row)
                 session.add(EventRow(execution_id=command.run_id, sequence=1, type="run.started", payload={}, created_at=now))
                 if sequence is not None:
@@ -404,7 +457,17 @@ class SqlAlchemyExecutionBackend:
                     raise StorageError("run has no pending approval")
                 decided_at = datetime.now(timezone.utc)
                 event_sequence = row.event_sequence + 1
-                new_approval = asdict(RunApproval(command.approval_id, record.approval.tool_call_id, record.approval.tool_name, record.approval.arguments, command.decision, command.decided_by))
+                new_approval = normalize_json(asdict(
+                    RunApproval(
+                        command.approval_id,
+                        record.approval.tool_call_id,
+                        record.approval.tool_name,
+                        record.approval.binding_fingerprint,
+                        command.decision,
+                        command.decided_by,
+                        decided_at,
+                    )
+                ))
                 if command.decision == ApprovalDecision.ALLOW:
                     result = await session.execute(
                         update(ExecutionRow)
@@ -421,7 +484,7 @@ class SqlAlchemyExecutionBackend:
                     )
                     if result.rowcount != 1:
                         raise StorageConflictError("approval changed concurrently")
-                    session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload={"decision": command.decision}, created_at=decided_at))
+                    session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload=new_approval, created_at=decided_at))
                     return _record(await self._run_row(session, command.run_id))
                 # DENY: terminal -- execution -> CANCELLED, lease released, turn -> CANCELLED.
                 result = await session.execute(
@@ -442,7 +505,7 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("approval changed concurrently")
-                session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload={"decision": command.decision}, created_at=decided_at))
+                session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload=new_approval, created_at=decided_at))
                 if record.session_turn_sequence is not None:
                     turn = await self._turn_row(session, record.session_id, record.session_turn_sequence, for_update=True)
                     if turn is not None:
@@ -471,7 +534,6 @@ class SqlAlchemyExecutionBackend:
                     )
                     .values(
                         status=RunStatus.PENDING.value,
-                        approval=None,
                         updated_at=resumed_at,
                         event_sequence=event_sequence,
                     )
@@ -544,7 +606,11 @@ class SqlAlchemyExecutionBackend:
                     )
                     .values(
                         status=status.value,
-                        approval=asdict(pending_approval) if pending_approval else None,
+                        approval=(
+                            asdict(pending_approval)
+                            if pending_approval is not None
+                            else row.approval
+                        ),
                         error=asdict(error) if error else None,
                         owner=None,
                         lease_expires_at=None,

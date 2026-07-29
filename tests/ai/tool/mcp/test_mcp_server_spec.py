@@ -9,7 +9,7 @@ import math
 
 import pytest
 
-from linktools.ai.tool.mcp.spec import MCPServerSpec
+from linktools.ai.agent.integrations.mcp.spec import MCPServerSpec
 
 
 def _valid(**overrides) -> MCPServerSpec:
@@ -56,8 +56,10 @@ def test_tool_prefix_accepts_bool_and_string():
 
 
 def test_invalid_discovery_mode_rejected():
+    from linktools.ai.agent.integrations.mcp.models import MCPRuntimePolicy
+
     with pytest.raises(ValueError, match="unknown discovery_mode"):
-        _valid(discovery_mode="lax")
+        MCPRuntimePolicy(discovery_mode="lax")
 
 
 def test_invalid_transport_rejected():

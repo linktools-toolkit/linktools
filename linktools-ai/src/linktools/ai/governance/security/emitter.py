@@ -15,23 +15,6 @@ from .redact import redact_exception
 _LOGGER = logging.getLogger(__name__)
 
 
-def _to_jsonable(value: Any) -> Any:
-    """Flatten dataclass wrappers / Mappings / sequences into a plain JSON
-    structure for size measurement. ``_value`` already redacted and normalized
-    the event but keeps payload dataclasses as instances; canonical_json needs a
-    plain structure. Not a hash path -- only used to measure bytes."""
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {
-            f.name: _to_jsonable(getattr(value, f.name))
-            for f in dataclasses.fields(value)
-        }
-    if isinstance(value, Mapping):
-        return {str(k): _to_jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_to_jsonable(v) for v in value]
-    return value
-
-
 @runtime_checkable
 class SecurityEventEmitter(Protocol):
     async def emit_security(self, event: Any) -> None: ...
@@ -61,10 +44,9 @@ class DefaultSecurityEventSanitizer:
     def sanitize(self, event: Any) -> Any:
         result = self._value(event)
         try:
-            from ...json import canonical_json
+            from ...json import canonical_json_bytes
 
-            serialized = canonical_json(_to_jsonable(result))
-            size = len(serialized.encode("utf-8"))
+            size = len(canonical_json_bytes(result))
         except Exception:
             # If the sanitized value cannot be sized it cannot overflow either;
             # return it as-is rather than synthesizing a placeholder.
@@ -164,10 +146,10 @@ class DurableSecurityEventEmitter:
                 EventStreamContext(
                     stream_id=run_id or "",
                     run_id=run_id,
-                    root_run_id=(getattr(ctx, "root_run_id", None) or run_id)
+                    root_execution_id=(getattr(ctx, "root_execution_id", None) or run_id)
                     if ctx
                     else run_id,
-                    parent_run_id=getattr(ctx, "parent_run_id", None) if ctx else None,
+                    parent_execution_id=getattr(ctx, "parent_execution_id", None) if ctx else None,
                     session_id=getattr(ctx, "session_id", None) if ctx else None,
                     runnable_id=getattr(ctx, "runnable_id", None) if ctx else None,
                 ),
@@ -195,7 +177,7 @@ class DurableSecurityEventEmitter:
 
 class CollectingSecurityEventEmitter:
     """A SecurityEventEmitter that records sanitized events in memory instead of
-    persisting them. Used by Runtime.inspect so a capability resolution that
+    persisting them. Used by Runtime.inspect so a feature resolution that
     emits SecurityDegraded (e.g. MCP best-effort discovery) behaves the same
     under inspection as under a real run -- the degradation is observable, not
     silently swallowed or turned into a hard failure.

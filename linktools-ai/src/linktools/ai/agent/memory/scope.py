@@ -7,7 +7,7 @@ cross-tenant query path, and a missing tenant fails closed (no results, never
 the whole table).
 
 ``get`` / ``update`` / ``forget`` are NOT scope-gated -- they key off
-``memory_id`` alone (the id is the capability). They are admin/lifecycle paths,
+``memory_id`` alone (the id is the lookup key). They are admin/lifecycle paths,
 not the search/isolation boundary; ``search`` is what enforces the tenant
 boundary.
 

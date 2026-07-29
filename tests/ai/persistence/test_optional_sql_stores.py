@@ -9,16 +9,16 @@ from linktools.ai.errors import StorageConflictError
 from linktools.ai.tasks.models import TaskExecution, TaskPlan
 from linktools.ai.tasks.persistence.sqlalchemy import SqlAlchemyTaskBackend
 from linktools.ai.tasks.store import TaskStore
-from linktools.ai.tool.persistence.sqlalchemy import SqlAlchemyToolStateBackend
-from linktools.ai.tool.state import ToolOperation, ToolOperationStatus
-from linktools.ai.tool.store import ToolStateStore
+from linktools.ai.agent.tool.state.persistence.sqlalchemy import SqlAlchemyToolStateBackend
+from linktools.ai.agent.tool.state import ToolOperation, ToolOperationStatus
+from linktools.ai.agent.tool.state.store import ToolStateStore
 
 
 @pytest.mark.asyncio
 async def test_sql_task_store_fences_claims(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tasks.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = TaskStore(SqlAlchemyTaskBackend(factory))
+    store = SqlAlchemyTaskBackend(factory)
     await store.initialize_storage(engine)
     await store.save_plan(TaskPlan("p", ()))
     await store.add_execution(TaskExecution("e", "p", "n", "ready"))
@@ -38,7 +38,7 @@ async def test_sql_task_store_fences_claims(tmp_path):
 async def test_sql_task_store_allows_only_one_concurrent_claim(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'task-claim.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = TaskStore(SqlAlchemyTaskBackend(factory))
+    store = SqlAlchemyTaskBackend(factory)
     await store.initialize_storage(engine)
     await store.save_plan(TaskPlan("p", ()))
     await store.add_execution(TaskExecution("e", "p", "n", "ready"))
@@ -56,7 +56,7 @@ async def test_sql_task_store_allows_only_one_concurrent_claim(tmp_path):
 async def test_sql_task_store_commits_terminal_result_exactly_once(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'task-result.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = TaskStore(SqlAlchemyTaskBackend(factory))
+    store = SqlAlchemyTaskBackend(factory)
     await store.initialize_storage(engine)
     await store.save_plan(TaskPlan("p", ()))
     await store.add_execution(TaskExecution("e", "p", "n", "ready"))
@@ -75,7 +75,7 @@ async def test_sql_task_store_commits_terminal_result_exactly_once(tmp_path):
 async def test_sql_task_store_reclaims_expired_lease_and_rejects_stale_fence(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'task-reclaim.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = TaskStore(SqlAlchemyTaskBackend(factory))
+    store = SqlAlchemyTaskBackend(factory)
     await store.initialize_storage(engine)
     await store.save_plan(TaskPlan("p", ()))
     await store.add_execution(TaskExecution("e", "p", "n", "ready"))
@@ -91,9 +91,9 @@ async def test_sql_task_store_reclaims_expired_lease_and_rejects_stale_fence(tmp
 async def test_sql_tool_store_replays_completed_operation(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tools.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ToolStateStore(SqlAlchemyToolStateBackend(factory))
+    store = SqlAlchemyToolStateBackend(factory)
     await store.initialize_storage(engine)
-    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", ToolOperationStatus.PREPARED)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED)
     await store.prepare(operation)
     claimed = await store.claim("o", owner="worker", duration=timedelta(minutes=1))
     assert claimed.lease.expires_at is not None
@@ -108,9 +108,9 @@ async def test_sql_tool_store_replays_completed_operation(tmp_path):
 async def test_sql_tool_store_concurrent_prepare_is_idempotent(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-prepare.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ToolStateStore(SqlAlchemyToolStateBackend(factory))
+    store = SqlAlchemyToolStateBackend(factory)
     await store.initialize_storage(engine)
-    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", ToolOperationStatus.PREPARED)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED)
     results = await asyncio.gather(
         store.prepare(operation),
         store.prepare(operation),
@@ -123,9 +123,9 @@ async def test_sql_tool_store_concurrent_prepare_is_idempotent(tmp_path):
 async def test_sql_tool_store_allows_only_one_concurrent_claim(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-claim.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ToolStateStore(SqlAlchemyToolStateBackend(factory))
+    store = SqlAlchemyToolStateBackend(factory)
     await store.initialize_storage(engine)
-    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", ToolOperationStatus.PREPARED)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED)
     await store.prepare(operation)
     results = await asyncio.gather(
         store.claim("o", owner="worker-a"),
@@ -141,9 +141,9 @@ async def test_sql_tool_store_allows_only_one_concurrent_claim(tmp_path):
 async def test_sql_tool_store_commits_terminal_result_exactly_once(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-result.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ToolStateStore(SqlAlchemyToolStateBackend(factory))
+    store = SqlAlchemyToolStateBackend(factory)
     await store.initialize_storage(engine)
-    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", ToolOperationStatus.PREPARED)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED)
     await store.prepare(operation)
     claimed = await store.claim("o", owner="worker")
     results = await asyncio.gather(
@@ -160,9 +160,9 @@ async def test_sql_tool_store_commits_terminal_result_exactly_once(tmp_path):
 async def test_sql_tool_store_reclaims_expired_lease_and_rejects_stale_fence(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-reclaim.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ToolStateStore(SqlAlchemyToolStateBackend(factory))
+    store = SqlAlchemyToolStateBackend(factory)
     await store.initialize_storage(engine)
-    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", ToolOperationStatus.PREPARED)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED, replay_safe=True)
     await store.prepare(operation)
     stale = await store.claim("o", owner="worker-a", duration=timedelta(seconds=-1))
     current = await store.claim("o", owner="worker-b")

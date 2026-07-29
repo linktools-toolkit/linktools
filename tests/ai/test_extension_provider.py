@@ -6,12 +6,12 @@ catalog-only for `extension:`, read tools for `extension-asset:`, list tool for
 
 import pytest
 
-from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.agent.capability.provider import CapabilityContext
-from linktools.ai.agent.capability.models import CapabilityRef
+from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+from linktools.ai.agent.assembly.provider import AgentFeatureContext
+from linktools.ai.agent.assembly.models import AgentFeatureRef
 from linktools.ai.errors import ExtensionContentAccessDeniedError, ExtensionNotFoundError
-from linktools.ai.agent.extension.capability_provider import ExtensionProvider
-from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.agent.extension.provider import ExtensionProvider
+from linktools.ai.agent.extension.content_source import DirectoryExtensionContentSource
 from linktools.ai.agent.extension.resolver import (
     DirectoryEntrypointResolver,
     DirectoryExtensionRegistry,
@@ -36,15 +36,23 @@ def env(tmp_path):
 
 
 def _ctx():
-    return CapabilityContext(
-        agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+    return AgentFeatureContext(
+        agent_id="a1",
+        execution_id="e1",
+        root_execution_id="e1",
+        parent_execution_id=None,
+        session_id="s1",
+        tenant_id="t1",
+        user_id="u1",
+        workspace=None,
+        sandbox=None,
     )
 
 
 @pytest.mark.asyncio
 async def test_extension_kind_is_prompt_catalog_only(env):
     provider, _ = env
-    bundle = await provider.resolve(CapabilityRef("extension", "skill-creator"), _ctx())
+    bundle = await provider.resolve(AgentFeatureRef("extension", "skill-creator"), _ctx())
     assert "extensions" in bundle.prompt_sections
 
 
@@ -52,9 +60,9 @@ async def test_extension_kind_is_prompt_catalog_only(env):
 async def test_extension_resource_exposes_read_tools(env):
     provider, _ = env
     bundle = await provider.resolve(
-        CapabilityRef("extension-asset", "skill-creator"), _ctx()
+        AgentFeatureRef("extension-asset", "skill-creator"), _ctx()
     )
-    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
+    names = {md.descriptor.name for md in bundle.tools}
     assert names == {"list_extension_content", "read_extension_content"}
 
 
@@ -62,12 +70,11 @@ async def test_extension_resource_exposes_read_tools(env):
 async def test_extension_resource_read_tool_authorized_and_sandboxed(env):
     provider, _ = env
     bundle = await provider.resolve(
-        CapabilityRef("extension-asset", "skill-creator"), _ctx()
+        AgentFeatureRef("extension-asset", "skill-creator"), _ctx()
     )
     tools = {
         md.descriptor.name: md.handler
-        for c in bundle.tool_contributions
-        for md in c.tools
+        for md in bundle.tools
     }
     list_fn = tools["list_extension_content"]
     read_fn = tools["read_extension_content"]
@@ -85,15 +92,14 @@ async def test_extension_resource_read_tool_authorized_and_sandboxed(env):
 async def test_extension_entrypoint_lists_only_by_default(env):
     provider, _ = env
     bundle = await provider.resolve(
-        CapabilityRef("extension-entrypoint", "skill-creator"), _ctx()
+        AgentFeatureRef("extension-entrypoint", "skill-creator"), _ctx()
     )
-    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
+    names = {md.descriptor.name for md in bundle.tools}
     # Default: only list, no call tool.
     assert names == {"list_extension_entrypoints"}
     list_fn = next(
         md.handler
-        for c in bundle.tool_contributions
-        for md in c.tools
+        for md in bundle.tools
         if md.descriptor.name == "list_extension_entrypoints"
     )
     result = await list_fn("skill-creator", kind="agent")
@@ -103,11 +109,8 @@ async def test_extension_entrypoint_lists_only_by_default(env):
 @pytest.mark.asyncio
 async def test_extension_entrypoint_call_is_opt_in(env):
     provider, _ = env
-    ctx = CapabilityContext(
-        agent_id="a1",
-        exposure_policy=CapabilityToolExposurePolicy(expose_execution_tools=True),
-    )
-    ref = CapabilityRef(
+    ctx = _ctx()
+    ref = AgentFeatureRef(
         "extension-entrypoint",
         "skill-creator",
         config={
@@ -117,7 +120,7 @@ async def test_extension_entrypoint_call_is_opt_in(env):
         },
     )
     bundle = await provider.resolve(ref, ctx)
-    names = {md.descriptor.name for c in bundle.tool_contributions for md in c.tools}
+    names = {md.descriptor.name for md in bundle.tools}
     assert "call_extension_entrypoint" in names
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """CommandRule: denies terminal commands matching a configurable pattern list.
-Replaces security/hook.py's SecurityCapability's hardcoded regex blocklist with
+Replaces the old security hook's hardcoded regex blocklist with
 a PolicyRule -- same default patterns, now configurable."""
 
 import re
@@ -37,7 +37,7 @@ class CommandRule:
                 )
         elif request.tool_name not in ("bash", "terminal"):
             # Compat fallback: request.category is only populated by callers
-            # that resolved a ToolDescriptor (ManagedToolAdapter, or
+            # that resolved a ToolDescriptor (ToolExecutionService, or
             # PolicyCapability with a descriptor lookup wired). A caller that
             # never threads descriptor info through falls back to the name
             # check rather than silently losing command-injection protection.

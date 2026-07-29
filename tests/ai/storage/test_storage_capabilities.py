@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from linktools.ai.errors import StorageCapabilityError
+from linktools.ai.errors import StorageFeatureSupportError
 from linktools.ai.spec.cache import MemoryContentCache
 from linktools.ai.spec.composition import StorageComposition
 from linktools.ai.spec.multi import OverlayRefreshPolicy, StorageLayer
@@ -28,7 +28,7 @@ class Source:
 def test_storage_composition_only_records_explicit_capabilities():
     source = Source()
     composition = StorageComposition(primary=source, writer=source)
-    assert composition.backend is source
+    assert not hasattr(composition, "backend")
     assert composition.writer is source
 
 
@@ -243,7 +243,7 @@ async def test_preload_requires_revision_source():
         cache_adapter=adapter,
     )
     with pytest.raises(
-        StorageCapabilityError,
+        StorageFeatureSupportError,
         match="preload requires a revision source",
     ):
         await composition.refresh(preload=True)

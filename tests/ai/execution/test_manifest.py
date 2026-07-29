@@ -15,7 +15,7 @@ from linktools.ai.execution.manifest import (
     MCPManifest,
     ManifestResolver,
     ResolvedExecution,
-    CapabilityRevision,
+    FeatureRevision,
     Resumability,
     SCHEMA_VERSION,
     ToolManifest,
@@ -31,7 +31,7 @@ from linktools.ai.execution.manifest import (
 from linktools.ai.errors import ManifestDriftError
 
 
-class _ToolRef:
+class _AgentFeatureRef:
     def __init__(self, kind, name, config):
         self.kind = kind
         self.name = name
@@ -39,9 +39,9 @@ class _ToolRef:
 
 
 class _Spec:
-    def __init__(self, *, tools=(), primary="test-model", spec_id="agent-1"):
+    def __init__(self, *, features=(), primary="test-model", spec_id="agent-1"):
         self.id = spec_id
-        self.tools = tools
+        self.features = features
         self.model = type("M", (), {"primary": primary})
 
 
@@ -49,17 +49,17 @@ class _Spec:
 
 
 def test_descriptor_fingerprint_is_deterministic():
-    a = descriptor_fingerprint(_ToolRef("builtin", "t", {"x": 1}))
-    b = descriptor_fingerprint(_ToolRef("builtin", "t", {"x": 1}))
+    a = descriptor_fingerprint(_AgentFeatureRef("builtin", "t", {"x": 1}))
+    b = descriptor_fingerprint(_AgentFeatureRef("builtin", "t", {"x": 1}))
     assert a == b
     assert len(a) == 64  # sha256 hex
 
 
 def test_descriptor_fingerprint_differs_on_any_identity_field():
-    base = descriptor_fingerprint(_ToolRef("builtin", "t", {"x": 1}))
-    assert descriptor_fingerprint(_ToolRef("builtin", "t", {"x": 2})) != base
-    assert descriptor_fingerprint(_ToolRef("builtin", "t2", {"x": 1})) != base
-    assert descriptor_fingerprint(_ToolRef("mcp", "t", {"x": 1})) != base
+    base = descriptor_fingerprint(_AgentFeatureRef("builtin", "t", {"x": 1}))
+    assert descriptor_fingerprint(_AgentFeatureRef("builtin", "t", {"x": 2})) != base
+    assert descriptor_fingerprint(_AgentFeatureRef("builtin", "t2", {"x": 1})) != base
+    assert descriptor_fingerprint(_AgentFeatureRef("mcp", "t", {"x": 1})) != base
 
 
 # --- handler_revision --------------------------------------------------------
@@ -120,7 +120,7 @@ def test_versioned_provider_protocol_runtime_checkable():
 
 
 def test_build_manifest_captures_spec_level_fields():
-    spec = _Spec(tools=(_ToolRef("builtin", "t1", {}), _ToolRef("mcp", "t2", {"k": 1})))
+    spec = _Spec(features=(_AgentFeatureRef("builtin", "t1", {}), _AgentFeatureRef("mcp", "t2", {"k": 1})))
     manifest = build_execution_manifest(
         spec, runnable_type="agent", runnable_fingerprint="fp"
     )
@@ -146,7 +146,7 @@ def test_build_manifest_records_handler_revisions_when_handlers_supplied():
 
     handler_a.revision = "ha-v1"
 
-    spec = _Spec(tools=(_ToolRef("builtin", "t1", {}),))
+    spec = _Spec(features=(_AgentFeatureRef("builtin", "t1", {}),))
     manifest = build_execution_manifest(
         spec,
         runnable_type="agent",
@@ -185,15 +185,15 @@ def test_manifest_round_trips_through_dict():
             ToolManifest(name="t", descriptor_fingerprint="d", handler_revision="h"),
         ),
         skill_revisions=(
-            CapabilityRevision(path="s.md", revision="r", etag="e", sha256="sh", artifact_id="a"),
+            FeatureRevision(path="s.md", revision="r", etag="e", sha256="sh", artifact_id="a"),
         ),
         subagent_revisions=(
-            CapabilityRevision(path="sub.md", revision=None, etag=None, sha256=None, artifact_id="aid"),
+            FeatureRevision(path="sub.md", revision=None, etag=None, sha256=None, artifact_id="aid"),
         ),
         mcp_servers=(MCPManifest(name="srv", revision="mr"),),
         policy_revision="pol",
         security_baseline_revision="sec",
-        capability_revision="cap",
+        feature_revision="cap",
         output_schema_id="osid",
         output_schema_revision="osrev",
     )
@@ -262,7 +262,7 @@ def test_compute_resumability_non_resumable_for_ephemeral_provider():
 def test_compute_resumability_non_resumable_for_missing_resource_snapshot():
     manifest = _manifest(
         skill_revisions=(
-            CapabilityRevision(path="s.md", revision=None, etag=None, sha256=None, artifact_id=None),
+            FeatureRevision(path="s.md", revision=None, etag=None, sha256=None, artifact_id=None),
         ),
     )
     verdict, reasons = compute_resumability(manifest)
@@ -275,7 +275,7 @@ def test_compute_resumability_resumable_when_resource_pinned_by_etag_only():
     # HTTP-served skill that exposes ETag but no content hash) is resumable.
     manifest = _manifest(
         skill_revisions=(
-            CapabilityRevision(path="s.md", revision=None, etag="etag-x", sha256=None, artifact_id=None),
+            FeatureRevision(path="s.md", revision=None, etag="etag-x", sha256=None, artifact_id=None),
         ),
     )
     verdict, reasons = compute_resumability(manifest)

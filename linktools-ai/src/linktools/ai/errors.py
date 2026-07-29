@@ -101,30 +101,30 @@ class InvalidStoragePathError(StorageError):
     """A caller supplied an identifier that cannot safely address local data."""
 
 
-class StorageCapabilityError(StorageError):
-    """Raised when an operation requires a StorageFeatures capability the
+class StorageFeatureSupportError(StorageError):
+    """Raised when an operation requires a StorageFeatures flag the
     active Storage does not expose (e.g. database-scoped transactions on
     local directory storage, which is process-local)."""
 
 
-class StorageRequirementsNotMetError(StorageCapabilityError):
-    """Raised at build time by the RuntimeBuilder capability gate when the
+class StorageRequirementsNotMetError(StorageFeatureSupportError):
+    """Raised at build time by the RuntimeBuilder storage-feature gate when the
     active Storage's StorageFeatures fall below a declared RuntimeRequirements
     minimum (e.g. process-local coordination configured for a topology that
     declared it needs distributed). Fail-fast, never a silent degradation."""
 
 
-class StorageCapabilityDeclarationError(StorageCapabilityError):
-    """A wired component does not expose the public capability properties the
+class StorageFeatureDeclarationError(StorageFeatureSupportError):
+    """A wired component does not expose the public storage-feature properties the
     Storage's feature derivation requires (e.g. an ArtifactStore stand-in
     missing ``record_store`` / ``supports_streaming`` / ``coordination_scope``).
-    Fail-closed at construction: a Storage cannot declare a capability none of
+    Fail-closed at construction: a Storage cannot declare a feature none of
     its wired objects actually provides."""
 
 
-class StorageFeatureError(StorageCapabilityError):
+class StorageFeatureError(StorageFeatureSupportError):
     """Raised when a Storage's declared StorageFeatures do not match its wired
-    objects -- a declared capability that has no backing object (e.g.
+    objects -- a declared feature that has no backing object (e.g.
     streaming_blobs=True with no ArtifactStore, or a NONE transaction scope
     where a cross-store UoW was requested). This class is the unified signal
     for feature/behavior mismatch. The more specific
@@ -138,15 +138,15 @@ class StorageTransactionNotSupportedError(StorageFeatureError):
     cross-store write."""
 
 
-class StorageConcurrencyNotSupportedError(StorageCapabilityError):
+class StorageConcurrencyNotSupportedError(StorageFeatureSupportError):
     """optimistic_concurrency is False but a caller requested CAS-style updates."""
 
 
-class StorageLeaseNotSupportedError(StorageCapabilityError):
+class StorageLeaseNotSupportedError(StorageFeatureSupportError):
     """leasing is False but a caller (e.g. swarm claim) requested a lease."""
 
 
-class StorageCoordinationNotSupportedError(StorageCapabilityError):
+class StorageCoordinationNotSupportedError(StorageFeatureSupportError):
     """Raised when a KeyedCoordinator that cannot provide the required
     coordination scope is constructed (e.g. a filesystem flock coordinator on
     a non-POSIX platform), or when a deployment that needs a distributed
@@ -184,6 +184,10 @@ class RunCancelledError(RunError):
     pass
 
 
+class ExecutionAlreadyActiveError(RunConflictError):
+    """A second live task attempted to drive the same execution."""
+
+
 class InvalidRunTransitionError(RunError):
     pass
 
@@ -207,6 +211,14 @@ class RunInvariantError(RunError):
     """A run completed without the authoritative state the runtime contract
     requires (e.g. no terminal RunResult after a non-pausing execute). Raised
     instead of fabricating an empty success result that would mask the bug."""
+
+
+class RunDefinitionError(RunError):
+    """A persisted runnable definition has an unsupported schema."""
+
+
+class RunDefinitionIntegrityError(RunDefinitionError):
+    """A persisted runnable definition no longer matches its content hash."""
 
 
 class RunLiveStreamAlreadyOpenError(RunError):
@@ -321,8 +333,8 @@ class ToolApprovalRequiredError(ToolError):
 
 
 class ToolPolicyResolutionError(ToolError):
-    """A ToolPolicyProvider could not resolve a policy for a tool. The default
-    posture is fail closed: the ManagedToolAdapter catches this, emits a
+    """A ToolPolicyResolver could not resolve a policy for a tool. The default
+    posture is fail closed: ToolExecutionService catches this, emits a
     SecurityDegraded event, and denies the call rather than running ungoverned."""
 
 
@@ -355,7 +367,7 @@ class PipelineExecutionError(ToolError):
 
 class TransientToolError(ToolError):
     """A tool execution error that MAY succeed on retry (network blip, transient
-    lock conflict, etc.). ManagedToolAdapter retries these up to max_retries."""
+    lock conflict, etc.). ToolExecutionService retries these up to max_retries."""
 
 
 class ToolCommitError(ToolError):
@@ -496,31 +508,34 @@ class InvalidSpecError(SpecError):
     """A parsed spec is structurally present but semantically invalid."""
 
 
-# --- Capability resolution tree -----------------------------------------
-# Resolving AgentSpec.tools into concrete capability bundles can fail in two
-# qualitatively different ways: a referenced capability cannot be found, or two
-# capabilities collide. Both carry agent_id / ref so callers can pinpoint the
+# --- Feature resolution tree --------------------------------------------
+# Resolving AgentSpec.features into concrete contributions can fail in two
+# qualitatively different ways: a referenced feature cannot be found, or two
+# features collide. Both carry agent_id / ref so callers can pinpoint the
 # failing declaration instead of grepping strings.
 
 
-class CapabilityResolutionError(LinktoolsAIError):
-    """Base class for capability-resolution failures (assemble-time)."""
+class AgentAssemblyError(LinktoolsAIError):
+    """Base class for feature-resolution failures (assemble-time)."""
 
 
-class CapabilityNotFoundError(CapabilityResolutionError):
+class AgentFeatureNotFoundError(AgentAssemblyError):
     pass
 
 
-class CapabilityConflictError(CapabilityResolutionError):
-    """Two capabilities produced the same tool name; resolution never silently
-    overwrites."""
+class AgentFeatureConflictError(AgentAssemblyError):
+    """Two features conflict at the declaration or contribution boundary."""
 
 
-class SkillNotFoundError(CapabilityNotFoundError):
+class ToolConflictError(LinktoolsAIError):
+    """Tool exposure produced duplicate names or exceeded a configured limit."""
+
+
+class SkillNotFoundError(AgentFeatureNotFoundError):
     pass
 
 
-class MCPServerNotFoundError(CapabilityNotFoundError):
+class MCPServerNotFoundError(AgentFeatureNotFoundError):
     pass
 
 
@@ -568,11 +583,11 @@ class ToolSecurityAuditError(ToolError):
     """A security-critical audit event could not be persisted."""
 
 
-class ExtensionNotFoundError(CapabilityNotFoundError):
+class ExtensionNotFoundError(AgentFeatureNotFoundError):
     pass
 
 
-class ExtensionContentNotFoundError(CapabilityNotFoundError):
+class ExtensionContentNotFoundError(AgentFeatureNotFoundError):
     pass
 
 
@@ -580,7 +595,7 @@ class ExtensionContentAccessDeniedError(PolicyError):
     """An extension asset path was outside the allowed scope/extension set."""
 
 
-class ExtensionEntrypointNotFoundError(CapabilityNotFoundError):
+class ExtensionEntrypointNotFoundError(AgentFeatureNotFoundError):
     pass
 
 
@@ -588,7 +603,7 @@ class ExtensionEntrypointDeniedError(PolicyError):
     """An entrypoint kind/name was not on the declared allowlist."""
 
 
-class SubagentNotFoundError(CapabilityNotFoundError):
+class SubagentNotFoundError(AgentFeatureNotFoundError):
     pass
 
 

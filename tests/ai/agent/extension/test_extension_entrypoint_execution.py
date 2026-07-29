@@ -5,18 +5,23 @@
 
 import pytest
 
-from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.agent.capability.provider import CapabilityContext
-from linktools.ai.agent.capability.models import CapabilityRef
-from linktools.ai.agent.extension.capability_provider import ExtensionProvider
+from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+from linktools.ai.agent.assembly.provider import AgentFeatureContext
+from linktools.ai.agent.assembly.models import AgentFeatureRef
+from linktools.ai.agent.extension.provider import ExtensionProvider
 
 
 def _ctx(execution_tools=True):
-    return CapabilityContext(
+    return AgentFeatureContext(
         agent_id="a1",
-        exposure_policy=CapabilityToolExposurePolicy(
-            expose_execution_tools=execution_tools
-        ),
+        execution_id="e1",
+        root_execution_id="e1",
+        parent_execution_id=None,
+        session_id="s1",
+        tenant_id="t1",
+        user_id="u1",
+        workspace=None,
+        sandbox=None,
     )
 
 
@@ -27,7 +32,7 @@ async def test_call_without_executor_raises_not_reserved():
     provider = ExtensionProvider(
         entrypoint_resolver=object()
     )  # resolver set, executor None
-    ref = CapabilityRef(
+    ref = AgentFeatureRef(
         "extension-entrypoint",
         "pkg",
         config={
@@ -39,8 +44,7 @@ async def test_call_without_executor_raises_not_reserved():
     bundle = await provider.resolve(ref, _ctx())
     call = next(
         md.handler
-        for c in bundle.tool_contributions
-        for md in c.tools
+        for md in bundle.tools
         if md.descriptor.name == "call_extension_entrypoint"
     )
     with pytest.raises(Exception):  # ExtensionEntrypointDeniedError
@@ -72,7 +76,7 @@ async def test_call_without_resolver_raises_not_nameerror():
         expose_call_tool=True,
         executor=object(),
     )
-    call = ts.tools["call_extension_entrypoint"].function
+    call = ts.handlers["call_extension_entrypoint"]
     with pytest.raises(ExtensionEntrypointNotFoundError):
         await call("pkg", "agent", "grader", "do it")
 
@@ -80,10 +84,10 @@ async def test_call_without_resolver_raises_not_nameerror():
 @pytest.mark.asyncio
 async def test_call_extension_entrypoint_forwards_parent_identity_unmodified():
     """Regression: call_extension_entrypoint used to hardcode
-    root_run_id=parent_run_id, truncating lineage to one hop whenever the
+    root_execution_id=parent_execution_id, truncating lineage to one hop whenever the
     entrypoint call is itself already nested under an existing chain. It must
     now forward the SAME ParentRunIdentity the caller built -- in particular
-    parent.root_run_id, never re-derived from parent.run_id here."""
+    parent.root_execution_id, never re-derived from parent.run_id here."""
     from linktools.ai.agent.extension.scope import ExtensionScope
     from linktools.ai.agent.extension.toolset import build_extension_entrypoint_toolset
     from linktools.ai.execution.identity import ParentRunIdentity
@@ -120,7 +124,7 @@ async def test_call_extension_entrypoint_forwards_parent_identity_unmodified():
     # the immediate parent is B (run_id="B") but the true root is A ("A-root").
     parent_identity = ParentRunIdentity(
         run_id="B",
-        root_run_id="A-root",
+        root_execution_id="A-root",
         session_id="session-B",
         user_id="u1",
         tenant_id="t1",
@@ -135,9 +139,9 @@ async def test_call_extension_entrypoint_forwards_parent_identity_unmodified():
         executor=executor,
         parent=parent_identity,
     )
-    call = ts.tools["call_extension_entrypoint"].function
+    call = ts.handlers["call_extension_entrypoint"]
     await call("pkg", "agent", "grader", "do it")
 
     assert executor.seen_parent is parent_identity
-    assert executor.seen_parent.root_run_id == "A-root"
+    assert executor.seen_parent.root_execution_id == "A-root"
     assert executor.seen_parent.user_id == "u1"

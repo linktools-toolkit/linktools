@@ -6,10 +6,9 @@ reads raise SkillNotFoundError so existence is not leaked."""
 
 from typing import Any, Awaitable, Callable, Iterable
 
-from pydantic_ai.toolsets import FunctionToolset
-
 from ...errors import SkillNotFoundError
 from ...observability.events.payloads import SkillListed, SkillRead
+from ..tool.models import ToolHandlerSet
 from .spec import SkillSpecProvider
 from .models import SkillContent, SkillSummary
 from .private import set_active_skill
@@ -18,7 +17,7 @@ from .private import set_active_skill
 SkillEmitter = "Callable[[Any], Awaitable[None]]"
 
 
-def _summary_from_spec(skill_id: str, spec, *, authorized: bool = True) -> SkillSummary:
+def summary_from_spec(skill_id: str, spec, *, authorized: bool = True) -> SkillSummary:
     meta = dict(getattr(spec, "metadata", {}) or {})
     return SkillSummary(
         id=skill_id,
@@ -36,14 +35,14 @@ def build_skill_toolset(
     authorized: "Iterable[str]",
     emit: "SkillEmitter | None" = None,
     active_skill_lookup: "Callable[[str], Awaitable[Any]] | None" = None,
-) -> FunctionToolset:
+) -> ToolHandlerSet:
     """Level-1 skill discovery tools scoped to ``authorized`` skill ids.
 
     When ``active_skill_lookup`` is provided, a successful ``read_skill`` also
     activates that skill in the current task's context (so a later
     ``call_subagent(instruction_path=...)`` resolves the path relative to it).
     Activation is best-effort and never blocks a read."""
-    toolset: FunctionToolset = FunctionToolset()
+    toolset = ToolHandlerSet()
     allowed = set(authorized)
 
     async def list_skills(query: "str | None" = None) -> "dict[str, Any]":
@@ -57,7 +56,7 @@ def build_skill_toolset(
                 spec = await skill_provider.get(sid)
             except (KeyError, LookupError):
                 continue
-            summary = _summary_from_spec(sid, spec)
+            summary = summary_from_spec(sid, spec)
             if query:
                 haystack = f"{summary.name} {summary.description or ''}".lower()
                 if query.lower() not in haystack:

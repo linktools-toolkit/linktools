@@ -27,7 +27,7 @@ from linktools.ai.execution.domain import ApprovalDecision, RunApproval, RunDefi
 async def test_sqlalchemy_execution_pages_in_database(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'execution.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ExecutionStore(SqlAlchemyExecutionBackend(factory))
+    store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
     definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
@@ -46,7 +46,7 @@ async def test_sqlalchemy_execution_pages_in_database(tmp_path):
 async def _claimed_store(tmp_path, name: str = "lifecycle"):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / f'{name}.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ExecutionStore(SqlAlchemyExecutionBackend(factory))
+    store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
     definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
@@ -158,7 +158,7 @@ async def test_store_allocates_monotonic_snapshot_revisions(tmp_path):
 async def test_sqlalchemy_run_allows_only_one_concurrent_claim(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'run-claim.db'}")
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    store = ExecutionStore(SqlAlchemyExecutionBackend(factory))
+    store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
     definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")

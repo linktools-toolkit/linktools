@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """PromptBuilder: owns model-prompt template composition. Folds session
-history, memory, knowledge, and capability-resolved prompt sections around the
+history, memory, knowledge, and feature-resolved prompt sections around the
 user prompt into the single string sent to the model. The prompt
 domain owns PromptSpec + PromptBuilder + template composition, and does not
 read the filesystem -- the runner hands in already-fetched sections (memory,
-knowledge, capability catalog) and the builder only composes.
+knowledge, feature catalog) and the builder only composes.
 
 Two distinct values are composed and the distinction is load-bearing:
 
 * ``user_prompt`` is the caller's ORIGINAL input (what gets persisted as the
   USER session message); it never carries runtime context.
 * the composed model prompt returned here is history + memory + knowledge +
-  capability sections + user -- never persisted verbatim, so internal runtime
+  feature sections + user -- never persisted verbatim, so internal runtime
   context cannot leak into session history.
 
 The methods are pure string transforms over already-fetched inputs; async
-policy execution (memory recall, knowledge retrieval, capability resolution)
+policy execution (memory recall, knowledge retrieval, feature assembly)
 stays with the caller."""
 
 from typing import TYPE_CHECKING
@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from ...execution.session import SessionMessage
 
 
 class PromptBuilder:
@@ -32,7 +31,7 @@ class PromptBuilder:
     string transform."""
 
     @staticmethod
-    def format_session_history(messages: "Sequence[SessionMessage]") -> str:
+    def format_session_history(messages: "Sequence[object]") -> str:
         """Render prior session messages into the MODEL prompt with role
         prefixes, so an assistant turn is not disguised as user content. This
         is injected into the model prompt only -- the persisted USER session
@@ -50,7 +49,7 @@ class PromptBuilder:
     def build_base_prompt(
         *,
         user_prompt: str,
-        prior_messages: "Sequence[SessionMessage]",
+        prior_messages: "Sequence[object]",
         memory_section: str = "",
         knowledge_section: str = "",
     ) -> str:
@@ -74,19 +73,19 @@ class PromptBuilder:
     def combine(
         *,
         base_prompt: "str | None",
-        capability_sections: "Mapping[str, str]",
+        feature_sections: "Mapping[str, str]",
         static_sections: "Mapping[str, str] | None" = None,
         resuming: bool,
     ) -> "str | None":
-        """Merge the spec-declared static sections + the capability-resolved
+        """Merge the spec-declared static sections + the feature-resolved
         sections with the base prompt.
 
         ``static_sections`` are the agent's declared ``PromptSpec.sections``
-        (stable, spec-authored); ``capability_sections`` are the dynamically
+        (stable, spec-authored); ``feature_sections`` are the dynamically
         resolved catalog sections (skills/extensions/etc.). Both render the
         same way -- joined into one catalog prompt prepended to the base.
-        Static sections come first (agent identity), then capability sections
-        (dynamic catalog); a colliding key is won by the capability section.
+        Static sections come first (agent identity), then feature sections
+        (dynamic catalog); a colliding key is won by the feature section.
 
         On the resume path (``resuming=True``) the prompt is baked into the
         checkpointed ``message_history`` -- return ``None`` so the runner does
@@ -96,8 +95,8 @@ class PromptBuilder:
         merged: "dict[str, str]" = {}
         if static_sections:
             merged.update(static_sections)
-        if capability_sections:
-            merged.update(capability_sections)
+        if feature_sections:
+            merged.update(feature_sections)
         catalog_prompt = "\n\n".join(merged.values()) if merged else ""
         if catalog_prompt:
             return f"{catalog_prompt}\n\n{base_prompt}"

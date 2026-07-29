@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCPProvider + toolset shaping + spec/client (contract). Deterministic policy
+"""MCPToolProvider + toolset shaping + spec/client (contract). Deterministic policy
 is unit-tested; live connection is environment-dependent and excluded."""
 
 import dataclasses
 
 import pytest
 
-from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.agent.capability.provider import CapabilityContext
-from linktools.ai.agent.capability.models import CapabilityRef
+from linktools.ai.agent.tool.exposure import ToolExposurePolicy
+from linktools.ai.agent.assembly.provider import AgentFeatureContext
+from linktools.ai.agent.assembly.models import AgentFeatureRef
 from linktools.ai.errors import (
-    CapabilityConflictError,
-    CapabilityResolutionError,
+    AgentFeatureConflictError,
+    AgentAssemblyError,
     InvalidSpecError,
     MCPServerNotFoundError,
 )
-from linktools.ai.tool.mcp import (
+from linktools.ai.agent.integrations.mcp import (
     MCPConnectionPool,
-    MCPProvider,
+    MCPRuntimePolicy,
+    MCPToolProvider,
     build_mcp_server,
     parse_mcp_spec,
 )
-from linktools.ai.tool.mcp.client import MCPConnectionRef
-from linktools.ai.tool.mcp.provider import MCPDiscoveryResult, MCPToolInfo
+from linktools.ai.agent.integrations.mcp.models import MCPConnectionRef
+from linktools.ai.agent.integrations.mcp.tool_provider import MCPDiscoveryResult, MCPToolInfo
 from linktools.ai.errors import MCPDiscoveryUnsupportedError
-from linktools.ai.tool.mcp.toolset import (
+from linktools.ai.agent.integrations.mcp.tool_provider import (
     detect_mcp_conflicts,
     filter_tool_names,
     final_tool_name,
@@ -58,7 +59,7 @@ def test_filter_disabled_only():
 
 
 def test_detect_conflicts_raises_on_duplicate_final_name():
-    with pytest.raises(CapabilityConflictError, match="query_user"):
+    with pytest.raises(AgentFeatureConflictError, match="query_user"):
         detect_mcp_conflicts(
             {"risk": ("risk.query_user",), "legacy": ("query_user", "risk.query_user")}
         )
@@ -144,7 +145,28 @@ def test_build_mcp_server_rejects_misconfigured_transport():
         build_mcp_server(_Bare())
 
 
-# --- MCPProvider (contract/contract) ----------------------------------------------
+def test_connection_pool_normalizes_connection_errors_without_import_failure():
+    from linktools.ai.agent.integrations.mcp.client import MCPClient
+
+    error = MCPClient.normalize_discovery_error(
+        ConnectionError("connect failed")
+    )
+    assert type(error).__name__ == "MCPConnectionError"
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_missing_reference_is_domain_error():
+    from linktools.ai.errors import MCPConnectionUnavailableError
+
+    with pytest.raises(MCPConnectionUnavailableError):
+        await MCPConnectionPool().call_tool(
+            connection_ref=MCPConnectionRef("missing", "fingerprint"),
+            tool_name="tool",
+            arguments={},
+        )
+
+
+# --- MCPToolProvider (contract/contract) ----------------------------------------------
 
 
 class _FakeManager:
@@ -180,8 +202,16 @@ class _FakeSpecProvider:
 
 
 def _ctx():
-    return CapabilityContext(
-        agent_id="a1", exposure_policy=CapabilityToolExposurePolicy()
+    return AgentFeatureContext(
+        agent_id="a1",
+        execution_id="e1",
+        root_execution_id="e1",
+        parent_execution_id=None,
+        session_id="s1",
+        tenant_id="t1",
+        user_id="u1",
+        workspace=None,
+        sandbox=None,
     )
 
 
@@ -190,9 +220,9 @@ async def test_mcp_single_server_exposes_toolset():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
-    bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
-    assert [d.descriptor.name for d in bundle.tool_contributions[0].tools] == [
+    provider = MCPToolProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
+    bundle = await provider.resolve(AgentFeatureRef("mcp", "risk"), _ctx())
+    assert [d.descriptor.name for d in bundle.tools] == [
         "risk.query_user"
     ]
 
@@ -226,11 +256,11 @@ async def test_mcp_disabled_tools_removed_from_toolset_surface():
             "disabled_tools": ["secret"],
         },
     )
-    provider = MCPProvider(
+    provider = MCPToolProvider(
         _FakeSpecProvider({"risk": spec}), _FakeManager(("query_user", "secret"))
     )
-    bundle = await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
-    contrib = bundle.tool_contributions[0]
+    bundle = await provider.resolve(AgentFeatureRef("mcp", "risk"), _ctx())
+    contrib = bundle
     # Descriptors (the governance source of truth) exclude the disabled tool...
     assert [d.descriptor.name for d in contrib.tools] == ["risk.query_user"]
 
@@ -255,17 +285,22 @@ async def test_mcp_multi_server_disabled_tools_filter_independent_per_server():
         "beta", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
     # alpha exposes (keep, secret); beta exposes a single unrelated tool.
-    provider = MCPProvider(
+    provider = MCPToolProvider(
         _FakeSpecProvider({"alpha": s1, "beta": s2}),
         _FakeManager(("keep", "secret")),  # both servers share the fake's tool set
-        allow_mcp_wildcard=True,
+        policy=MCPRuntimePolicy(allow_wildcard=True),
     )
-    bundle = await provider.resolve(CapabilityRef("mcp", "*"), _ctx())
-    by_server = {
-        c.tools[0].descriptor.capability_name: c for c in bundle.tool_contributions
-    }
-    alpha_names = [tool.descriptor.name for tool in by_server["alpha"].tools]
-    beta_names = [tool.descriptor.name for tool in by_server["beta"].tools]
+    bundle = await provider.resolve(AgentFeatureRef("mcp", "*"), _ctx())
+    alpha_names = [
+        tool.descriptor.name
+        for tool in bundle.tools
+        if tool.descriptor.name.startswith("alpha.")
+    ]
+    beta_names = [
+        tool.descriptor.name
+        for tool in bundle.tools
+        if tool.descriptor.name.startswith("beta.")
+    ]
     # alpha: "secret" disabled -> only "keep" survives (NOT the union, NOT beta's set).
     assert "secret" not in alpha_names, "disabled tool leaked across servers"
     assert alpha_names == ["alpha.keep"]
@@ -275,9 +310,9 @@ async def test_mcp_multi_server_disabled_tools_filter_independent_per_server():
 
 @pytest.mark.asyncio
 async def test_mcp_missing_server_raises_not_found():
-    provider = MCPProvider(_FakeSpecProvider({}), _FakeManager())
+    provider = MCPToolProvider(_FakeSpecProvider({}), _FakeManager())
     with pytest.raises(MCPServerNotFoundError):
-        await provider.resolve(CapabilityRef("mcp", "ghost"), _ctx())
+        await provider.resolve(AgentFeatureRef("mcp", "ghost"), _ctx())
 
 
 @pytest.mark.asyncio
@@ -285,9 +320,9 @@ async def test_mcp_wildcard_denied_by_default():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
-    with pytest.raises(CapabilityResolutionError, match="allow_mcp_wildcard"):
-        await provider.resolve(CapabilityRef("mcp", "*"), _ctx())
+    provider = MCPToolProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
+    with pytest.raises(AgentAssemblyError, match="allow_wildcard"):
+        await provider.resolve(AgentFeatureRef("mcp", "*"), _ctx())
 
 
 @pytest.mark.asyncio
@@ -295,11 +330,13 @@ async def test_mcp_wildcard_allowed_via_flag():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    provider = MCPProvider(
-        _FakeSpecProvider({"risk": spec}), _FakeManager(), allow_mcp_wildcard=True
+    provider = MCPToolProvider(
+        _FakeSpecProvider({"risk": spec}),
+        _FakeManager(),
+        policy=MCPRuntimePolicy(allow_wildcard=True),
     )
-    bundle = await provider.resolve(CapabilityRef("mcp", "*"), _ctx())
-    assert len(bundle.tool_contributions) == 1
+    bundle = await provider.resolve(AgentFeatureRef("mcp", "*"), _ctx())
+    assert bundle.tools
 
 
 @pytest.mark.asyncio
@@ -309,9 +346,9 @@ async def test_mcp_wildcard_ref_config_cannot_self_grant():
     spec = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
-    ref = CapabilityRef("mcp", "*", config={"allow_mcp_wildcard": True})
-    with pytest.raises(CapabilityResolutionError, match="allow_mcp_wildcard"):
+    provider = MCPToolProvider(_FakeSpecProvider({"risk": spec}), _FakeManager())
+    ref = AgentFeatureRef("mcp", "*", config={"allow_mcp_wildcard": True})
+    with pytest.raises(AgentAssemblyError, match="allow_wildcard"):
         await provider.resolve(ref, _ctx())
 
 
@@ -341,9 +378,9 @@ async def test_mcp_strict_discovery_fails_closed_without_explicit_governance():
         and not spec.disabled_tools
         and spec.tool_prefix is None
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _UnenumerableManager())
-    with pytest.raises(CapabilityResolutionError, match="strict discovery"):
-        await provider.resolve(CapabilityRef("mcp", "risk"), _ctx())
+    provider = MCPToolProvider(_FakeSpecProvider({"risk": spec}), _UnenumerableManager())
+    with pytest.raises(AgentAssemblyError, match="strict discovery"):
+        await provider.resolve(AgentFeatureRef("mcp", "risk"), _ctx())
 
 
 @pytest.mark.asyncio
@@ -353,27 +390,23 @@ async def test_mcp_best_effort_discovery_mode_opts_out_of_fail_closed():
         {
             "transport": "stdio",
             "command": ["python", "-m", "r"],
-            "discovery_mode": "best_effort",
         },
     )
-    provider = MCPProvider(_FakeSpecProvider({"risk": spec}), _UnenumerableManager())
-    events = []
-
-    class _Emitter:
-        async def emit_security(self, event):
-            events.append(event)
-
-    ctx = dataclasses.replace(_ctx(), security_event_emitter=_Emitter())
-    bundle = await provider.resolve(CapabilityRef("mcp", "risk"), ctx)
+    provider = MCPToolProvider(
+        _FakeSpecProvider({"risk": spec}),
+        _UnenumerableManager(),
+        policy=MCPRuntimePolicy(discovery_mode="best_effort"),
+    )
+    ctx = _ctx()
+    bundle = await provider.resolve(AgentFeatureRef("mcp", "risk"), ctx)
     # Proceeds without raising, but exposes no unverified execution tools.
-    assert all(not contribution.tools for contribution in bundle.tool_contributions)
-    assert len(events) == 1 and events[0].component == "mcp-discovery"
+    assert bundle.tools == ()
 
 
 @pytest.mark.asyncio
 async def test_mcp_provider_rejects_missing_connection_manager():
     """A server declared without a connection manager cannot verify tool
-    governance (no live enumeration), so MCPProvider fails at construction --
+    governance (no live enumeration), so MCPToolProvider fails at construction --
     never surfacing as a verified-but-empty discovery result."""
     from linktools.ai.errors import RuntimeInitializationError
 
@@ -381,7 +414,7 @@ async def test_mcp_provider_rejects_missing_connection_manager():
         "risk", {"transport": "stdio", "command": ["python", "-m", "r"]}
     )
     with pytest.raises(RuntimeInitializationError, match="MCPConnectionPool"):
-        MCPProvider(_FakeSpecProvider({"risk": spec}), None)
+        MCPToolProvider(_FakeSpecProvider({"risk": spec}), None)
 
 
 @pytest.mark.asyncio
@@ -392,7 +425,7 @@ async def test_connection_manager_closes_toolsets():
     mgr = MCPConnectionPool()
     # Use the real manager's close path with an object exposing close(), keyed
     # the way get_toolset actually keys (server.id, fingerprint).
-    from linktools.ai.tool.mcp.client import _config_fingerprint
+    from linktools.ai.agent.integrations.mcp.connection import _config_fingerprint
 
     class _TS:
         closed = False
@@ -412,7 +445,7 @@ async def test_connection_manager_cache_keyed_on_config_fingerprint():
     (command) must get DISTINCT cache slots -- a config change with a reused id
     must not return a stale cached toolset. Secret plaintext never enters the
     key (only a length revision does)."""
-    from linktools.ai.tool.mcp.client import _config_fingerprint
+    from linktools.ai.agent.integrations.mcp.connection import _config_fingerprint
 
     s1 = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "a"]}

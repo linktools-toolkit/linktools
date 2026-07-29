@@ -225,25 +225,25 @@ class AssetChanged:
     revision: int
 
 
-# --- Capability Runtime lifecycle events ---
-# These let a downstream event consumer observe the capability/skill/mcp/subagent/
+# --- Feature runtime lifecycle events ---
+# These let a downstream event consumer observe the feature/skill/mcp/subagent/
 # package/prompt/tool-exposure lifecycle without coupling to internal classes.
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityResolveStarted:
-    event_type: ClassVar[str] = 'CapabilityResolveStarted'
+class AgentFeatureResolveStarted:
+    event_type: ClassVar[str] = 'AgentFeatureResolveStarted'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str
-    capability_ref: str
+    feature_ref: str
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityResolveCompleted:
-    event_type: ClassVar[str] = 'CapabilityResolveCompleted'
+class AgentFeatureResolveCompleted:
+    event_type: ClassVar[str] = 'AgentFeatureResolveCompleted'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str
-    capability_ref: str
+    feature_ref: str
     tool_count: int
 
 
@@ -338,7 +338,7 @@ class SubagentStarted:
     event_type: ClassVar[str] = 'SubagentStarted'
     criticality: ClassVar[EventCriticality] = EventCriticality.OBSERVABILITY
     agent_id: str = ""
-    parent_run_id: "str | None" = None
+    parent_execution_id: "str | None" = None
     scope: "str | None" = None
 
 
@@ -396,7 +396,7 @@ class ToolExposureDenied:
 class SecurityDegraded:
     """Emitted when a security-relevant component fails and the system falls
     back to a safer-but-degraded posture rather than failing open -- e.g. a
-    ToolPolicyProvider error caught and replaced with a fail-closed policy."""
+    ToolPolicyResolver error caught and replaced with a fail-closed policy."""
     event_type: ClassVar[str] = 'SecurityDegraded'
     criticality: ClassVar[EventCriticality] = EventCriticality.SECURITY_CRITICAL
 
@@ -509,8 +509,8 @@ EventPayload = Union[
     SwarmStepFailed,
     SwarmCompleted,
     AssetChanged,
-    CapabilityResolveStarted,
-    CapabilityResolveCompleted,
+    AgentFeatureResolveStarted,
+    AgentFeatureResolveCompleted,
     SkillListed,
     SkillRead,
     ExtensionContentListed,
