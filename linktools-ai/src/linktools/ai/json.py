@@ -18,6 +18,7 @@ import types
 import typing
 from datetime import datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping
 from uuid import UUID
 
@@ -27,6 +28,21 @@ if TYPE_CHECKING:
     JSONValue: "TypeAlias" = (
         "None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]"
     )
+
+
+def freeze_value(value: Any) -> Any:
+    """Recursively freeze container values used by immutable public models."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: freeze_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(freeze_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(freeze_value(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(freeze_value(item) for item in value)
+    return value
 
 
 def normalize_json(value: Any, *, path: str = "$") -> "JSONValue":

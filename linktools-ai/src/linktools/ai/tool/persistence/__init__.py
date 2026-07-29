@@ -1,4 +1,4 @@
-from .local import LocalToolStateStore
-from .sqlalchemy import SqlAlchemyToolStateStore
+from .local import LocalToolStateBackend
+from .sqlalchemy import SqlAlchemyToolStateBackend
 
-__all__ = ["LocalToolStateStore", "SqlAlchemyToolStateStore"]
+__all__ = ["LocalToolStateBackend", "SqlAlchemyToolStateBackend"]

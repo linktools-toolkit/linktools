@@ -9,7 +9,8 @@ def test_domain_sqlalchemy_tables_use_storage_prefix():
         ROOT / "execution/persistence/sqlalchemy.py",
         ROOT / "tool/persistence/sqlalchemy.py",
         ROOT / "tasks/persistence/sqlalchemy.py",
-        ROOT / "memory/persistence/sqlalchemy.py",
+        ROOT / "agent/memory/persistence/sqlalchemy.py",
+        ROOT / "spec/persistence/sqlalchemy.py",
     )
     for path in files:
         source = path.read_text(encoding="utf-8")

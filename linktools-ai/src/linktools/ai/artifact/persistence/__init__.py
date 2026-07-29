@@ -2,6 +2,6 @@
 # -*- coding: utf-8 -*-
 """Artifact persistence ports and local/SQL implementations."""
 
-from .local import LocalArtifactStore
+from .local import LocalArtifactBackend
 
-__all__ = ["LocalArtifactStore"]
+__all__ = ["LocalArtifactBackend"]

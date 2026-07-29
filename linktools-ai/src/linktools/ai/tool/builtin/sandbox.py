@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic_ai.toolsets import FunctionToolset
 
-from ...sandbox.protocols import Sandbox
+from ..sandbox.protocols import Sandbox
 
 
 @dataclass(frozen=True, slots=True)

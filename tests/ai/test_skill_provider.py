@@ -5,11 +5,11 @@ authorization boundary that never leaks unauthorized skill content."""
 
 import pytest
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
 from linktools.ai.errors import SkillNotFoundError
-from linktools.ai.skill import SkillProvider
+from linktools.ai.agent.skill import SkillProvider
 
 
 class _Spec:

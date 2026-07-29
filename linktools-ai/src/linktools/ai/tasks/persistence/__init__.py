@@ -1,4 +1,4 @@
-from .local import LocalTaskStore
-from .sqlalchemy import SqlAlchemyTaskStore
+from .local import LocalTaskBackend
+from .sqlalchemy import SqlAlchemyTaskBackend
 
-__all__ = ["LocalTaskStore", "SqlAlchemyTaskStore"]
+__all__ = ["LocalTaskBackend", "SqlAlchemyTaskBackend"]

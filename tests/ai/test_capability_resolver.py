@@ -6,15 +6,16 @@ merging prompt sections in stable order."""
 
 import pytest
 
-from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef
-from linktools.ai.capability import CapabilityProvider
-from linktools.ai.capability.resolver import CapabilityResolver
-from linktools.ai.capability.builtin import BuiltinProvider
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.models import CapabilityBundle
-from linktools.ai.capability.provider import CapabilityContext
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.tool import ToolRef
+from linktools.ai.agent.capability import CapabilityProvider
+from linktools.ai.agent.capability.resolver import CapabilityResolver
+from linktools.ai.agent.capability.builtin import BuiltinProvider
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.models import CapabilityBundle
+from linktools.ai.agent.capability.provider import CapabilityContext
 from linktools.ai.errors import CapabilityConflictError, CapabilityResolutionError
-from linktools.ai.sandbox.local import LocalSandbox
+from linktools.ai.tool.sandbox.local import LocalSandbox
 from linktools.ai.model.policy import ModelPolicy
 
 
@@ -160,8 +161,8 @@ async def test_register_accepts_a_new_kind():
 def test_provider_kinds_reads_supported_kinds():
     """A provider declaring supported_kinds is recognized for every kind it
     owns -- no manual alias registration needed (the contract multi-kind model)."""
-    from linktools.ai.capability.provider import provider_kinds
-    from linktools.ai.extension.capability_provider import ExtensionProvider
+    from linktools.ai.agent.capability.provider import provider_kinds
+    from linktools.ai.agent.extension.capability_provider import ExtensionProvider
 
     kinds = provider_kinds(ExtensionProvider())
     assert kinds == frozenset({"extension", "extension-asset", "extension-entrypoint"})

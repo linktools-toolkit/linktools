@@ -1,12 +1,13 @@
 import pytest
 
 from linktools.ai.tasks.models import TaskExecution, TaskPlan
-from linktools.ai.tasks.persistence.local import LocalTaskStore
+from linktools.ai.tasks.persistence.local import LocalTaskBackend
+from linktools.ai.tasks.store import TaskStore
 
 
 @pytest.mark.asyncio
 async def test_task_store_uses_one_fenced_claim_path():
-    store = LocalTaskStore()
+    store = TaskStore(LocalTaskBackend())
     await store.save_plan(TaskPlan("plan", ()))
     await store.add_execution(TaskExecution("execution", "plan", "node", "ready"))
     claimed = await store.claim("execution", owner="worker")

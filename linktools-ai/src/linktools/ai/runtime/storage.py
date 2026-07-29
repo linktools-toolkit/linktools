@@ -6,14 +6,14 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..execution.persistence.local import LocalExecutionStore
+from ..execution.persistence.local import LocalExecutionBackend
 from ..execution.store import ExecutionStore
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..artifact.store import ArtifactStore
-    from ..memory.store import MemoryStore
+    from ..agent.memory.store import MemoryStore
     from ..tasks.store import TaskStore
     from ..tool.store import ToolStateStore
 
@@ -32,14 +32,19 @@ class LocalDirectoryStorage(RuntimeStorage):
 
     def __init__(self, root: str | Path = ".linktools", *, tools=None, tasks=None, memory=None, artifacts=None) -> None:
         object.__setattr__(self, "root", Path(root))
-        super().__init__(execution=ExecutionStore(LocalExecutionStore(root)), tools=tools, tasks=tasks, memory=memory, artifacts=artifacts)
+        super().__init__(
+            execution=ExecutionStore(LocalExecutionBackend(root)),
+            tools=tools,
+            tasks=tasks,
+            memory=memory,
+            artifacts=artifacts,
+        )
 
     async def initialize_storage(self) -> None:
         await asyncio.to_thread((self.root / "execution").mkdir, parents=True, exist_ok=True)
         for store in (self.tools, self.tasks, self.memory, self.artifacts):
-            initialize = getattr(store, "initialize_storage", None)
-            if initialize is not None:
-                await initialize()
+            if store is not None:
+                await store.initialize_storage()
 
 
 class SqlAlchemyRuntimeStorage(RuntimeStorage):
@@ -51,9 +56,8 @@ class SqlAlchemyRuntimeStorage(RuntimeStorage):
     async def initialize_storage(self, engine) -> None:
         await self.execution.initialize_storage(engine)
         for store in (self.tools, self.tasks, self.memory, self.artifacts):
-            initialize = getattr(store, "initialize_storage", None)
-            if initialize is not None:
-                await initialize(engine)
+            if store is not None:
+                await store.initialize_storage(engine)
 
 
 __all__ = ["LocalDirectoryStorage", "RuntimeStorage", "SqlAlchemyRuntimeStorage"]

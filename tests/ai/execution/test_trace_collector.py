@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from linktools.ai.execution.trace import SemanticTraceCollector
+from linktools.ai.execution.trace_collector import SemanticTraceCollector
 from linktools.ai.execution.models import RunStatus, RunUsage
 
 
@@ -19,7 +19,7 @@ class FakeTraceStore:
 @pytest.mark.asyncio
 async def test_collector_flushes_each_completed_step_and_keeps_bounded_state():
     store = FakeTraceStore()
-    collector = SemanticTraceCollector("run", store)
+    collector = SemanticTraceCollector("run", store, 0)
     await collector.model_request_succeeded({"request": {"messages": []}, "response": "ok"})
     await collector.tool_result({"call_id": "c1", "result": {"ok": True}})
     assert collector._pending == []

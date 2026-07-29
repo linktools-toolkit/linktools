@@ -2,18 +2,18 @@
 # -*- coding: utf-8 -*-
 """Tool declarations and optional execution state."""
 
-from .models import ManagedToolDefinition, ToolDescriptor
+from .models import ManagedToolDefinition, ToolDescriptor, ToolRef
 from .policy import (
     EffectiveToolPolicy,
     ResolvedToolPolicy,
     ToolPolicyProvider,
 )
 from .state import ToolOperation, ToolOperationStatus
-from .persistence.local import LocalToolStateStore
-from .store import ToolPort, ToolStateStore
+from .store import ToolStateBackend, ToolStateStore
 
 __all__ = [
     "ToolDescriptor",
+    "ToolRef",
     "ManagedToolDefinition",
     "ResolvedToolPolicy",
     "EffectiveToolPolicy",
@@ -21,6 +21,5 @@ __all__ = [
     "ToolOperation",
     "ToolOperationStatus",
     "ToolStateStore",
-    "ToolPort",
-    "LocalToolStateStore",
+    "ToolStateBackend",
 ]

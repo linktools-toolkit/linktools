@@ -49,7 +49,7 @@ LEGACY_CEILINGS: "dict[str, int]" = {
     # migrated to canonical domain homes (agent/skill/mcp/tool/swarm .catalog /
     # .codec / .spec / .models + catalog.parsing). Locked at 0.
     "linktools.ai.registry": 0,
-    # linktools.ai.task renamed to linktools.ai.jobs; the package +
+    # linktools.ai.task renamed to linktools.ai.tasks.job; the package +
     # all consumers + tests are migrated. Locked at 0.
     "linktools.ai.task": 0,
     # linktools.ai.security and linktools.ai.policy merged into
@@ -59,7 +59,7 @@ LEGACY_CEILINGS: "dict[str, int]" = {
     # they are the current canonical packages.
     "linktools.ai.security": 0,
     "linktools.ai.policy": 0,
-    # linktools.ai.knowledge renamed to linktools.ai.retrieval;
+    # linktools.ai.knowledge renamed to linktools.ai.agent.retrieval;
     # the package + all consumers + tests are migrated. Locked at 0.
     "linktools.ai.knowledge": 0,
 }

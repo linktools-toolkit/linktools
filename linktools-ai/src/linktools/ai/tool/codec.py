@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ToolSpecCodec: the CatalogCodec[ToolSpec] for the tool domain.
+"""ToolSpecCodec: the SpecCodec[ToolSpec] for the tool domain.
 
 Owns the tool-specific parsing (moved here from registry/tool.py): a
 ``{name}.yaml`` item is parsed as YAML, strictly validated, and built into a
@@ -13,8 +13,8 @@ from typing import Any
 
 from collections.abc import Mapping
 
-from ..catalog import CatalogCodec
-from ..catalog.parsing import (
+from ..spec import SpecCodec
+from ..spec.parsing import (
     StrictConfigReader,
     parse_yaml_text,
 )
@@ -35,9 +35,8 @@ def parse_tool_refs(items: Any) -> "tuple[Any, ...] | None":
 
     Tool declarations are explicit mappings with string ``kind`` and ``name``;
     unknown fields are rejected and the names are normalized (stripped) so a
-    stray space cannot silently turn into a different tool identity. Moved here
-    from catalog/parsing -- it builds a tool-domain type (ToolRef), so it is
-    tool-specific, not generic parser infra.
+    stray space cannot silently turn into a different tool identity. It builds
+    a tool-domain type, so it belongs here rather than in generic spec parsing.
     """
     if items is None:
         # Distinguish "no tools key" (None -> runtime default) from "tools: []"
@@ -183,7 +182,7 @@ def _parse_tool_spec(name: str, payload: "dict[str, Any]") -> ToolSpec:
 
 
 class ToolSpecCodec:
-    """CatalogCodec[ToolSpec]: decode one ``{id}.yaml`` item's raw text into a
+    """SpecCodec[ToolSpec]: decode one ``{id}.yaml`` item's raw text into a
     ToolSpec. Strict; propagates the domain's rich errors."""
 
     def decode(self, item_id: str, raw: str) -> ToolSpec:

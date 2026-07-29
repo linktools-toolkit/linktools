@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.run.dispatch import ChildRunHandle, RunDispatchRequest
+from linktools.ai.execution.dispatch import ChildRunHandle, RunDispatchRequest
 from linktools.ai.runtime.dispatcher import LateBoundRunDispatcher
 
 

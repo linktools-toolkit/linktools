@@ -1,4 +1,5 @@
 """Execution persistence implementations."""
 
-from .local import LocalExecutionStore
-__all__ = ["LocalExecutionStore"]
+from .local import LocalExecutionBackend
+
+__all__ = ["LocalExecutionBackend"]

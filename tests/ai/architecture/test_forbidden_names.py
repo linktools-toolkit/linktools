@@ -31,7 +31,6 @@ FORBIDDEN_RUNTIME_TERMS = (
     "ModelGateway",
     "ModelRouter",
     "CapabilityAssembler",
-    "ExecutionBackend",
     "KeywordMemoryIndex",
     "MemoryIndexStatus",
     "MemoryManager",

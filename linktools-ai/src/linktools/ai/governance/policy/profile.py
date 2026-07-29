@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""build_default_policy_engine: assembles a PolicyEngine from a ToolCatalog so
+"""build_default_policy_engine: assembles a PolicyEngine from a ToolSpecIndex so
 the rich rules (Permission/Risk/Approval) actually enforce against real tool
 declarations. Without this helper only CommandRule -- the one rule that needs
 no metadata -- enforces, because nothing else consults the registry.
 
-The helper awaits ``ToolCatalog.get_metadata_map()`` and hands the resulting
+The helper awaits ``ToolSpecIndex.get_metadata_map()`` and hands the resulting
 ``{tool_name: ToolPolicyMetadata}`` mapping to each rich rule. Sensible defaults
 are exposed as keyword arguments; callers wanting different policy can pass
 overrides here, or build their own ``PolicyEngine`` and hand it to
@@ -21,7 +21,7 @@ from .risk import RiskRule
 from .rule import Permission, RiskLevel, SideEffectKind
 
 if TYPE_CHECKING:
-    from ...tool.catalog import ToolCatalog
+    from ...tool.index import ToolSpecIndex
 
 
 # Default allowed permission set: read/write/execute are the routine agent
@@ -33,7 +33,7 @@ _DEFAULT_ALLOWED_PERMISSIONS: "frozenset[Permission]" = frozenset(
 
 
 async def build_default_policy_engine(
-    tool_catalog: "ToolCatalog",
+    tool_catalog: "ToolSpecIndex",
     *,
     allowed_permissions: "frozenset[Permission]" = _DEFAULT_ALLOWED_PERMISSIONS,
     max_risk: RiskLevel = RiskLevel.HIGH,

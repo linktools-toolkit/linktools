@@ -18,8 +18,8 @@ rejects a tool-less run that actually needs tools, so a compiler without an
 executor is legal for tool-free agents and fails loudly at execution time
 rather than silently governing nothing."""
 
-from ..middleware.capability import build_middleware_capability
-from ..middleware.pipeline import MiddlewarePipeline
+from .middleware.capability import build_middleware_capability
+from .middleware.pipeline import MiddlewarePipeline
 from ..model.resolver import ModelResolver, ResolvedModel
 from ..tool.pydantic import build_policy_capability
 from .dependencies import AgentDependencies

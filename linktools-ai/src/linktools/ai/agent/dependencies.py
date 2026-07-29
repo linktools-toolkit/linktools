@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Mapping
 from ..governance.policy.rule import ToolContext
 
 if TYPE_CHECKING:
-    from ..sandbox.protocols import Sandbox
+    from ..tool.sandbox.protocols import Sandbox
     from ..tool.models import ToolDescriptor
 
 

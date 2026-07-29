@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 from typing import Any, ClassVar, Mapping, Union
 
-from .criticality import EventCriticality
+from .models import EventCriticality
 
 
 @dataclass(frozen=True, slots=True)

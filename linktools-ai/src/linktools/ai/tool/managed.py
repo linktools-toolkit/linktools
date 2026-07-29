@@ -23,9 +23,9 @@ from ..errors import (
     ToolResultDeniedError,
     RuntimeInitializationError,
 )
-from ..tool.models import ToolDescriptor
+from .models import ToolDescriptor
 from ..governance.security.redact import redact_for_audit, redact_exception
-from ..tool.schema import validate_arguments
+from .schema import validate_arguments
 from ..governance.security.pipeline import (
     PipelineAction,
     SecurityPipeline,
@@ -42,7 +42,7 @@ from .policy import (
 )
 
 if TYPE_CHECKING:
-    from ..run.context import RunContext
+    from ..execution.context import RunContext
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ class ManagedToolAdapter:
         )
         import hashlib
         from ..json import canonical_json
-        from ..jobs.models import to_jsonable
+        from ..json import to_jsonable
 
         descriptor_fingerprint = self._descriptor.fingerprint()
         binding_metadata = {

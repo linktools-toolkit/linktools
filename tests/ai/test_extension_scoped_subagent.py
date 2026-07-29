@@ -5,12 +5,12 @@ resolves via the EntrypointResolver and never pollutes the global namespace."""
 
 import pytest
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
 from linktools.ai.errors import SubagentNotFoundError
-from linktools.ai.extension.resolver import DirectoryEntrypointResolver
-from linktools.ai.subagent import SubagentProvider, SubagentResult
+from linktools.ai.agent.extension.resolver import DirectoryEntrypointResolver
+from linktools.ai.agent.subagent import SubagentProvider, SubagentResult
 
 
 class _Executor:

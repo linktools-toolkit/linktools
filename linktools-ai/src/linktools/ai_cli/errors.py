@@ -9,12 +9,12 @@ re-exported here instead of pulled from ``linktools.ai`` directly.
 ``MissingConfigError`` is this layer's own signal that a required configuration
 value could not be resolved."""
 
-from linktools.ai.errors import (  # noqa: F401  (re-exported for command known_errors)
+from ..ai.errors import (  # noqa: F401  (re-exported for command known_errors)
     InvalidRunTransitionError,
     RunConflictError,
     RunNotFoundError,
 )
-from linktools.ai.model.registry import (  # noqa: F401  (re-exported for command known_errors)
+from ..ai.model.registry import (  # noqa: F401  (re-exported for command known_errors)
     ModelClientUnavailable,
     ModelOutputError,
     ModelTurnLimitExceeded,

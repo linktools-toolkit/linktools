@@ -3,7 +3,7 @@
 from typing import Any
 
 from ..errors import PrincipalAccessDeniedError
-from ..identity.principal import PrincipalContext
+from ..governance.identity import PrincipalContext
 
 
 class ApprovalService:

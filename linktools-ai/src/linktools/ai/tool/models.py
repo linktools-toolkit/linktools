@@ -9,7 +9,7 @@ so the tool domain owns its descriptors; keeping the dependency one-way."""
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from ..utils.freeze import freeze_value
+from ..json import freeze_value
 
 # Standard category -> default risk mapping. Unknown categories
 # default to "high" (conservative).
@@ -36,10 +36,9 @@ def default_risk_for_category(category: str) -> str:
 @dataclass(frozen=True, slots=True)
 class ToolRef:
     """A reference to a tool from a declaration: a capability ``kind`` + ``name``
-    + optional ``config``. This is the tool-domain reference type (previously
-    defined in agent/spec.py); it lives here because it is a TOOL concept
+    + optional ``config``. It lives here because it is a tool concept
     referenced by agent / skill / swarm / capability declarations, not an
-    agent-specific one. agent.spec re-exports it for back-comat.
+    agent-specific one.
 
     It is the SINGLE reference type: ``linktools.ai.capability.models.CapabilityRef``
     is an alias of this class, so a spec declaration and

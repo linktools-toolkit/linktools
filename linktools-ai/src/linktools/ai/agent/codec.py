@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentSpecCodec: the CatalogCodec[AgentSpec] for the agent domain.
+"""AgentSpecCodec: the SpecCodec[AgentSpec] for the agent domain.
 
 Owns the agent-specific parsing (moved here from the old registry/agent.py):
 a ``{name}.md`` item is markdown with a YAML frontmatter. The codec splits the
 raw text, strictly validates the frontmatter, and builds an AgentSpec. Unknown
 frontmatter fields are rejected; parse failures surface the domain's existing
-rich errors (RegistryParseError for malformed frontmatter, InvalidSpecError
-for a bad/missing spec field) -- the same errors the inlined registry used to
-raise, so callers and tests are unchanged by the Catalog migration.
+errors (SpecParseError for malformed frontmatter, InvalidSpecError
+for a bad or missing specification field).
 
-The shared markdown / strict-config primitives live in catalog/parsing (moved
-out of registry); this module imports them one-way (no cycle).
+The shared markdown and strict-config primitives live in ``spec.parsing``;
+this module imports them one-way.
 """
 
 from __future__ import annotations
@@ -20,13 +19,13 @@ from typing import Any
 
 from collections.abc import Mapping
 
-from ..catalog import CatalogCodec
-from ..catalog.parsing import (
+from ..spec import SpecCodec
+from ..spec.parsing import (
     StrictConfigReader,
     parse_markdown_text,
-    parse_model_policy,
     resolved_name,
 )
+from ..model.codec import parse_model_policy
 from ..tool.codec import parse_tool_refs
 from ..errors import InvalidSpecError
 from .spec import AgentSpec, MiddlewareRef, PromptSpec
@@ -97,9 +96,9 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
 
 
 class AgentSpecCodec:
-    """CatalogCodec[AgentSpec]: decode one ``{id}.md`` item's raw text into an
+    """SpecCodec[AgentSpec]: decode one ``{id}.md`` item's raw text into an
     AgentSpec. Strict (rejects unknown frontmatter fields). Propagates the
-    domain's existing rich errors (RegistryParseError / InvalidSpecError)
+    domain's existing rich errors (SpecParseError / InvalidSpecError)
     carrying the item id + field path."""
 
     def decode(self, item_id: str, raw: str) -> AgentSpec:

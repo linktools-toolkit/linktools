@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """tests/ai/agent/test_spec.py"""
 
-from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
+from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec
+from linktools.ai.tool import ToolRef
 from linktools.ai.model.policy import ModelPolicy
 
 

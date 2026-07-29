@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from ...errors import PrincipalAccessDeniedError
-from ...identity.principal import PrincipalContext
+from ..identity import PrincipalContext
 
 
 @dataclass(frozen=True, slots=True)

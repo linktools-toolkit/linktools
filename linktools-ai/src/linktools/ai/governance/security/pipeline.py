@@ -7,7 +7,7 @@ import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
-from ...utils.freeze import freeze_value
+from ...json import freeze_value
 from ...errors import PipelineExecutionError
 
 

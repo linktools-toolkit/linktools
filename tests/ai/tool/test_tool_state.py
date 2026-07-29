@@ -1,12 +1,13 @@
 import pytest
 
-from linktools.ai.tool.persistence.local import LocalToolStateStore
+from linktools.ai.tool.persistence.local import LocalToolStateBackend
 from linktools.ai.tool.state import ToolOperation, ToolOperationStatus
+from linktools.ai.tool.store import ToolStateStore
 
 
 @pytest.mark.asyncio
 async def test_tool_state_replays_completed_idempotent_operation():
-    store = LocalToolStateStore()
+    store = ToolStateStore(LocalToolStateBackend())
     operation = ToolOperation("op", "tenant", "run", "call", "idem", "tool", "hash", ToolOperationStatus.PREPARED)
     await store.prepare(operation)
     claim = await store.claim("op", owner="worker")
@@ -18,7 +19,7 @@ async def test_tool_state_replays_completed_idempotent_operation():
 
 @pytest.mark.asyncio
 async def test_tool_state_rejects_stale_fence():
-    store = LocalToolStateStore()
+    store = ToolStateStore(LocalToolStateBackend())
     await store.prepare(ToolOperation("op", None, "run", "call", "idem", "tool", "hash", ToolOperationStatus.PREPARED))
     claim = await store.claim("op", owner="worker")
     with pytest.raises(ValueError):

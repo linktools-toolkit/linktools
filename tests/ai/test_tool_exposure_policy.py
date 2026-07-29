@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """CapabilityToolExposurePolicy (contract): conservative defaults + immutability."""
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
 
 
 def test_defaults_are_conservative():
@@ -50,7 +50,7 @@ def _descriptor(category, mutating):
 
 
 def test_discovery_category_gated_by_expose_discovery_tools():
-    from linktools.ai.capability.exposure import is_descriptor_exposable
+    from linktools.ai.agent.capability.exposure import is_descriptor_exposable
 
     on = CapabilityToolExposurePolicy(expose_discovery_tools=True)
     off = CapabilityToolExposurePolicy(expose_discovery_tools=False)
@@ -60,7 +60,7 @@ def test_discovery_category_gated_by_expose_discovery_tools():
 
 
 def test_mutating_tool_gated_by_expose_execution_tools_regardless_of_category():
-    from linktools.ai.capability.exposure import is_descriptor_exposable
+    from linktools.ai.agent.capability.exposure import is_descriptor_exposable
 
     off = CapabilityToolExposurePolicy(expose_execution_tools=False)
     on = CapabilityToolExposurePolicy(expose_execution_tools=True)
@@ -77,7 +77,7 @@ def test_mutating_tool_gated_by_expose_execution_tools_regardless_of_category():
 
 
 def test_non_discovery_non_mutating_tool_always_exposed():
-    from linktools.ai.capability.exposure import is_descriptor_exposable
+    from linktools.ai.agent.capability.exposure import is_descriptor_exposable
 
     off = CapabilityToolExposurePolicy(
         expose_discovery_tools=False, expose_execution_tools=False
@@ -90,10 +90,11 @@ def test_non_discovery_non_mutating_tool_always_exposed():
 
 import pytest  # noqa: E402
 
-from linktools.ai.agent.spec import AgentSpec, PromptSpec, ToolRef  # noqa: E402
-from linktools.ai.capability.provider import CapabilityContext  # noqa: E402
-from linktools.ai.capability.resolver import CapabilityResolver  # noqa: E402
-from linktools.ai.capability.models import CapabilityBundle  # noqa: E402
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.tool import ToolRef  # noqa: E402
+from linktools.ai.agent.capability.provider import CapabilityContext  # noqa: E402
+from linktools.ai.agent.capability.resolver import CapabilityResolver  # noqa: E402
+from linktools.ai.agent.capability.models import CapabilityBundle  # noqa: E402
 from linktools.ai.model.policy import ModelPolicy  # noqa: E402
 from linktools.ai.tool.models import ToolDescriptor  # noqa: E402
 from linktools.ai.tool.models import ToolContribution, declared_tool_definitions  # noqa: E402
@@ -138,7 +139,7 @@ def _spec():
 
 @pytest.mark.asyncio
 async def test_mutating_mcp_tool_hidden_by_default_policy():
-    from linktools.ai.capability.exposure import CapabilityToolExposurePolicy as Policy
+    from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy as Policy
 
     asm = CapabilityResolver({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(agent_id="a1", exposure_policy=Policy())
@@ -148,7 +149,7 @@ async def test_mutating_mcp_tool_hidden_by_default_policy():
 
 @pytest.mark.asyncio
 async def test_mutating_mcp_tool_exposed_when_execution_tools_allowed():
-    from linktools.ai.capability.exposure import CapabilityToolExposurePolicy as Policy
+    from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy as Policy
 
     asm = CapabilityResolver({"mcp": _FakeMutatingProvider()})
     ctx = CapabilityContext(

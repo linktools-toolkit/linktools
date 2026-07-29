@@ -2,14 +2,15 @@
 
 from dataclasses import dataclass
 
-from linktools.ai.agent.catalog import AgentCatalog
-from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.catalog.parsing import SpecLoader
-from linktools.ai.execution.persistence.local import LocalExecutionStore
-from linktools.ai.mcp.catalog import MCPCatalog
-from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.runtime import Runtime, RuntimeStorage, build_runtime
-from linktools.ai.skill.catalog import SkillCatalog
+from ..ai.agent.index import AgentSpecIndex
+from ..ai.agent.spec import AgentSpec, PromptSpec
+from ..ai.spec.parsing import SpecLoader
+from ..ai.execution.persistence.local import LocalExecutionBackend
+from ..ai.execution.store import ExecutionStore
+from ..ai.tool.mcp.index import MCPServerSpecIndex
+from ..ai.model.policy import ModelPolicy
+from ..ai.runtime import Runtime, RuntimeStorage, build_runtime
+from ..ai.agent.skill.index import SkillSpecIndex
 
 from .project import CliProject
 from .skill_index import DirectorySkillIndex
@@ -20,9 +21,9 @@ class CliRuntimeBundle:
     project: CliProject
     runtime: Runtime
     storage: RuntimeStorage
-    agents: AgentCatalog
-    skills: SkillCatalog
-    mcp: MCPCatalog
+    agents: AgentSpecIndex
+    skills: SkillSpecIndex
+    mcp: MCPServerSpecIndex
     skill_index: DirectorySkillIndex
 
 
@@ -36,10 +37,10 @@ _BUILTIN_DEFAULT = AgentSpec(
 
 def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundle:
     """Build the CLI bundle with the v4 runtime storage composition."""
-    agents = AgentCatalog.from_specloader(SpecLoader.from_filesystem(project.agents_root))
-    skills = SkillCatalog.from_specloader(SpecLoader.from_filesystem(project.skills_root), suffix="")
-    mcp = MCPCatalog.from_specloader(SpecLoader.from_filesystem(project.mcp_root))
-    storage = RuntimeStorage(execution=LocalExecutionStore(project.state_root))
+    agents = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(project.agents_root))
+    skills = SkillSpecIndex.from_specloader(SpecLoader.from_filesystem(project.skills_root), suffix="")
+    mcp = MCPServerSpecIndex.from_specloader(SpecLoader.from_filesystem(project.mcp_root))
+    storage = RuntimeStorage(execution=ExecutionStore(LocalExecutionBackend(project.state_root)))
     runtime = build_runtime(storage=storage, model_resolver=model_resolver)
     return CliRuntimeBundle(
         project=project,

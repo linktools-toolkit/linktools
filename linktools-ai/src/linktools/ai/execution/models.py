@@ -1,67 +1,24 @@
-"""Domain values for execution history and semantic run traces."""
+"""Execution aggregates and canonical JSON-shaped persistence values."""
 
-from dataclasses import dataclass, field
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
-from typing import Any, Literal, Mapping
+from typing import Generic, Literal, TypeVar
 
-JsonValue = Any
-
-
-class RunKind(str, Enum):
-    USER_TURN = "user_turn"
-    SUBAGENT = "subagent"
-    BACKGROUND = "background"
-    TASK = "task"
-
-
-class RunStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-@dataclass(frozen=True, slots=True)
-class RunDefinitionSnapshot:
-    agent_id: str
-    model: str | None = None
-    settings: Mapping[str, JsonValue] = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class RunApproval:
-    approval_id: str
-    tool_call_id: str
-    tool_name: str
-    arguments: JsonValue
-    decision: str | None = None
-    decided_by: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class RunUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class RunErrorInfo:
-    error_type: str
-    message: str
-    detail: JsonValue | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AgentOutcome:
-    status: RunStatus
-    snapshot: "RunSnapshot"
-    error: RunErrorInfo | None = None
-    pause: Any | None = None
-
+from ..storage.json import JsonScalar, JsonValue
+from .run import (
+    RunApproval,
+    RunDefinition,
+    RunError,
+    RunErrorInfo,
+    RunKind,
+    RunRecord,
+    RunResult,
+    RunStatus,
+    RunUsage,
+    RunnableType,
+)
 
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
@@ -79,34 +36,11 @@ class SessionTurn:
     session_id: str
     sequence: int
     run_id: str
-    user_prompt: JsonValue | str
-    assistant_summary: JsonValue | str | None
+    user_prompt: JsonValue
+    assistant_summary: JsonValue | None
     status: RunStatus
     created_at: datetime
     completed_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class RunRecord:
-    id: str
-    session_id: str
-    kind: RunKind
-    session_turn_sequence: int | None
-    parent_run_id: str | None
-    root_run_id: str
-    status: RunStatus
-    definition: RunDefinitionSnapshot
-    pending_approval: RunApproval | None
-    execution_owner: str | None
-    execution_fence: int
-    lease_expires_at: datetime | None
-    cancel_requested_at: datetime | None
-    snapshot_revision: int
-    trace_sequence: int
-    created_at: datetime
-    updated_at: datetime
-    tenant_id: str | None = None
-    user_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,7 +49,7 @@ class RunSnapshot:
     run_id: str
     revision: int
     resume_messages: tuple[JsonValue, ...]
-    final_output: JsonValue | str | None
+    final_output: JsonValue | None
     status: RunStatus
     usage: RunUsage
     trace_end_sequence: int
@@ -149,6 +83,7 @@ class RunEvent:
 
 @dataclass(frozen=True, slots=True)
 class RunEvaluation:
+    evaluation_id: str
     run_id: str
     evaluator: str
     score: float | None
@@ -156,8 +91,35 @@ class RunEvaluation:
     created_at: datetime
 
 
+T = TypeVar("T")
+
+
 @dataclass(frozen=True, slots=True)
-class Page:
-    items: tuple[Any, ...]
+class Page(Generic[T]):
+    items: tuple[T, ...]
     has_more: bool
     next_cursor: int | None = None
+
+
+__all__ = [
+    "JsonScalar",
+    "JsonValue",
+    "Page",
+    "RunApproval",
+    "RunDefinition",
+    "RunError",
+    "RunErrorInfo",
+    "RunEvaluation",
+    "RunEvent",
+    "RunKind",
+    "RunRecord",
+    "RunResult",
+    "RunSnapshot",
+    "RunStatus",
+    "RunTraceStep",
+    "RunUsage",
+    "RunnableType",
+    "SessionRecord",
+    "SessionTurn",
+    "NewRunTraceStep",
+]

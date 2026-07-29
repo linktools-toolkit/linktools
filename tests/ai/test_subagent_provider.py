@@ -6,16 +6,16 @@ global + package-scoped resolution, structured error on failure."""
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
 from linktools.ai.errors import (
     SubagentDepthExceededError,
     SubagentExecutionError,
     SubagentNotFoundError,
 )
 from linktools.ai.model.policy import ModelPolicy
-from linktools.ai.subagent import SubagentProvider, SubagentResult
+from linktools.ai.agent.subagent import SubagentProvider, SubagentResult
 
 
 def _agent(agent_id):
@@ -158,7 +158,7 @@ async def test_subagent_wildcard_authorizes_all():
 
 
 def test_subagent_default_limits():
-    from linktools.ai.subagent import (
+    from linktools.ai.agent.subagent import (
         DEFAULT_MAX_DEPTH,
         DEFAULT_MAX_CONCURRENCY,
         DEFAULT_TIMEOUT_SECONDS,

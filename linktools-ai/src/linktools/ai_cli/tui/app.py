@@ -17,11 +17,11 @@ from textual.binding import Binding
 from .commands import AiCommandProvider
 from .screens.chat import ChatScreen
 from .screens.doctor import DoctorScreen
-from .screens.catalog import CatalogScreen
+from .screens.index import CatalogScreen
 from .screens.runs import RunsScreen
 
 if TYPE_CHECKING:
-    from linktools.ai_cli.client import RuntimeClient
+    from ..client import RuntimeClient
 
 
 class LinktoolsAIApp(App):

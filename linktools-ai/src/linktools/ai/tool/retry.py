@@ -20,7 +20,7 @@ from ..errors import (
 )
 
 if TYPE_CHECKING:
-    from ..tool.models import ToolDescriptor
+    from .models import ToolDescriptor
     from .policy import EffectiveToolPolicy
 
 # Errors that can NEVER succeed on retry -- retrying them is wasted work and,

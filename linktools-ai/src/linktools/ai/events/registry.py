@@ -22,7 +22,7 @@ change the wire event type or the criticality.
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Mapping, TypeVar
 
-from .criticality import EventCriticality
+from .models import EventCriticality
 from .payloads import EventPayload
 
 T = TypeVar("T")
@@ -32,6 +32,11 @@ T = TypeVar("T")
 # to the current one. Returning a dict keeps migrators pure (no dataclass
 # reconstruction mid-chain).
 EventMigrator = Callable[[Mapping[str, Any]], Mapping[str, Any]]
+
+
+def classify_event(payload: Any) -> EventCriticality:
+    """Return criticality from the default event registry."""
+    return default_codec.registry.criticality_of(payload)
 
 
 @dataclass(frozen=True)
@@ -247,6 +252,7 @@ __all__: "list[str]" = [
     "EventSchemaError",
     "UnknownEventPayload",
     "build_default_registry",
+    "classify_event",
     "default_codec",
 ]
 
@@ -268,8 +274,9 @@ def build_default_registry() -> EventRegistry:
     is 1 for every payload. The returned registry is frozen.
     """
     import dataclasses as _dc
+    import importlib
 
-    from . import payloads as _payloads
+    _payloads = importlib.import_module(".payloads", __package__)
 
     registry = EventRegistry()
     missing: "list[str]" = []
@@ -311,4 +318,3 @@ def _make_decoder(cls: type) -> "Callable[[Mapping[str, Any]], object]":
 
 
 default_codec = EventCodec(build_default_registry())
-

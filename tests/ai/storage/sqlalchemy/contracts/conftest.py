@@ -16,7 +16,7 @@ import os
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.memory.persistence.sqlalchemy import Base
+from linktools.ai.agent.memory.persistence.sqlalchemy import Base
 
 _DIALECTS = ["sqlite", "mysql", "postgresql"]
 

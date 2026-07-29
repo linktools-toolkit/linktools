@@ -141,7 +141,7 @@ def test_domains_do_not_import_concrete_storage_backends() -> None:
         # backend adapters) may name a concrete backend.
         if rel_parts[0] in ("storage", "runtime"):
             continue
-        if len(rel_parts) >= 2 and rel_parts[1] == "persistence":
+        if "persistence" in rel_parts[:-1]:
             continue
         for mod in _resolved_imports(path):
             if mod.startswith(concrete):

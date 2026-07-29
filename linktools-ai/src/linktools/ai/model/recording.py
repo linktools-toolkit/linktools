@@ -1,37 +1,17 @@
-"""Semantic model-call recording placed after security and before providers."""
+"""Semantic model-call recording at the model boundary."""
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import asyncio
 from typing import Any
 
 from pydantic_ai.models import Model
 
-from ..execution.trace import SemanticTraceCollector
-
-
-def _json(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool, list, dict)):
-        return value
-    dump = getattr(value, "model_dump", None)
-    if dump is not None:
-        return dump(mode="json")
-    return repr(value)
-
-
-def _request_payload(messages: Any, settings: Any, parameters: Any) -> dict[str, Any]:
-    return {
-        "messages": _json(messages),
-        "settings": _json(settings),
-        "parameters": _json(parameters),
-    }
-
-
 class SemanticRecordingModel(Model):
-    """Record each completed request while delegating model semantics."""
-
-    def __init__(self, delegate: Model, collector: SemanticTraceCollector) -> None:
+    def __init__(self, delegate: Model, collector: Any, codec: Any) -> None:
         object.__setattr__(self, "_delegate", delegate)
         object.__setattr__(self, "_collector", collector)
+        object.__setattr__(self, "_codec", codec)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._delegate, name)
@@ -44,27 +24,31 @@ class SemanticRecordingModel(Model):
     def system(self) -> str:
         return self._delegate.system
 
+    def _request(self, messages: Any, settings: Any, parameters: Any) -> dict[str, Any]:
+        return dict(self._codec.encode_model_request(tuple(messages), settings, parameters))
+
     async def request(self, messages, model_settings, model_request_parameters):  # type: ignore[override]
-        started = datetime.now(timezone.utc).isoformat()
-        request = _request_payload(messages, model_settings, model_request_parameters)
+        started = datetime.now(timezone.utc)
+        request = self._request(messages, model_settings, model_request_parameters)
         try:
             response = await self._delegate.request(messages, model_settings, model_request_parameters)
         except Exception as exc:
-            await self._collector.model_request_failed({"request": request, "status": "error", "error": {"type": type(exc).__name__, "message": str(exc)}, "started_at": started})
+            await self._collector.model_request_failed({"request": request, "status": "failed", "error": {"error_type": type(exc).__name__, "message": str(exc)}, "started_at": started.isoformat()})
             raise
-        await self._collector.model_request_succeeded({"request": request, "response": _json(response), "status": "completed", "started_at": started, "completed_at": datetime.now(timezone.utc).isoformat()})
+        await self._collector.model_request_succeeded({"request": request, "response": self._codec.encode_model_response(response), "status": "completed", "started_at": started.isoformat(), "completed_at": datetime.now(timezone.utc).isoformat()})
         return response
 
     @asynccontextmanager
     async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):  # type: ignore[override]
-        started = datetime.now(timezone.utc).isoformat()
-        request = _request_payload(messages, model_settings, model_request_parameters)
+        started = datetime.now(timezone.utc)
+        request = self._request(messages, model_settings, model_request_parameters)
         try:
             async with self._delegate.request_stream(messages, model_settings, model_request_parameters, run_context) as response:
                 yield response
-            await self._collector.model_request_succeeded({"request": request, "response": _json(response.get()), "status": "completed", "started_at": started, "completed_at": datetime.now(timezone.utc).isoformat()})
-        except Exception as exc:
-            await self._collector.model_request_failed({"request": request, "status": "error", "error": {"type": type(exc).__name__, "message": str(exc)}, "started_at": started})
+            await self._collector.model_request_succeeded({"request": request, "response": self._codec.encode_model_response(response.get()), "status": "completed", "started_at": started.isoformat(), "completed_at": datetime.now(timezone.utc).isoformat()})
+        except BaseException as exc:
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"
+            await self._collector.model_request_failed({"request": request, "status": status, "error": {"error_type": type(exc).__name__, "message": str(exc)}, "started_at": started.isoformat()})
             raise
 
 

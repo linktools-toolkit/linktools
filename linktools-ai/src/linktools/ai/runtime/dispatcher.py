@@ -12,14 +12,14 @@ instead of a bare closure; every caller only ever sees the narrow
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ..run.context import RunContext
-    from ..run.dispatch import (
+    from ..execution.context import RunContext
+    from ..execution.dispatch import (
         ChildRunHandle,
         ChildSessionPolicy,
         RunDispatchRequest,
         RunDispatcher,
     )
-    from ..run.models import RunResult
+    from ..execution.run import RunResult
     from collections.abc import Mapping
     from typing import Any as _Any
 

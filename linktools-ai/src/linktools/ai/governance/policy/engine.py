@@ -4,8 +4,7 @@
 decision. Middleware never makes authorization decisions itself -- only
 PolicyEngine does.
 
-The decision types and the PolicyRule Protocol live in rule.py and are
-re-exported here so existing imports from policy.engine keep working."""
+The decision types and the PolicyRule Protocol live in ``rule.py``."""
 
 from .rule import (
     PolicyDecision,

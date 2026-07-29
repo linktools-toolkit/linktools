@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.tools import ToolDefinition
 
-    from ..run.context import RunContext as _RunContext
+    from ..execution.context import RunContext as _RunContext
     from ..governance.security.pipeline import SecurityPipeline
     from .policy import ResolvedToolPolicy, ToolPolicyProvider
 

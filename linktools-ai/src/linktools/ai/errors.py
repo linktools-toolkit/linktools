@@ -81,6 +81,18 @@ class StorageError(LinktoolsAIError):
     """Base class for Storage-facade-related errors."""
 
 
+class StorageConflictError(StorageError, ValueError):
+    """A compare-and-swap, lease, or revision update lost a race."""
+
+
+class StorageCorruptionError(StorageError):
+    """Required local or database persistence data is missing or malformed."""
+
+
+class InvalidStoragePathError(StorageError):
+    """A caller supplied an identifier that cannot safely address local data."""
+
+
 class StorageCapabilityError(StorageError):
     """Raised when an operation requires a StorageFeatures capability the
     active Storage does not expose (e.g. database-scoped transactions on
@@ -209,7 +221,7 @@ class RunPaused(RunError):
     """Raised by GovernedToolInvoker when a tool requires approval, and propagated
     through pydantic-ai's tool-execution stack out to AgentEngine, which
     persists the ApprovalRequest, checkpoints state, transitions the Run to
-    WAITING_APPROVAL, and appends the pause events -- all atomically in one
+    PAUSED, and appends the pause events -- all atomically in one
     UnitOfWork on SqlAlchemy storage. This is the single approval path: the
     executor only emits the signal; it never persists approval state itself.
 
@@ -456,23 +468,23 @@ class MemoryConflictError(MemoryError):
     pass
 
 
-class RegistryError(LinktoolsAIError):
-    """Base class for spec-registry errors (loading/parsing spec files)."""
+class SpecError(LinktoolsAIError):
+    """Base class for specification loading and parsing errors."""
 
 
-class RegistryNotFoundError(RegistryError):
+class SpecNotFoundError(SpecError):
     pass
 
 
-class RegistryConflictError(RegistryError):
+class SpecConflictError(SpecError):
     pass
 
 
-class RegistryParseError(RegistryError):
+class SpecParseError(SpecError):
     pass
 
 
-class InvalidSpecError(RegistryError):
+class InvalidSpecError(SpecError):
     """A parsed spec is structurally present but semantically invalid."""
 
 

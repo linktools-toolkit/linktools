@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from linktools.ai.sandbox.local import LocalSandbox, _run_file_tool_sync
+from linktools.ai.tool.sandbox.local import LocalSandbox, _run_file_tool_sync
 
 
 def _run(tool: str, args: dict, runtime) -> dict:

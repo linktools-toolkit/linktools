@@ -6,12 +6,12 @@ same standard Specs."""
 
 import pytest
 
-from linktools.ai.catalog.parsing import SpecLoader
-from linktools.ai.agent.catalog import AgentCatalog
-from linktools.ai.mcp.catalog import MCPCatalog
-from linktools.ai.skill.catalog import SkillCatalog
-from linktools.ai.skill.models import SkillSpec
-from linktools.ai.tool.catalog import ToolCatalog
+from linktools.ai.spec.parsing import SpecLoader
+from linktools.ai.agent.index import AgentSpecIndex
+from linktools.ai.tool.mcp.index import MCPServerSpecIndex
+from linktools.ai.agent.skill.index import SkillSpecIndex
+from linktools.ai.agent.skill.spec import SkillSpec
+from linktools.ai.tool.index import ToolSpecIndex
 
 from ._assertions import (
     assert_spec_provider_contract,
@@ -51,7 +51,7 @@ def base(tmp_path):
 async def test_agent_registry_contract(base):
     from linktools.ai.agent.spec import AgentSpec
 
-    reg = AgentCatalog.from_specloader(SpecLoader.from_filesystem(base / "agents"))
+    reg = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(base / "agents"))
     await assert_spec_provider_contract(
         reg, sample_id="writer", expected_type=AgentSpec
     )
@@ -59,15 +59,15 @@ async def test_agent_registry_contract(base):
 
 @pytest.mark.asyncio
 async def test_skill_registry_contract(base):
-    reg = SkillCatalog.from_specloader(SpecLoader.from_filesystem(base / "skills"))
+    reg = SkillSpecIndex.from_specloader(SpecLoader.from_filesystem(base / "skills"))
     await assert_spec_provider_contract(reg, sample_id="sql", expected_type=SkillSpec)
 
 
 @pytest.mark.asyncio
 async def test_mcp_registry_contract(base):
-    from linktools.ai.mcp.spec import MCPServerSpec
+    from linktools.ai.tool.mcp.spec import MCPServerSpec
 
-    reg = MCPCatalog.from_specloader(SpecLoader.from_filesystem(base / "mcp"))
+    reg = MCPServerSpecIndex.from_specloader(SpecLoader.from_filesystem(base / "mcp"))
     await assert_spec_provider_contract(
         reg, sample_id="search", expected_type=MCPServerSpec
     )
@@ -75,5 +75,5 @@ async def test_mcp_registry_contract(base):
 
 @pytest.mark.asyncio
 async def test_tool_registry_contract(base):
-    reg = ToolCatalog.from_specloader(SpecLoader.from_filesystem(base / "tools"))
+    reg = ToolSpecIndex.from_specloader(SpecLoader.from_filesystem(base / "tools"))
     await assert_tool_policy_provider_contract(reg, sample_name="read_file")

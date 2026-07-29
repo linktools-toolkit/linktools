@@ -35,8 +35,8 @@ from linktools.ai.governance.security.authorization import (
     AuthorizationService,
     DenyAllAuthorization,
 )
-from linktools.ai.identity.principal import PrincipalContext
-from linktools.ai.jobs.models import ActorRef, ScopeSet
+from linktools.ai.governance.identity import PrincipalContext
+from linktools.ai.tasks.job.models import ActorRef, ScopeSet
 
 
 def _principal(
@@ -178,8 +178,8 @@ def test_importing_security_does_not_load_jobs():
     code = (
         "import sys\n"
         "import linktools.ai.governance.security\n"
-        "assert 'linktools.ai.jobs.models' not in sys.modules, "
-        "'linktools.ai.jobs.models'\n"
+        "assert 'linktools.ai.tasks.job.models' not in sys.modules, "
+        "'linktools.ai.tasks.job.models'\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=False

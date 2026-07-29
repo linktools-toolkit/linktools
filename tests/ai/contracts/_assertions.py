@@ -10,10 +10,10 @@ from collections.abc import Mapping
 import pytest
 
 from linktools.ai.agent.spec import AgentSpec
-from linktools.ai.errors import RegistryNotFoundError
-from linktools.ai.extension.entrypoint import EntrypointRef
-from linktools.ai.extension.content import ExtensionContentRef
-from linktools.ai.extension.scope import ExtensionScope
+from linktools.ai.errors import SpecNotFoundError
+from linktools.ai.agent.extension.entrypoint import EntrypointRef
+from linktools.ai.agent.extension.content import ExtensionContentRef
+from linktools.ai.agent.extension.scope import ExtensionScope
 
 
 async def assert_spec_provider_contract(
@@ -21,7 +21,7 @@ async def assert_spec_provider_contract(
     *,
     sample_id,
     expected_type,
-    missing_exc=(KeyError, LookupError, RegistryNotFoundError),
+    missing_exc=(KeyError, LookupError, SpecNotFoundError),
 ):
     """list_ids returns a tuple of str; get returns the standard Spec type for a
     known id; a missing id raises."""

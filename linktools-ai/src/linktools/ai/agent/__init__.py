@@ -4,9 +4,9 @@
 is the declaration surface, with PromptSpec/ToolRef as its component value
 types; the compiler/runner that turn it into Runs live in their submodules
 (``agent.compiler``, ``agent.engine``). A run's result is ``RunResult``
-(from ``linktools.ai.run``), not an agent-local type."""
+(from ``linktools.ai.execution``), not an agent-local type."""
 
-from .spec import AgentSpec, PromptSpec, ToolRef
+from .spec import AgentSpec, PromptSpec
 from .codec import parse_agent_spec_markdown
 
-__all__ = ["AgentSpec", "PromptSpec", "ToolRef", "parse_agent_spec_markdown"]
+__all__ = ["AgentSpec", "PromptSpec", "parse_agent_spec_markdown"]

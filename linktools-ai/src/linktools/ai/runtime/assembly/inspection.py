@@ -11,13 +11,13 @@ import dataclasses
 from typing import TYPE_CHECKING, Any
 
 from ...agent.spec import AgentSpec
-from ...capability.models import CapabilityRuntimeOptions
-from ...sandbox.protocols import Sandbox
+from ...agent.capability.models import CapabilityRuntimeOptions
+from ...tool.sandbox.protocols import Sandbox
 
 if TYPE_CHECKING:
-    from ...capability.resolver import CapabilityResolver
-    from ...capability.models import CapabilityBundle
-    from ...capability.models import CapabilityInspection
+    from ...agent.capability.resolver import CapabilityResolver
+    from ...agent.capability.models import CapabilityBundle
+    from ...agent.capability.models import CapabilityInspection
 
 
 def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, ...]":
@@ -48,8 +48,8 @@ async def _assemble_internal(
     configured. ``security_event_emitter`` is wired into the CapabilityContext
     so a resolution that degrades can emit its SecurityDegraded event instead
     of failing for want of an emitter."""
-    from ...capability.provider import CapabilityContext
-    from ...capability.models import CapabilityBundle, requires_capability_resolver
+    from ...agent.capability.provider import CapabilityContext
+    from ...agent.capability.models import CapabilityBundle, requires_capability_resolver
 
     if resolver is None and requires_capability_resolver(
         tools=spec.tools, sandbox=sandbox
@@ -83,7 +83,7 @@ async def inspect_capabilities(
     emits a SecurityDegraded event into an in-memory collector rather than an
     event store; those events are surfaced as warnings so inspection reflects
     the same degradation a real run would observe."""
-    from ...capability.models import CapabilityInspection
+    from ...agent.capability.models import CapabilityInspection
     from ...governance.security.emitter import CollectingSecurityEventEmitter
     from ...governance.security.emitter import DefaultSecurityEventSanitizer
 

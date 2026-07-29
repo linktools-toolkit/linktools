@@ -16,7 +16,7 @@ from textual.screen import Screen
 from textual.widgets import RichLog
 
 if TYPE_CHECKING:
-    from linktools.ai_cli.client import RuntimeClient
+    from ...client import RuntimeClient
 
 
 class CatalogScreen(Screen):

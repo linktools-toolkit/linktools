@@ -9,7 +9,7 @@ from typing import Any, Mapping, Protocol, runtime_checkable
 from pydantic import BaseModel
 
 from ..model.policy import ModelPolicy
-from ..tool.models import ToolRef  # re-exported below; ToolRef is a tool-domain type
+from ..tool.models import ToolRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,15 +20,9 @@ class PromptSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.instructions, str):
             raise TypeError("PromptSpec.instructions must be a string")
-        from ..utils.freeze import freeze_value
+        from ..json import freeze_value
 
         object.__setattr__(self, "sections", freeze_value(dict(self.sections)))
-
-
-# ToolRef now lives in ..tool.models (its proper home -- a tool reference, not
-# an agent-specific type). The import above re-exports it, so existing
-# `from linktools.ai.agent.spec import ToolRef` call sites keep working; new
-# code should import it from linktools.ai.tool.models.
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +33,7 @@ class MiddlewareRef:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("MiddlewareRef.name must be a non-empty string")
-        from ..utils.freeze import freeze_value
+        from ..json import freeze_value
 
         object.__setattr__(self, "config", freeze_value(dict(self.config)))
 
@@ -76,7 +70,7 @@ class AgentSpec:
             isinstance(m, MiddlewareRef) for m in self.middleware
         ):
             raise TypeError("AgentSpec.middleware must be tuple[MiddlewareRef]")
-        from ..utils.freeze import freeze_value
+        from ..json import freeze_value
 
         object.__setattr__(self, "metadata", freeze_value(dict(self.metadata)))
 

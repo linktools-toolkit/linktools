@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import DateTime, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from .conventions import BIGSERIAL, _OnUpdateDateTime
+from .conventions import BIGSERIAL, OnUpdateDateTime
 
 
 class Base(DeclarativeBase):
@@ -16,7 +16,7 @@ class Base(DeclarativeBase):
         nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        _OnUpdateDateTime(timezone=True),
+        OnUpdateDateTime(timezone=True),
         server_default=text("CURRENT_TIMESTAMP"),
         nullable=False,
     )

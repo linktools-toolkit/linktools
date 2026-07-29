@@ -19,7 +19,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 if TYPE_CHECKING:
-    from linktools.ai_cli.client import RuntimeClient
+    from ...client import RuntimeClient
 
 _APPROVE = "approve"
 _REJECT = "reject"

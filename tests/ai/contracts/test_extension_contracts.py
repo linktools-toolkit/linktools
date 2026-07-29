@@ -6,8 +6,8 @@ DirectoryEntrypointResolver and reusable for business backends."""
 
 import pytest
 
-from linktools.ai.extension.provider import DirectoryExtensionContentSource
-from linktools.ai.extension.resolver import DirectoryEntrypointResolver
+from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.agent.extension.resolver import DirectoryEntrypointResolver
 
 from ._assertions import (
     assert_entrypoint_resolver_contract,
@@ -53,8 +53,8 @@ async def test_entrypoint_resolver_contract(env):
 @pytest.mark.asyncio
 async def test_same_entrypoint_name_in_two_extensions_stays_distinct(env):
     _, resolver = env
-    from linktools.ai.extension.entrypoint import EntrypointRef
-    from linktools.ai.extension.scope import ExtensionScope
+    from linktools.ai.agent.extension.entrypoint import EntrypointRef
+    from linktools.ai.agent.extension.scope import ExtensionScope
 
     a = await resolver.resolve_agent(
         EntrypointRef("agent", "grader", ExtensionScope("skill-creator"))

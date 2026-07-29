@@ -11,7 +11,7 @@ metrics (retry rate).
 
 This executor is the bridge between the evaluation and task planes. It depends
 on JobRuntime only through the duck-typed ``run_one_task`` surface and reads
-    the result via attributes + the ArtifactService, so it imports NO task-domain
+    the result via attributes + the ArtifactStore, so it imports NO task-domain
 module -- the evaluation package itself never reaches into task."""
 
 import json

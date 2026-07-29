@@ -19,8 +19,8 @@ from linktools.ai.governance.policy.rule import (
     ToolContext,
     ToolRequest,
 )
-from linktools.ai.catalog.parsing import SpecLoader
-from linktools.ai.tool.catalog import ToolCatalog
+from linktools.ai.spec.parsing import SpecLoader
+from linktools.ai.tool.index import ToolSpecIndex
 
 
 def _write_tools(tmp_path) -> None:
@@ -58,8 +58,8 @@ def _write_tools(tmp_path) -> None:
     )
 
 
-def _registry(tmp_path) -> ToolCatalog:
-    return ToolCatalog.from_specloader(SpecLoader.from_filesystem(tmp_path / "tools"))
+def _registry(tmp_path) -> ToolSpecIndex:
+    return ToolSpecIndex.from_specloader(SpecLoader.from_filesystem(tmp_path / "tools"))
 
 
 def _ctx() -> ToolContext:

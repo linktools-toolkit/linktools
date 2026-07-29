@@ -1,12 +1,14 @@
 """SQLAlchemy ToolStateStore with one fenced operation aggregate."""
 
-from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Integer, String, UniqueConstraint, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
+from ...errors import StorageConflictError
+from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
 from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX
 from ..state import ToolOperation, ToolOperationStatus
@@ -15,7 +17,7 @@ from ..state import ToolOperation, ToolOperationStatus
 class OperationRow(Base):
     __tablename__ = f"{TABLE_PREFIX}tool_operations"
     __table_args__ = (UniqueConstraint("run_id", "tool_call_id", name="uq_tool_operation_call"),)
-    id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(255), unique=True)
     tenant_id: Mapped[str | None] = mapped_column(String(255))
     run_id: Mapped[str] = mapped_column(String(255), index=True)
     tool_call_id: Mapped[str] = mapped_column(String(255))
@@ -30,7 +32,7 @@ class OperationRow(Base):
     error: Mapped[Any] = mapped_column(JSON, nullable=True)
 
 
-class SqlAlchemyToolStateStore:
+class SqlAlchemyToolStateBackend:
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
@@ -39,59 +41,187 @@ class SqlAlchemyToolStateStore:
             await connection.run_sync(Base.metadata.create_all)
 
     @staticmethod
-    def _operation(row: OperationRow) -> ToolOperation:
-        return ToolOperation(row.id, row.tenant_id, row.run_id, row.tool_call_id, row.idempotency_key, row.tool_name, row.arguments_hash, ToolOperationStatus(row.status), row.owner, row.fence, row.lease_expires_at, row.result, row.error)
+    async def _row(session, operation_id: str, *, for_update: bool = False):
+        query = select(OperationRow).where(
+            OperationRow.operation_id == operation_id
+        )
+        if for_update:
+            query = query.with_for_update()
+        return await session.scalar(query)
 
     @staticmethod
-    def _check_fence(row: OperationRow | None, owner: str, fence: int) -> None:
-        if row is None or row.owner != owner or row.fence != fence:
-            raise ValueError("tool operation fence conflict")
+    def _operation(row: OperationRow) -> ToolOperation:
+        return ToolOperation(row.operation_id, row.tenant_id, row.run_id, row.tool_call_id, row.idempotency_key, row.tool_name, row.arguments_hash, ToolOperationStatus(row.status), Lease(row.owner, row.fence, row.lease_expires_at), row.result, row.error, row.created_at, row.updated_at)
+
+    @staticmethod
+    async def _update_claimed(session, row: OperationRow, **values: object) -> OperationRow:
+        result = await session.execute(
+            update(OperationRow)
+            .where(
+                OperationRow.operation_id == row.operation_id,
+                OperationRow.status == ToolOperationStatus.CLAIMED.value,
+                OperationRow.owner == row.owner,
+                OperationRow.fence == row.fence,
+                OperationRow.lease_expires_at == row.lease_expires_at,
+            )
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            raise StorageConflictError("tool operation claim changed concurrently")
+        updated = await SqlAlchemyToolStateBackend._row(session, row.operation_id)
+        return updated
 
     async def prepare(self, operation: ToolOperation) -> ToolOperation:
-        async with self.session_factory() as session:
-            async with session.begin():
-                row = await session.get(OperationRow, operation.id, with_for_update=True)
-                if row is not None:
-                    if row.idempotency_key != operation.idempotency_key or row.arguments_hash != operation.arguments_hash:
-                        raise ValueError("tool operation idempotency conflict")
-                    return self._operation(row)
-                session.add(OperationRow(**asdict(operation)))
-                return operation
+        try:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    row = await self._row(session, operation.id, for_update=True)
+                    if row is not None:
+                        return self._replay(row, operation)
+                    session.add(OperationRow(
+                        operation_id=operation.id,
+                        tenant_id=operation.tenant_id,
+                        run_id=operation.run_id,
+                        tool_call_id=operation.tool_call_id,
+                        idempotency_key=operation.idempotency_key,
+                        tool_name=operation.tool_name,
+                        arguments_hash=operation.arguments_hash,
+                        status=operation.status.value,
+                        owner=operation.owner,
+                        fence=operation.fence,
+                        lease_expires_at=operation.lease.expires_at,
+                        result=operation.result,
+                        error=operation.error,
+                        created_at=operation.created_at,
+                        updated_at=operation.updated_at,
+                    ))
+                    await session.flush()
+                    return operation
+        except IntegrityError:
+            async with self.session_factory() as session:
+                row = await session.scalar(
+                    select(OperationRow).where(
+                        OperationRow.run_id == operation.run_id,
+                        OperationRow.tool_call_id == operation.tool_call_id,
+                    )
+                )
+                if row is None:
+                    raise StorageConflictError("tool operation prepare conflict")
+                return self._replay(row, operation)
+
+    def _replay(self, row: OperationRow, operation: ToolOperation) -> ToolOperation:
+        if (
+            row.operation_id != operation.id
+            or row.idempotency_key != operation.idempotency_key
+            or row.arguments_hash != operation.arguments_hash
+        ):
+            raise StorageConflictError("tool operation idempotency conflict")
+        return self._operation(row)
 
     async def get(self, operation_id: str) -> ToolOperation | None:
         async with self.session_factory() as session:
-            row = await session.get(OperationRow, operation_id)
+            row = await self._row(session, operation_id)
             return None if row is None else self._operation(row)
 
-    async def claim(self, operation_id: str, *, owner: str) -> ToolOperation:
+    async def claim(self, operation_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await session.get(OperationRow, operation_id, with_for_update=True)
+                row = await self._row(session, operation_id, for_update=True)
                 if row is None:
                     raise KeyError(operation_id)
                 if row.status == ToolOperationStatus.COMPLETED.value:
                     return self._operation(row)
-                row.status, row.owner, row.fence = ToolOperationStatus.CLAIMED.value, owner, row.fence + 1
-                return self._operation(row)
+                if row.status == ToolOperationStatus.FAILED.value:
+                    raise StorageConflictError("failed tool operation cannot be claimed")
+                now = datetime.now(timezone.utc)
+                lease = claim(
+                    Lease(row.owner, row.fence, row.lease_expires_at),
+                    owner=owner,
+                    now=now,
+                    duration=duration,
+                )
+                result = await session.execute(
+                    update(OperationRow)
+                    .where(
+                        OperationRow.operation_id == operation_id,
+                        OperationRow.status == row.status,
+                        OperationRow.fence == row.fence,
+                    )
+                    .values(
+                        status=ToolOperationStatus.CLAIMED.value,
+                        owner=lease.owner,
+                        fence=lease.fence,
+                        lease_expires_at=lease.expires_at,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("tool operation claim conflict")
+                claimed = await self._row(session, operation_id)
+                return self._operation(claimed)
 
-    async def renew(self, operation_id: str, *, owner: str, fence: int) -> ToolOperation:
+    async def renew(self, operation_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
         async with self.session_factory() as session:
-            row = await session.get(OperationRow, operation_id)
-            self._check_fence(row, owner, fence)
-            return self._operation(row)
+            async with session.begin():
+                row = await self._row(session, operation_id, for_update=True)
+                if row is None:
+                    raise KeyError(operation_id)
+                now = datetime.now(timezone.utc)
+                lease = renew(
+                    Lease(row.owner, row.fence, row.lease_expires_at),
+                    owner=owner,
+                    fence=fence,
+                    now=now,
+                    duration=duration,
+                )
+                updated = await self._update_claimed(
+                    session,
+                    row,
+                    lease_expires_at=lease.expires_at,
+                    updated_at=now,
+                )
+                return self._operation(updated)
 
     async def complete(self, operation_id: str, *, owner: str, fence: int, result: Any) -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await session.get(OperationRow, operation_id, with_for_update=True)
-                self._check_fence(row, owner, fence)
-                row.status, row.result = ToolOperationStatus.COMPLETED.value, result
-                return self._operation(row)
+                row = await self._row(session, operation_id, for_update=True)
+                if row is None:
+                    raise KeyError(operation_id)
+                now = datetime.now(timezone.utc)
+                assert_active(Lease(row.owner, row.fence, row.lease_expires_at), owner=owner, fence=fence, now=now)
+                if row.status != ToolOperationStatus.CLAIMED.value:
+                    raise StorageConflictError("tool operation is not claimed")
+                lease = release(Lease(row.owner, row.fence, row.lease_expires_at))
+                updated = await self._update_claimed(
+                    session,
+                    row,
+                    status=ToolOperationStatus.COMPLETED.value,
+                    result=result,
+                    owner=lease.owner,
+                    lease_expires_at=lease.expires_at,
+                    updated_at=now,
+                )
+                return self._operation(updated)
 
     async def fail(self, operation_id: str, *, owner: str, fence: int, error: Any) -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await session.get(OperationRow, operation_id, with_for_update=True)
-                self._check_fence(row, owner, fence)
-                row.status, row.error = ToolOperationStatus.FAILED.value, error
-                return self._operation(row)
+                row = await self._row(session, operation_id, for_update=True)
+                if row is None:
+                    raise KeyError(operation_id)
+                now = datetime.now(timezone.utc)
+                assert_active(Lease(row.owner, row.fence, row.lease_expires_at), owner=owner, fence=fence, now=now)
+                if row.status != ToolOperationStatus.CLAIMED.value:
+                    raise StorageConflictError("tool operation is not claimed")
+                lease = release(Lease(row.owner, row.fence, row.lease_expires_at))
+                updated = await self._update_claimed(
+                    session,
+                    row,
+                    status=ToolOperationStatus.FAILED.value,
+                    error=error,
+                    owner=lease.owner,
+                    lease_expires_at=lease.expires_at,
+                    updated_at=now,
+                )
+                return self._operation(updated)

@@ -7,25 +7,25 @@ import dataclasses
 
 import pytest
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
 from linktools.ai.errors import (
     CapabilityConflictError,
     CapabilityResolutionError,
     InvalidSpecError,
     MCPServerNotFoundError,
 )
-from linktools.ai.mcp import (
+from linktools.ai.tool.mcp import (
     MCPConnectionPool,
     MCPProvider,
     build_mcp_server,
     parse_mcp_spec,
 )
-from linktools.ai.mcp.client import MCPConnectionRef
-from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPToolInfo
+from linktools.ai.tool.mcp.client import MCPConnectionRef
+from linktools.ai.tool.mcp.provider import MCPDiscoveryResult, MCPToolInfo
 from linktools.ai.errors import MCPDiscoveryUnsupportedError
-from linktools.ai.mcp.toolset import (
+from linktools.ai.tool.mcp.toolset import (
     detect_mcp_conflicts,
     filter_tool_names,
     final_tool_name,
@@ -392,7 +392,7 @@ async def test_connection_manager_closes_toolsets():
     mgr = MCPConnectionPool()
     # Use the real manager's close path with an object exposing close(), keyed
     # the way get_toolset actually keys (server.id, fingerprint).
-    from linktools.ai.mcp.client import _config_fingerprint
+    from linktools.ai.tool.mcp.client import _config_fingerprint
 
     class _TS:
         closed = False
@@ -412,7 +412,7 @@ async def test_connection_manager_cache_keyed_on_config_fingerprint():
     (command) must get DISTINCT cache slots -- a config change with a reused id
     must not return a stale cached toolset. Secret plaintext never enters the
     key (only a length revision does)."""
-    from linktools.ai.mcp.client import _config_fingerprint
+    from linktools.ai.tool.mcp.client import _config_fingerprint
 
     s1 = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "a"]}

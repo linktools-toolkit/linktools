@@ -12,7 +12,7 @@ from ..policy.command import DEFAULT_DENIED_COMMAND_PATTERNS
 from enum import Enum
 
 if TYPE_CHECKING:
-    from ...capability.exposure import CapabilityToolExposurePolicy
+    from ...agent.capability.exposure import CapabilityToolExposurePolicy
     from .pipeline import SecurityPipeline
 
 

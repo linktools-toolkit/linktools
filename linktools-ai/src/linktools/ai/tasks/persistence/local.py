@@ -1,11 +1,14 @@
-"""Single-process TaskStore."""
+"""Single-process TaskStore with shared lease semantics."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
-from ..models import TaskExecution, TaskPlan
+from ...storage.coordination.lease import Lease, assert_active, claim, renew
+from ...errors import StorageConflictError
+from ..models import TaskExecution, TaskPlan, TaskStatus
 
 
-class LocalTaskStore:
+class LocalTaskBackend:
     def __init__(self) -> None:
         self._plans: dict[str, TaskPlan] = {}
         self._executions: dict[str, TaskExecution] = {}
@@ -24,26 +27,36 @@ class LocalTaskStore:
 
     create_execution = add_execution
 
-    async def claim(self, execution_id: str, *, owner: str) -> TaskExecution:
+    async def claim(self, execution_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
         current = self._executions[execution_id]
-        claimed = replace(current, status="claimed", owner=owner, fence=current.fence + 1, attempt=current.attempt + 1)
-        self._executions[execution_id] = claimed
-        return claimed
+        now = datetime.now(timezone.utc)
+        if current.status is TaskStatus.COMPLETED:
+            return current
+        lease = claim(current.lease, owner=owner, now=now, duration=duration)
+        updated = replace(current, status=TaskStatus.CLAIMED, lease=lease, attempt=current.attempt + 1, updated_at=now)
+        self._executions[execution_id] = updated
+        return updated
 
-    async def renew(self, execution_id: str, *, owner: str, fence: int) -> TaskExecution:
+    async def renew(self, execution_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
         current = self._executions[execution_id]
-        if current.owner != owner or current.fence != fence:
-            raise ValueError("task fence conflict")
-        return current
+        now = datetime.now(timezone.utc)
+        updated = replace(current, lease=renew(current.lease, owner=owner, fence=fence, now=now, duration=duration), updated_at=now)
+        self._executions[execution_id] = updated
+        return updated
 
     async def complete(self, execution_id: str, *, owner: str, fence: int, result: object) -> TaskExecution:
         current = await self.renew(execution_id, owner=owner, fence=fence)
-        completed = replace(current, status="completed", result=result)
-        self._executions[execution_id] = completed
-        return completed
+        now = datetime.now(timezone.utc)
+        updated = replace(current, status=TaskStatus.COMPLETED, result=result, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
+        self._executions[execution_id] = updated
+        return updated
 
-    async def fail(self, execution_id: str, *, owner: str, fence: int, retry: bool = False) -> TaskExecution:
+    async def fail(self, execution_id: str, *, owner: str, fence: int, retry: bool = False, error: object = None) -> TaskExecution:
         current = await self.renew(execution_id, owner=owner, fence=fence)
-        failed = replace(current, status="ready" if retry else "failed")
-        self._executions[execution_id] = failed
-        return failed
+        now = datetime.now(timezone.utc)
+        updated = replace(current, status=TaskStatus.READY if retry else TaskStatus.FAILED, error=error, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
+        self._executions[execution_id] = updated
+        return updated
+
+
+__all__ = ["LocalTaskBackend"]

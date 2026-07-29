@@ -16,7 +16,7 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage
 
 from ..model.resolver import ResolvedModel
-from ..run.models import RunErrorInfo, RunResult
+from ..execution.run import RunErrorInfo, RunResult
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
 
@@ -39,7 +39,7 @@ def model_supports_streaming(model: object) -> bool:
     return True
 
 if TYPE_CHECKING:
-    from ..middleware.capability import MiddlewareCapability
+    from .middleware.capability import MiddlewareCapability
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +106,7 @@ class PauseRequest:
 class AgentCompleted:
     """AgentEngine ran to a successful final output. The serialized message
     history at completion travels on ``snapshot`` (the trace collector's
-    resume snapshot), which RunCoordinator persists alongside the SUCCEEDED
+    resume snapshot), which the execution service persists alongside the COMPLETED
     transition so a later resume/replay has the same message state a paused
     run would have checkpointed."""
 

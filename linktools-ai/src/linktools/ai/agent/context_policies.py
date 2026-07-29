@@ -16,10 +16,10 @@ searching globally. There is no unscoped / cross-tenant retrieval path."""
 from typing import TYPE_CHECKING, Any, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
-    from ..retrieval.context import KnowledgeItem
-    from ..memory.models import MemoryRecord
-    from ..run.context import RunContext
-    from ..run.models import RunResult
+    from .retrieval.context import KnowledgeItem
+    from .memory.models import MemoryRecord
+    from ..execution.context import RunContext
+    from ..execution.run import RunResult
 
 
 @runtime_checkable
@@ -75,7 +75,7 @@ class DefaultMemoryPolicy:
         self._limit = limit
 
     async def select_memories(self, context, query):
-        from ..memory.scope import MemoryScope
+        from .memory.scope import MemoryScope
 
         if not context.tenant_id:
             # Fail closed: a missing tenant never searches globally.
@@ -104,7 +104,7 @@ class DefaultRetrievalPolicy:
         self._limit = limit
 
     async def retrieve(self, context, query):
-        from ..retrieval.scope import RetrievalScope
+        from .retrieval.scope import RetrievalScope
 
         if not context.tenant_id:
             return ()
@@ -122,12 +122,12 @@ class DefaultPromptContextFormatter:
     Substitute this to change titles or ordering."""
 
     def format_memory(self, records):
-        from ..retrieval.context import format_memory
+        from .retrieval.context import format_memory
 
         return format_memory(records)
 
     def format_knowledge(self, items):
-        from ..retrieval.context import KnowledgeContext
+        from .retrieval.context import KnowledgeContext
 
         return KnowledgeContext(documents=list(items)).format()
 

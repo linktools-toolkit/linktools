@@ -9,8 +9,9 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec, ToolRef
-from linktools.ai.capability.models import CapabilityBundle, CapabilityRef
+from linktools.ai.agent.spec import AgentSpec, MiddlewareRef, PromptSpec
+from linktools.ai.tool import ToolRef
+from linktools.ai.agent.capability.models import CapabilityBundle, CapabilityRef
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.tool.models import ToolDescriptor
 

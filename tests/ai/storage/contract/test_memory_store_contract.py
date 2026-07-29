@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """tests/ai/storage/contract/test_memory_store_contract.py — runs the same
-MemoryStore contract against both FilesystemMemoryStore and SqlAlchemyMemoryStore
+MemoryStore contract against both FilesystemMemoryBackend and SqlAlchemyMemoryBackend
 (contract backend parity). The parametrized ``store_factory`` fixture is
 copied verbatim from ``test_swarm_store_contract.py`` (file + sqlalchemy
 branches, including the ``_run_in_new_loop`` helper that bootstraps the SQL
@@ -17,9 +17,9 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
-from linktools.ai.memory.models import MemoryRecord
-from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
+from linktools.ai.agent.memory.models import MemoryRecord
+from linktools.ai.agent.memory.scope import MemoryScope
+from linktools.ai.agent.memory.persistence.filesystem import FilesystemMemoryBackend
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +74,13 @@ def store_factory(request, tmp_path):
 
         def file_factory():
             counter["n"] += 1
-            return FilesystemMemoryStore(root=tmp_path / f"mem-{counter['n']}")
+            return FilesystemMemoryBackend(root=tmp_path / f"mem-{counter['n']}")
 
         return file_factory
 
     from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
-    from linktools.ai.memory.persistence.sqlalchemy import Base
-    from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
+    from linktools.ai.agent.memory.persistence.sqlalchemy import Base
+    from linktools.ai.agent.memory.persistence.sqlalchemy import SqlAlchemyMemoryBackend
 
     counter = {"n": 0}
     engines = []
@@ -129,7 +129,7 @@ def store_factory(request, tmp_path):
 
         _run_in_new_loop(_create())
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        return SqlAlchemyMemoryStore(session_factory=session_factory)
+        return SqlAlchemyMemoryBackend(session_factory=session_factory)
 
     def _dispose_engines():
         # The store itself opens fresh connections on pytest-asyncio's loop
@@ -357,13 +357,13 @@ def test_forget_then_get_none_and_missing_raises(store_factory):
 # ---------------------------------------------------------------------------
 # 7. File-only: path-traversal in memory_id -> ValueError. (SQL ids are opaque
 #    primary-key strings, not path segments, so this guard is
-#    FilesystemMemoryStore-specific — mirrors the file-only path-traversal test in
+#    FilesystemMemoryBackend-specific — mirrors the file-only path-traversal test in
 #    test_swarm_store_contract.py.)
 # ---------------------------------------------------------------------------
 
 
 def test_path_traversal_in_memory_id_is_rejected(tmp_path):
-    store = FilesystemMemoryStore(root=tmp_path)
+    store = FilesystemMemoryBackend(root=tmp_path)
 
     async def _run():
         with pytest.raises(ValueError):

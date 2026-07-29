@@ -6,9 +6,9 @@ resolve scoped agents, and namespace isolation across extensions."""
 import pytest
 
 from linktools.ai.errors import ExtensionEntrypointNotFoundError
-from linktools.ai.extension.entrypoint import EntrypointRef
-from linktools.ai.extension.resolver import DirectoryEntrypointResolver
-from linktools.ai.extension.scope import ExtensionScope
+from linktools.ai.agent.extension.entrypoint import EntrypointRef
+from linktools.ai.agent.extension.resolver import DirectoryEntrypointResolver
+from linktools.ai.agent.extension.scope import ExtensionScope
 
 
 def _make_pkg(base, pkg_id, agents=("grader",)):

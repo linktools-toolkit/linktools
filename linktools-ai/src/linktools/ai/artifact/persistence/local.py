@@ -1,76 +1,110 @@
-"""Content-addressed local ArtifactStore."""
+"""Single-process content-addressed artifact persistence."""
+
+from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import tempfile
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
+from ...storage.local.files import atomic_write_bytes, atomic_write_json, read_json
+from ...storage.local.paths import Sha256Digest, StorageId, safe_child
+from ..digest import ArtifactDigest
 from ..models import ArtifactProvenance, ArtifactRecord, ArtifactRef
-from ...execution.codec import decode, encode
+
+_BATCH_SIZE = 4 * 1024 * 1024
 
 
-class LocalArtifactStore:
+class LocalArtifactBackend:
     def __init__(self, root: str | Path = ".linktools") -> None:
         self.root = Path(root)
 
-    async def put(self, *, record: ArtifactRecord, content) -> ArtifactRecord:
-        digest, size, temporary = await asyncio.to_thread(self._stage, content)
-        if digest != record.ref.sha256 or size != record.ref.size:
-            await asyncio.to_thread(temporary.unlink, missing_ok=True)
-            raise ValueError("artifact digest or size mismatch")
-        blob = self.root / "artifacts" / "blobs" / digest
-        metadata = self.root / "artifacts" / "records" / f"{record.ref.id}.json"
-        await asyncio.to_thread(self._put_sync, blob, metadata, record, temporary)
-        return record
+    async def initialize_storage(self) -> None:
+        await asyncio.to_thread((self.root / "artifacts").mkdir, parents=True, exist_ok=True)
 
-    @staticmethod
-    def _stage(content) -> tuple[str, int, Path]:
+    def _record_path(self, artifact_id: str) -> Path:
+        return safe_child(self.root, "artifacts", "records", StorageId.parse(artifact_id)).with_suffix(".json")
+
+    def _blob_path(self, digest: str) -> Path:
+        return safe_child(self.root, "artifacts", "blobs", Sha256Digest.parse(digest))
+
+    async def put(self, *, record: ArtifactRecord, content) -> ArtifactRecord:
+        StorageId.parse(record.ref.id)
+        ArtifactDigest.parse(record.ref.sha256)
+        temporary = await asyncio.to_thread(self._temporary_path)
         digest = hashlib.sha256()
         size = 0
-        with tempfile.NamedTemporaryFile(prefix="linktools-artifact-", delete=False) as target:
-            temporary = Path(target.name)
-            async def consume() -> None:
-                nonlocal size
-                async for chunk in content:
-                    digest.update(chunk)
-                    size += len(chunk)
-                    target.write(chunk)
-            asyncio.run(consume())
-        return digest.hexdigest(), size, temporary
+        buffer = bytearray()
+        try:
+            async for chunk in content:
+                if not isinstance(chunk, bytes):
+                    raise TypeError("artifact content chunks must be bytes")
+                digest.update(chunk)
+                size += len(chunk)
+                buffer.extend(chunk)
+                if len(buffer) >= _BATCH_SIZE:
+                    await asyncio.to_thread(self._append, temporary, bytes(buffer))
+                    buffer.clear()
+            if buffer:
+                await asyncio.to_thread(self._append, temporary, bytes(buffer))
+            if digest.hexdigest() != record.ref.sha256 or size != record.ref.size:
+                raise ValueError("artifact digest or size mismatch")
+            blob = self._blob_path(record.ref.sha256)
+            await asyncio.to_thread(self._publish_blob, temporary, blob)
+            await asyncio.to_thread(atomic_write_json, self._record_path(record.ref.id), asdict(record))
+            return record
+        finally:
+            await asyncio.to_thread(Path.unlink, temporary, missing_ok=True)
 
     @staticmethod
-    def _put_sync(blob: Path, metadata: Path, record: ArtifactRecord, temporary: Path) -> None:
+    def _temporary_path() -> Path:
+        fd, path = tempfile.mkstemp(prefix="linktools-artifact-")
+        os.close(fd)
+        return Path(path)
+
+    @staticmethod
+    def _append(path: Path, content: bytes) -> None:
+        with path.open("ab") as stream:
+            stream.write(content)
+
+    @staticmethod
+    def _publish_blob(temporary: Path, blob: Path) -> None:
         blob.parent.mkdir(parents=True, exist_ok=True)
-        metadata.parent.mkdir(parents=True, exist_ok=True)
-        if not blob.exists():
-            temporary.replace(blob)
-        else:
+        if blob.exists():
             temporary.unlink(missing_ok=True)
-        metadata.write_text(encode(asdict(record)), encoding="utf-8")
+            return
+        temporary.replace(blob)
 
     async def get_record(self, artifact_id: str) -> ArtifactRecord | None:
-        path = self.root / "artifacts" / "records" / f"{artifact_id}.json"
-        if not path.exists():
+        path = self._record_path(artifact_id)
+        if not await asyncio.to_thread(path.exists):
             return None
-        raw = await asyncio.to_thread(lambda: decode(path.read_text(encoding="utf-8")))
+        raw = dict(await asyncio.to_thread(read_json, path))
         raw["ref"] = ArtifactRef(**raw["ref"])
         raw["provenance"]["parent_artifact_ids"] = tuple(raw["provenance"].get("parent_artifact_ids", ()))
         raw["provenance"] = ArtifactProvenance(**raw["provenance"])
+        raw["created_at"] = datetime.fromisoformat(raw["created_at"])
         return ArtifactRecord(**raw)
 
     async def open(self, artifact_id: str):
         record = await self.get_record(artifact_id)
         if record is None:
             return
-        path = self.root / "artifacts" / "blobs" / record.ref.sha256
-        with path.open("rb") as source:
-            while chunk := await asyncio.to_thread(source.read, 1024 * 1024):
+        source = await asyncio.to_thread(open, self._blob_path(record.ref.sha256), "rb")
+        try:
+            while True:
+                chunk = await asyncio.to_thread(source.read, _BATCH_SIZE)
+                if not chunk:
+                    break
                 yield chunk
+        finally:
+            await asyncio.to_thread(source.close)
 
     async def delete(self, artifact_id: str) -> None:
-        record_path = self.root / "artifacts" / "records" / f"{artifact_id}.json"
-        record = await self.get_record(artifact_id)
-        if record is None:
-            return
-        await asyncio.to_thread(record_path.unlink, missing_ok=True)
+        path = self._record_path(artifact_id)
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+__all__ = ["LocalArtifactBackend"]

@@ -18,7 +18,7 @@ from linktools.core import environ
 from ..client import build_runtime_client
 
 if TYPE_CHECKING:
-    from linktools.ai_cli.client import RuntimeClient
+    from ..client import RuntimeClient
 
 
 def run_doctor(

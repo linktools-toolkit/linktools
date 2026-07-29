@@ -6,6 +6,7 @@ Model + revision). Re-exports the public surface so callers can
 ``from linktools.ai.model import ModelResolver`` etc. without reaching into
 submodule paths."""
 
+from .codec import parse_model_policy
 from .policy import ModelPolicy
 from .registry import (
     ModelBundle,
@@ -25,6 +26,7 @@ from .resolver import (
 
 __all__ = [
     "ModelPolicy",
+    "parse_model_policy",
     "ModelBundle",
     "ModelClientUnavailable",
     "ModelOutputError",

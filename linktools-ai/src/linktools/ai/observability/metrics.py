@@ -38,7 +38,7 @@ HARDENING_METRICS = (
     "job_stale_fence_total",
     "job_recovery_total",
     "approval_replay_reject_total",
-    "catalog_revision_refresh_total",
+    "spec_revision_refresh_total",
     "external_adapter_conformance_failure_total",
     "artifact_blob_upload_failure_total",
     "artifact_orphan_cleanup_failure_total",

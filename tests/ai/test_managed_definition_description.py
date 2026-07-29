@@ -1,12 +1,12 @@
 from types import SimpleNamespace
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
-from linktools.ai.mcp.client import MCPConnectionPool
-from linktools.ai.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
-from linktools.ai.mcp.spec import MCPServerSpecProvider
-from linktools.ai.mcp.codec import parse_mcp_spec
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
+from linktools.ai.tool.mcp.client import MCPConnectionPool
+from linktools.ai.tool.mcp.provider import MCPDiscoveryResult, MCPProvider, MCPToolInfo
+from linktools.ai.tool.mcp.spec import MCPServerSpecProvider
+from linktools.ai.tool.mcp.codec import parse_mcp_spec
 from linktools.ai.tool.models import ToolDescriptor
 from linktools.ai.tool.models import ManagedToolDefinition
 

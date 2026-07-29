@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/filesystem/test_memory.py — FilesystemMemoryStore contract: JSON-on-disk
+"""tests/ai/storage/filesystem/test_memory.py — FilesystemMemoryBackend contract: JSON-on-disk
 persistence for MemoryRecord. Uses the `def test_x(): asyncio.run(_run())`
 style (sync test wrapper driving its own event loop) so no pytest-asyncio mode
 config is needed."""
@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
-from linktools.ai.memory.models import MemoryRecord
-from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.memory.persistence.filesystem import FilesystemMemoryStore
+from linktools.ai.agent.memory.models import MemoryRecord
+from linktools.ai.agent.memory.scope import MemoryScope
+from linktools.ai.agent.memory.persistence.filesystem import FilesystemMemoryBackend
 
 
 def _now() -> datetime:
@@ -60,7 +60,7 @@ def _record(
 
 def test_remember_then_get_roundtrips_all_fields(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(
             content="hello world",
             category=None,
@@ -87,7 +87,7 @@ def test_remember_then_get_roundtrips_all_fields(tmp_path):
 
 def test_get_missing_returns_none(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         assert await store.get("nope") is None
 
     asyncio.run(_run_case())
@@ -100,7 +100,7 @@ def test_get_missing_returns_none(tmp_path):
 
 def test_search_filters_owner_category_query_and_limit(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         a = _record(owner_id="u1", user_id="u1", content="hello world", category="note")
         b = _record(owner_id="u1", user_id="u1", content="hello there", category="log")
         c = _record(owner_id="u2", user_id="u2", content="hello other", category="note")
@@ -138,7 +138,7 @@ def test_search_filters_owner_category_query_and_limit(tmp_path):
 
 def test_remember_duplicate_id_raises_conflict(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(memory_id="dup-1")
         await store.remember(rec)
         with pytest.raises(MemoryConflictError):
@@ -154,7 +154,7 @@ def test_remember_duplicate_id_raises_conflict(tmp_path):
 
 def test_update_bumps_version_and_applies_content(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(content="old", version=1)
         await store.remember(rec)
         updated = await store.update(rec.id, expected_version=1, content="new")
@@ -168,7 +168,7 @@ def test_update_bumps_version_and_applies_content(tmp_path):
 
 def test_update_category_none_clears_category_and_omitted_fields_unchanged(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(
             content="keep", category="note", confidence=0.8, metadata={"k": "v"}
         )
@@ -191,7 +191,7 @@ def test_update_category_none_clears_category_and_omitted_fields_unchanged(tmp_p
 
 def test_update_wrong_expected_version_raises_conflict(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(version=1)
         await store.remember(rec)
         with pytest.raises(MemoryConflictError):
@@ -202,7 +202,7 @@ def test_update_wrong_expected_version_raises_conflict(tmp_path):
 
 def test_update_missing_id_raises_not_found(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         with pytest.raises(MemoryNotFoundError):
             await store.update("ghost", expected_version=1, content="x")
 
@@ -216,7 +216,7 @@ def test_update_missing_id_raises_not_found(tmp_path):
 
 def test_forget_removes_file_and_errors(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         rec = _record(version=1)
         await store.remember(rec)
         await store.forget(rec.id, expected_version=1)
@@ -240,7 +240,7 @@ def test_forget_removes_file_and_errors(tmp_path):
 
 def test_path_traversal_memory_id_rejected(tmp_path):
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         with pytest.raises(ValueError):
             await store.get("../evil")
 
@@ -256,7 +256,7 @@ def test_tenant_id_path_traversal_rejected(tmp_path):
     # : the tenant path segment is validated, so a caller-controlled
     # tenant_id can't escape the store root via "../".
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         with pytest.raises(ValueError):
             await store.search(
                 "x", scope=MemoryScope(tenant_id="../evil"), limit=1
@@ -273,7 +273,7 @@ def test_search_isolates_tenants_via_partition(tmp_path):
     # : search scans ONLY the requesting tenant's subdir, so one
     # tenant can never enumerate another's records (even with a shared owner).
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         await store.remember(
             _record(memory_id="a1", tenant_id="tenant-a", owner_id="alice", content="hello a")
         )
@@ -295,7 +295,7 @@ def test_legacy_flat_record_quarantined_from_real_tenant(tmp_path):
     import json as _json
 
     async def _run_case():
-        store = FilesystemMemoryStore(root=tmp_path)
+        store = FilesystemMemoryBackend(root=tmp_path)
         # Write a legacy flat record directly: root/{id}.json, no tenant_id.
         legacy = {
             "id": "legacy-1",
@@ -315,7 +315,7 @@ def test_legacy_flat_record_quarantined_from_real_tenant(tmp_path):
         )
         assert real_hits == ()
         # Only the explicit legacy scope sees it.
-        from linktools.ai.memory.scope import LEGACY_TENANT_ID
+        from linktools.ai.agent.memory.scope import LEGACY_TENANT_ID
 
         legacy_hits = await store.search("legacy", scope=MemoryScope(tenant_id=LEGACY_TENANT_ID))
         assert {m.record.id for m in legacy_hits} == {"legacy-1"}

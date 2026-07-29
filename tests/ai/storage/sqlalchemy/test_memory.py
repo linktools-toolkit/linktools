@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""tests/ai/storage/sqlalchemy/test_memory.py — SqlAlchemyMemoryStore contract.
+"""tests/ai/storage/sqlalchemy/test_memory.py — SqlAlchemyMemoryBackend contract.
 Uses the `def test_x(): asyncio.run(_run())` style (sync test wrapper driving its
 own event loop) so no pytest-asyncio mode config is needed. Mirrors how
 test_swarm.py bootstraps the in-file aiosqlite engine; mirrors the File test's
@@ -17,10 +17,10 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.errors import MemoryConflictError, MemoryNotFoundError
-from linktools.ai.memory.models import MemoryRecord
-from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.memory.persistence.sqlalchemy import SqlAlchemyMemoryStore
-from linktools.ai.memory.persistence.sqlalchemy import Base
+from linktools.ai.agent.memory.models import MemoryRecord
+from linktools.ai.agent.memory.scope import MemoryScope
+from linktools.ai.agent.memory.persistence.sqlalchemy import SqlAlchemyMemoryBackend
+from linktools.ai.agent.memory.persistence.sqlalchemy import Base
 
 
 def _now() -> datetime:
@@ -61,7 +61,7 @@ def _record(
 
 @asynccontextmanager
 async def _store_ctx(tmp_path):
-    """Build a SqlAlchemyMemoryStore against an in-file SQLite DB. The engine is
+    """Build a SqlAlchemyMemoryBackend against an in-file SQLite DB. The engine is
     disposed on exit so aiosqlite's background worker threads shut down before
     the per-test event loop closes (otherwise they call into a dead loop)."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/mem.db")
@@ -69,7 +69,7 @@ async def _store_ctx(tmp_path):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
-        yield SqlAlchemyMemoryStore(session_factory=session_factory)
+        yield SqlAlchemyMemoryBackend(session_factory=session_factory)
     finally:
         await engine.dispose()
 
@@ -223,6 +223,23 @@ def test_update_wrong_expected_version_raises_conflict(tmp_path):
     asyncio.run(_run_case())
 
 
+def test_concurrent_updates_use_atomic_version_cas(tmp_path):
+    async def _run_case():
+        async with _store_ctx(tmp_path) as store:
+            rec = _record(memory_id="concurrent", version=1)
+            await store.remember(rec)
+            results = await asyncio.gather(
+                store.update(rec.id, expected_version=1, content="first"),
+                store.update(rec.id, expected_version=1, content="second"),
+                return_exceptions=True,
+            )
+            assert sum(isinstance(result, MemoryRecord) for result in results) == 1
+            assert sum(isinstance(result, MemoryConflictError) for result in results) == 1
+            assert (await store.get(rec.id)).version == 2
+
+    asyncio.run(_run_case())
+
+
 def test_update_missing_id_raises_not_found(tmp_path):
     async def _run_case():
         async with _store_ctx(tmp_path) as store:
@@ -334,8 +351,8 @@ def test_legacy_null_tenant_row_quarantined_from_real_tenant(tmp_path):
     # legacy tenant. A real tenant's search never matches it (NULL != tenant-a);
     # only an explicit legacy-scope search does.
     async def _run_case():
-        from linktools.ai.memory.scope import LEGACY_TENANT_ID
-        from linktools.ai.memory.persistence.sqlalchemy import MemoryRow
+        from linktools.ai.agent.memory.scope import LEGACY_TENANT_ID
+        from linktools.ai.agent.memory.persistence.sqlalchemy import MemoryRow
         from sqlalchemy import insert
 
         async with _store_ctx(tmp_path) as store:

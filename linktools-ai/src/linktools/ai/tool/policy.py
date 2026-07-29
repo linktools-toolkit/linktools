@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
 from .models import ToolDescriptor
 from ..errors import ToolPolicyResolutionError
-from ..utils.freeze import freeze_value
+from ..json import freeze_value
 
 
 class IdempotencyStrategy(str, Enum):
@@ -76,7 +76,7 @@ def validate_idempotency_policy(
 
 
 if TYPE_CHECKING:
-    from ..run.context import RunContext
+    from ..execution.context import RunContext
 
 
 @dataclass(frozen=True, slots=True)

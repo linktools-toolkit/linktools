@@ -7,9 +7,12 @@ import hashlib
 import json
 from typing import Any
 
+from ..storage.coordination.lease import Lease
+from ..storage.json import canonical_json_bytes
+
 
 def compute_arguments_hash(arguments: Any) -> str:
-    return hashlib.sha256(json.dumps(arguments, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(arguments)).hexdigest()
 
 
 class ToolOperationStatus(str, Enum):
@@ -29,8 +32,20 @@ class ToolOperation:
     tool_name: str
     arguments_hash: str
     status: ToolOperationStatus
-    owner: str | None = None
-    fence: int = 0
-    lease_expires_at: datetime | None = None
+    lease: Lease = Lease()
     result: Any = None
     error: Any = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def owner(self) -> str | None:
+        return self.lease.owner
+
+    @property
+    def fence(self) -> int:
+        return self.lease.fence
+
+    @property
+    def lease_expires_at(self) -> datetime | None:
+        return self.lease.expires_at

@@ -5,4 +5,17 @@
 This package defines the abstractions an OpenTelemetry adapter can later plug
 into: ObservabilitySink (spans), ObservabilityMetrics
 (counters/histograms/gauges), and LoggingObservabilitySink, the stdlib-only
-default. Submodules are imported explicitly; nothing is re-exported here."""
+default."""
+
+from .logging import LoggingObservabilitySink
+from .metrics import InMemoryMetrics, ObservabilityMetrics
+from .tracing import ObservabilitySink, Span, current_span
+
+__all__ = [
+    "InMemoryMetrics",
+    "LoggingObservabilitySink",
+    "ObservabilityMetrics",
+    "ObservabilitySink",
+    "Span",
+    "current_span",
+]

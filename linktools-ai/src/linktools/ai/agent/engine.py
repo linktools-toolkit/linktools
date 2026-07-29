@@ -15,7 +15,7 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
 * runs the before_run/after_run middleware hooks (on a new, non-resuming run)
   via the wired MiddlewarePipeline -- after_run fires before the outcome is
   returned, so it always precedes the RunCoordinator commit;
-* builds the model prompt via :class:`~linktools.ai.prompt.builder.PromptBuilder`
+* builds the model prompt via :class:`~linktools.ai.agent.prompt.builder.PromptBuilder`
   (memory + knowledge sections from their async policies, then capability-
   resolved sections folded in via PromptBuilder.combine). Prior-turn history
   arrives as native pydantic-ai ``message_history`` on AgentInput (loaded by
@@ -59,21 +59,19 @@ from ..errors import (
     ToolError,
     ToolSchemaError,
 )
-from ..middleware.pipeline import MiddlewarePipeline
+from .middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
-from ..prompt.builder import PromptBuilder
+from .prompt.builder import PromptBuilder
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
-from ..run.cancellation import CancellationToken
-from ..run.context import RunContext
-from ..run.models import (
+from ..execution.cancellation import CancellationToken
+from ..execution.context import RunContext
+from ..execution.run import (
     RunErrorInfo,
     RunResult,
 )
-from ..execution.store import RunTraceOps
-from ..execution.trace import SemanticTraceCollector
-from ..execution.models import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
 from ..model.recording import SemanticRecordingModel
+from ..execution.run import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
 from .dependencies import AgentDependencies
 from .models import (
     AgentCancelled,
@@ -92,25 +90,21 @@ if TYPE_CHECKING:
 
     from pydantic_ai.toolsets import AbstractToolset
 
-    from ..capability.resolver import CapabilityResolver
-    from ..capability.models import CapabilityRuntimeOptions
-    from ..sandbox.protocols import Sandbox
-    from ..retrieval.retriever import Retriever
-    from ..memory.store import MemoryStore
+    from .capability.resolver import CapabilityResolver
+    from .capability.models import CapabilityRuntimeOptions
+    from ..tool.sandbox.protocols import Sandbox
+    from .retrieval.retriever import Retriever
+    from .memory.store import MemoryStore
     from ..observability.metrics import ObservabilityMetrics
     from ..observability.tracing import ObservabilitySink
-    from ..run.live_events import RunLiveEventSink, SecurityEventSink
+    from ..execution.live_events import RunLiveEventSink, SecurityEventSink
 
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _semantic_messages(messages: Any) -> tuple[Any, ...]:
-    values = []
-    for message in messages or ():
-        dump = getattr(message, "model_dump", None)
-        values.append(dump(mode="json") if dump is not None else message)
-    return tuple(values)
+    raise RuntimeError("semantic message codec must be injected")
 
 # Exception types that count as EXPECTED provider/model/tool failures for the
 # pure execution loop's outcome classification. Only these are turned into an
@@ -158,7 +152,8 @@ class AgentEngine:
         managed_tool_executor: Any = None,
         security_audit_failure_mode: Any = "fail_closed",
         pricing_provider: Any = None,
-        trace_store: "RunTraceOps | None" = None,
+        trace_collector: Any = None,
+        trace_codec: Any = None,
     ) -> None:
         self._middleware_pipeline = middleware_pipeline
         self._memory_store = memory_store
@@ -174,7 +169,8 @@ class AgentEngine:
         self._tool_executor_for_managed = managed_tool_executor
         self._security_audit_failure_mode = security_audit_failure_mode
         self._pricing_provider = pricing_provider
-        self._trace_store = trace_store
+        self._trace_collector = trace_collector
+        self._trace_codec = trace_codec
 
     def _span(self, name: str, *, attrs: "dict | None" = None):
         """Return an async context manager that opens an observability span when
@@ -223,6 +219,8 @@ class AgentEngine:
         cancellation: CancellationToken,
         live_events: "RunLiveEventSink",
         security_events: "SecurityEventSink",
+        trace_sequence: int = 0,
+        trace_collector: Any = None,
     ) -> AgentExecutionOutcome:
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- RunCoordinator
@@ -265,11 +263,7 @@ class AgentEngine:
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
         started = time.monotonic()
 
-        trace_collector = (
-            SemanticTraceCollector(context.run_id, self._trace_store)
-            if self._trace_store is not None
-            else None
-        )
+        trace_collector = trace_collector or self._trace_collector
 
         current_run = None
 
@@ -278,7 +272,7 @@ class AgentEngine:
             if current is None:
                 return ()
             try:
-                return _semantic_messages(current.all_messages())
+                return self._trace_codec.encode_model_messages(tuple(current.all_messages()))
             except Exception:
                 return ()
 
@@ -381,7 +375,7 @@ class AgentEngine:
                     and deps.sandbox is not None
                     and builtin_flag is not False
                 )
-                from ..capability.models import requires_capability_resolver
+                from .capability.models import requires_capability_resolver
 
                 requires_tools = requires_capability_resolver(
                     tools=(agent.spec.tools if not needs_default else ("builtin",)),
@@ -396,15 +390,15 @@ class AgentEngine:
                         "AgentEngine requires a GovernedToolInvoker for managed tool execution"
                     )
                 if requires_tools:
-                    from ..capability.exposure import CapabilityToolExposurePolicy
-                    from ..capability.provider import CapabilityContext
+                    from .capability.exposure import CapabilityToolExposurePolicy
+                    from .capability.provider import CapabilityContext
 
                     exposure = (
                         self._capability_options.tool_exposure
                         if self._capability_options is not None
                         else CapabilityToolExposurePolicy()
                     )
-                    from ..run.live_events import SecurityEventSinkEmitter
+                    from ..execution.live_events import SecurityEventSinkEmitter
 
                     # The security/observability emitter for this Run is built
                     # from the injected SecurityEventSink (durable, RunCoordinator-
@@ -427,7 +421,7 @@ class AgentEngine:
                         workspace=context.workspace,
                     )
                     if needs_default:
-                        from ..agent.spec import ToolRef as _TR
+                        from .spec import ToolRef as _TR
 
                         effective_spec = dataclasses.replace(
                             agent.spec,
@@ -438,7 +432,7 @@ class AgentEngine:
                     cap_bundle = await self._capability_resolver.resolve(
                         effective_spec, cap_ctx
                     )
-                    from ..capability.resolver import contribution_descriptors
+                    from .capability.resolver import contribution_descriptors
 
                     descriptor_lookup = {
                         d.name: d
@@ -520,6 +514,7 @@ class AgentEngine:
                     iter_model = SemanticRecordingModel(
                         iter_model or agent.pydantic_agent.model,
                         trace_collector,
+                        self._trace_codec,
                     )
                 if message_history is not None:
                     run_iter = agent.pydantic_agent.iter(
@@ -664,7 +659,7 @@ class AgentEngine:
                                 if trace_collector is not None:
                                     snapshot = await _snapshot(
                                         ExecutionRunStatus.PAUSED,
-                                        messages=_semantic_messages(run.all_messages()),
+                                        messages=self._trace_codec.encode_model_messages(tuple(run.all_messages())),
                                     )
                                 # The engine does NOT publish a "paused" state
                                 # event: per the state-event split, state events
@@ -767,7 +762,7 @@ class AgentEngine:
                 if trace_collector is not None:
                     snapshot = await _snapshot(
                         ExecutionRunStatus.COMPLETED,
-                        messages=_semantic_messages(run.all_messages()),
+                        messages=self._trace_codec.encode_model_messages(tuple(run.all_messages())),
                         final_output=output,
                         usage=ExecutionRunUsage(
                             input_tokens=usage.input_tokens if usage else 0,

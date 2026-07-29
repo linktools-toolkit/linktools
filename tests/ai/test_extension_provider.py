@@ -6,18 +6,18 @@ catalog-only for `extension:`, read tools for `extension-asset:`, list tool for
 
 import pytest
 
-from linktools.ai.capability.exposure import CapabilityToolExposurePolicy
-from linktools.ai.capability.provider import CapabilityContext
-from linktools.ai.capability.models import CapabilityRef
+from linktools.ai.agent.capability.exposure import CapabilityToolExposurePolicy
+from linktools.ai.agent.capability.provider import CapabilityContext
+from linktools.ai.agent.capability.models import CapabilityRef
 from linktools.ai.errors import ExtensionContentAccessDeniedError, ExtensionNotFoundError
-from linktools.ai.extension.capability_provider import ExtensionProvider
-from linktools.ai.extension.provider import DirectoryExtensionContentSource
-from linktools.ai.extension.resolver import (
+from linktools.ai.agent.extension.capability_provider import ExtensionProvider
+from linktools.ai.agent.extension.provider import DirectoryExtensionContentSource
+from linktools.ai.agent.extension.resolver import (
     DirectoryEntrypointResolver,
     DirectoryExtensionRegistry,
     ExtensionRegistry,
 )
-from linktools.ai.extension.scope import ExtensionScope
+from linktools.ai.agent.extension.scope import ExtensionScope
 
 
 @pytest.fixture
@@ -145,11 +145,11 @@ def test_directory_extension_registry_alias():
 async def test_extension_registry_implements_content_source(tmp_path):
     # contract: ExtensionRegistry satisfies BOTH ExtensionSpecProvider and
     # ExtensionContentSource.
-    from linktools.ai.extension.spec import (
+    from linktools.ai.agent.extension.spec import (
         ExtensionContentSource,
         ExtensionSpecProvider,
     )
-    from linktools.ai.extension.resolver import ExtensionRegistry
+    from linktools.ai.agent.extension.resolver import ExtensionRegistry
 
     root = tmp_path / "skill-creator"
     root.mkdir()
@@ -157,8 +157,8 @@ async def test_extension_registry_implements_content_source(tmp_path):
     reg = ExtensionRegistry(tmp_path)
     assert isinstance(reg, ExtensionSpecProvider)
     assert isinstance(reg, ExtensionContentSource)
-    from linktools.ai.extension.scope import ExtensionScope
-    from linktools.ai.extension.content import ExtensionContentRef
+    from linktools.ai.agent.extension.scope import ExtensionScope
+    from linktools.ai.agent.extension.content import ExtensionContentRef
 
     content = await reg.read_content(
         ExtensionContentRef(scope=ExtensionScope("skill-creator"), path="SKILL.md")

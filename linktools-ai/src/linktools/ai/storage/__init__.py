@@ -1,25 +1,62 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Storage infrastructure and reusable content primitives."""
+"""Shared storage primitives and SQL conventions for domain stores."""
 
-from .cache import (
-    ContentCache,
-    ContentCacheKey,
-    FilesystemContentCache,
-    MemoryContentCache,
-    TieredContentCache,
+from .json import JsonScalar, JsonValue, canonical_json_bytes, decode_json, encode_json, normalize_json
+from .local.files import atomic_write_bytes, atomic_write_json, read_bytes, read_json
+from .local.paths import StoragePath, Sha256Digest, StorageId, safe_child
+from .composition import (
+    StorageAdapter,
+    StorageCacheAdapter,
+    StorageComposition,
+    StorageInitializer,
 )
-from .revision import MetadataSnapshot, MetadataState, RevisionSource, SnapshotRequired, VersionedMetadataRepository
+from .revision import (
+    ChangeSource,
+    CompositeRevisionSource,
+    MetadataSnapshot,
+    RevisionCache,
+    RevisionCacheCodec,
+    RevisionCacheSource,
+    RevisionSource,
+)
+from .multi import (
+    BatchStorageReader,
+    MultiBackend,
+    OverlayRefreshPolicy,
+    StorageLayer,
+    StorageReader,
+    StorageWriter,
+)
 
 __all__ = [
-    "ContentCache",
-    "ContentCacheKey",
-    "FilesystemContentCache",
-    "MemoryContentCache",
-    "TieredContentCache",
+    "StoragePath",
+    "BatchStorageReader",
+    "MultiBackend",
+    "JsonScalar",
+    "JsonValue",
+    "Sha256Digest",
+    "StorageId",
+    "StorageComposition",
+    "StorageAdapter",
+    "StorageCacheAdapter",
+    "StorageInitializer",
+    "StorageLayer",
+    "StorageReader",
+    "StorageWriter",
+    "OverlayRefreshPolicy",
+    "ChangeSource",
+    "CompositeRevisionSource",
     "MetadataSnapshot",
-    "MetadataState",
     "RevisionSource",
-    "SnapshotRequired",
-    "VersionedMetadataRepository",
+    "RevisionCache",
+    "RevisionCacheCodec",
+    "RevisionCacheSource",
+    "atomic_write_bytes",
+    "atomic_write_json",
+    "canonical_json_bytes",
+    "decode_json",
+    "encode_json",
+    "normalize_json",
+    "read_bytes",
+    "read_json",
+    "safe_child",
 ]

@@ -4,11 +4,8 @@
 
 - ``TABLE_PREFIX``: the unified table-name prefix (every ``__tablename__``
   routes through it).
-- ``TimestampMixin``: the built-in ``created_at`` / ``updated_at`` columns with
-  a ``CURRENT_TIMESTAMP`` server default (valid on SQLite and MySQL 5.6.5+).
-  ``updated_at`` additionally renders ``ON UPDATE CURRENT_TIMESTAMP`` under the
-  MySQL dialect only, via the marker type below; SQLite/Postgres render a plain
-  ``DATETIME`` so ``create_all`` works there unchanged.
+- ``OnUpdateDateTime``: the marker used by the shared declarative ``Base`` for
+  ``updated_at``.
 - ``sha256_hash``: 32-byte digest used as the uniqueness carrier for wide
   natural keys (commit_id, scope+key, job_id+key) -- mirrors the storage
   kernel's ``key_hash`` pattern.
@@ -16,11 +13,8 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
-
-from sqlalchemy import BigInteger, DateTime, Index, Integer, text
+from sqlalchemy import BigInteger, DateTime, Index, Integer
 from sqlalchemy.ext.compiler import compiles
-from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.schema import CreateIndex
 
 TABLE_PREFIX = "ai_"
@@ -68,42 +62,30 @@ def timestamp_indexes() -> tuple:
     )
 
 
-class _OnUpdateDateTime(DateTime):
+class OnUpdateDateTime(DateTime):
     """DateTime that appends ``ON UPDATE CURRENT_TIMESTAMP`` under MySQL and
     renders as a plain DateTime everywhere else. ``inherit_cache`` is set so
     SQLAlchemy's compilation cache keys on the type correctly."""
     inherit_cache = True
 
 
-@compiles(_OnUpdateDateTime)
+@compiles(OnUpdateDateTime)
 def _onupdate_datetime_default(element, compiler, **kw):  # noqa: D401
     # SQLite / Postgres / others: plain DATETIME -- no ON UPDATE clause.
     return compiler.visit_DATETIME(element, **kw)
 
 
-@compiles(_OnUpdateDateTime, "mysql")
+@compiles(OnUpdateDateTime, "mysql")
 def _onupdate_datetime_mysql(element, compiler, **kw):  # noqa: D401
     # MySQL: the ON UPDATE clause is valid in the type-modifier position
     # (``col DATETIME ON UPDATE CURRENT_TIMESTAMP DEFAULT CURRENT_TIMESTAMP``).
     return compiler.visit_DATETIME(element, **kw) + " ON UPDATE CURRENT_TIMESTAMP"
 
 
-class TimestampMixin:
-    """Built-in created_at + updated_at. Both NOT NULL with a
-    CURRENT_TIMESTAMP server default; updated_at auto-refreshes on MySQL."""
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        nullable=False,
-        comment="Created at",
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        _OnUpdateDateTime(timezone=True),
-        server_default=text("CURRENT_TIMESTAMP"),
-        nullable=False,
-        comment="Updated at",
-    )
-
-
-__all__: "list[str]" = ["TABLE_PREFIX", "BIGSERIAL", "TimestampMixin", "sha256_hash", "timestamp_indexes"]
+__all__ = [
+    "BIGSERIAL",
+    "OnUpdateDateTime",
+    "TABLE_PREFIX",
+    "sha256_hash",
+    "timestamp_indexes",
+]

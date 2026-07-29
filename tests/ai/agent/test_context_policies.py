@@ -10,10 +10,10 @@ from linktools.ai.agent.context_policies import (
     DefaultMemoryPolicy,
     DefaultRetrievalPolicy,
 )
-from linktools.ai.retrieval.scope import RetrievalScope
-from linktools.ai.memory.scope import MemoryScope
-from linktools.ai.run.context import RunContext
-from linktools.ai.run.models import RunnableType
+from linktools.ai.agent.retrieval.scope import RetrievalScope
+from linktools.ai.agent.memory.scope import MemoryScope
+from linktools.ai.execution.context import RunContext
+from linktools.ai.execution.run import RunnableType
 
 
 def _ctx(*, tenant_id=None, user_id=None, session_id="sess-1", workspace_key=None):
