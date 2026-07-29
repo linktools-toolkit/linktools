@@ -258,18 +258,16 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         pass
 
     @subcommand("up", help="deploy this container")
-    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    def on_exec_up(self, build: bool = True, pull: bool = False):
-        return _actions.up(self, build=build, pull=pull)
+    def on_exec_up(self, pull: bool = False):
+        return _actions.up(self, pull=pull)
 
     @subcommand("restart", help="restart this container")
-    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    def on_exec_restart(self, build: bool = True, pull: bool = False):
-        return _actions.restart(self, build=build, pull=pull)
+    def on_exec_restart(self, pull: bool = False):
+        return _actions.restart(self, pull=pull)
 
     @subcommand("down", help="stop this container")
     def on_exec_down(self):

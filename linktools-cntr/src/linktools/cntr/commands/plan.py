@@ -44,12 +44,12 @@ def render_plan(logger, plan: "ExecutionPlan") -> None:
         logger.info("[WARN] %s" % warning)
 
 
-def maybe_dry_run(manager, logger, action, names=None, build=True, pull=False, dry_run=False, as_json=False):
+def maybe_dry_run(manager, logger, action, names=None, pull=False, dry_run=False, as_json=False):
     if as_json and not dry_run:
         raise ContainerError("--json requires --dry-run")
     if not dry_run:
         return False
-    plan = manager.planner.plan(action, names=names, build=build, pull=pull)
+    plan = manager.planner.plan(action, names=names, pull=pull)
     if as_json:
         print(json.dumps(_plan_to_dict(plan), indent=2, sort_keys=True))
     else:

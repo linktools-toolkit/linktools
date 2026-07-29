@@ -69,6 +69,14 @@ def load_docker_compose(container: "BaseContainer") -> "dict[str, Any] | None":
                         if isinstance(build, dict):
                             build.setdefault("context", str(container.get_docker_context_path()))
                             build.setdefault("dockerfile", str(dockerfile))
+                if service.get("build") is not None and service.get("image") is None:
+                    # Compose uses this image as the stable local result of a
+                    # build.  An explicit image remains authoritative in the
+                    # model and is never replaced.
+                    service["image"] = container.get_service_name(name)
+                if "image" in service and service["image"] == "":
+                    from ..container import ContainerError
+                    raise ContainerError(f"Service `{name}` has an empty image")
                 if "env_file" not in service:
                     path = container.get_source_path(".env")
                     if path and os.path.exists(path):

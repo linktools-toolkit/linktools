@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from ..artifacts import collect_candidates, sha256_of
 from ..container import ContainerError
 from ..lifecycle.hooks import HookPhase
+from ..runtime.compose import ComposeOptions
 from ..runtime.structured import redact_command
 from .model import ExecutionPlan, PlannedArtifact, PlannedCommand, PlannedHook
 
@@ -45,7 +46,6 @@ class ExecutionPlanner:
             self,
             action: str,
             names: "list[str] | None" = None,
-            build: bool = True,
             pull: bool = False,
     ) -> "ExecutionPlan":
         if action not in ("up", "restart", "down"):
@@ -80,10 +80,7 @@ class ExecutionPlanner:
         if action == "restart":
             commands.append(self._planned_command("stop", [*file_args, "stop", *services]))
         if action in ("up", "restart"):
-            options = manager.compose_operations.build_options(action, selection, build, pull)
-            if build:
-                commands.append(self._planned_command(
-                    "build", [*file_args, *manager.compose_runner.build_args(options)]))
+            options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
             commands.append(self._planned_command(
                 "up", [*file_args, *manager.compose_runner.up_args(options)]))
         elif action == "down":

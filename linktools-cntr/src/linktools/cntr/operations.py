@@ -106,41 +106,29 @@ class ComposeOperations:
         context.is_full_containers = selection.full
         return context
 
-    def build_options(
-            self, action: str, selection: ComposeSelection, build: bool, pull: bool,
-    ) -> ComposeOptions:
-        """The exact ``ComposeOptions`` ``up``/``restart`` build for this
-        action -- shared with ``ExecutionPlanner`` so a plan can never drift
-        from what actually runs. ``down`` never builds a ComposeOptions at
-        all (it doesn't build/pull/up anything)."""
-        if action == "restart":
-            # restart omits the --pull=false / --pull missing defaults that
-            # `up` emits, and (unlike `up`/`exec up`/`exec restart`) never
-            # includes proxy --build-args.
-            return ComposeOptions(
-                build=build, pull=pull, remove_orphans=selection.full,
-                services=list(selection.services), emit_default_pull=False, include_proxy_build_args=False,
-            )
-        return ComposeOptions(
-            build=build, pull=pull, remove_orphans=selection.full,
-            services=list(selection.services), emit_default_pull=True,
-        )
-
-    def up(self, names: "Sequence[str] | None" = None, build: bool = True, pull: bool = False,
+    def up(self, names: "Sequence[str] | None" = None, pull: bool = False,
           report: bool = False) -> None:
         manager = self.manager
         selection = self.select(names)
-        context = self._make_context(["up", pull and "pull", build and "build"], selection)
-        options = self.build_options("up", selection, build, pull)
+        context = self._make_context(["up", pull and "pull"], selection)
+        options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
 
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)
 
         with manager.lifecycle.notify_start(context):
-            if build:
-                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(options)),
+            model = manager.compose_runner.final_model(context)
+            preparation = manager.image_preparer
+            image_plan = preparation.plan(model, selection.services, force_pull=pull)
+            if image_plan.pull:
+                with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
                                   container=container_scope, logger=manager.logger):
-                    manager.compose_runner.build(context, options)
+                    manager.compose_runner.pull(context, image_plan.pull)
+            if image_plan.build:
+                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
+                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
+                                  container=container_scope, logger=manager.logger):
+                    manager.compose_runner.build(context, build_options)
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.up(context, options)
@@ -158,12 +146,12 @@ class ComposeOperations:
         if report:
             render_report(manager.logger, get_records(context))
 
-    def restart(self, names: "Sequence[str] | None" = None, build: bool = True, pull: bool = False,
+    def restart(self, names: "Sequence[str] | None" = None, pull: bool = False,
                report: bool = False) -> None:
         manager = self.manager
         selection = self.select(names)
-        context = self._make_context(["restart", pull and "pull", build and "build"], selection)
-        options = self.build_options("restart", selection, build, pull)
+        context = self._make_context(["restart", pull and "pull"], selection)
+        options = ComposeOptions(remove_orphans=selection.full, services=list(selection.services))
 
         container_scope = None if context.is_full_containers else ",".join(
             c.name for c in context.target_containers)
@@ -180,10 +168,18 @@ class ComposeOperations:
             manager.running_state.mark_stopped(context)
 
         with manager.lifecycle.notify_start(context):
-            if build:
-                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(options)),
+            model = manager.compose_runner.final_model(context)
+            preparation = manager.image_preparer
+            image_plan = preparation.plan(model, selection.services, force_pull=pull)
+            if image_plan.pull:
+                with record_phase(context, "pull", command=tuple(manager.compose_runner.pull_args(image_plan.pull)),
                                   container=container_scope, logger=manager.logger):
-                    manager.compose_runner.build(context, options)
+                    manager.compose_runner.pull(context, image_plan.pull)
+            if image_plan.build:
+                build_options = manager.compose_runner.options_for_build(image_plan.build, pull=pull)
+                with record_phase(context, "build", command=tuple(manager.compose_runner.build_args(build_options)),
+                                  container=container_scope, logger=manager.logger):
+                    manager.compose_runner.build(context, build_options)
             with record_phase(context, "up", command=tuple(manager.compose_runner.up_args(options)),
                               container=container_scope, logger=manager.logger):
                 manager.compose_runner.up(context, options)

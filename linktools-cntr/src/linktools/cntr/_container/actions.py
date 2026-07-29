@@ -18,27 +18,24 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
 
 
-def up(container: "BaseContainer", build: bool = True, pull: bool = False):
-    context = container._make_exec_context(["up", pull and "pull", build and "build"])
+def up(container: "BaseContainer", pull: bool = False):
+    context = container._make_exec_context(["up", pull and "pull"])
     services = container.compose_runner.collect_services(context)
     # exec never emitted default --pull flags -> emit_default_pull=False.
-    options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
-
     with container.lifecycle.notify_start(context):
-        if build:
-            container.compose_runner.build(context, options)
-        container.compose_runner.up(context, options)
+        model = container.compose_runner.final_model(context)
+        container.manager.image_preparer.execute(
+            context, model, services, force_pull=pull)
+        container.compose_runner.up(context, ComposeOptions(services=services))
         # Recorded immediately after up succeeds, still inside this `with`
         # (before notify_start's on_started/AFTER_START hooks) -- see
         # operations.ComposeOperations.up's identical comment for why.
         container.running_state.mark_started(context)
 
 
-def restart(container: "BaseContainer", build: bool = True, pull: bool = False):
-    context = container._make_exec_context(["restart", pull and "pull", build and "build"])
+def restart(container: "BaseContainer", pull: bool = False):
+    context = container._make_exec_context(["restart", pull and "pull"])
     services = container.compose_runner.collect_services(context)
-    options = ComposeOptions(build=build, pull=pull, services=services, emit_default_pull=False)
-
     with container.lifecycle.notify_stop(context):
         container.compose_runner.stop(context, services)
         # If build/up below then fails, persisted state must reflect that
@@ -46,9 +43,10 @@ def restart(container: "BaseContainer", build: bool = True, pull: bool = False):
         container.running_state.mark_stopped(context)
 
     with container.lifecycle.notify_start(context):
-        if build:
-            container.compose_runner.build(context, options)
-        container.compose_runner.up(context, options)
+        model = container.compose_runner.final_model(context)
+        container.manager.image_preparer.execute(
+            context, model, services, force_pull=pull)
+        container.compose_runner.up(context, ComposeOptions(services=services))
         container.running_state.mark_started(context)
 
 

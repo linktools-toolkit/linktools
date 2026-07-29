@@ -130,7 +130,6 @@ class Command(StatusCommands, BaseCommandGroup):
         self.logger.info(f"Remove {', '.join(result)} success")
 
     @subcommand("up", order=ROOT_COMMAND_ORDER["up"], help="deploy installed containers")
-    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
@@ -141,16 +140,15 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_up(self, names: "list[str]" = None, build: bool = True, pull: str = False,
+    def on_command_up(self, names: "list[str]" = None, pull: str = False,
                       dry_run: bool = False, report: bool = False, as_json: bool = False):
-        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, build=build, pull=pull, dry_run=dry_run, as_json=as_json):
+        if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run, as_json=as_json):
             return
         # Root `up` and `compose` (final-model rendering) share one
         # implementation (ComposeOperations) so they cannot drift from each other.
-        _shared.manager.compose_operations.up(names=names, build=build, pull=pull, report=report)
+        _shared.manager.compose_operations.up(names=names, pull=pull, report=report)
 
     @subcommand("restart", order=ROOT_COMMAND_ORDER["restart"], help="restart installed containers")
-    @subcommand_argument("--build", action=BooleanOptionalAction, help="build images before starting")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,
@@ -161,12 +159,12 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_restart(self, names: "list[str]" = None, build: bool = True, pull: str = False,
+    def on_command_restart(self, names: "list[str]" = None, pull: str = False,
                            dry_run: bool = False, report: bool = False, as_json: bool = False):
-        if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, build=build, pull=pull,
+        if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, pull=pull,
                          dry_run=dry_run, as_json=as_json):
             return
-        _shared.manager.compose_operations.restart(names=names, build=build, pull=pull, report=report)
+        _shared.manager.compose_operations.restart(names=names, pull=pull, report=report)
 
     @subcommand("down", order=ROOT_COMMAND_ORDER["down"], help="stop installed containers")
     @subcommand_argument("--dry-run", dest="dry_run", action="store_true", default=False,

@@ -6,14 +6,8 @@ Both the CLI (``ct-cntr up/restart/down``) and the per-container ``exec``
 subcommands build the same kind of ``docker compose`` argument lists. This
 module centralizes that assembly so the two paths cannot drift.
 
-Two behavioral subtleties, each captured by a ``ComposeOptions`` flag so every
-caller reproduces its own exact arguments:
-
-- when ``--pull`` is not requested, CLI ``up`` still emits ``--pull=false``
-  (to build) and ``--pull missing`` (to up); ``restart`` and ``exec`` emit
-  nothing (``emit_default_pull``).
-- CLI ``up`` and both ``exec up``/``exec restart`` include proxy
-  ``--build-arg``s; CLI ``restart`` never did (``include_proxy_build_args``).
+Proxy build arguments and action-specific command options are centralized here
+so root, restart, and per-container execution share one command builder.
 """
 import os
 from dataclasses import dataclass, field
@@ -32,12 +26,11 @@ _PROXY_ENV_KEYS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
 class ComposeOptions:
     """Resolved options for a single compose build/up invocation."""
 
-    build: bool = True
     pull: bool = False
     remove_orphans: bool = False
     services: "list[str]" = field(default_factory=list)
-    # Only CLI ``up`` emits --pull=false / --pull missing when ``pull`` is False.
-    # ``restart`` and ``exec`` emit no pull flags in that case.
+    # Compatibility field for callers constructing options; preparation owns
+    # all pull decisions now.
     emit_default_pull: bool = False
     # CLI `up` and both `exec up`/`exec restart` include proxy --build-args;
     # CLI `restart` deliberately never did.
@@ -80,8 +73,6 @@ class ComposeRunner:
         args: "list[str]" = ["build"]
         if options.pull:
             args.append("--pull")
-        elif options.emit_default_pull:
-            args.append("--pull=false")
         if options.include_proxy_build_args:
             args.extend(self.collect_proxy_build_args())
         args.extend(options.services)
@@ -89,10 +80,7 @@ class ComposeRunner:
 
     def up_args(self, options: ComposeOptions) -> "list[str]":
         args: "list[str]" = ["up", "--detach", "--no-build"]
-        if options.pull:
-            args.extend(["--pull", "always"])
-        elif options.emit_default_pull:
-            args.extend(["--pull", "missing"])
+        args.extend(["--pull", "never"])
         if options.remove_orphans:
             args.append("--remove-orphans")
         args.extend(options.services)
@@ -102,6 +90,30 @@ class ComposeRunner:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.build_args(options)
         ).check_call()
+
+    def pull_args(self, services):
+        return ["pull", "--ignore-buildable", *services]
+
+    def pull(self, context: "EventContext", services):
+        return self.manager.runtime.create_docker_compose_process(
+            context.containers, *self.pull_args(services)
+        ).check_call()
+
+    def options_for_build(self, services, pull=False):
+        return ComposeOptions(pull=pull, services=list(services),
+                              emit_default_pull=False)
+
+    def final_model(self, context: "EventContext"):
+        result = self.manager.structured_runner.execute_json(
+            self.manager.runtime.create_docker_compose_process(
+                context.containers, *self.config_args(output_format="json"),
+                capture_output=True,
+            ), check=True,
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("services"), dict):
+            from ..container import ContainerError
+            raise ContainerError("Docker Compose returned an invalid final model")
+        return result
 
     def up(self, context: "EventContext", options: ComposeOptions):
         return self.manager.runtime.create_docker_compose_process(

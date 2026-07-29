@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .runtime.process import RuntimeProcessFactory
     from .runtime.structured import StructuredCommandRunner
     from .runtime.inspect import DockerInspector
+    from .runtime.images import ImagePreparer
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .lifecycle.hooks import HookListView, HookRegistry
     from .state.running import RunningStateStore
@@ -276,6 +277,11 @@ class ContainerManager:
     def docker_inspector(self) -> "DockerInspector":
         from .runtime.inspect import DockerInspector
         return DockerInspector(self)
+
+    @cached_property
+    def image_preparer(self) -> "ImagePreparer":
+        from .runtime.images import ImagePreparer
+        return ImagePreparer(self)
 
     @cached_property
     def artifact_index(self) -> "ArtifactIndex":
