@@ -1,6 +1,7 @@
 """The only runtime composition root."""
 
 from ..errors import StorageCapabilityError
+from ..agent.compiler import AgentCompiler
 from ..execution.persistence.local import LocalExecutionBackend
 from ..model.resolver import ModelResolver
 from .dependencies import RuntimeDependencies
@@ -8,7 +9,7 @@ from .facade import Runtime
 from .requirements import RuntimeRequirements, RuntimeTopology
 from .storage import RuntimeStorage
 from ..execution.query import ExecutionQueryService
-from .executor import RuntimeExecutor
+from ..execution.service import ExecutionService
 
 
 def build_runtime(*, storage: RuntimeStorage, dependencies: RuntimeDependencies | None = None, requirements: RuntimeRequirements = RuntimeRequirements(), model_resolver: ModelResolver | None = None) -> Runtime:
@@ -23,7 +24,8 @@ def build_runtime(*, storage: RuntimeStorage, dependencies: RuntimeDependencies 
         raise StorageCapabilityError("memory is required but no memory store was configured")
     if requirements.artifacts and storage.artifacts is None:
         raise StorageCapabilityError("artifacts are required but no artifact store was configured")
-    executor = RuntimeExecutor(storage.execution, dependencies.model_resolver)
+    compiler = AgentCompiler(model_resolver=dependencies.model_resolver)
+    executor = ExecutionService(storage.execution, compiler)
     return Runtime(executor, ExecutionQueryService(storage.execution))
 
 

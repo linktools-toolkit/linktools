@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 from sqlalchemy import BigInteger, DateTime, Index, Integer
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.schema import CreateIndex
@@ -52,6 +53,15 @@ def sha256_hash(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
 
 
+def as_utc(value: "datetime | None") -> "datetime | None":
+    # SQLite (aiosqlite) round-trips datetimes as naive values regardless of
+    # the tzinfo they were stored with, so reattach UTC on read to match the
+    # timezone-aware datetimes every domain constructs elsewhere.
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
 def timestamp_indexes() -> tuple:
     """A fresh ``(ix_updated_at, ix_created_at)`` pair for a table's
     ``__table_args__``. Returns new Index instances on each call so they bind
@@ -86,6 +96,7 @@ __all__ = [
     "BIGSERIAL",
     "OnUpdateDateTime",
     "TABLE_PREFIX",
+    "as_utc",
     "sha256_hash",
     "timestamp_indexes",
 ]

@@ -10,6 +10,14 @@ class LinktoolsAIError(Exception):
     """Base class for every error raised by linktools.ai."""
 
 
+class JsonEncodingError(TypeError):
+    """Raised when a value cannot be normalized to canonical JSON.
+
+    Subclasses TypeError so callers that catch the generic JSON-conversion
+    TypeError (and ``pytest.raises(TypeError)``) keep working, while the name
+    makes the failure explicit at the persistence boundary."""
+
+
 class RuntimeInitializationError(LinktoolsAIError):
     """The runtime cannot safely initialize a required component."""
 

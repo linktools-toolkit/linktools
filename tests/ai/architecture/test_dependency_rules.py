@@ -2,16 +2,11 @@
 # -*- coding: utf-8 -*-
 """dependency-direction guards.
 
-The refactor establishes one-way dependency directions between top-level
-packages. records the *current* structure and the rules that already
-hold, plus the one known violation must repair (``task`` reaching into
-``security`` for the identity value types). As phases land, promote rules from
-``TARGET_RULES_NOT_YET_ENFORCED`` into ``FORBIDDEN_IMPORTS``.
-
 A "rule" maps a top-level package (the importer, under
 ``linktools/ai/<pkg>/``) to the set of other top-level packages it must not
 import. The check is AST-based: only ``import x.y`` and ``from x.y import z``
-statements are considered, and the importer's own sub-tree never counts as a
+statements are considered (including relative imports, resolved against the
+importing file's location), and the importer's own sub-tree never counts as a
 self-dependency.
 """
 
@@ -26,52 +21,28 @@ _REPO = Path(__file__).resolve().parents[3]
 _AI = _REPO / "linktools-ai" / "src" / "linktools" / "ai"
 
 # Importer top-level package -> set of forbidden top-level package names.
-# These hold on the baseline and must continue to hold.
 FORBIDDEN_IMPORTS: "dict[str, set[str]]" = {
-    # identity value types (PrincipalContext/ActorRef/ScopeSet) must not reach
-    # into any downstream domain. They are the canonical owner; everything
-    # else imports them. Enforced since .
-    "identity": {"jobs", "run", "agent", "storage"},
-    # governance (security + policy, converged ) must not depend
-    # on the jobs domain (task.py -> jobs). Held since before the
-    # refactor; made it structural by removing the
-    # security.principal -> task.models link entirely.
-    "governance": {"jobs"},
-    # jobs must not reach into the runtime build internals -- it only depends
-    # on the narrow TaskRunDispatcher Protocol at the handler boundary.
-    # Enforced since (task -> jobs pure rename).
-    "jobs": {"runtime"},
-    # The artifact and asset domains are fully decoupled. The
-    # artifact facade depends only on the ArtifactBlobStore /
-    # ArtifactRecordStore Protocols; the filesystem + SQLAlchemy reference
-    # adapters live in the storage layer, so neither domain names the other.
-    "artifact": {"asset", "jobs"},
-    "asset": {"artifact"},
-    # : storage is a bottom-layer dependency -- it must not reach up into
-    # runtime (the outermost assembly), catalog, or capability. A backend is
-    # injected INTO storage; storage never imports those layers.
-    "storage": {"runtime", "catalog", "capability"},
-    # : catalog does not depend on runtime (it is a config layer consumed
-    # BY runtime, not the reverse).
-    "catalog": {"runtime"},
-    # NOTE: the rule "capability must not import a concrete storage
-    # backend (filesystem/sqlalchemy/sqlite/coordination)" is NOT here -- this
-    # map's matcher normalizes to top-level packages, and capability legitimately
-    # imports ``storage.protocols`` (top-level ``storage``). That rule is
-    # enforced structurally by test_architecture_section_7_6's
-    # test_domains_do_not_import_concrete_storage_backends, which checks the
-    # concrete subpackages specifically.
+    # storage is the bottom-layer dependency: it must not reach up into any
+    # business domain. A backend is injected INTO storage; storage never
+    # imports those layers.
+    "storage": {
+        "agent", "artifact", "execution", "governance", "model",
+        "observability", "runtime", "spec", "tasks", "tool",
+    },
+    # spec does not import runtime, execution, or agent.
+    "spec": {"runtime", "execution", "agent"},
+    # runtime/facade only imports ExecutionService, ExecutionQueryService, and
+    # public DTOs -- never a concrete Store or the compiler/engine directly.
+    # Enforced precisely (not just at package granularity) by
+    # test_architecture_section_7_6; the package-level rule here additionally
+    # guards that agent/execution never import runtime at all -- only runtime
+    # may reach into every composition dependency.
+    "agent": {"runtime"},
+    "execution": {"runtime"},
+    "tool": {"runtime"},
+    "tasks": {"runtime"},
+    "governance": {"runtime"},
 }
-
-
-# Rules defines for the END state. They are documented here so
-# the target is captured in code; each is enforced the moment its phase lands.
-# Format: (importer_pkg, forbidden_pkg, phase_that_enforces).
-TARGET_RULES_NOT_YET_ENFORCED: "list[tuple[str, str, str]]" = [
-    ("asset", "runtime", "Phase 3"),
-    ("events", "runtime", "Phase 2"),
-    ("governance", "agent", "Phase 6"),
-]
 
 
 def _top_level_packages() -> "set[str]":
@@ -85,17 +56,14 @@ def _top_level_packages() -> "set[str]":
 def _imports_in(file_path: Path) -> "set[str]":
     """Top-level ``linktools.ai.<x>`` packages imported by this file.
 
-    Resolves relative imports (``from ..jobs.models import X``) against the
-    file's location, so a forbidden dep cannot slip in via a dotted-relative
-    form that the absolute-import-only check would miss.
+    Resolves relative imports (``from ..execution.domain import X``) against
+    the file's location, so a forbidden dep cannot slip in via a dotted-
+    relative form that an absolute-import-only check would miss.
     """
     try:
         tree = ast.parse(file_path.read_text(encoding="utf-8"))
     except (SyntaxError, OSError, UnicodeDecodeError):
         return set()
-    # Resolve relative imports against the file's package. For a module
-    # ``linktools.ai.<pkg>.mod`` the base is its containing package; for a
-    # package's ``__init__`` the base is the package itself.
     rel = file_path.relative_to(_AI).with_suffix("")
     is_init = rel.name == "__init__"
     if is_init:
@@ -113,7 +81,6 @@ def _imports_in(file_path: Path) -> "set[str]":
                 if node.module:
                     roots.add(node.module)
             else:
-                # level=1 -> base_pkg; each extra level climbs one parent.
                 base = base_pkg
                 for _ in range(node.level - 1):
                     if "." in base:
@@ -124,9 +91,6 @@ def _imports_in(file_path: Path) -> "set[str]":
                 if node.module:
                     roots.add(f"{base}.{node.module}")
                 else:
-                    # ``from .. import name`` form: each name is a submodule
-                    # of the resolved base. Treat them as such so a forbidden
-                    # package cannot slip in via the name-only form.
                     for alias in node.names:
                         roots.add(f"{base}.{alias.name}")
     out: "set[str]" = set()
@@ -167,16 +131,6 @@ def test_forbidden_dependency_directions_hold(importer: str) -> None:
     )
 
 
-def test_target_dependency_rules_are_documented() -> None:
-    """The end-state rules are captured so they can be promoted as phases land.
-
-    This always passes at ; it exists to keep the target visible and to
-    fail loudly if a documented rule is silently dropped. When a phase enforces
-    a rule, move its entry into FORBIDDEN_IMPORTS and delete it here.
-    """
-    assert TARGET_RULES_NOT_YET_ENFORCED, "target rules should be non-empty until Phase 9"
-
-
 def _two_cycles() -> "set[tuple[str, str]]":
     """All 2-cycles (A imports B AND B imports A) between top-level packages."""
     pkgs = _top_level_packages()
@@ -194,61 +148,52 @@ def _two_cycles() -> "set[tuple[str, str]]":
     return cycles
 
 
-# Top-level 2-cycles still present today. Each is a dependency debt the refactor
-# retires (governance/tool split, runtime/run convergence, asset/artifact
-# separation, etc.). Ratchet downward as phases land; the target is an empty
-# set. New cycles must not appear.
+# Top-level 2-cycles present today, each a deliberate cross-wiring rather than
+# debt:
 #
-# Tuples are stored in sorted form because ``_two_cycles`` normalizes every
-# cycle via ``tuple(sorted(...))`` -- a non-sorted literal can never match and
-# is silently dead weight. The Catalog migration already retired three
-# cycles that earlier baselines carried: ``mcp <-> registry`` (domains now
-# import one-way from catalog/*; the registry/*.py shims import the domain
-# homes, not vice-versa), ``storage <-> task`` (the implicit storage.assets
-# fallback was deleted in ), and ``policy <-> registry`` (policy
-# now imports tool.catalog directly instead of registry.tool).
+# - (agent, execution): execution/service.py compiles specs via
+#   agent.compiler/agent.engine (the execution service is explicitly permitted
+#   to depend on the agent compiler/engine); agent/models.py and
+#   agent/engine.py reference execution.domain's RunErrorInfo/RunResult and
+#   execution.context.RunContext as the agent-outcome/context boundary types.
+# - (agent, governance): agent's security/sandbox capability wiring reaches
+#   governance's policy/security types; governance's only reference back is a
+#   TYPE_CHECKING-only annotation (agent.capability.exposure), not a runtime
+#   dependency.
+# - (agent, tool): agent compiles tool policy capabilities from tool.pydantic;
+#   tool's builtin/sandbox toolsets reach agent's dependency/context types.
+# - (governance, tool): governance's command/path policy governs tool
+#   execution; tool's security pipeline wiring reaches governance types.
+#
+# New cycles beyond this set must not appear.
 _BASELINE_TWO_CYCLES: "frozenset[tuple[str, str]]" = frozenset({
-    ("run", "runtime"),
-    ("agent", "capability"),
+    ("agent", "execution"),
     ("agent", "governance"),
-    ("agent", "run"),
-    ("agent", "storage"),
     ("agent", "tool"),
-    ("artifact", "storage"),
-    ("evaluation", "storage"),
-    ("events", "storage"),
-    ("extension", "subagent"),
-    ("memory", "storage"),
-    # subagent.executor wires the runtime.persistence.Storage type to compose
-    # a SubagentExecutor; runtime.persistence imports every domain's
-    # persistence adapters (which is its job as the composition root).
-    ("runtime", "subagent"),
-    ("run", "sandbox"),
     ("governance", "tool"),
-    # The following domains own their persistence adapters (Filesystem +
-    # SQLAlchemy), which import shared storage-kernel helpers; storage.facade
-    # wires those adapters into the composition. Same documented
-    # architecture-debt shape as artifact<->storage above: a domain owns its
-    # persistence layer, the storage facade wires it.
-    ("jobs", "storage"),
-    ("run", "storage"),
-    ("run", "swarm"),
-    ("session", "storage"),
-    ("storage", "swarm"),
-    ("storage", "tool"),
 })
 
 
 def test_no_new_circular_top_level_imports() -> None:
     """No NEW 2-cycle may appear between top-level packages.
 
-    The baseline carries a known set of 2-cycles (recorded above) that the
-    refactor retires phase by phase. This asserts the current set never grows
-    beyond the baseline; lower the baseline as a phase breaks a cycle.
+    The baseline carries a known, deliberate set of 2-cycles (recorded above).
+    This asserts the current set never grows beyond the baseline.
     """
     current = _two_cycles()
     new = current - _BASELINE_TWO_CYCLES
     assert not new, (
         f"new top-level 2-cycles introduced (refactor must not add cycles): "
         f"{sorted(new)}"
+    )
+
+
+def test_baseline_cycles_are_still_accurate() -> None:
+    """The recorded baseline must not silently over-allow: every entry must
+    still be a real cycle, so a resolved cycle is promptly removed from the
+    allowlist instead of becoming permanent dead weight."""
+    current = _two_cycles()
+    stale = _BASELINE_TWO_CYCLES - current
+    assert not stale, (
+        f"baseline lists cycles that no longer exist -- remove them: {sorted(stale)}"
     )

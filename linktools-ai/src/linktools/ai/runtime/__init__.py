@@ -1,8 +1,7 @@
-"""The v4 runtime and its explicit storage composition."""
+"""The runtime composition root and its explicit storage composition."""
 
 from .builder import build_runtime
 from .dependencies import RuntimeDependencies
-from .executor import RuntimeExecutor
 from .facade import Runtime
 from .requirements import RuntimeRequirements, RuntimeTopology
 from .storage import LocalDirectoryStorage, RuntimeStorage, SqlAlchemyRuntimeStorage
@@ -10,7 +9,6 @@ from .storage import LocalDirectoryStorage, RuntimeStorage, SqlAlchemyRuntimeSto
 __all__ = [
     "Runtime",
     "RuntimeDependencies",
-    "RuntimeExecutor",
     "RuntimeRequirements",
     "RuntimeTopology",
     "build_runtime",

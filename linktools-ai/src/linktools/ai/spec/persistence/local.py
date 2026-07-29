@@ -11,7 +11,7 @@ from ...storage.local.files import atomic_write_json, read_json
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import StoragePath, safe_child
 from ..document import SpecDocument, SpecDocumentChange, SpecDocumentInfo
-from ...storage.revision import SnapshotRequired
+from ..revision import SnapshotRequired
 
 
 class LocalSpecBackend:

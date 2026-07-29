@@ -3,7 +3,6 @@
 from datetime import timedelta
 from typing import Protocol
 
-from ..storage.composition import StorageComposition
 from .models import TaskExecution, TaskPlan
 
 
@@ -28,35 +27,35 @@ class TaskBackend(Protocol):
 
 class TaskStore:
     def __init__(self, backend: TaskBackend) -> None:
-        self._storage = StorageComposition(primary=backend)
+        self._backend = backend
 
     @property
     def backend(self) -> TaskBackend:
-        return self._storage.primary
+        return self._backend
 
     async def initialize_storage(self, *args: object) -> None:
-        await self._storage.initialize(*args)
+        await self._backend.initialize_storage(*args)
 
     async def get_plan(self, plan_id: str) -> TaskPlan | None:
-        return await self._storage.primary.get_plan(plan_id)
+        return await self._backend.get_plan(plan_id)
 
     async def get_execution(self, execution_id: str) -> TaskExecution | None:
-        return await self._storage.primary.get_execution(execution_id)
+        return await self._backend.get_execution(execution_id)
 
     async def save_plan(self, plan: TaskPlan) -> None:
-        await self._storage.primary.save_plan(plan)
+        await self._backend.save_plan(plan)
 
     async def add_execution(self, execution: TaskExecution) -> None:
-        await self._storage.primary.add_execution(execution)
+        await self._backend.add_execution(execution)
 
     async def claim(self, execution_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
-        return await self._storage.primary.claim(execution_id, owner=owner, duration=duration)
+        return await self._backend.claim(execution_id, owner=owner, duration=duration)
 
     async def renew(self, execution_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
-        return await self._storage.primary.renew(execution_id, owner=owner, fence=fence, duration=duration)
+        return await self._backend.renew(execution_id, owner=owner, fence=fence, duration=duration)
 
     async def complete(self, execution_id: str, *, owner: str, fence: int, result: object) -> TaskExecution:
-        return await self._storage.primary.complete(
+        return await self._backend.complete(
             execution_id,
             owner=owner,
             fence=fence,
@@ -72,7 +71,7 @@ class TaskStore:
         retry: bool = False,
         error: object = None,
     ) -> TaskExecution:
-        return await self._storage.primary.fail(
+        return await self._backend.fail(
             execution_id,
             owner=owner,
             fence=fence,

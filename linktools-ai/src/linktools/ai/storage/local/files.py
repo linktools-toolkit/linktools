@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from ..json import JsonValue, decode_json, encode_json
+from ...json import JsonValue, decode_json, encode_json
 
 
 def atomic_write_bytes(path: str | Path, content: bytes) -> None:

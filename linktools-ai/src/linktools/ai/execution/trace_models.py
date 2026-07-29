@@ -1,11 +1,13 @@
-"""Canonical semantic trace values."""
+"""Canonical semantic trace values, and the persisted trace-step / event
+append-log records that carry them."""
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
-from ..storage.json import JsonValue
-from .run import RunUsage
+from ..json import JsonValue
+from .domain import RunUsage
 
 
 class InteractionStatus(StrEnum):
@@ -48,7 +50,7 @@ class ModelInteractionTrace:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCallTrace:
+class ToolResultTrace:
     call_id: str
     interaction_sequence: int
     tool_name: str
@@ -60,4 +62,39 @@ class ToolCallTrace:
     completed_at: datetime | None
 
 
-__all__ = ["InteractionStatus", "ModelInteractionTrace", "ModelRequestTrace", "ModelResponseTrace", "ToolCallTrace", "TraceError"]
+@dataclass(frozen=True, slots=True)
+class NewRunTraceStep:
+    kind: Literal["model_interaction", "tool_result"]
+    payload: JsonValue
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RunTraceStep:
+    run_id: str
+    sequence: int
+    kind: Literal["model_interaction", "tool_result"]
+    payload: JsonValue
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RunEvent:
+    run_id: str
+    sequence: int
+    type: str
+    payload: JsonValue
+    created_at: datetime
+
+
+__all__ = [
+    "InteractionStatus",
+    "ModelInteractionTrace",
+    "ModelRequestTrace",
+    "ModelResponseTrace",
+    "NewRunTraceStep",
+    "RunEvent",
+    "RunTraceStep",
+    "ToolResultTrace",
+    "TraceError",
+]

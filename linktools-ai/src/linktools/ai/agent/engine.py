@@ -5,8 +5,8 @@
 The engine owns ONLY the prompt-build → model/tool drive → outcome path. It
  touches no run-lifecycle persistence and no coordinator or controller --
 RunRecord create/transition, checkpoint/session/approval persistence, pause/
-cancel/stream events, and the cross-store commit are RunCoordinator's sole
-job (see run/coordinator.py). The single public entry point is
+cancel/stream events, and the cross-store commit are ExecutionService's sole
+job (see execution/service.py). The single public entry point is
 :meth:`AgentEngine.execute_pure`, which returns a discriminated-union
 ``AgentExecutionOutcome`` (AgentCompleted / AgentPaused / AgentFailed /
 AgentCancelled) -- never a Store write.
@@ -14,12 +14,12 @@ AgentCancelled) -- never a Store write.
 execute_pure drives ``agent.pydantic_agent.iter()`` and:
 * runs the before_run/after_run middleware hooks (on a new, non-resuming run)
   via the wired MiddlewarePipeline -- after_run fires before the outcome is
-  returned, so it always precedes the RunCoordinator commit;
+  returned, so it always precedes the ExecutionService commit;
 * builds the model prompt via :class:`~linktools.ai.agent.prompt.builder.PromptBuilder`
   (memory + knowledge sections from their async policies, then capability-
   resolved sections folded in via PromptBuilder.combine). Prior-turn history
   arrives as native pydantic-ai ``message_history`` on AgentInput (loaded by
-  RunCoordinator), NOT via a Store read here;
+  ExecutionService), NOT via a Store read here;
 * threads the per-Run ToolContext through pydantic-ai dependency injection
   (``deps=AgentDependencies(tool_context=...)`` -> ``ctx.deps``), never a
   mutable capability field;
@@ -30,7 +30,7 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
   propagates unchanged;
 * publishes ONLY process dict-events through the injected ``live_events``
   sink (text / tool / model_progress); state events (paused / completed /
-  failed / cancelled) are the RunCoordinator's job, published only AFTER the
+  failed / cancelled) are the ExecutionService's job, published only AFTER the
   durable commit succeeds. Security+observability events route through the
   injected ``security_events`` sink.
 
@@ -66,12 +66,12 @@ from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..execution.cancellation import CancellationToken
 from ..execution.context import RunContext
-from ..execution.run import (
+from ..execution.domain import (
     RunErrorInfo,
-    RunResult,
 )
+from .models import RunResult
 from ..model.recording import SemanticRecordingModel
-from ..execution.run import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
+from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
 from .dependencies import AgentDependencies
 from .models import (
     AgentCancelled,
@@ -81,9 +81,9 @@ from .models import (
     model_supports_streaming,
     AgentInput,
     AgentPaused,
+    AgentUsage,
     CompiledAgent,
     PauseRequest,
-    RunUsage,
 )
 
 if TYPE_CHECKING:
@@ -223,7 +223,7 @@ class AgentEngine:
         trace_collector: Any = None,
     ) -> AgentExecutionOutcome:
         """The target pure execution loop. Touches NO run_store/
-        session_store/commit_coordinator/run_controller -- RunCoordinator
+        session_store/commit_coordinator/run_controller -- ExecutionService
         owns RunRecord creation/transition, checkpoint and session storage,
         and execution claim/heartbeat/fencing; this method only assembles
         the prompt, drives the model/tool loop, and returns a value
@@ -290,7 +290,6 @@ class AgentEngine:
                 final_output=final_output,
                 status=status,
                 usage=usage or ExecutionRunUsage(),
-                revision=0,
             )
 
         try:
@@ -318,7 +317,7 @@ class AgentEngine:
                         message_history or (), agent.spec.model
                     )
                     message_history = tuple(trimmed) or None
-                    from ..events.payloads import PromptWindowApplied
+                    from ..observability.events.payloads import PromptWindowApplied
 
                     await security_events.emit(
                         PromptWindowApplied(
@@ -401,7 +400,7 @@ class AgentEngine:
                     from ..execution.live_events import SecurityEventSinkEmitter
 
                     # The security/observability emitter for this Run is built
-                    # from the injected SecurityEventSink (durable, RunCoordinator-
+                    # from the injected SecurityEventSink (durable, ExecutionService-
                     # owned) -- NOT from a held durable store. Capabilities/tools/
                     # governance depend only on this emitter (SecurityEventEmitter
                     # shape), with no direct persistence reference.
@@ -469,7 +468,7 @@ class AgentEngine:
                                     )
                                 )
                 if cap_bundle is not None:
-                    from ..events.payloads import (
+                    from ..observability.events.payloads import (
                         PromptCatalogInjected,
                         ToolExposureApplied,
                     )
@@ -680,7 +679,7 @@ class AgentEngine:
                                         idempotency_key=paused.idempotency_key,
                                         binding=paused.binding,
                                     ),
-                                    usage=RunUsage(),
+                                    usage=AgentUsage(),
                                     snapshot=snapshot,
                                 )
                             else:
@@ -790,7 +789,7 @@ class AgentEngine:
 
                 return AgentCompleted(
                     result=run_result,
-                    usage=RunUsage(
+                    usage=AgentUsage(
                         input_tokens=usage.input_tokens if usage else 0,
                         output_tokens=usage.output_tokens if usage else 0,
                     ),
@@ -804,7 +803,7 @@ class AgentEngine:
                         ExecutionRunStatus.CANCELLED,
                         messages=resume_messages(),
                     )
-                return AgentCancelled(reason=None, usage=RunUsage(), snapshot=snapshot)
+                return AgentCancelled(reason=None, usage=AgentUsage(), snapshot=snapshot)
             raise
         except _EXPECTED_RUN_FAILURES as exc:
             # A malformed tool schema is a contract/config violation, not a
@@ -835,6 +834,6 @@ class AgentEngine:
             return AgentFailed(
                 error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),
                 retryable=False,
-                usage=RunUsage(),
+                usage=AgentUsage(),
                 snapshot=snapshot,
             )

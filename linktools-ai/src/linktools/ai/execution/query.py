@@ -6,9 +6,8 @@ from dataclasses import dataclass
 
 from ..errors import PrincipalAccessDeniedError
 from ..governance.identity import PrincipalContext
-from ..storage.json import JsonValue
-from .run import RunStatus, RunUsage
-from .models import Page, RunRecord
+from ..json import JsonValue
+from .domain import Page, RunRecord, RunStatus, RunUsage
 from .store import ExecutionStore
 
 
@@ -17,7 +16,7 @@ class SessionTurnView:
     session_id: str
     sequence: int
     run_id: str
-    user_prompt: JsonValue
+    input: JsonValue
     assistant_summary: JsonValue | None
     status: RunStatus
 
@@ -40,15 +39,21 @@ class ToolCallView:
 
 
 @dataclass(frozen=True, slots=True)
-class RunDetailView:
+class ExecutionDetailView:
     run_id: str
     session_id: str
     status: RunStatus
-    effective_prompt: JsonValue | None
+    effective_input: JsonValue | None
     interactions: tuple[ModelInteractionView, ...]
     tool_calls: tuple[ToolCallView, ...]
     final_output: JsonValue | None
     usage: RunUsage | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResultView:
+    run_id: str
+    output: JsonValue | None
 
 
 class ExecutionQueryService:
@@ -65,9 +70,9 @@ class ExecutionQueryService:
         if session is None or session.tenant_id != principal.tenant_id or (session.user_id is not None and session.user_id != principal.user_id):
             raise PrincipalAccessDeniedError("session is not visible to this principal")
         page = await self._store.list_session_turns(session_id, before_sequence=before_sequence, limit=limit)
-        return Page(tuple(SessionTurnView(item.session_id, item.sequence, item.run_id, item.user_prompt, item.assistant_summary, item.status) for item in page.items), page.has_more, page.next_cursor)
+        return Page(tuple(SessionTurnView(item.session_id, item.sequence, item.run_id, item.input, item.assistant_summary, item.status) for item in page.items), page.has_more, page.next_cursor)
 
-    async def get_run_detail(self, *, run_id: str, principal: PrincipalContext) -> RunDetailView:
+    async def get_run_detail(self, *, run_id: str, principal: PrincipalContext) -> ExecutionDetailView:
         run = await self._store.get_run(run_id)
         if run is None:
             raise PrincipalAccessDeniedError("run is not visible to this principal")
@@ -89,13 +94,7 @@ class ExecutionQueryService:
                 if call_id in calls:
                     previous = calls[call_id]
                     calls[call_id] = ToolCallView(previous.call_id, previous.tool_name, previous.arguments, payload.get("result"), payload.get("status", "completed"))
-        prompt = None
-        if interactions:
-            for part in interactions[0].request.get("messages", ()):
-                if part.get("type") == "user_prompt":
-                    prompt = part.get("content")
-                    break
-        return RunDetailView(run.id, run.session_id, run.status, prompt, tuple(interactions), tuple(calls.values()), snapshot.final_output if snapshot else None, snapshot.usage if snapshot else None)
+        return ExecutionDetailView(run.id, run.session_id, run.status, run.input, tuple(interactions), tuple(calls.values()), snapshot.final_output if snapshot else None, snapshot.usage if snapshot else None)
 
 
-__all__ = ["ExecutionQueryService", "ModelInteractionView", "RunDetailView", "SessionTurnView", "ToolCallView"]
+__all__ = ["ExecutionQueryService", "ModelInteractionView", "ExecutionDetailView", "ExecutionResultView", "SessionTurnView", "ToolCallView"]

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from ...execution.run import RunResult
+from ...agent.models import RunResult
 from .models import SwarmStep
 
 

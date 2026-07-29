@@ -11,7 +11,7 @@ from linktools.ai.tool.sandbox.workspace import (
     WorkspaceRef,
 )
 from linktools.ai.execution.context import RunContext
-from linktools.ai.execution.run import RunnableType
+from linktools.ai.execution.domain import RunnableType
 
 
 def _run_context(run_id="run-1") -> RunContext:

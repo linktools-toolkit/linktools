@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, TypeAlias
 
-from ...execution.run import RunErrorInfo, RunResult
+from ...execution.domain import RunErrorInfo
+from ...agent.models import RunResult
 from ...execution.session import NewSessionMessage
 
 
@@ -222,7 +223,7 @@ class SwarmUsage:
 class SwarmCompleted:
     """SwarmEngine drove the strategy to a final aggregate result. ``result`` is
     the merged aggregate RunResult; ``aggregate_messages`` are the session
-    messages RunCoordinator persists to the parent/shared session; ``usage`` is
+    messages ExecutionService persists to the parent/shared session; ``usage`` is
     the cross-worker aggregate."""
 
     result: RunResult
@@ -233,7 +234,7 @@ class SwarmCompleted:
 @dataclass(frozen=True, slots=True)
 class SwarmPaused:
     """SwarmEngine suspended (e.g. a worker awaited approval). Carries the
-    SwarmCheckpoint RunCoordinator persists so a later resume replays only the
+    SwarmCheckpoint ExecutionService persists so a later resume replays only the
     unfinished tasks."""
 
     checkpoint: SwarmCheckpoint
@@ -251,7 +252,7 @@ class SwarmFailed:
 
 SwarmExecutionOutcome: TypeAlias = "SwarmCompleted | SwarmPaused | SwarmFailed"
 """The sole return shape of SwarmEngine.execute(): a discriminated union so
-RunCoordinator can converge the driving Run's lifecycle (transition/checkpoint/
+ExecutionService can converge the driving Run's lifecycle (transition/checkpoint/
 session/event writes) from ONE outcome object. Invalid combinations (a paused
 swarm carrying a result, etc.) are not constructible -- callers dispatch with
 ``isinstance()``."""

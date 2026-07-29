@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """SqlAlchemyMemoryBackend: DB-backed MemoryStore (the Protocol in
 memory/store.py). Mirrors ``SqlAlchemyTaskBackend``'s structure:
-`session_factory: Callable[[], AsyncSession]` constructor, `_as_utc` helper for
+`session_factory: Callable[[], AsyncSession]` constructor, ``as_utc`` for
 aiosqlite's naive-datetime round-trip, and read-check-mutate-commit transactions.
 
 Search uses ``content LIKE`` with optional ``owner_id`` / ``category`` filters
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ....errors import MemoryConflictError, MemoryNotFoundError
 from ....storage.sqlalchemy.base import Base
-from ....storage.sqlalchemy.conventions import TABLE_PREFIX, timestamp_indexes
+from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ..models import MemoryMatch, MemoryRecord
 from ..scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
 from ..store import UNSET
@@ -48,15 +48,6 @@ class MemoryRow(Base):
     session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Session id")
 
 
-def _as_utc(dt: "datetime | None") -> "datetime | None":
-    # SQLite (aiosqlite) round-trips datetimes as naive values regardless of the
-    # tzinfo they were stored with, so reattach UTC on read to match the
-    # timezone-aware datetimes MemoryRecord is constructed with everywhere else.
-    if dt is None or dt.tzinfo is not None:
-        return dt
-    return dt.replace(tzinfo=timezone.utc)
-
-
 def _row_to_record(row: MemoryRow) -> MemoryRecord:
     # A NULL tenant_id is a legacy row (pre-tenant). It is read back under the
     # reserved legacy tenant so it never matches a real tenant's search.
@@ -68,8 +59,8 @@ def _row_to_record(row: MemoryRow) -> MemoryRecord:
         category=row.category,
         confidence=None if row.confidence is None else float(row.confidence),
         version=row.version,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         metadata=json.loads(row.metadata_json),
         user_id=row.user_id,
         workspace_id=row.workspace_id,

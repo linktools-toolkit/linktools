@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pure Session domain models -- SessionRecord/SessionMessage carry no Store
-reference, no physical root path, and no I/O methods (contrast with the
-pre-vNext FileSession/RemoteSession in this same package's types.py, which
-this models.py does not touch or depend on)."""
+"""Pure Session domain models -- SessionRecord/SessionTurn/SessionMessage carry
+no Store reference, no physical root path, and no I/O methods."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Mapping
 
-
-class SessionStatus(str, Enum):
-    ACTIVE = "active"
-    ARCHIVED = "archived"
+from ..json import JsonValue
+from .domain import RunStatus
 
 
 class MessageRole(str, Enum):
@@ -29,20 +25,24 @@ MessageContent = "str | Mapping[str, Any]"
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     id: str
-    parent_id: "str | None"
-    status: SessionStatus
-    version: int
+    user_id: "str | None"
+    tenant_id: "str | None"
+    next_turn_sequence: int
+    latest_completed_run_id: "str | None"
     created_at: datetime
     updated_at: datetime
-    # Principal the session belongs to. resolve_session enforces strict
-    # (user_id, tenant_id) equality on re-open: a session created by (u, t) is
-    # only re-openable by the same principal, and (None, None) only opens an
-    # unowned session -- ownership is never auto-claimed. Defaults to None
-    # (unowned) so the CLI and existing call sites stay single-principal; the
-    # runtime path always sets these explicitly via resolve_session.
-    user_id: "str | None" = None
-    tenant_id: "str | None" = None
-    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurn:
+    session_id: str
+    sequence: int
+    run_id: str
+    input: JsonValue
+    assistant_summary: "JsonValue | None"
+    status: RunStatus
+    created_at: datetime
+    completed_at: "datetime | None"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,3 +72,12 @@ class NewSessionMessage:
     content: "str | Mapping[str, Any]"
     run_id: "str | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+__all__: "list[str]" = [
+    "MessageRole",
+    "NewSessionMessage",
+    "SessionMessage",
+    "SessionRecord",
+    "SessionTurn",
+]

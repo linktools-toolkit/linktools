@@ -123,10 +123,10 @@ def validate_session_id(session_id: str) -> str:
 async def ensure_session(storage: RuntimeStorage, session_id: str) -> None:
     """Get-or-create a session record.
 
-    ``Runtime.run`` / ``Runtime.run_stream`` require a pre-existing session when
-    a ``session_id`` is supplied (they do not auto-create). This mirrors the
-    ``session_id=None`` branch exactly by creating the ``SessionRecord``
-    up-front when the id is unseen."""
+    ``Runtime.run`` requires a pre-existing session when a ``session_id`` is
+    supplied (it does not auto-create one). This mirrors the ``session_id=None``
+    branch exactly by creating the ``SessionRecord`` up-front when the id is
+    unseen."""
     if await storage.execution.get_session(session_id) is None:
         await storage.execution.create_session(session_id=session_id, user_id=None, tenant_id=None)
 
@@ -233,14 +233,14 @@ class LocalRuntimeClient:
         session_id = validate_session_id(request.session_id)
         await ensure_session(self._bundle.storage, session_id)
         run_id = request.run_id or new_run_id()
-        async for event in self._bundle.runtime.run_stream(
+        output = await self._bundle.runtime.run(
             spec, request.prompt, session_id=session_id, run_id=run_id
-        ):
-            yield event
+        )
+        yield {"type": "run.completed", "output": output}
 
     async def resume_stream(self, run_id: str) -> "AsyncIterator[Mapping[str, Any]]":
-        async for event in self._bundle.runtime.resume(run_id):
-            yield event
+        output = await self._bundle.runtime.resume(run_id)
+        yield {"type": "run.completed", "output": output}
 
     async def cancel(self, run_id: str) -> None:
         await self._bundle.runtime.cancel(run_id)

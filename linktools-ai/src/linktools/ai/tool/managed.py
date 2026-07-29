@@ -79,14 +79,14 @@ class ManagedToolAdapter:
         )
         # The emitter is the single seam for security/observability events --
         # never a direct event store reference. None means no emission (the
-        # caller -- RunCoordinator -- always wires a durable, per-Run sink).
+        # caller -- ExecutionService -- always wires a durable, per-Run sink).
         self._security_event_emitter = security_event_emitter
 
     async def _emit_degraded(self, component: str, reason: str) -> None:
         """Best-effort SecurityDegraded event when a security component fails
         and the call falls back to a fail-closed posture. Never raises -- a
         degraded-path event-emission failure must not mask the original deny."""
-        from ..events.payloads import SecurityDegraded
+        from ..observability.events.payloads import SecurityDegraded
 
         await self._emit_security(
             SecurityDegraded(
@@ -122,7 +122,7 @@ class ManagedToolAdapter:
     async def _process_after_tool(self, result, *, run_id, call_id):
         if self._pipeline is None:
             return result, "returned"
-        from ..events.payloads import ToolCompleted, ToolPipelineAfter, ToolPipelineDecision
+        from ..observability.events.payloads import ToolCompleted, ToolPipelineAfter, ToolPipelineDecision
         result_event = ToolResultEvent(tool_name=self._descriptor.name, result=result,
             success=True, run_id=run_id, call_id=call_id)
         try:
@@ -223,7 +223,7 @@ class ManagedToolAdapter:
                     "arguments_hash": compute_arguments_hash(self._descriptor.name, payload)}
         # Audit: the finalized policy governing this call -- emitted BEFORE the
         # enabled check so a policy-disabled tool is still auditable.
-        from ..events.payloads import ToolPolicyResolved
+        from ..observability.events.payloads import ToolPolicyResolved
 
         await self._emit_security(
             ToolPolicyResolved(
@@ -268,7 +268,7 @@ class ManagedToolAdapter:
                 mutating=self._descriptor.mutating,
                 parameter_schema=parameter_schema,
             )
-            from ..events.payloads import ToolPipelineBefore, ToolPipelineDecision
+            from ..observability.events.payloads import ToolPipelineBefore, ToolPipelineDecision
 
             await self._emit_observability(
                 ToolPipelineBefore(
@@ -364,7 +364,7 @@ class ManagedToolAdapter:
         # 4. Execute. can_retry mirrors the mutating/idempotent safety rule:
         # a mutating, non-idempotent tool is never retried even if a positive
         # max_retries was declared upstream.
-        from ..events.payloads import ToolCompleted, ToolFailed, ToolStarted
+        from ..observability.events.payloads import ToolCompleted, ToolFailed, ToolStarted
 
         await self._emit_observability(
             ToolStarted(tool_name=self._descriptor.name, tool_call_id=call_id)

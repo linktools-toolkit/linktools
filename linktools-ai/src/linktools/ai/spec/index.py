@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Generic, TypeVar
 
-from ..storage.revision import RevisionCache
+from .revision import RevisionCache
 from .contracts import SpecCodec, SpecSource
 from .parsing import SpecLoader
 from .source import SpecLoaderSource

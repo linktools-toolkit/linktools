@@ -74,7 +74,7 @@ class DefaultSecurityEventSanitizer:
             # persistence layer persists via dataclasses.asdict and reconstructs
             # by class name, so a dict here would TypeError and break the
             # security audit trail.
-            from ...events.payloads import TruncatedSecurityEvent
+            from ...observability.events.payloads import TruncatedSecurityEvent
 
             return TruncatedSecurityEvent(
                 original_event_type=type(event).__name__,
@@ -156,7 +156,7 @@ class DurableSecurityEventEmitter:
             return
         ctx = self._context
         run_id = getattr(ctx, "run_id", None) if ctx else None
-        from ...events.context import EventStreamContext, append_event
+        from ...observability.events.context import EventStreamContext, append_event
 
         try:
             await append_event(

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from ..storage.coordination.lease import Lease, assert_active, claim, renew
 from ..errors import InvalidRunTransitionError, RunConflictError, RunNotResumableError
-from .run import ALLOWED_RUN_TRANSITIONS, RunRecord, RunStatus
+from .domain import ALLOWED_RUN_TRANSITIONS, ApprovalDecision, RunRecord, RunStatus
 
 
 def assert_transition(current: RunStatus, target: RunStatus) -> None:
@@ -43,7 +43,7 @@ def assert_resumable(run: RunRecord) -> None:
 
 
 def assert_approval_decided(run: RunRecord) -> None:
-    if run.pending_approval is not None and run.pending_approval.decision not in {"allow", "deny"}:
+    if run.approval is not None and run.approval.decision not in {ApprovalDecision.ALLOW, ApprovalDecision.DENY}:
         raise RunConflictError("run approval has not been decided")
 
 

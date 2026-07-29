@@ -4,7 +4,7 @@
 
 ``Runtime.cancel(run_id)`` must actually stop the running
 task, not just update the database status. The controller is the bridge --
-when RunCoordinator starts driving a run, it registers the driving
+when ExecutionService starts driving a run, it registers the driving
 ``asyncio.Task`` and a fresh ``CancellationToken`` here. Runtime.cancel() then
 calls ``RunController.cancel(run_id)`` which (a) flips the token so
 execute_pure's next ``raise_if_cancelled()`` check aborts and (b) calls
@@ -49,8 +49,8 @@ class RunController:
         token: CancellationToken,
     ) -> None:
         """Associate ``task`` + ``token`` with ``run_id``. Called by
-        RunCoordinator._claim_and_fence at the start of the lifecycle (after
-        the RUNNING transition). If a stale registration already exists for
+        ExecutionService._execute at the start of the lifecycle (after the
+        RUNNING transition). If a stale registration already exists for
         the same run_id (e.g. the runner restarted after a crash without
         unregistering), it is overwritten -- the new task/token pair is the
         authoritative in-flight run."""
@@ -78,7 +78,7 @@ class RunController:
             task.cancel()
 
     async def unregister(self, run_id: str) -> None:
-        """Remove the registration. Called by RunCoordinator in a finally
+        """Remove the registration. Called by ExecutionService in a finally
         block so the controller does not retain references to finished tasks
         (which would prevent GC of the run's frames). Idempotent -- a missing
         registration is a no-op."""

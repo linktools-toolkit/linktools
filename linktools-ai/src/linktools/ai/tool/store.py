@@ -3,7 +3,6 @@
 from datetime import timedelta
 from typing import Any, Protocol
 
-from ..storage.composition import StorageComposition
 from .state import ToolOperation
 
 
@@ -18,29 +17,29 @@ class ToolStateBackend(Protocol):
 
 class ToolStateStore:
     def __init__(self, backend: ToolStateBackend) -> None:
-        self._storage = StorageComposition(primary=backend)
+        self._backend = backend
 
     @property
     def backend(self) -> ToolStateBackend:
-        return self._storage.primary
+        return self._backend
 
     async def initialize_storage(self, *args: object) -> None:
-        await self._storage.initialize(*args)
+        await self._backend.initialize_storage(*args)
 
     async def prepare(self, operation: ToolOperation) -> ToolOperation:
-        return await self._storage.primary.prepare(operation)
+        return await self._backend.prepare(operation)
 
     async def get(self, operation_id: str) -> ToolOperation | None:
-        return await self._storage.primary.get(operation_id)
+        return await self._backend.get(operation_id)
 
     async def claim(self, operation_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
-        return await self._storage.primary.claim(operation_id, owner=owner, duration=duration)
+        return await self._backend.claim(operation_id, owner=owner, duration=duration)
 
     async def renew(self, operation_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
-        return await self._storage.primary.renew(operation_id, owner=owner, fence=fence, duration=duration)
+        return await self._backend.renew(operation_id, owner=owner, fence=fence, duration=duration)
 
     async def complete(self, operation_id: str, *, owner: str, fence: int, result: Any) -> ToolOperation:
-        return await self._storage.primary.complete(
+        return await self._backend.complete(
             operation_id,
             owner=owner,
             fence=fence,
@@ -48,7 +47,7 @@ class ToolStateStore:
         )
 
     async def fail(self, operation_id: str, *, owner: str, fence: int, error: Any) -> ToolOperation:
-        return await self._storage.primary.fail(
+        return await self._backend.fail(
             operation_id,
             owner=owner,
             fence=fence,

@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from ..storage.coordination.lease import Lease
-from ..storage.json import canonical_json_bytes
+from ..json import canonical_json_bytes
 
 
 def compute_arguments_hash(arguments: Any) -> str:

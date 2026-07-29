@@ -3,7 +3,7 @@
 """tests/ai/run/test_context.py"""
 
 from linktools.ai.execution.context import RunContext
-from linktools.ai.execution.run import RunnableType
+from linktools.ai.execution.domain import RunnableType
 
 
 def test_run_context_construction():

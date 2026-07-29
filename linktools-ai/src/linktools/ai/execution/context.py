@@ -5,7 +5,7 @@
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .run import RunnableType
+from .domain import RunnableType
 
 
 @dataclass(frozen=True, slots=True)

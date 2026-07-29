@@ -105,7 +105,7 @@ class MCPProvider:
                     f"returned no tools) -- set discovery_mode='best_effort' to opt out"
                 )
             if not discovery.verified and discovery_mode == "best_effort":
-                from ...events.payloads import SecurityDegraded
+                from ...observability.events.payloads import SecurityDegraded
 
                 if context.security_event_emitter is None:
                     raise CapabilityResolutionError(

@@ -12,7 +12,7 @@ Keeping the config in the subagent domain breaks that cycle: the config is
 constructed by the CLI / caller and injected through ``build_runtime`` straight
 into the ``SubagentProvider``, never flowing through the providers bundle.
 
-All fields optional; an all-None config preserves legacy behavior (the
+All fields optional; an all-None config preserves the default behavior (the
 instruction_path branch raises that it is not wired when invoked).
 """
 

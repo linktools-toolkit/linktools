@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .run import RunApproval, RunDefinition, RunKind
+from ..json import JsonValue
+from .domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind
+from .snapshots import AgentSnapshotData
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,18 +18,18 @@ class CreateSession:
 
 
 @dataclass(frozen=True, slots=True)
-class StartRun:
+class StartExecution:
     run_id: str
     session_id: str
     kind: RunKind
     definition: RunDefinition
-    user_prompt: object
+    input: JsonValue
     root_run_id: str | None = None
     parent_run_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class ClaimRun:
+class ClaimExecution:
     run_id: str
     owner: str
     now: datetime
@@ -35,7 +37,7 @@ class ClaimRun:
 
 
 @dataclass(frozen=True, slots=True)
-class HeartbeatRun:
+class HeartbeatExecution:
     run_id: str
     owner: str
     fence: int
@@ -44,29 +46,29 @@ class HeartbeatRun:
 
 
 @dataclass(frozen=True, slots=True)
-class PauseRun:
+class PauseExecution:
     run_id: str
     owner: str
     fence: int
-    snapshot: object
+    snapshot: AgentSnapshotData
     pending_approval: RunApproval
 
 
 @dataclass(frozen=True, slots=True)
-class DecideRunApproval:
+class DecideApproval:
     run_id: str
     approval_id: str
-    decision: str
+    decision: ApprovalDecision
     decided_by: str
 
 
 @dataclass(frozen=True, slots=True)
-class ResumeRun:
+class ResumeExecution:
     run_id: str
 
 
 @dataclass(frozen=True, slots=True)
-class RequestRunCancel:
+class RequestCancellation:
     run_id: str
     owner: str
     fence: int
@@ -74,39 +76,50 @@ class RequestRunCancel:
 
 
 @dataclass(frozen=True, slots=True)
-class CompleteRun:
+class CompleteExecution:
     run_id: str
     owner: str
     fence: int
-    snapshot: object
+    snapshot: AgentSnapshotData
 
 
 @dataclass(frozen=True, slots=True)
-class FailRun:
+class FailExecution:
     run_id: str
     owner: str
     fence: int
-    snapshot: object
+    snapshot: AgentSnapshotData
+    error: RunError | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class AcknowledgeRunCancel:
+class AcknowledgeCancellation:
     run_id: str
     owner: str
     fence: int
-    snapshot: object
+    snapshot: AgentSnapshotData
+
+
+@dataclass(frozen=True, slots=True)
+class AbortExecution:
+    run_id: str
+    owner: str
+    fence: int
+    error: RunError
+    trace_end_sequence: int
 
 
 __all__ = [
-    "AcknowledgeRunCancel",
-    "ClaimRun",
-    "CompleteRun",
+    "AbortExecution",
+    "AcknowledgeCancellation",
+    "ClaimExecution",
+    "CompleteExecution",
     "CreateSession",
-    "DecideRunApproval",
-    "FailRun",
-    "HeartbeatRun",
-    "PauseRun",
-    "RequestRunCancel",
-    "ResumeRun",
-    "StartRun",
+    "DecideApproval",
+    "FailExecution",
+    "HeartbeatExecution",
+    "PauseExecution",
+    "RequestCancellation",
+    "ResumeExecution",
+    "StartExecution",
 ]

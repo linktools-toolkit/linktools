@@ -45,7 +45,7 @@ def build_extension_resource_toolset(
     """Level-1 read tools: list_extension_content / read_extension_content.
     ``allowed`` maps a declared extension_id to its scope; undeclared ids are
     refused before any filesystem access."""
-    from ...events.payloads import ExtensionContentListed, ExtensionContentRead
+    from ...observability.events.payloads import ExtensionContentListed, ExtensionContentRead
 
     toolset: FunctionToolset = FunctionToolset()
     cap_list = max_resources_per_list
@@ -118,7 +118,7 @@ def build_extension_entrypoint_toolset(
     """Level-1 list tool for extension entrypoints (``list_extension_entrypoints``).
     Calling an entrypoint is opt-in (``expose_call_tool``) and is wired through
     the subagent runner elsewhere; here it is reserved."""
-    from ...events.payloads import ExtensionEntrypointListed
+    from ...observability.events.payloads import ExtensionEntrypointListed
 
     toolset: FunctionToolset = FunctionToolset()
     cap = max_entrypoints_per_list
@@ -184,7 +184,7 @@ def build_extension_entrypoint_toolset(
             ref = EntrypointRef(kind=kind, name=name, scope=scope)
             agent_spec = await resolver.resolve_agent(ref)
             if emit is not None:
-                from ...events.payloads import ExtensionEntrypointResolved
+                from ...observability.events.payloads import ExtensionEntrypointResolved
 
                 await emit(
                     ExtensionEntrypointResolved(

@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Iterable
 from pydantic_ai.toolsets import FunctionToolset
 
 from ...errors import SkillNotFoundError
-from ...events.payloads import SkillListed, SkillRead
+from ...observability.events.payloads import SkillListed, SkillRead
 from .spec import SkillSpecProvider
 from .models import SkillContent, SkillSummary
 from .private import set_active_skill

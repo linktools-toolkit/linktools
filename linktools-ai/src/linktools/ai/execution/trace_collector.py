@@ -3,9 +3,11 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .models import JsonValue, NewRunTraceStep, RunSnapshot
-from .run import RunStatus, RunUsage
+from ..json import JsonValue
+from .domain import RunStatus, RunUsage
+from .snapshots import AgentSnapshotData
 from .store import ExecutionStore
+from .trace_models import NewRunTraceStep
 
 
 @dataclass(slots=True)
@@ -40,6 +42,6 @@ class SemanticTraceCollector:
         self._pending.clear()
         return self.next_sequence
 
-    async def build_snapshot(self, *, resume_messages: tuple[JsonValue, ...], final_output: JsonValue | str | None, status: RunStatus, usage: RunUsage, revision: int) -> RunSnapshot:
+    async def build_snapshot(self, *, resume_messages: tuple[JsonValue, ...], final_output: "JsonValue | str | None", status: RunStatus, usage: RunUsage) -> AgentSnapshotData:
         await self.flush()
-        return RunSnapshot("run-snapshot.v1", self.run_id, revision, resume_messages, final_output, status, usage, self.next_sequence, datetime.now(timezone.utc))
+        return AgentSnapshotData(resume_messages, final_output, usage, self.next_sequence)

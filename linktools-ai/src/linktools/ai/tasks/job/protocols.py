@@ -76,7 +76,7 @@ class TaskContext:
     cancellation: CancellationToken
 
     def __post_init__(self) -> None:
-        # Normalize legacy tuple/None input to a concrete ScopeSet so a context
+        # Normalize tuple/None input to a concrete ScopeSet so a context
         # handed to a handler is never None-typed.
         if not isinstance(self.delegated_scopes, ScopeSet):
             if self.delegated_scopes is None:

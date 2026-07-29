@@ -107,8 +107,10 @@ class FilesystemMemoryBackend:
     one process."""
 
     def __init__(self, *, root: Path) -> None:
+        # Construction does NO I/O: the root and tenant subdirs are created
+        # lazily on the first write (see _tenant_subdir). mkdir here would
+        # violate the zero-I/O construction contract.
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
 
     # -- paths ---------------------------------------------------------

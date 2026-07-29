@@ -13,7 +13,7 @@ from linktools.ai.agent.context_policies import (
 from linktools.ai.agent.retrieval.scope import RetrievalScope
 from linktools.ai.agent.memory.scope import MemoryScope
 from linktools.ai.execution.context import RunContext
-from linktools.ai.execution.run import RunnableType
+from linktools.ai.execution.domain import RunnableType
 
 
 def _ctx(*, tenant_id=None, user_id=None, session_id="sess-1", workspace_key=None):

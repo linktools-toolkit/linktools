@@ -13,20 +13,25 @@ from ...storage.local.files import atomic_write_json, read_json
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import StorageId, safe_child
 from ..commands import (
-    AcknowledgeRunCancel,
-    ClaimRun,
-    CompleteRun,
-    DecideRunApproval,
-    FailRun,
-    HeartbeatRun,
-    PauseRun,
-    RequestRunCancel,
-    ResumeRun,
-    StartRun,
+    AbortExecution,
+    AcknowledgeCancellation,
+    ClaimExecution,
+    CompleteExecution,
+    DecideApproval,
+    FailExecution,
+    HeartbeatExecution,
+    PauseExecution,
+    RequestCancellation,
+    ResumeExecution,
+    StartExecution,
 )
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
-from ..run import RunApproval, RunDefinition, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
-from ..models import Page, RunEvaluation, RunEvent, RunSnapshot, RunTraceStep, SessionRecord, SessionTurn, NewRunTraceStep
+from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
+from ..domain import Page
+from ..evaluation import RunEvaluation
+from ..session import SessionRecord, SessionTurn
+from ..snapshots import AgentSnapshotData, RunSnapshot
+from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 
 
 def _now() -> datetime:
@@ -45,8 +50,10 @@ def _run(raw: dict) -> RunRecord:
     definition["runnable_type"] = RunnableType(definition["runnable_type"])
     raw["definition"] = RunDefinition(**definition)
     raw["lease"] = Lease(lease_raw.get("owner"), lease_raw.get("fence", 0), _dt(lease_raw.get("expires_at")))
-    if raw.get("pending_approval") is not None:
-        raw["pending_approval"] = RunApproval(**raw["pending_approval"])
+    if raw.get("approval") is not None:
+        raw["approval"] = RunApproval(**raw["approval"])
+    if raw.get("error") is not None:
+        raw["error"] = RunError(**raw["error"])
     raw["cancel_requested_at"] = _dt(raw.get("cancel_requested_at"))
     raw["created_at"] = _dt(raw["created_at"])
     raw["updated_at"] = _dt(raw["updated_at"])
@@ -125,7 +132,7 @@ class LocalExecutionBackend:
             return None
         return _session(dict(await asyncio.to_thread(read_json, path)))
 
-    async def start_run(self, command: StartRun) -> RunRecord:
+    async def start_run(self, command: StartExecution) -> RunRecord:
         async with self._locks.acquire(("session", command.session_id)):
             session = await self.get_session(command.session_id)
             if session is None:
@@ -136,31 +143,33 @@ class LocalExecutionBackend:
             is_root = command.kind is RunKind.USER_TURN
             sequence = session.next_turn_sequence if is_root else None
             record = RunRecord(
-                command.run_id,
-                command.session_id,
-                command.kind,
-                command.definition.runnable_id,
-                command.definition.runnable_type,
-                command.definition,
-                RunStatus.PENDING,
-                sequence,
-                command.parent_run_id,
-                command.root_run_id or command.run_id,
-                None,
-                Lease(),
-                None,
-                0,
-                0,
-                1,
-                session.tenant_id,
-                session.user_id,
-                now,
-                now,
+                id=command.run_id,
+                session_id=command.session_id,
+                kind=command.kind,
+                runnable_id=command.definition.runnable_id,
+                runnable_type=command.definition.runnable_type,
+                definition=command.definition,
+                status=RunStatus.PENDING,
+                session_turn_sequence=sequence,
+                parent_run_id=command.parent_run_id,
+                root_run_id=command.root_run_id or command.run_id,
+                approval=None,
+                lease=Lease(),
+                cancel_requested_at=None,
+                snapshot_revision=0,
+                trace_sequence=0,
+                event_sequence=1,
+                tenant_id=session.tenant_id,
+                user_id=session.user_id,
+                created_at=now,
+                updated_at=now,
+                error=None,
+                input=command.input,
             )
             await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(record))
             await asyncio.to_thread(atomic_write_json, self._numbered(command.run_id, "events", 1), asdict(RunEvent(command.run_id, 1, "run.started", {}, now)))
             if sequence is not None:
-                turn = SessionTurn(command.session_id, sequence, command.run_id, command.user_prompt, None, RunStatus.PENDING, now, None)
+                turn = SessionTurn(command.session_id, sequence, command.run_id, command.input, None, RunStatus.PENDING, now, None)
                 await asyncio.to_thread(atomic_write_json, self._turn_path(command.session_id, sequence), asdict(turn))
                 await asyncio.to_thread(atomic_write_json, self._session_path(command.session_id), asdict(replace(session, next_turn_sequence=sequence + 1, updated_at=now)))
             return record
@@ -171,7 +180,7 @@ class LocalExecutionBackend:
             return None
         return _run(dict(await asyncio.to_thread(read_json, path)))
 
-    async def claim_run(self, command: ClaimRun) -> RunRecord:
+    async def claim_run(self, command: ClaimExecution) -> RunRecord:
         async with self._locks.acquire(("run", command.run_id)):
             record = await self.get_run(command.run_id)
             if record is None:
@@ -181,65 +190,116 @@ class LocalExecutionBackend:
             await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
             return updated
 
-    async def heartbeat_run(self, command: HeartbeatRun) -> RunRecord:
+    async def heartbeat_run(self, command: HeartbeatExecution) -> RunRecord:
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
             updated = replace(record, lease=renew(record.lease, owner=command.owner, fence=command.fence, now=command.now, duration=command.duration), updated_at=command.now)
             await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
             return updated
 
-    async def request_cancel(self, command: RequestRunCancel) -> RunRecord:
+    async def request_cancel(self, command: RequestCancellation) -> RunRecord:
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
+            if record.status in {RunStatus.PENDING, RunStatus.PAUSED}:
+                # Direct terminal cancel: PENDING was never claimed (no lease),
+                # PAUSED lease was already released by _finish. No owner/fence
+                # check needed.
+                now = command.requested_at
+                updated = replace(record, status=RunStatus.CANCELLED, lease=release(record.lease), cancel_requested_at=now, event_sequence=record.event_sequence + 1, updated_at=now)
+                await self._write_run_event(updated, "run.cancelled", now)
+                if record.session_turn_sequence is not None:
+                    turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(record.session_id, record.session_turn_sequence))))
+                    await asyncio.to_thread(atomic_write_json, self._turn_path(record.session_id, record.session_turn_sequence), asdict(replace(turn, status=RunStatus.CANCELLED, completed_at=now)))
+                return updated
             assert_owner(record, command.owner, command.fence, command.requested_at)
             assert_transition(record.status, RunStatus.CANCELLING)
-            updated = replace(record, status=RunStatus.CANCELLING, cancel_requested_at=command.requested_at, lease=release(record.lease), event_sequence=record.event_sequence + 1, updated_at=command.requested_at)
+            # The lease stays active (unlike pause/complete/fail): the same
+            # owner+fence must still be able to authorize the terminal
+            # acknowledge_cancel/fail_run that follows. A worker that dies
+            # mid-cancel is recovered the same way any other stuck RUNNING
+            # lease is -- by expiry -- not by releasing it early.
+            updated = replace(record, status=RunStatus.CANCELLING, cancel_requested_at=command.requested_at, event_sequence=record.event_sequence + 1, updated_at=command.requested_at)
             await self._write_run_event(updated, "run.cancelling", command.requested_at)
             return updated
 
-    async def pause_run(self, command: PauseRun) -> RunRecord:
+    async def pause_run(self, command: PauseExecution) -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.PAUSED, command.pending_approval)
 
-    async def resume_run(self, command: ResumeRun) -> RunRecord:
+    async def resume_run(self, command: ResumeExecution) -> RunRecord:
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
             assert_resumable(record)
             assert_approval_decided(record)
-            updated = replace(record, status=RunStatus.PENDING, pending_approval=None, event_sequence=record.event_sequence + 1, updated_at=_now())
+            updated = replace(record, status=RunStatus.PENDING, approval=None, event_sequence=record.event_sequence + 1, updated_at=_now())
             await self._write_run_event(updated, "run.resumed", updated.updated_at)
             return updated
 
-    async def decide_approval(self, command: DecideRunApproval) -> RunRecord:
+    async def decide_approval(self, command: DecideApproval) -> RunRecord:
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
-            if record.status is not RunStatus.PAUSED or record.pending_approval is None or record.pending_approval.approval_id != command.approval_id:
+            if record.approval is None or record.approval.approval_id != command.approval_id:
                 raise StorageError("run has no pending approval")
-            updated = replace(record, pending_approval=replace(record.pending_approval, decision=command.decision, decided_by=command.decided_by), event_sequence=record.event_sequence + 1, updated_at=_now())
-            await self._write_run_event(updated, "run.approval_decided", updated.updated_at)
+            existing = record.approval.decision
+            if existing is not None:
+                if existing == command.decision and record.approval.decided_by == command.decided_by:
+                    return record
+                raise StorageConflictError("approval decision conflict")
+            if record.status is not RunStatus.PAUSED:
+                raise StorageError("run has no pending approval")
+            new_approval = replace(record.approval, decision=command.decision, decided_by=command.decided_by)
+            if command.decision == ApprovalDecision.ALLOW:
+                updated = replace(record, approval=new_approval, event_sequence=record.event_sequence + 1, updated_at=_now())
+                await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
+                await self._write_run_event(updated, "run.approval_decided", updated.updated_at)
+                return updated
+            now = _now()
+            updated = replace(record, status=RunStatus.CANCELLED, approval=new_approval, lease=release(record.lease), event_sequence=record.event_sequence + 1, updated_at=now)
+            await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
+            await self._write_run_event(updated, "run.approval_decided", now)
+            if record.session_turn_sequence is not None:
+                turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(record.session_id, record.session_turn_sequence))))
+                await asyncio.to_thread(atomic_write_json, self._turn_path(record.session_id, record.session_turn_sequence), asdict(replace(turn, status=RunStatus.CANCELLED, completed_at=now)))
             return updated
 
-    async def complete_run(self, command: CompleteRun) -> RunRecord:
+    async def complete_run(self, command: CompleteExecution) -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.COMPLETED)
 
-    async def fail_run(self, command: FailRun) -> RunRecord:
-        return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.FAILED)
+    async def fail_run(self, command: FailExecution) -> RunRecord:
+        return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.FAILED, error=command.error)
 
-    async def acknowledge_cancel(self, command: AcknowledgeRunCancel) -> RunRecord:
+    async def acknowledge_cancel(self, command: AcknowledgeCancellation) -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.CANCELLED)
 
-    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: RunSnapshot, status: RunStatus, pending_approval: RunApproval | None = None) -> RunRecord:
+    async def abort_run(self, command: AbortExecution) -> RunRecord:
+        # Unlike fail_run, there is no snapshot to persist here -- an
+        # AbortExecution fires on a programming/config/protocol error, before
+        # the engine ever produced a coherent outcome to snapshot.
+        async with self._locks.acquire(("run", command.run_id)):
+            record = await self._required_run(command.run_id)
+            assert_owner(record, command.owner, command.fence, _now())
+            assert_transition(record.status, RunStatus.FAILED)
+            now = _now()
+            updated = replace(record, status=RunStatus.FAILED, error=command.error, lease=release(record.lease), trace_sequence=command.trace_end_sequence, event_sequence=record.event_sequence + 1, updated_at=now)
+            await self._write_run_event(updated, "run.aborted", now)
+            if record.session_turn_sequence is not None:
+                turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(record.session_id, record.session_turn_sequence))))
+                await asyncio.to_thread(atomic_write_json, self._turn_path(record.session_id, record.session_turn_sequence), asdict(replace(turn, status=RunStatus.FAILED, completed_at=now)))
+            return updated
+
+    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: AgentSnapshotData, status: RunStatus, pending_approval: RunApproval | None = None, error: RunError | None = None) -> RunRecord:
         record = await self._required_run(run_id)
         session_id = record.session_id
         async with self._locks.acquire(("session", session_id), ("run", run_id)):
             record = await self._required_run(run_id)
             assert_owner(record, owner, fence, _now())
             assert_transition(record.status, status)
-            current_snapshot = await self.get_snapshot(run_id)
-            if current_snapshot is not None and snapshot.revision <= current_snapshot.revision:
-                raise StorageConflictError("snapshot revision is not increasing")
-            now = snapshot.created_at
-            updated = replace(record, status=status, pending_approval=pending_approval, lease=release(record.lease), snapshot_revision=snapshot.revision, trace_sequence=snapshot.trace_end_sequence, event_sequence=record.event_sequence + 1, updated_at=now)
-            await asyncio.to_thread(atomic_write_json, self._snapshot_path(run_id), asdict(snapshot))
+            # The store allocates the snapshot revision (expected + 1); the
+            # write lock serializes concurrent commits within this process.
+            new_revision = record.snapshot_revision + 1
+            now = _now()
+            stored_snapshot = RunSnapshot("run-snapshot.v1", run_id, new_revision, snapshot.resume_messages, snapshot.final_output, status, snapshot.usage, snapshot.trace_end_sequence, now)
+            updated = replace(record, status=status, approval=pending_approval, error=error, lease=release(record.lease), snapshot_revision=new_revision, trace_sequence=snapshot.trace_end_sequence, event_sequence=record.event_sequence + 1, updated_at=now)
+            await asyncio.to_thread(atomic_write_json, self._snapshot_path(run_id), asdict(stored_snapshot))
             await self._write_run_event(updated, f"run.{status.value}", now)
             if record.session_turn_sequence is not None:
                 turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(session_id, record.session_turn_sequence))))

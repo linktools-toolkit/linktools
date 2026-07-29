@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Minimal linktools-ai runtime: register a model, build a Runtime, run a
-no-tool agent, shut it down. Uses public imports only.
+"""Minimal linktools-ai runtime: register a model, build a Runtime over local
+directory storage, run a no-tool agent, shut it down. Uses public imports
+only.
 
-This module is executed by ``tests/ai/docs/test_readme_examples.py`` so the
-README example cannot silently drift. The model is a pydantic-ai
-``FunctionModel`` (a canned response) so the example runs offline -- swap it
-for a real ``OpenAIChatModel`` (via ``RuntimeModelConfig``) in production."""
+The model is a pydantic-ai ``FunctionModel`` (a canned response) so the
+example runs offline -- swap it for a real model (via ``RuntimeModelConfig``)
+in production."""
 
 from pathlib import Path
 from typing import Any
@@ -16,9 +16,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.model import ModelPolicy, ModelRegistry, ModelResolver
-from linktools.ai.runtime import Runtime, build_runtime
-from linktools.ai.runtime.persistence import FilesystemStorage
-from linktools.ai.run.persistence.commit import FilesystemRunCommitCoordinator
+from linktools.ai.runtime import LocalDirectoryStorage, build_runtime
 
 
 def _canned_model() -> FunctionModel:
@@ -29,28 +27,23 @@ def _canned_model() -> FunctionModel:
 
 
 async def run(data_dir: Path) -> Any:
-    """Build a Runtime over a FilesystemStorage, run one no-tool agent, return
-    its output, and close the Runtime. ``data_dir`` is the storage root."""
+    """Build a Runtime over LocalDirectoryStorage, run one no-tool agent,
+    return its output, and close the Runtime. ``data_dir`` is the storage
+    root."""
     registry = ModelRegistry()
     registry.register("standard", model=_canned_model())
 
-    storage = FilesystemStorage(root=data_dir)
-    runtime = build_runtime(
-        storage=storage,
-        model_resolver=ModelResolver(registry=registry),
-        commit_coordinator=FilesystemRunCommitCoordinator.from_storage(storage),
-    )
-    try:
+    storage = LocalDirectoryStorage(root=data_dir)
+    await storage.initialize_storage()
+    runtime = build_runtime(storage=storage, model_resolver=ModelResolver(registry=registry))
+    async with runtime:
         spec = AgentSpec(
             id="writer",
             name="writer",
             model=ModelPolicy(primary="standard"),
             instructions=PromptSpec(instructions="You are a careful writer."),
         )
-        result = await runtime.run(spec, "Say hello.")
-        return result.output
-    finally:
-        await runtime.aclose()
+        return await runtime.run(spec, "Say hello.")
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke

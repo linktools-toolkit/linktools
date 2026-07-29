@@ -26,7 +26,7 @@ def _inspection_warnings_from_events(events: "tuple[Any, ...]") -> "tuple[str, .
     sanitizer-redacted) reason -- so inspection never leaks a secret or exposes
     the raw event objects."""
     warnings: "list[str]" = []
-    from ...events.payloads import SecurityDegraded, TruncatedSecurityEvent
+    from ...observability.events.payloads import SecurityDegraded, TruncatedSecurityEvent
 
     for event in events:
         if isinstance(event, SecurityDegraded):

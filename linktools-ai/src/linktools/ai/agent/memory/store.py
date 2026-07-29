@@ -12,7 +12,6 @@ optional orthogonal content filter (it carries no authorization weight)."""
 
 from typing import Protocol, runtime_checkable
 
-from ...storage.composition import StorageComposition
 from .models import MemoryMatch, MemoryRecord
 from .scope import MemoryScope
 
@@ -52,17 +51,17 @@ class MemoryBackend(Protocol):
 
 class MemoryStore:
     def __init__(self, backend: MemoryBackend) -> None:
-        self._storage = StorageComposition(primary=backend)
+        self._backend = backend
 
     @property
     def backend(self) -> MemoryBackend:
-        return self._storage.primary
+        return self._backend
 
     async def initialize_storage(self, *args: object) -> None:
-        await self._storage.initialize(*args)
+        await self._backend.initialize_storage(*args)
 
     async def get(self, memory_id: str) -> MemoryRecord | None:
-        return await self._storage.primary.get(memory_id)
+        return await self._backend.get(memory_id)
 
     async def search(
         self,
@@ -72,7 +71,7 @@ class MemoryStore:
         limit: int = 10,
         category: str | None = None,
     ) -> tuple[MemoryMatch, ...]:
-        return await self._storage.primary.search(
+        return await self._backend.search(
             query,
             scope=scope,
             limit=limit,
@@ -80,7 +79,7 @@ class MemoryStore:
         )
 
     async def remember(self, record: MemoryRecord) -> MemoryRecord:
-        return await self._storage.primary.remember(record)
+        return await self._backend.remember(record)
 
     async def update(
         self,
@@ -92,7 +91,7 @@ class MemoryStore:
         confidence: object = UNSET,
         metadata: object = UNSET,
     ) -> MemoryRecord:
-        return await self._storage.primary.update(
+        return await self._backend.update(
             memory_id,
             expected_version=expected_version,
             content=content,
@@ -102,7 +101,7 @@ class MemoryStore:
         )
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None:
-        await self._storage.primary.forget(memory_id, expected_version=expected_version)
+        await self._backend.forget(memory_id, expected_version=expected_version)
 
 
 __all__ = ["MemoryBackend", "MemoryStore", "UNSET"]

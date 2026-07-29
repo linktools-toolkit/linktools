@@ -3,8 +3,8 @@ import pytest
 from linktools.ai.errors import StorageCapabilityError
 from linktools.ai.spec.document import SpecDocument, SpecDocumentInfo
 from linktools.ai.spec.store import SpecStore
-from linktools.ai.storage.cache import MemoryContentCache
-from linktools.ai.storage.multi import StorageLayer
+from linktools.ai.spec.cache import MemoryContentCache
+from linktools.ai.spec.multi import StorageLayer
 
 
 class Backend:

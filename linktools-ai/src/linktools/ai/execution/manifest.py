@@ -14,7 +14,7 @@ captured). The concrete ``DefaultManifestResolver`` consumes it on resume
 ``Runtime.resume``. Tool-handler revisions and pinned asset (skill /
 subagent) snapshots are NOT yet populated -- handlers are resolved at
 execution time, not prepare time, so their revisions layer in once tool
-resolution moves earlier; asset snapshotting is its own follow-up.
+resolution moves earlier; asset snapshotting is handled separately.
 
 Revision helpers:
 - ``descriptor_fingerprint`` -- content hash of a tool declaration (the ToolRef

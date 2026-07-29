@@ -16,7 +16,8 @@ from pydantic_ai import Agent as PydanticAgent
 from pydantic_ai.messages import ModelMessage
 
 from ..model.resolver import ResolvedModel
-from ..execution.run import RunErrorInfo, RunResult
+from ..execution.domain import RunErrorInfo
+from ..json import JsonValue
 from ..tool.pydantic import PolicyCapability
 from .spec import AgentSpec
 
@@ -54,13 +55,14 @@ class CompiledAgent:
 @dataclass(frozen=True, slots=True)
 class AgentInput:
     """The AgentEngine-facing execution request (the ``input:
-    AgentInput``) -- a dedicated type rather than reusing ``run.models.RunInput``
-    directly, so AgentEngine's public surface does not couple to the Run
-    domain's own input shape as that shape evolves independently."""
+    AgentInput``) -- a dedicated type rather than reusing the execution
+    domain's own command/definition input fields directly, so AgentEngine's
+    public surface does not couple to the Run domain's input shape as that
+    shape evolves independently."""
 
     prompt: str
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
-    # Session history RunCoordinator already loaded (via SessionReader) and
+    # Session history ExecutionService already loaded (via SessionReader) and
     # converted to pydantic-ai's message shape -- AgentEngine folds it into
     # the model prompt but never reads persistence itself. Empty (default)
     # means a new run with no prior turns.
@@ -72,11 +74,12 @@ class AgentInput:
 
 
 @dataclass(frozen=True, slots=True)
-class RunUsage:
-    """Token/cost usage summary an execution produced. A typed replacement
-    for the free-form ``token_usage: Mapping`` carried on ``run.models.RunResult``
-    -- ``AgentExecutionOutcome.usage`` reports this directly rather than via an
-    untyped mapping."""
+class AgentUsage:
+    """Token/cost usage summary an agent execution produced. Distinct from the
+    persisted ``execution.domain.RunUsage`` (which carries token counts for
+    snapshots): the agent outcome reports input/output tokens plus an optional
+    total cost, and the execution service converts it to the snapshot's
+    ``RunUsage`` when it commits."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -85,7 +88,7 @@ class RunUsage:
 
 @dataclass(frozen=True, slots=True)
 class PauseRequest:
-    """Everything RunCoordinator needs to persist an ApprovalRequest and
+    """Everything ExecutionService needs to persist an ApprovalRequest and
     checkpoint on a PAUSED outcome, without AgentEngine touching
     persistence itself. Mirrors the fields
     ``errors.RunPaused`` already carries (see errors.py) -- this is the
@@ -103,6 +106,13 @@ class PauseRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class RunResult:
+    output: object
+    token_usage: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class AgentCompleted:
     """AgentEngine ran to a successful final output. The serialized message
     history at completion travels on ``snapshot`` (the trace collector's
@@ -111,19 +121,19 @@ class AgentCompleted:
     run would have checkpointed."""
 
     result: RunResult
-    usage: RunUsage
+    usage: AgentUsage
     snapshot: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class AgentPaused:
     """AgentEngine suspended on a tool call awaiting approval. Carries
-    everything RunCoordinator needs to persist the ApprovalRequest and
+    everything ExecutionService needs to persist the ApprovalRequest and
     snapshot without AgentEngine touching persistence
     itself."""
 
     request: PauseRequest
-    usage: RunUsage
+    usage: AgentUsage
     snapshot: Any = None
 
 
@@ -137,7 +147,7 @@ class AgentFailed:
 
     error: RunErrorInfo
     retryable: bool
-    usage: RunUsage
+    usage: AgentUsage
     snapshot: Any = None
 
 
@@ -148,7 +158,7 @@ class AgentCancelled:
     cleanup rather than reporting as an outcome)."""
 
     reason: "str | None"
-    usage: RunUsage
+    usage: AgentUsage
     snapshot: Any = None
 
 
@@ -156,7 +166,7 @@ AgentExecutionOutcome: TypeAlias = (
     AgentCompleted | AgentPaused | AgentFailed | AgentCancelled
 )
 """The sole return shape of ``AgentEngine.execute_pure()``: a single awaited
-discriminated union, so RunCoordinator can converge run lifecycle
+discriminated union, so ExecutionService can converge run lifecycle
 (transition/checkpoint/session/event writes) from ONE outcome object instead
 of iterating a stream and inferring state from event shapes. Unlike a flat
 dataclass with nullable fields per status, invalid combinations (e.g. a

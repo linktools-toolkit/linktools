@@ -66,7 +66,7 @@ class SubagentProvider:
     depth_provider: "Callable[[], int]" = field(default=current_depth)
     # Skill-private subagent support (call_subagent(instruction_path=...)).
     # All optional: when None, the tool's instruction_path branch raises that
-    # skill-private subagents are not enabled (preserving the legacy behavior).
+    # skill-private subagents are not enabled (preserving the default behavior).
     skill_resolver: Any = None
     active_skill_provider: "Callable[[], Any] | None" = None
     child_model_policy: Any = None

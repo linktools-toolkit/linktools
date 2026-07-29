@@ -19,15 +19,15 @@ import typing
 from datetime import datetime, timezone
 from enum import Enum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, TypeAlias
 from uuid import UUID
 
-if TYPE_CHECKING:
-    from typing import TypeAlias
+from .errors import JsonEncodingError
 
-    JSONValue: "TypeAlias" = (
-        "None | bool | int | float | str | list[JSONValue] | dict[str, JSONValue]"
-    )
+JsonScalar: "TypeAlias" = str | int | float | bool | None
+JsonValue: "TypeAlias" = JsonScalar | list["JsonValue"] | dict[str, "JsonValue"]
+# Backwards-compatible spelling retained for existing string annotations.
+JSONValue: "TypeAlias" = JsonValue
 
 
 def freeze_value(value: Any) -> Any:
@@ -46,40 +46,46 @@ def freeze_value(value: Any) -> Any:
 
 
 def normalize_json(value: Any, *, path: str = "$") -> "JSONValue":
-    """Return a JSON-compatible view of ``value`` or raise ``TypeError``.
+    """Return a JSON-compatible view of ``value`` or raise ``JsonEncodingError``.
 
-    Rules: ``None``/``str``/``bool`` pass; ``int`` passes (``bool`` is handled
-    first so ``True`` is not collapsed to ``1``); ``float`` must be finite;
-    ``UUID`` is rendered as its canonical string; timezone-aware ``datetime``
-    is rendered as UTC ISO 8601 (naive datetimes are rejected -- their zone is
-    ambiguous); ``list``/``tuple`` become JSON arrays; ``Mapping`` becomes a
-    JSON object whose keys must be strings. Everything else (``bytes``,
-    ``set``, ``Decimal``, custom classes) is rejected -- callers must convert
-    those explicitly rather than rely on an unstable string fallback."""
+    Accepted: ``None``/``str``/``bool``/``int``; finite ``float``; ``UUID``;
+    timezone-aware ``datetime`` (rendered as UTC ISO 8601 -- naive datetimes are
+    rejected, their zone is ambiguous); ``Enum`` (by its value); ``list``/``tuple``;
+    ``Mapping`` (string keys only); dataclasses; pydantic models (via
+    ``model_dump``). Everything else (``bytes``, ``set``, ``Decimal``, custom
+    classes) is rejected -- callers must convert those explicitly rather than
+    rely on an unstable string fallback."""
     if value is None or isinstance(value, (str, bool)):
         return value
     if isinstance(value, int):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise TypeError(f"{path}: non-finite float is not valid JSON")
+            raise JsonEncodingError(f"{path}: non-finite float is not valid JSON")
         return value
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            raise TypeError(f"{path}: naive datetime is not valid JSON (use tz-aware)")
+            raise JsonEncodingError(f"{path}: naive datetime is not valid JSON (use tz-aware)")
         return value.astimezone(timezone.utc).isoformat()
+    if isinstance(value, Enum):
+        return normalize_json(value.value, path=path)
     if isinstance(value, (list, tuple)):
         return [normalize_json(v, path=f"{path}[{i}]") for i, v in enumerate(value)]
     if isinstance(value, Mapping):
         out: "dict[str, Any]" = {}
         for key, item in value.items():
             if not isinstance(key, str):
-                raise TypeError(f"{path}: non-string mapping key {key!r}")
+                raise JsonEncodingError(f"{path}: non-string mapping key {key!r}")
             out[key] = normalize_json(item, path=f"{path}.{key}")
         return out
-    raise TypeError(
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return normalize_json(model_dump(mode="python"), path=path)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return normalize_json(dataclasses.asdict(value), path=path)
+    raise JsonEncodingError(
         f"{path}: {type(value).__name__} is not JSON-compatible "
         f"(convert it explicitly instead of relying on a string fallback)"
     )
@@ -96,6 +102,21 @@ def canonical_json(value: Any) -> str:
         ensure_ascii=False,
         allow_nan=False,
     )
+
+
+def encode_json(value: Any) -> str:
+    """Compact JSON encoding of ``value`` (not sorted -- preserves insertion
+    order). Use ``canonical_json`` when the bytes must be stable for a hash."""
+    return json.dumps(normalize_json(value), ensure_ascii=False, separators=(",", ":"))
+
+
+def decode_json(raw: str) -> "JsonValue":
+    return normalize_json(json.loads(raw))  # type: ignore[return-value]
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    """Canonical JSON encoded as UTF-8 bytes (for hashing/fingerprinting)."""
+    return canonical_json(value).encode("utf-8")
 
 
 # ----------------------------------------------------------- generic serde --

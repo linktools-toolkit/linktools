@@ -8,7 +8,7 @@ from ..spec import SpecSource
 from ..spec.index import SpecIndex
 from ..spec.parsing import SpecLoader
 from ..spec.source import SpecLoaderSource
-from .codec import AgentSpecCodec
+from .codec import AgentSpecDocumentCodec
 from .spec import AgentSpec
 
 
@@ -18,13 +18,13 @@ class AgentSpecIndex(SpecIndex[AgentSpec]):
         self,
         source: SpecSource,
         *,
-        codec: "AgentSpecCodec | None" = None,
+        codec: "AgentSpecDocumentCodec | None" = None,
         suffix: str = ".md",
         source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
-            codec or AgentSpecCodec(),
+            codec or AgentSpecDocumentCodec(),
             suffix=suffix,
             source_name=source_name,
         )

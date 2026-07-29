@@ -17,7 +17,7 @@ Resolution rules:
 from typing import TYPE_CHECKING, Any, Mapping
 
 from ...errors import CapabilityConflictError, CapabilityResolutionError
-from ...events.payloads import (
+from ...observability.events.payloads import (
     CapabilityResolveCompleted,
     CapabilityResolveStarted,
     ToolExposureDenied,
@@ -44,7 +44,7 @@ async def _emit(context: CapabilityContext, payload) -> None:
     emitter = context.security_event_emitter
     if emitter is None:
         return
-    from ...events.models import EventCriticality
+    from ...observability.events.models import EventCriticality
 
     if getattr(type(payload), "criticality", None) is EventCriticality.SECURITY_CRITICAL:
         await emitter.emit_security(payload)

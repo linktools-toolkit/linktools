@@ -131,7 +131,7 @@ class ActorChain:
     delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.empty)
 
     def __post_init__(self) -> None:
-        # Runtime construction is strict; persistence adapters own legacy migration.
+        # Runtime construction is strict; persistence adapters own schema migration.
         if not isinstance(self.delegated_scopes, ScopeSet):
             raise TypeError("ActorChain.delegated_scopes requires explicit ScopeSet")
 
@@ -206,7 +206,7 @@ class TaskRecord:
     actor_chain: "ActorChain | None" = None
 
     def __post_init__(self) -> None:
-        # Runtime construction is strict; persistence adapters own legacy migration.
+        # Runtime construction is strict; persistence adapters own schema migration.
         if not isinstance(self.delegated_scopes, ScopeSet):
             raise TypeError("TaskRecord.delegated_scopes requires explicit ScopeSet")
     # Signal-wait state (set when a handler returns WaitSignal). wait_deadline_at

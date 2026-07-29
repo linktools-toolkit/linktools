@@ -7,7 +7,7 @@ from linktools.ai.spec.document import SpecDocument, SpecDocumentInfo
 from linktools.ai.spec.persistence.local import LocalSpecBackend
 from linktools.ai.spec.persistence.sqlalchemy import SqlAlchemySpecBackend
 from linktools.ai.spec.store import SpecStore
-from linktools.ai.storage.multi import StorageLayer
+from linktools.ai.spec.multi import StorageLayer
 
 
 @pytest.mark.asyncio

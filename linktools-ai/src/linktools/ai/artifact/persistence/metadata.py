@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""SQL-first ``ArtifactBackend``: metadata in ``ai_artifacts``, content in a
+:class:`FilesystemArtifactBlobStore`. Records are create-only -- inserting the
+same id with byte-identical content is idempotent (a retried ``put``), but a
+different sha256/tenant/provenance under an existing id is refused rather than
+overwriting the prior write's lineage.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import JSON, Integer, String, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Mapped, mapped_column
+
+from ...errors import ArtifactRecordConflictError
+from ...storage.sqlalchemy.base import Base
+from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
+from ..models import ArtifactProvenance, ArtifactRecord, ArtifactRef
+from .blob import FilesystemArtifactBlobStore
+
+
+class ArtifactRow(Base):
+    __tablename__ = f"{TABLE_PREFIX}artifacts"
+    artifact_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    sha256: Mapped[str] = mapped_column(String(64), index=True)
+    media_type: Mapped[str] = mapped_column(String(255))
+    size: Mapped[int] = mapped_column(Integer)
+    tenant_id: Mapped[str] = mapped_column(String(255), index=True)
+    producer_kind: Mapped[str] = mapped_column(String(255))
+    producer_id: Mapped[str] = mapped_column(String(255))
+    run_id: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    session_id: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    parent_artifact_ids: Mapped[Any] = mapped_column(JSON)
+    provenance_metadata: Mapped[Any] = mapped_column(JSON)
+
+
+def _record(row: ArtifactRow) -> ArtifactRecord:
+    return ArtifactRecord(
+        ref=ArtifactRef(row.artifact_id, row.sha256, row.media_type, row.size),
+        tenant_id=row.tenant_id,
+        provenance=ArtifactProvenance(
+            producer_kind=row.producer_kind,
+            producer_id=row.producer_id,
+            run_id=row.run_id,
+            session_id=row.session_id,
+            parent_artifact_ids=tuple(row.parent_artifact_ids),
+            metadata=row.provenance_metadata,
+        ),
+        created_at=as_utc(row.created_at),
+    )
+
+
+class SqlArtifactBackend:
+    def __init__(self, session_factory, blobs: "FilesystemArtifactBlobStore | str | Path") -> None:
+        self.session_factory = session_factory
+        self.blobs = blobs if isinstance(blobs, FilesystemArtifactBlobStore) else FilesystemArtifactBlobStore(blobs)
+
+    async def initialize_storage(self, engine) -> None:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        await self.blobs.initialize_storage()
+
+    async def put(self, *, record: ArtifactRecord, content: AsyncIterator[bytes]) -> ArtifactRecord:
+        await self.blobs.put(ref=record.ref, content=content)
+        row = ArtifactRow(
+            artifact_id=record.ref.id,
+            sha256=record.ref.sha256,
+            media_type=record.ref.media_type,
+            size=record.ref.size,
+            tenant_id=record.tenant_id,
+            producer_kind=record.provenance.producer_kind,
+            producer_id=record.provenance.producer_id,
+            run_id=record.provenance.run_id,
+            session_id=record.provenance.session_id,
+            parent_artifact_ids=list(record.provenance.parent_artifact_ids),
+            provenance_metadata=dict(record.provenance.metadata),
+            created_at=record.created_at,
+        )
+        try:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    session.add(row)
+            return record
+        except IntegrityError:
+            existing = await self.get_record(record.ref.id)
+            if existing != record:
+                raise ArtifactRecordConflictError(record.ref.id)
+            return existing
+
+    async def get_record(self, artifact_id: str) -> "ArtifactRecord | None":
+        async with self.session_factory() as session:
+            row = await session.scalar(select(ArtifactRow).where(ArtifactRow.artifact_id == artifact_id))
+        return None if row is None else _record(row)
+
+    async def open(self, artifact_id: str) -> AsyncIterator[bytes]:
+        record = await self.get_record(artifact_id)
+        if record is None:
+            return
+        async for chunk in self.blobs.open(record.ref.sha256):
+            yield chunk
+
+    async def delete(self, artifact_id: str) -> None:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(select(ArtifactRow).where(ArtifactRow.artifact_id == artifact_id))
+                if row is not None:
+                    await session.delete(row)
+
+
+__all__: "list[str]" = ["ArtifactRow", "SqlArtifactBackend"]

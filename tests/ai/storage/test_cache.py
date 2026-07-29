@@ -1,6 +1,6 @@
 import pytest
 
-from linktools.ai.storage.cache import (
+from linktools.ai.spec.cache import (
     FilesystemContentCache,
     MemoryContentCache,
     TieredContentCache,

@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AgentSpecCodec: the SpecCodec[AgentSpec] for the agent domain.
+"""Agent spec codecs: document parsing and JSON round-trip.
 
-Owns the agent-specific parsing (moved here from the old registry/agent.py):
-a ``{name}.md`` item is markdown with a YAML frontmatter. The codec splits the
-raw text, strictly validates the frontmatter, and builds an AgentSpec. Unknown
-frontmatter fields are rejected; parse failures surface the domain's existing
-errors (SpecParseError for malformed frontmatter, InvalidSpecError
-for a bad or missing specification field).
+Two codecs share this module:
+
+* :class:`AgentSpecDocumentCodec` is the ``SpecCodec[AgentSpec]`` that decodes a
+  ``{name}.md`` item (markdown + YAML frontmatter) into an AgentSpec for the
+  spec index. It strictly validates the frontmatter and propagates the domain's
+  rich errors (SpecParseError / InvalidSpecError).
+* :class:`AgentSpecCodec` is the JSON round-trip codec: ``encode``
+  produces the canonical JsonValue persisted in ``RunDefinition.spec`` and
+  ``decode`` rebuilds a semantically equal AgentSpec, including the structured
+  output type via :class:`OutputTypeRegistry`.
 
 The shared markdown and strict-config primitives live in ``spec.parsing``;
 this module imports them one-way.
@@ -25,8 +29,11 @@ from ..spec.parsing import (
     parse_markdown_text,
     resolved_name,
 )
+from ..json import JsonValue, from_jsonable, to_jsonable
 from ..model.codec import parse_model_policy
+from ..model.policy import ModelPolicy
 from ..tool.codec import parse_tool_refs
+from ..tool.models import ToolRef
 from ..errors import InvalidSpecError
 from .spec import AgentSpec, MiddlewareRef, PromptSpec
 
@@ -95,7 +102,7 @@ def parse_agent_spec(agent_id: str, payload: "dict[str, Any]", body: str) -> Age
     )
 
 
-class AgentSpecCodec:
+class AgentSpecDocumentCodec:
     """SpecCodec[AgentSpec]: decode one ``{id}.md`` item's raw text into an
     AgentSpec. Strict (rejects unknown frontmatter fields). Propagates the
     domain's existing rich errors (SpecParseError / InvalidSpecError)
@@ -107,13 +114,109 @@ class AgentSpecCodec:
         return parse_agent_spec(item_id, payload, body)
 
 
+class OutputTypeRegistry:
+    """Stable ref <-> structured output type mapping so a RunDefinition can
+    reference an output type by string (persisted in the spec JSON) and resume
+    can resolve the exact class without re-fetching it from the caller or
+    synthesizing an empty model."""
+
+    def __init__(self) -> None:
+        self._by_ref: "dict[str, type]" = {}
+        self._by_type: "dict[type, str]" = {}
+
+    def register(self, ref: str, output_type: type) -> None:
+        existing_ref = self._by_type.get(output_type)
+        existing_type = self._by_ref.get(ref)
+        if existing_ref == ref and existing_type is output_type:
+            return
+        if existing_ref is not None and existing_ref != ref:
+            raise InvalidSpecError(f"output type already registered as {existing_ref!r}")
+        if existing_type is not None and existing_type is not output_type:
+            raise InvalidSpecError(f"output ref {ref!r} already registered to a different type")
+        self._by_ref[ref] = output_type
+        self._by_type[output_type] = ref
+
+    def resolve(self, ref: str) -> type:
+        try:
+            return self._by_ref[ref]
+        except KeyError as exc:
+            raise InvalidSpecError(f"unknown output type ref {ref!r}") from exc
+
+    def ref_for(self, output_type: type) -> "str | None":
+        return self._by_type.get(output_type)
+
+
+class AgentSpecCodec:
+    """JSON round-trip codec for AgentSpec. ``encode`` produces the
+    canonical JsonValue stored in ``RunDefinition.spec``; ``decode`` rebuilds a
+    semantically equal AgentSpec from it. Every field round-trips -- model,
+    instructions + sections, tools, middleware, metadata, and the structured
+    output type (by registry ref). Output types are never stored as Python
+    reprs and never restored via a dynamic model factory."""
+
+    def __init__(self, output_types: "OutputTypeRegistry | None" = None) -> None:
+        self._output_types = output_types
+
+    def encode(self, spec: AgentSpec) -> JsonValue:
+        output_ref = None
+        if spec.output_schema is not None:
+            if self._output_types is None:
+                raise InvalidSpecError("cannot encode a structured output without an OutputTypeRegistry")
+            output_ref = self._output_types.ref_for(spec.output_schema)
+            if output_ref is None:
+                raise InvalidSpecError("structured output type is not registered")
+        return {
+            "schema": "agent-spec.v1",
+            "id": spec.id,
+            "name": spec.name,
+            "model": to_jsonable(spec.model),
+            "instructions": {
+                "instructions": spec.instructions.instructions,
+                "sections": dict(spec.instructions.sections),
+            },
+            "tools": None if spec.tools is None else [to_jsonable(item) for item in spec.tools],
+            "middleware": [{"name": item.name, "config": dict(item.config)} for item in spec.middleware],
+            "output_ref": output_ref,
+            "metadata": dict(spec.metadata),
+        }
+
+    def decode(self, value: JsonValue) -> AgentSpec:
+        data = dict(value)
+        raw_tools = data.get("tools")
+        instructions = data["instructions"]
+        output_schema = None
+        output_ref = data.get("output_ref")
+        if output_ref is not None:
+            if self._output_types is None:
+                raise InvalidSpecError("cannot decode a structured output ref without an OutputTypeRegistry")
+            output_schema = self._output_types.resolve(output_ref)
+        return AgentSpec(
+            id=data["id"],
+            name=data["name"],
+            model=from_jsonable(ModelPolicy, data["model"]),
+            instructions=PromptSpec(
+                instructions=instructions["instructions"],
+                sections=instructions.get("sections") or {},
+            ),
+            tools=None if raw_tools is None else tuple(from_jsonable(ToolRef, item) for item in raw_tools),
+            middleware=tuple(
+                MiddlewareRef(name=item["name"], config=item.get("config") or {})
+                for item in data.get("middleware") or ()
+            ),
+            output_schema=output_schema,
+            metadata=data.get("metadata") or {},
+        )
+
+
 def parse_agent_spec_markdown(content: str, *, agent_id: str) -> AgentSpec:
     """Decode one AgentSpec from Markdown without touching the filesystem."""
-    return AgentSpecCodec().decode(agent_id, content)
+    return AgentSpecDocumentCodec().decode(agent_id, content)
 
 
 __all__: "list[str]" = [
     "AgentSpecCodec",
+    "AgentSpecDocumentCodec",
+    "OutputTypeRegistry",
     "parse_agent_spec",
     "parse_agent_spec_markdown",
     "parse_middleware_refs",

@@ -20,8 +20,8 @@ import asyncio
 class CancellationToken:
     """Cooperative cancellation signal. Checked at execution points.
 
-    A token is created per Run by RunCoordinator._claim_and_fence and
-    registered with RunController; execute_pure receives it as a parameter and
+    A token is created per Run by ExecutionService._execute and registered
+    with RunController; execute_pure receives it as a parameter and
     awaits ``raise_if_cancelled()`` before and after the model call. The token
     has two states -- not-set (run is in flight) and set (cancel requested).
     RunController.cancel() calls ``cancel()`` which flips the state, so the

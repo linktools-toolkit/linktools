@@ -40,7 +40,7 @@ class ToolRef:
     referenced by agent / skill / swarm / capability declarations, not an
     agent-specific one.
 
-    It is the SINGLE reference type: ``linktools.ai.capability.models.CapabilityRef``
+    It is the SINGLE reference type: ``linktools.ai.agent.capability.models.CapabilityRef``
     is an alias of this class, so a spec declaration and
     a resolved capability ref are the same object, not two identical shapes."""
 

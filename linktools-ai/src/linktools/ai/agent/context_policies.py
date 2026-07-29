@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .retrieval.context import KnowledgeItem
     from .memory.models import MemoryRecord
     from ..execution.context import RunContext
-    from ..execution.run import RunResult
+    from .models import RunResult
 
 
 @runtime_checkable
