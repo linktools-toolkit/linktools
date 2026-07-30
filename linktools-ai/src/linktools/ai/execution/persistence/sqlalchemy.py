@@ -64,7 +64,11 @@ class ExecutionRow(Base):
     status: Mapped[str] = mapped_column(String(40), index=True)
     definition: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     definition_hash: Mapped[str] = mapped_column(String(64))
-    approval: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
+    # Variable payload (input / approval / error) packed into one JSON column to
+    # keep the table's large-field count within the DBA limit; _record/_finish
+    # (un)pack it. `definition` stays separate (it drives definition_hash + the
+    # RunDefinition rebuild).
+    data: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     owner: Mapped[str | None] = mapped_column(String(255))
     fence: Mapped[int] = mapped_column(Integer, default=0)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
@@ -74,8 +78,6 @@ class ExecutionRow(Base):
     event_sequence: Mapped[int] = mapped_column(Integer, default=0)
     tenant_id: Mapped[str | None] = mapped_column(String(255))
     user_id: Mapped[str | None] = mapped_column(String(255))
-    error: Mapped[dict[str, JsonValue] | None] = mapped_column(JSON, nullable=True)
-    input: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
 
 
 class SnapshotRow(Base):
@@ -83,9 +85,9 @@ class SnapshotRow(Base):
     execution_id: Mapped[str] = mapped_column(String(255), unique=True)
     revision: Mapped[int] = mapped_column(Integer)
     resume_messages: Mapped[list[JsonValue]] = mapped_column(JSON)
-    final_output: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
+    # final_output + usage packed into one JSON column (DBA large-field limit).
+    outcome: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32))
-    usage: Mapped[dict[str, int]] = mapped_column(JSON)
     trace_end_sequence: Mapped[int] = mapped_column(Integer)
 
 
@@ -139,6 +141,7 @@ def _approval(data: dict[str, JsonValue]) -> RunApproval:
 
 
 def _record(row: ExecutionRow) -> RunRecord:
+    data = row.data or {}
     return RunRecord(
         id=row.execution_id,
         session_id=row.session_id,
@@ -150,7 +153,7 @@ def _record(row: ExecutionRow) -> RunRecord:
         session_turn_sequence=row.session_turn_sequence,
         parent_execution_id=row.parent_execution_id,
         root_execution_id=row.root_execution_id,
-        approval=_approval(row.approval) if row.approval else None,
+        approval=_approval(data["approval"]) if data.get("approval") else None,
         lease=Lease(row.owner, row.fence, as_utc(row.lease_expires_at)),
         cancel_requested_at=as_utc(row.cancel_requested_at),
         snapshot_revision=row.snapshot_revision,
@@ -160,8 +163,8 @@ def _record(row: ExecutionRow) -> RunRecord:
         user_id=row.user_id,
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
-        error=RunError(**row.error) if row.error else None,
-        input=row.input,
+        error=RunError(**data["error"]) if data.get("error") else None,
+        input=data.get("input"),
     )
 
 
@@ -298,7 +301,7 @@ class SqlAlchemyExecutionBackend:
                     raise StorageConflictError("run already exists")
                 now = datetime.now(timezone.utc)
                 sequence = owner.next_turn_sequence if command.kind is RunKind.USER_TURN else None
-                row = ExecutionRow(execution_id=command.run_id, session_id=owner.session_id, kind=command.kind.value, runnable_id=command.definition.runnable_id, runnable_type=command.definition.runnable_type.value, session_turn_sequence=sequence, parent_execution_id=command.parent_execution_id, root_execution_id=command.root_execution_id or command.run_id, status=RunStatus.PENDING.value, definition=asdict(command.definition), definition_hash=command.definition.spec_hash, approval=None, owner=None, fence=0, lease_expires_at=None, cancel_requested_at=None, snapshot_revision=0, trace_sequence=0, event_sequence=1, tenant_id=owner.tenant_id, user_id=owner.user_id, created_at=now, updated_at=now, input=command.input)
+                row = ExecutionRow(execution_id=command.run_id, session_id=owner.session_id, kind=command.kind.value, runnable_id=command.definition.runnable_id, runnable_type=command.definition.runnable_type.value, session_turn_sequence=sequence, parent_execution_id=command.parent_execution_id, root_execution_id=command.root_execution_id or command.run_id, status=RunStatus.PENDING.value, definition=asdict(command.definition), definition_hash=command.definition.spec_hash, data={"input": command.input}, owner=None, fence=0, lease_expires_at=None, cancel_requested_at=None, snapshot_revision=0, trace_sequence=0, event_sequence=1, tenant_id=owner.tenant_id, user_id=owner.user_id, created_at=now, updated_at=now)
                 session.add(row)
                 session.add(EventRow(execution_id=command.run_id, sequence=1, type="run.started", payload={}, created_at=now))
                 if sequence is not None:
@@ -477,7 +480,7 @@ class SqlAlchemyExecutionBackend:
                             ExecutionRow.event_sequence == row.event_sequence,
                         )
                         .values(
-                            approval=new_approval,
+                            data={**(row.data or {}), "approval": new_approval},
                             event_sequence=event_sequence,
                             updated_at=decided_at,
                         )
@@ -496,7 +499,7 @@ class SqlAlchemyExecutionBackend:
                     )
                     .values(
                         status=RunStatus.CANCELLED.value,
-                        approval=new_approval,
+                        data={**(row.data or {}), "approval": new_approval},
                         owner=None,
                         lease_expires_at=None,
                         event_sequence=event_sequence,
@@ -578,7 +581,8 @@ class SqlAlchemyExecutionBackend:
             row = await self._snapshot_row(session, run_id)
             if row is None:
                 return None
-            return RunSnapshot("run-snapshot.v1", row.execution_id, row.revision, tuple(row.resume_messages), row.final_output, RunStatus(row.status), RunUsage(**row.usage), row.trace_end_sequence, row.created_at)
+            outcome = row.outcome or {}
+            return RunSnapshot("run-snapshot.v1", row.execution_id, row.revision, tuple(row.resume_messages), outcome.get("final_output"), RunStatus(row.status), RunUsage(**(outcome.get("usage") or {})), row.trace_end_sequence, row.created_at)
 
     async def _finish(self, run_id: str, owner: str, fence: int, snapshot: AgentSnapshotData, status: RunStatus, pending_approval: RunApproval | None = None, error: RunError | None = None) -> RunRecord:
         async with self.session_factory() as session:
@@ -595,6 +599,12 @@ class SqlAlchemyExecutionBackend:
                 # the engine; the CAS on the row's snapshot_revision fences out
                 # a stale execution's concurrent commit.
                 new_revision = row.snapshot_revision + 1
+                prior_data = row.data or {}
+                merged_data = {
+                    **prior_data,
+                    "approval": asdict(pending_approval) if pending_approval is not None else prior_data.get("approval"),
+                    "error": asdict(error) if error else None,
+                }
                 result = await session.execute(
                     update(ExecutionRow)
                     .where(
@@ -606,12 +616,7 @@ class SqlAlchemyExecutionBackend:
                     )
                     .values(
                         status=status.value,
-                        approval=(
-                            asdict(pending_approval)
-                            if pending_approval is not None
-                            else row.approval
-                        ),
-                        error=asdict(error) if error else None,
+                        data=merged_data,
                         owner=None,
                         lease_expires_at=None,
                         snapshot_revision=new_revision,
@@ -625,9 +630,9 @@ class SqlAlchemyExecutionBackend:
                 finished = await self._run_row(session, run_id)
                 current = await self._snapshot_row(session, run_id, for_update=True)
                 if current is None:
-                    session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=list(snapshot.resume_messages), final_output=snapshot.final_output, status=status.value, usage=asdict(snapshot.usage), trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
+                    session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=list(snapshot.resume_messages), outcome={"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status=status.value, trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
                 else:
-                    current.revision, current.resume_messages, current.final_output, current.status, current.usage, current.trace_end_sequence, current.updated_at = new_revision, list(snapshot.resume_messages), snapshot.final_output, status.value, asdict(snapshot.usage), snapshot.trace_end_sequence, now
+                    current.revision, current.resume_messages, current.outcome, current.status, current.trace_end_sequence, current.updated_at = new_revision, list(snapshot.resume_messages), {"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status.value, snapshot.trace_end_sequence, now
                 session.add(EventRow(execution_id=run_id, sequence=event_sequence, type=f"run.{status.value}", payload={}, created_at=now))
                 if finished.session_turn_sequence is not None:
                     turn = await self._turn_row(
@@ -683,7 +688,7 @@ class SqlAlchemyExecutionBackend:
                     )
                     .values(
                         status=RunStatus.FAILED.value,
-                        error=asdict(command.error),
+                        data={**(row.data or {}), "error": asdict(command.error)},
                         owner=None,
                         lease_expires_at=None,
                         trace_sequence=command.trace_end_sequence,

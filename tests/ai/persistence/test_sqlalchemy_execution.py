@@ -37,7 +37,7 @@ async def test_sqlalchemy_execution_pages_in_database(tmp_path):
     snapshot = RunSnapshot("run-snapshot.v1", "r", 1, ({"role": "user", "content": "p"},), "done", RunStatus.COMPLETED, RunUsage(), 0, datetime.now(timezone.utc))
     async with factory() as session:
         async with session.begin():
-            session.add(SnapshotRow(execution_id="r", revision=1, resume_messages=list(snapshot.resume_messages), final_output="done", status="completed", usage={"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, trace_end_sequence=0, created_at=snapshot.created_at))
+            session.add(SnapshotRow(execution_id="r", revision=1, resume_messages=list(snapshot.resume_messages), outcome={"final_output": "done", "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}, status="completed", trace_end_sequence=0, created_at=snapshot.created_at))
     assert (await store.list_session_turns("s", limit=1)).items[0].run_id == "r"
     assert (await store.get_snapshot("r")).final_output == "done"
     await engine.dispose()

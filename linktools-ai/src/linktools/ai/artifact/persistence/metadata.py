@@ -36,15 +36,15 @@ class ArtifactRow(Base):
             "tenant_id", "artifact_id", name="uq_artifact_tenant_id"
         ),
     )
-    artifact_id: Mapped[str] = mapped_column(String(255), index=True)
+    artifact_id: Mapped[str] = mapped_column(String(128), index=True)
     sha256: Mapped[str] = mapped_column(String(64), index=True)
-    media_type: Mapped[str] = mapped_column(String(255))
+    media_type: Mapped[str] = mapped_column(String(128))
     size: Mapped[int] = mapped_column(Integer)
-    tenant_id: Mapped[str] = mapped_column(String(255), index=True)
-    producer_kind: Mapped[str] = mapped_column(String(255))
-    producer_id: Mapped[str] = mapped_column(String(255))
-    run_id: Mapped["str | None"] = mapped_column(String(255), nullable=True)
-    session_id: Mapped["str | None"] = mapped_column(String(255), nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    producer_kind: Mapped[str] = mapped_column(String(64))
+    producer_id: Mapped[str] = mapped_column(String(128))
+    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
+    session_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
     parent_artifact_ids: Mapped[Any] = mapped_column(JSON)
     provenance_metadata: Mapped[Any] = mapped_column(JSON)
 
