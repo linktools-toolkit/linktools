@@ -4,21 +4,21 @@ import pytest
 
 from linktools.ai.agent.assembly import AgentFeatureRef
 from linktools.ai.agent.dependencies import AgentDependencies
-from linktools.ai.agent.tool.execution.idempotency import operation_id
-from linktools.ai.agent.tool.execution.models import (
+from linktools.ai.agent.tool.idempotency import operation_id
+from linktools.ai.agent.tool.models import (
     ExecuteTool,
     ToolExecutionContext,
 )
-from linktools.ai.agent.tool.execution.service import ToolExecutionService
+from linktools.ai.agent.tool.service import ToolExecutionService
 from linktools.ai.agent.tool.models import (
     ToolCategory,
     ToolDefinition,
     ToolDescriptor,
     ToolSource,
 )
-from linktools.ai.agent.tool.state.models import ToolOperationStatus
-from linktools.ai.agent.tool.state.persistence.memory import LocalToolStateBackend
-from linktools.ai.agent.tool.state.store import ToolStateStore
+from linktools.ai.agent.tool.models import ToolOperationStatus
+from linktools.ai.agent.tool.persistence.memory import LocalToolStateBackend
+from linktools.ai.agent.tool.store import ToolStateStore
 from linktools.ai.errors import JsonEncodingError, ToolDeniedError
 from linktools.ai.execution.context import RunContext
 from linktools.ai.execution.domain import RunnableType

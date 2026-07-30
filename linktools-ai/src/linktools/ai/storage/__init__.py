@@ -1,9 +1,9 @@
 """Shared storage primitives and SQL conventions for domain stores.
 
-The generic composition/revision/cache/overlay machinery that used to live here
-has moved to ``linktools.ai.spec`` -- it served only the spec domain's
-revision-aware source, so it is spec-owned now. This package keeps only the
-truly cross-domain database, lease, and file primitives plus the JSON helpers
+Generic composition/revision/cache/overlay machinery lives here
+(``cache``/``composition``/``multi``/``revision``): it is domain-agnostic and
+consumed by domain stores (e.g. ``spec``) via the narrow Protocols below. The
+truly cross-domain database, lease, and file primitives plus JSON helpers are
 re-exported for convenience.
 """
 

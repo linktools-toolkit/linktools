@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from linktools.ai.errors import InvalidSpecError
-from linktools.ai.agent.integrations.mcp.env import expand_env_mapping, expand_env_value
+from linktools.ai.agent.mcp.env import expand_env_mapping, expand_env_value
 
 
 class TestMcpEnvExpansion(unittest.TestCase):

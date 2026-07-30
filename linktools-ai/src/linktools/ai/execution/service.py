@@ -22,7 +22,7 @@ from ..agent.assembly.assembler import AgentAssembler
 from ..agent.assembly.models import AgentAssembly
 from ..agent.assembly.provider import AgentFeatureContext
 from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
-from ..agent.tool.sandbox.protocols import Sandbox
+from ..agent.sandbox.protocols import Sandbox
 from ..agent.spec import AgentSpec
 from ..governance.identity import PrincipalContext
 from ..governance.authorization import AuthorizationPolicy, ExecutionAction
@@ -30,6 +30,7 @@ from ..errors import (
     PrincipalAccessDeniedError,
     RunDefinitionError,
     RunDefinitionIntegrityError,
+    RuntimeInitializationError,
     StorageError,
 )
 from ..json import canonical_json_bytes

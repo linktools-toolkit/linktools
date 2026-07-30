@@ -10,7 +10,7 @@ from linktools.ai.agent.assembly import (
     AgentFeatureRegistry,
 )
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.agent.tool.execution.schema import JsonSchemaToolValidator
+from linktools.ai.agent.tool.schema import JsonSchemaToolValidator
 from linktools.ai.agent.tool.exposure import ToolAssembler, ToolExposurePolicy
 from linktools.ai.agent.tool.models import (
     ToolCategory,

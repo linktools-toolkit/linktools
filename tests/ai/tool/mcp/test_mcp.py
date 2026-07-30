@@ -12,9 +12,9 @@ from linktools.ai.errors import (
     SpecNotFoundError,
     SpecParseError,
 )
-from linktools.ai.agent.integrations.mcp.index import MCPServerSpecIndex
-from linktools.ai.agent.integrations.mcp.spec import MCPServerSpec
-from linktools.ai.agent.integrations.mcp.codec import parse_mcp_spec
+from linktools.ai.agent.mcp.index import MCPServerSpecIndex
+from linktools.ai.agent.mcp.spec import MCPServerSpec
+from linktools.ai.agent.mcp.codec import parse_mcp_spec
 from linktools.ai.spec.parsing import SpecLoader
 
 

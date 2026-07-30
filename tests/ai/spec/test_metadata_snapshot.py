@@ -1,7 +1,7 @@
 import pytest
 
 from linktools.ai.spec.document import SpecDocumentInfo, SpecDocumentChange
-from linktools.ai.spec.revision import MetadataSnapshot
+from linktools.ai.storage.revision import MetadataSnapshot
 
 
 class Repository:

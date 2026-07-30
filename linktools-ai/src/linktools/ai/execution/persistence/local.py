@@ -36,7 +36,7 @@ from ..commands import (
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
 from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
 from ..domain import Page
-from ..evaluation import RunEvaluation
+from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
 from ..snapshots import AgentSnapshotData, RunSnapshot
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
@@ -111,13 +111,13 @@ class LocalExecutionBackend:
 
     def _session_path(self, session_id: str) -> Path:
         sid = self._part(session_id)
-        return safe_child(self.root, "execution", "sessions", sid, "session.json")
+        return safe_child(self.root, "sessions", sid, "session.json")
 
     def _turn_path(self, session_id: str, sequence: int) -> Path:
         return self._session_path(session_id).parent / "turns" / f"{sequence:020d}.json"
 
     def _run_dir(self, run_id: str) -> Path:
-        return safe_child(self.root, "execution", "runs", self._part(run_id))
+        return safe_child(self.root, "runs", self._part(run_id))
 
     def _run_path(self, run_id: str) -> Path:
         return self._run_dir(run_id) / "run.json"
@@ -354,7 +354,7 @@ class LocalExecutionBackend:
             raise
 
     async def initialize_storage(self) -> None:
-        await asyncio.to_thread((self.root / "execution").mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(self.root.mkdir, parents=True, exist_ok=True)
 
     async def create_session(self, *, session_id: str, user_id: str | None, tenant_id: str | None) -> SessionRecord:
         path = self._session_path(session_id)

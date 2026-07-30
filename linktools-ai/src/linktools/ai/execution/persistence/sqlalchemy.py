@@ -18,7 +18,7 @@ from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, Run
 from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
-from ..evaluation import RunEvaluation
+from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
 from ..snapshots import AgentSnapshotData, RunSnapshot
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep

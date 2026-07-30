@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from ..tool.sandbox.protocols import Sandbox
+from ..sandbox.protocols import Sandbox
 from .models import AgentContribution, AgentFeatureRef
 
 

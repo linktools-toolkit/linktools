@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from ...errors import ToolConflictError
 from ..assembly.models import AgentFeatureRef
-from .execution.schema import ToolSchemaValidator
+from .schema import ToolSchemaValidator
 from .models import ToolCategory, ToolDefinition
 
 

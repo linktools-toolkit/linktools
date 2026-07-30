@@ -39,7 +39,6 @@ FORBIDDEN_TOP_LEVEL_PACKAGES = (
     "run",
     "catalog",
     "resources",
-    "evaluation",
     "events",
 )
 
@@ -47,6 +46,7 @@ FORBIDDEN_TOP_LEVEL_PACKAGES = (
 EXPECTED_TOP_LEVEL_PACKAGES = {
     "agent",
     "artifact",
+    "evaluation",
     "execution",
     "governance",
     "model",
@@ -85,10 +85,6 @@ DELETED_MODULES = (
     "execution/run.py",
     "execution/models.py",
     "execution/commit.py",
-    "storage/composition.py",
-    "storage/multi.py",
-    "storage/revision.py",
-    "storage/cache.py",
     "storage/json.py",
 )
 

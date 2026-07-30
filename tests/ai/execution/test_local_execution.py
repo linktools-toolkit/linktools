@@ -85,7 +85,7 @@ async def test_local_trace_is_append_only_and_numbered(tmp_path):
         steps=(type("Step", (), {"kind": "model_interaction", "payload": {"request": "x"}, "created_at": datetime.now(timezone.utc)})(),),
     )
     assert sequence == 1
-    assert (tmp_path / "data/execution/runs/r/trace/00000000000000000001.json").exists()
+    assert (tmp_path / "data/runs/r/trace/00000000000000000001.json").exists()
     assert len(await store.list_trace_steps("r")) == 1
 
 
@@ -282,7 +282,7 @@ async def test_published_manifest_with_missing_turn_is_corruption(
                 "r", "s", RunKind.USER_TURN, definition("agent"), "hello"
             )
         )
-    (root / "execution/sessions/s/turns/00000000000000000001.json").unlink()
+    (root / "sessions/s/turns/00000000000000000001.json").unlink()
 
     with pytest.raises(local_module.StorageCorruptionError):
         await LocalExecutionBackend(root).get_run("r")

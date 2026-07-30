@@ -11,7 +11,7 @@ from ...storage.local.files import atomic_write_json, read_json
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import StoragePath, safe_child
 from ..document import SpecDocument, SpecDocumentChange, SpecDocumentInfo
-from ..revision import SnapshotRequired
+from ...storage.revision import SnapshotRequired
 
 
 class LocalSpecBackend:
@@ -21,7 +21,7 @@ class LocalSpecBackend:
 
     @property
     def _directory(self) -> Path:
-        return self.root / "spec"
+        return self.root
 
     @property
     def _entries(self) -> Path:
@@ -40,7 +40,7 @@ class LocalSpecBackend:
 
     def _path(self, path: str) -> Path:
         value = StoragePath.parse(path)
-        return safe_child(self._entries, value) .with_suffix(".json")
+        return safe_child(self._entries, value).with_suffix(".json")
 
     async def _exists(self, path: Path) -> bool:
         return await asyncio.to_thread(path.exists)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..errors import SpecConflictError, SpecError, SpecNotFoundError, SpecParseError
-from .revision import RevisionCache
+from ..storage.revision import RevisionCache
 
 
 T = TypeVar("T")

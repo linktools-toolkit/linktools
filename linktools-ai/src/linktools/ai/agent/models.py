@@ -18,7 +18,7 @@ from pydantic_ai.messages import ModelMessage
 from ..model.resolver import ResolvedModel
 from ..execution.domain import RunErrorInfo
 from ..json import JsonValue
-from .tool.adapters.pydantic_ai import ToolPolicyCapability
+from .tool.pydantic_ai import ToolPolicyCapability
 from .spec import AgentSpec
 
 

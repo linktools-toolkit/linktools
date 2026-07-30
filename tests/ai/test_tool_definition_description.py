@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from linktools.ai.agent.assembly import AgentFeatureRef
-from linktools.ai.agent.integrations.mcp.client import MCPClient
+from linktools.ai.agent.mcp.client import MCPClient
 from linktools.ai.agent.tool.models import (
     ToolCategory,
     ToolDefinition,

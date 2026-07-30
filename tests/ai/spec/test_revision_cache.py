@@ -14,7 +14,7 @@ from linktools.ai.spec import (
     SpecParseError,
     SpecSource,
 )
-from linktools.ai.spec.revision import RevisionCache
+from linktools.ai.storage.revision import RevisionCache
 
 
 class _FakeSource:

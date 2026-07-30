@@ -16,17 +16,17 @@ from linktools.ai.errors import (
     InvalidSpecError,
     MCPServerNotFoundError,
 )
-from linktools.ai.agent.integrations.mcp import (
+from linktools.ai.agent.mcp import (
     MCPConnectionPool,
     MCPRuntimePolicy,
     MCPToolProvider,
     build_mcp_server,
     parse_mcp_spec,
 )
-from linktools.ai.agent.integrations.mcp.models import MCPConnectionRef
-from linktools.ai.agent.integrations.mcp.tool_provider import MCPDiscoveryResult, MCPToolInfo
+from linktools.ai.agent.mcp.models import MCPConnectionRef
+from linktools.ai.agent.mcp.tool_provider import MCPDiscoveryResult, MCPToolInfo
 from linktools.ai.errors import MCPDiscoveryUnsupportedError
-from linktools.ai.agent.integrations.mcp.tool_provider import (
+from linktools.ai.agent.mcp.tool_provider import (
     detect_mcp_conflicts,
     filter_tool_names,
     final_tool_name,
@@ -146,7 +146,7 @@ def test_build_mcp_server_rejects_misconfigured_transport():
 
 
 def test_connection_pool_normalizes_connection_errors_without_import_failure():
-    from linktools.ai.agent.integrations.mcp.client import MCPClient
+    from linktools.ai.agent.mcp.client import MCPClient
 
     error = MCPClient.normalize_discovery_error(
         ConnectionError("connect failed")
@@ -425,7 +425,7 @@ async def test_connection_manager_closes_toolsets():
     mgr = MCPConnectionPool()
     # Use the real manager's close path with an object exposing close(), keyed
     # the way get_toolset actually keys (server.id, fingerprint).
-    from linktools.ai.agent.integrations.mcp.connection import _config_fingerprint
+    from linktools.ai.agent.mcp.connection import _config_fingerprint
 
     class _TS:
         closed = False
@@ -445,7 +445,7 @@ async def test_connection_manager_cache_keyed_on_config_fingerprint():
     (command) must get DISTINCT cache slots -- a config change with a reused id
     must not return a stale cached toolset. Secret plaintext never enters the
     key (only a length revision does)."""
-    from linktools.ai.agent.integrations.mcp.connection import _config_fingerprint
+    from linktools.ai.agent.mcp.connection import _config_fingerprint
 
     s1 = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "a"]}

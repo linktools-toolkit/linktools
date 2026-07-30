@@ -3,7 +3,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 
 from linktools.ai.agent.assembly import AgentFeatureRef
-from linktools.ai.agent.integrations.mcp import (
+from linktools.ai.agent.mcp import (
     MCPConnectionRef,
     MCPDiscoveryResult,
     MCPRuntimePolicy,
@@ -12,9 +12,9 @@ from linktools.ai.agent.integrations.mcp import (
     MCPToolProvider,
 )
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
-from linktools.ai.agent.tool.policy.resolver import ResolvedToolPolicy
-from linktools.ai.agent.tool.state.persistence.memory import LocalToolStateBackend
-from linktools.ai.agent.tool.state.store import ToolStateStore
+from linktools.ai.agent.tool.policy import ResolvedToolPolicy
+from linktools.ai.agent.tool.persistence.memory import LocalToolStateBackend
+from linktools.ai.agent.tool.store import ToolStateStore
 from linktools.ai.errors import PrincipalAccessDeniedError
 from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.policy import ModelPolicy

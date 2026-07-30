@@ -1,8 +1,8 @@
 import pytest
 
-from linktools.ai.agent.tool.state.persistence.memory import LocalToolStateBackend
-from linktools.ai.agent.tool.state import ToolOperation, ToolOperationStatus
-from linktools.ai.agent.tool.state.store import ToolStateStore
+from linktools.ai.agent.tool.persistence.memory import LocalToolStateBackend
+from linktools.ai.agent.tool.models import ToolOperation, ToolOperationStatus
+from linktools.ai.agent.tool.store import ToolStateStore
 
 
 @pytest.mark.asyncio

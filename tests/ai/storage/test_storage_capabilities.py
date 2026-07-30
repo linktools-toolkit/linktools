@@ -3,9 +3,9 @@ from dataclasses import dataclass
 import pytest
 
 from linktools.ai.errors import StorageFeatureSupportError
-from linktools.ai.spec.cache import MemoryContentCache
-from linktools.ai.spec.composition import StorageComposition
-from linktools.ai.spec.multi import OverlayRefreshPolicy, StorageLayer
+from linktools.ai.storage.cache import MemoryContentCache
+from linktools.ai.storage.composition import StorageComposition
+from linktools.ai.storage.multi import OverlayRefreshPolicy, StorageLayer
 
 
 class Source:

@@ -9,10 +9,10 @@ from linktools.ai.agent.tool.exposure import ToolExposurePolicy
 from linktools.ai.agent.assembly.provider import AgentFeatureContext
 from linktools.ai.agent.assembly.models import AgentFeatureRef
 from linktools.ai.errors import AgentFeatureConflictError
-from linktools.ai.agent.integrations.mcp.models import MCPConnectionRef
-from linktools.ai.agent.integrations.mcp.tool_provider import MCPDiscoveryResult, MCPToolProvider, MCPToolInfo
-from linktools.ai.agent.integrations.mcp.models import MCPRuntimePolicy
-from linktools.ai.agent.integrations.mcp.spec import MCPServerSpec
+from linktools.ai.agent.mcp.models import MCPConnectionRef
+from linktools.ai.agent.mcp.tool_provider import MCPDiscoveryResult, MCPToolProvider, MCPToolInfo
+from linktools.ai.agent.mcp.models import MCPRuntimePolicy
+from linktools.ai.agent.mcp.spec import MCPServerSpec
 
 
 class _FakeMgr:

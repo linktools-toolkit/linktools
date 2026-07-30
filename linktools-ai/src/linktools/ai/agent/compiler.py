@@ -21,7 +21,7 @@ rather than silently governing nothing."""
 from .middleware.capability import build_middleware_capability
 from .middleware.pipeline import MiddlewarePipeline
 from ..model.resolver import ModelResolver, ResolvedModel
-from .tool.adapters.pydantic_ai import build_policy_capability
+from .tool.pydantic_ai import build_policy_capability
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
 from .spec import AgentSpec

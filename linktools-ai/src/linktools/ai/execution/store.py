@@ -17,7 +17,7 @@ from .commands import (
     StartExecution,
 )
 from .domain import Page, RunRecord
-from .evaluation import RunEvaluation
+from ..evaluation import RunEvaluation
 from .session import SessionRecord, SessionTurn
 from .snapshots import RunSnapshot
 from .trace_models import NewRunTraceStep, RunEvent, RunTraceStep

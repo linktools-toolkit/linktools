@@ -11,7 +11,7 @@ def test_new_storage_protocols_do_not_import_backends():
         "execution/store.py",
         "agent/memory/store.py",
         "tasks/store.py",
-        "agent/tool/state/store.py",
+        "agent/tool/store.py",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "persistence.local" not in text
@@ -43,7 +43,7 @@ def test_domain_stores_bind_a_backend_directly_without_composition():
     # spec/store.py is the one place composition remains (it owns the
     # spec-specific revision/cache/overlay capabilities), so it is absent here.
     expected = {
-        "agent/tool/state/store.py": ("ToolStateStore",),
+        "agent/tool/store.py": ("ToolStateStore",),
         "tasks/store.py": ("TaskStore",),
         "agent/memory/store.py": ("MemoryBackend", "MemoryStore"),
         "artifact/store.py": ("ArtifactStore",),
@@ -68,7 +68,7 @@ def test_sqlalchemy_adapters_share_one_declarative_base():
         "execution/persistence/sqlalchemy.py",
         "agent/memory/persistence/sqlalchemy.py",
         "tasks/persistence/sqlalchemy.py",
-        "agent/tool/state/persistence/sqlalchemy.py",
+        "agent/tool/persistence/sqlalchemy.py",
     ):
         text = (ROOT / relative).read_text(encoding="utf-8")
         assert "storage.sqlalchemy.base import Base" in text

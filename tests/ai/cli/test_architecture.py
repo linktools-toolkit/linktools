@@ -25,7 +25,7 @@ _FORBIDDEN_COMMAND_PREFIXES = (
     "textual",
     "linktools.ai.storage",
     "linktools.ai.agent.engine",
-    "linktools.ai.agent.integrations.mcp",
+    "linktools.ai.agent.mcp",
 )
 
 

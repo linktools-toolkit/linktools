@@ -4,8 +4,8 @@ from dataclasses import dataclass, field
 
 from ..agent.assembly.registry import AgentFeatureRegistry
 from ..agent.codec import OutputTypeRegistry
-from ..agent.integrations.mcp.models import MCPRuntimePolicy
-from ..agent.integrations.mcp.tool_provider import MCPToolProvider
+from ..agent.mcp.models import MCPRuntimePolicy
+from ..agent.mcp.tool_provider import MCPToolProvider
 from ..agent.extension.provider import ExtensionProvider
 from ..agent.skill.provider import SkillProvider
 from ..agent.subagent.provider import SubagentProvider
@@ -13,8 +13,8 @@ from ..agent.middleware.pipeline import MiddlewarePipeline
 from ..agent.prompt.window import SessionWindowPolicy
 from ..agent.memory.store import MemoryStore
 from ..agent.retrieval.retriever import Retriever
-from ..agent.tool.sandbox.protocols import Sandbox
-from ..agent.tool.policy.resolver import ToolPolicyResolver
+from ..agent.sandbox.protocols import Sandbox
+from ..agent.tool.policy import ToolPolicyResolver
 from ..execution.live_events import RunLiveEventSink, SecurityEventSink
 from ..governance.authorization import (
     AuthorizationPolicy,

@@ -9,9 +9,9 @@ from linktools.ai.errors import StorageConflictError
 from linktools.ai.tasks.models import TaskExecution, TaskPlan
 from linktools.ai.tasks.persistence.sqlalchemy import SqlAlchemyTaskBackend
 from linktools.ai.tasks.store import TaskStore
-from linktools.ai.agent.tool.state.persistence.sqlalchemy import SqlAlchemyToolStateBackend
-from linktools.ai.agent.tool.state import ToolOperation, ToolOperationStatus
-from linktools.ai.agent.tool.state.store import ToolStateStore
+from linktools.ai.agent.tool.persistence.sqlalchemy import SqlAlchemyToolStateBackend
+from linktools.ai.agent.tool.models import ToolOperation, ToolOperationStatus
+from linktools.ai.agent.tool.store import ToolStateStore
 
 
 @pytest.mark.asyncio

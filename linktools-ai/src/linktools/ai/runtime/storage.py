@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from ..artifact.store import ArtifactStore
     from ..agent.memory.store import MemoryStore
     from ..tasks.store import TaskStore
-    from ..agent.tool.state.store import ToolStateStore
+    from ..agent.tool.store import ToolStateStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ class LocalDirectoryStorage(RuntimeStorage):
     def __init__(self, root: str | Path = ".linktools", *, tools=None, tasks=None, memory=None, artifacts=None) -> None:
         object.__setattr__(self, "root", Path(root))
         super().__init__(
-            execution=LocalExecutionBackend(root),
+            execution=LocalExecutionBackend(self.root / "execution"),
             tools=tools,
             tasks=tasks,
             memory=memory,

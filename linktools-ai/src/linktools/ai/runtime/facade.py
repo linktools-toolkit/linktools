@@ -7,8 +7,8 @@ from uuid import uuid4
 
 from ..agent.spec import AgentSpec
 from ..agent.assembly.assembler import AgentAssembler
-from ..agent.tool.sandbox.protocols import Sandbox
-from ..agent.integrations.mcp.connection import MCPConnectionPool
+from ..agent.sandbox.protocols import Sandbox
+from ..agent.mcp.connection import MCPConnectionPool
 from ..errors import PrincipalAccessDeniedError
 from ..execution.domain import ApprovalDecision, RunRecord
 from ..execution.query import ExecutionQueryService, ExecutionDetailView

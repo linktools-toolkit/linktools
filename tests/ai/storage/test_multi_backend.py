@@ -3,12 +3,12 @@ import asyncio
 import pytest
 
 from linktools.ai.spec.document import SpecDocumentChange, SpecDocumentInfo
-from linktools.ai.spec.multi import (
+from linktools.ai.storage.multi import (
     MultiBackend,
     OverlayRefreshPolicy,
     StorageLayer,
 )
-from linktools.ai.spec.revision import (
+from linktools.ai.storage.revision import (
     CompositeRevisionSource,
     MetadataSnapshot,
 )

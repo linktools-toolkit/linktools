@@ -40,7 +40,7 @@ def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundl
     agents = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(project.agents_root))
     skills = SkillSpecIndex.from_specloader(SpecLoader.from_filesystem(project.skills_root), suffix="")
     mcp = MCPServerSpecIndex.from_specloader(SpecLoader.from_filesystem(project.mcp_root))
-    storage = RuntimeStorage(execution=ExecutionStore(LocalExecutionBackend(project.state_root)))
+    storage = RuntimeStorage(execution=ExecutionStore(LocalExecutionBackend(project.state_root / "execution")))
     runtime = build_runtime(storage=storage, model_resolver=model_resolver)
     return CliRuntimeBundle(
         project=project,

@@ -2,14 +2,14 @@
 
 from typing import Protocol
 
-from .cache import ContentCache, ContentCacheKey
-from .composition import (
+from ..storage.cache import ContentCache, ContentCacheKey
+from ..storage.composition import (
     StorageAdapter,
     StorageCacheAdapter,
     StorageComposition,
 )
-from .multi import StorageLayer, StorageReader, StorageWriter
-from .revision import (
+from ..storage.multi import StorageLayer, StorageReader, StorageWriter
+from ..storage.revision import (
     ChangeSource,
     Revision,
     RevisionSource,

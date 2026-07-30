@@ -9,7 +9,7 @@ import math
 import pytest
 
 from linktools.ai.errors import InvalidSpecError
-from linktools.ai.agent.integrations.mcp.codec import parse_mcp_spec
+from linktools.ai.agent.mcp.codec import parse_mcp_spec
 from linktools.ai.model import parse_model_policy
 from linktools.ai.spec.parsing import StrictConfigReader
 

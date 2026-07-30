@@ -4,7 +4,7 @@ import pytest
 
 from linktools.ai.errors import InvalidSpecError
 from linktools.ai.spec.parsing import SpecLoader
-from linktools.ai.agent.tool.policy.index import ToolSpecIndex
+from linktools.ai.agent.tool.policy import ToolSpecIndex
 from linktools.ai.agent.tool.policy import (
     EffectiveToolPolicy,
     IdempotencyStrategy,

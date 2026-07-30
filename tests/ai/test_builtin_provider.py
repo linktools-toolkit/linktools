@@ -5,12 +5,12 @@ terminal FunctionToolset, and rejects resolution without a sandbox."""
 
 import pytest
 
-from linktools.ai.agent.tool.providers.builtin import BuiltinToolProvider
+from linktools.ai.agent.builtin import BuiltinToolProvider
 from linktools.ai.agent.tool.exposure import ToolExposurePolicy
 from linktools.ai.agent.assembly.provider import AgentFeatureContext
 from linktools.ai.agent.assembly.models import AgentFeatureRef
 from linktools.ai.errors import AgentFeatureNotFoundError, AgentAssemblyError
-from linktools.ai.agent.tool.sandbox.local import LocalSandbox
+from linktools.ai.agent.sandbox.local import LocalSandbox
 
 
 def _ctx(sandbox, agent_id="a1"):

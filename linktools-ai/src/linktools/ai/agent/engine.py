@@ -92,8 +92,8 @@ if TYPE_CHECKING:
 
     from .assembly.assembler import AgentAssembler
     from .assembly.models import AgentAssembly
-    from .tool.adapters.pydantic_ai import PydanticAIToolAdapter
-    from .tool.sandbox.protocols import Sandbox
+    from .tool.pydantic_ai import PydanticAIToolAdapter
+    from .sandbox.protocols import Sandbox
     from .retrieval.retriever import Retriever
     from .memory.store import MemoryStore
     from .prompt.window import SessionWindowPolicy
@@ -353,7 +353,7 @@ class AgentEngine:
                     )
                 if agent.spec.features:
                     from .assembly.provider import AgentFeatureContext
-                    from .tool.execution.models import ToolExecutionContext
+                    from .tool.invocation import ToolExecutionContext
 
                     feature_context = AgentFeatureContext(
                         agent_id=agent.spec.id,

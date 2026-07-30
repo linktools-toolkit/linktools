@@ -235,7 +235,7 @@ class CompositeSecurityPipeline:
             ):
                 last_modified_payload = decision.modified_payload
                 if schema is not None:
-                    from ...agent.tool.execution.schema import validate_arguments
+                    from ...agent.tool.schema import validate_arguments
 
                     tool_name = getattr(event, "tool_name", "")
                     # Raise as a DENY so the bad MODIFY never propagates.

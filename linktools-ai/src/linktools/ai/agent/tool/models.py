@@ -1,16 +1,20 @@
-"""Core model-callable tool values."""
+"""Core tool-domain values: declarations, invocation, policy spec, and operation state."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from enum import StrEnum
+from datetime import datetime
+from enum import Enum, StrEnum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
 
-from ...governance.policy.rule import RiskLevel, SideEffectKind
+from ...governance.policy.rule import ApprovalMode, Permission, RiskLevel, SideEffectKind
 from ...json import JsonValue, canonical_json_bytes, freeze_value, normalize_json
+from ...storage.coordination.lease import Lease
 
 if TYPE_CHECKING:
     from ..assembly.models import AgentFeatureRef
+    from ..dependencies import AgentDependencies
+    from ...execution.context import RunContext
 
 ToolHandler = Callable[..., Awaitable[object]]
 
@@ -120,3 +124,91 @@ def declared_tool_definitions(
         )
         for descriptor in descriptors
     )
+
+
+class ToolTraceSink(Protocol):
+    async def tool_result(self, payload: JsonValue) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionContext:
+    execution_id: str
+    tool_call_id: str
+    dependencies: "AgentDependencies"
+    run_context: "RunContext | None" = None
+    approved_tool_call_id: str | None = None
+    approved_binding_fingerprint: str | None = None
+    trace_sink: ToolTraceSink | None = None
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ExecuteTool:
+    definition: ToolDefinition
+    arguments: Mapping[str, JsonValue]
+    context: ToolExecutionContext
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSpec:
+    """An immutable tool declaration. Mirrors the policy layer's metadata
+    shape; the codec fills it from YAML."""
+
+    name: str
+    description: str = ""
+    enabled: bool = True
+    permissions: "frozenset[Permission]" = field(
+        default_factory=lambda: frozenset({Permission.READ})
+    )
+    risk: RiskLevel = RiskLevel.LOW
+    side_effect: SideEffectKind = SideEffectKind.READ_ONLY
+    approval: ApprovalMode = ApprovalMode.NEVER
+    idempotent: "bool | None" = None
+    timeout_seconds: "float | None" = None
+    max_retries: "int | None" = None
+    idempotency_strategy: "str | None" = None
+    idempotency_key_field: "str | None" = None
+    # bump when a tool's input contract changes shape so an idempotency
+    # hash computed under the old schema is never mistaken for a match
+    # against the new one (see idempotency.compute_request_hash).
+    schema_version: str = "1"
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+
+
+class ToolOperationStatus(str, Enum):
+    PREPARED = "prepared"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    INDETERMINATE = "indeterminate"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOperation:
+    id: str
+    tenant_id: str | None
+    execution_id: str
+    tool_call_id: str
+    idempotency_key: str
+    tool_name: str
+    arguments_hash: str
+    binding_fingerprint: str
+    status: ToolOperationStatus
+    replay_safe: bool = False
+    lease: Lease = Lease()
+    result: JsonValue | None = None
+    error: JsonValue | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def owner(self) -> str | None:
+        return self.lease.owner
+
+    @property
+    def fence(self) -> int:
+        return self.lease.fence
+
+    @property
+    def lease_expires_at(self) -> datetime | None:
+        return self.lease.expires_at

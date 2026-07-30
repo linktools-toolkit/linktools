@@ -6,11 +6,11 @@ from ..agent.assembly.assembler import AgentAssembler
 from ..agent.codec import AgentSpecCodec
 from ..agent.compiler import AgentCompiler
 from ..agent.engine import AgentEngine
-from ..agent.tool.adapters.pydantic_ai import PydanticAIToolAdapter
-from ..agent.tool.execution.schema import JsonSchemaToolValidator
-from ..agent.tool.execution.service import ToolExecutionService
+from ..agent.tool.pydantic_ai import PydanticAIToolAdapter
+from ..agent.tool.schema import JsonSchemaToolValidator
+from ..agent.tool.service import ToolExecutionService
 from ..agent.tool.exposure import ToolAssembler
-from ..agent.tool.providers.builtin import BuiltinToolProvider
+from ..agent.builtin import BuiltinToolProvider
 from ..errors import RuntimeInitializationError, StorageFeatureSupportError
 from ..execution.live_events import NoopRunLiveEventSink, NoopSecurityEventSink
 from ..execution.query import ExecutionQueryService

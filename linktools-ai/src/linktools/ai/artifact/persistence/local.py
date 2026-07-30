@@ -27,13 +27,13 @@ _BATCH_SIZE = 4 * 1024 * 1024
 class LocalArtifactBackend:
     def __init__(self, root: str | Path = ".linktools") -> None:
         self.root = Path(root)
-        self._temp = self.root / "artifacts" / "temp"
+        self._temp = self.root / "temp"
         self._locks = KeyedLocks()
 
     async def initialize_storage(self) -> None:
         await asyncio.gather(
             asyncio.to_thread(
-                (self.root / "artifacts").mkdir,
+                self.root.mkdir,
                 parents=True,
                 exist_ok=True,
             ),
@@ -43,14 +43,13 @@ class LocalArtifactBackend:
     def _record_path(self, artifact_id: str, tenant_id: str) -> Path:
         return safe_child(
             self.root,
-            "artifacts",
             "records",
             StorageId.parse(tenant_id),
             StorageId.parse(artifact_id),
         ).with_suffix(".json")
 
     def _blob_path(self, digest: str) -> Path:
-        return safe_child(self.root, "artifacts", "blobs", Sha256Digest.parse(digest))
+        return safe_child(self.root, "blobs", Sha256Digest.parse(digest))
 
     async def put(self, *, record: ArtifactRecord, content) -> ArtifactRecord:
         StorageId.parse(record.ref.id)
