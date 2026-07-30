@@ -1,259 +1,219 @@
-"""Optional revision, delta, and metadata snapshot features."""
+"""Single-load metadata protocol and per-layer metadata views.
+
+A backend returns its current revision and the entries that changed since a
+caller-held revision in one ``load_metadata`` call. This replaces the old
+multi-stage ``current_revision -> list_changes -> current_revision`` round
+trip: a single load either REPLACES the whole entry set (first load, or the
+caller's revision is too old to patch) or PATCHES it against a known prior
+state. See ``.docs/linktools_ai_storage_composition_revision_io_optimization_spec.md``.
+
+``LayerMetadataView`` wraps one backend's metadata with single-flight refresh
+so N concurrent readers trigger at most one backend load and a cancelled
+caller never publishes a half-loaded state."""
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Mapping, Protocol, TypeVar
+from enum import StrEnum
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-EntryT = TypeVar("EntryT")
-ChangeT = TypeVar("ChangeT")
+RevisionT = TypeVar("RevisionT")
 KeyT = TypeVar("KeyT")
-Revision = int | str
+ValueT = TypeVar("ValueT")
+InfoT = TypeVar("InfoT")
 
 
-class SnapshotRequired(Exception):
-    """The change source cannot provide a complete delta."""
-
-
-class RevisionSource(Protocol):
-    async def current_revision(self) -> Revision: ...
-
-
-class ChangeSource(Protocol[ChangeT]):
-    async def list_changes(
-        self,
-        *,
-        after_revision: Revision,
-        through_revision: Revision,
-    ) -> tuple[ChangeT, ...]: ...
-
-
-class CompositeRevisionSource:
-    def __init__(self, *sources: RevisionSource) -> None:
-        if not sources:
-            raise ValueError("at least one revision source is required")
-        self._sources = sources
-
-    async def current_revision(self) -> str:
-        values = tuple(
-            [await source.current_revision() for source in self._sources]
-        )
-        payload = "|".join(
-            f"{index}:{type(source).__qualname__}:{value}"
-            for index, (source, value) in enumerate(
-                zip(self._sources, values, strict=True)
-            )
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+class MetadataLoadMode(StrEnum):
+    REPLACE = "replace"
+    PATCH = "patch"
 
 
 @dataclass(frozen=True, slots=True)
-class MetadataState(Generic[KeyT, EntryT]):
-    revision: Revision | None
-    entries: Mapping[KeyT, EntryT]
-    cacheable: bool = True
+class StorageChange(Generic[KeyT, InfoT]):
+    """One entry's effective state at the loaded revision.
+
+    ``current`` is the entry's info, or ``None`` when the entry was removed:
+    a removal is represented as a tombstone in the change set, not a missing
+    row, so a PATCH can delete a key from a caller's entry map."""
+
+    key: KeyT
+    current: InfoT | None
 
 
-class MetadataSnapshot(Generic[KeyT, EntryT, ChangeT]):
-    """Revision-gated metadata with optional delta refresh."""
+@dataclass(frozen=True, slots=True)
+class MetadataLoad(Generic[RevisionT, KeyT, InfoT]):
+    """One backend load: the revision the data was read at, whether the
+    changes fully replace or only patch the caller's state, and the change
+    set (every entry for REPLACE, only diffs for PATCH)."""
+
+    revision: RevisionT
+    mode: MetadataLoadMode
+    changes: tuple[StorageChange[KeyT, InfoT], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataState(Generic[RevisionT, KeyT, InfoT]):
+    """A materialized entry map keyed by business key at a revision."""
+
+    revision: RevisionT
+    entries: Mapping[KeyT, InfoT]
+
+
+@runtime_checkable
+class StorageReader(Protocol[KeyT, ValueT, InfoT]):
+    async def get(self, key: KeyT) -> ValueT | None: ...
+
+    async def list_info(self) -> tuple[InfoT, ...]: ...
+
+
+@runtime_checkable
+class BatchStorageReader(Protocol[KeyT, ValueT]):
+    async def get_many(
+        self,
+        keys: tuple[KeyT, ...],
+    ) -> Mapping[KeyT, ValueT]: ...
+
+
+@runtime_checkable
+class StorageMetadataBackend(Protocol[RevisionT, KeyT, InfoT]):
+    async def load_metadata(
+        self,
+        after_revision: RevisionT | None,
+    ) -> MetadataLoad[RevisionT, KeyT, InfoT]:
+        ...
+
+
+class LayerRefreshPolicy(StrEnum):
+    STATIC = "static"
+    REVISIONED = "revisioned"
+    ALWAYS = "always"
+
+
+StorageInitializer = Callable[..., Awaitable[None]]
+
+
+def apply_metadata_load(
+    current: MetadataState[RevisionT, KeyT, InfoT] | None,
+    load: MetadataLoad[RevisionT, KeyT, InfoT],
+    *,
+    info_key: Callable[[InfoT], KeyT],
+) -> MetadataState[RevisionT, KeyT, InfoT]:
+    """Fold one backend ``load`` into a caller state. REPLACE discards the
+    prior state; PATCH applies only the listed changes (a ``None`` current
+    removes the key). Entries are keyed by ``StorageChange.key`` (the
+    backend's declared business key), not re-derived from the info, so the
+    key is stable whether or not the info happens to encode it. The result is
+    always a plain dict the caller owns."""
+    if load.mode is MetadataLoadMode.REPLACE:
+        entries: dict[KeyT, InfoT] = {}
+        for change in load.changes:
+            if change.current is not None:
+                entries[change.key] = change.current
+        return MetadataState(load.revision, entries)
+    entries = dict(current.entries) if current is not None else {}
+    for change in load.changes:
+        if change.current is None:
+            entries.pop(change.key, None)
+        else:
+            entries[change.key] = change.current
+    return MetadataState(load.revision, entries)
+
+
+class LayerMetadataView:
+    """Single-flight metadata refresh for one backend (primary or layer).
+
+    - STATIC: loads once, then serves the cached state forever.
+    - REVISIONED: ``load_metadata(current_revision | None)``; a same-revision
+      load is served from the cached state without a backend call (handled by
+      the backend returning an empty PATCH, see spec contract 5).
+    - ALWAYS: ``list_info()`` every refresh, tagged by a local generation so
+      callers see a fresh effective revision each time.
+
+    Concurrent refreshes collapse into one backend load: an caller that
+    observed a stale epoch before acquiring the lock returns whatever the
+    in-flight load published instead of loading again. A cancelled caller
+    never publishes a half state -- the load is awaited to completion by the
+    lock holder, and non-lock holders only read the published result."""
 
     def __init__(
         self,
-        reader: Any,
+        backend: Any,
+        policy: LayerRefreshPolicy,
         *,
-        revision: RevisionSource | None = None,
-        changes: ChangeSource[ChangeT] | None = None,
-        always_refresh: bool = False,
-        entry_key: Callable[[EntryT], KeyT] = lambda entry: entry.path,
-        change_key: Callable[[ChangeT], KeyT] = lambda change: change.path,
-        change_value: Callable[[ChangeT], EntryT | None] = lambda change: change.info,
+        info_key: Callable[[Any], Any],
+        initializer: StorageInitializer | None = None,
     ) -> None:
-        if changes is not None and revision is None:
-            raise ValueError("a change source requires a revision source")
-        self.reader = reader
-        self.revision = revision
-        self.changes = changes
-        self.always_refresh = always_refresh
-        self.entry_key = entry_key
-        self.change_key = change_key
-        self.change_value = change_value
-        self._state: MetadataState[KeyT, EntryT] | None = None
-        self._refresh_lock = asyncio.Lock()
-
-    async def _target_revision(self) -> Revision | None:
-        if self.revision is None:
-            return None
-        return await self.revision.current_revision()
-
-    async def _full(
-        self,
-        revision: Revision | None,
-        *,
-        cacheable: bool = True,
-    ) -> MetadataState[KeyT, EntryT]:
-        values = await self.reader.list_info()
-        return MetadataState(
-            revision,
-            {self.entry_key(value): value for value in values},
-            cacheable,
-        )
-
-    async def refresh(self) -> MetadataState[KeyT, EntryT] | None:
-        target = await self._target_revision()
-        if (
-            not self.always_refresh
-            and target is not None
-            and self._state is not None
-            and self._state.revision == target
+        if policy is LayerRefreshPolicy.REVISIONED and not isinstance(
+            backend, StorageMetadataBackend
         ):
-            return self._state
-        async with self._refresh_lock:
-            for _attempt in range(3):
-                target = await self._target_revision()
-                if (
-                    not self.always_refresh
-                    and target is not None
-                    and self._state is not None
-                    and self._state.revision == target
-                ):
-                    return self._state
-                current = self._state
-                try:
-                    if (
-                        current is None
-                        or target is None
-                        or self.always_refresh
-                        or self.changes is None
-                    ):
-                        candidate = await self._full(target)
-                    else:
-                        delta = await self.changes.list_changes(
-                            after_revision=current.revision,
-                            through_revision=target,
-                        )
-                        if len(delta) > max(1, int(len(current.entries) * 0.25)):
-                            candidate = await self._full(target)
-                        else:
-                            entries = dict(current.entries)
-                            for change in delta:
-                                key = self.change_key(change)
-                                value = self.change_value(change)
-                                if value is None:
-                                    entries.pop(key, None)
-                                else:
-                                    entries[key] = value
-                            candidate = MetadataState(target, entries)
-                except SnapshotRequired:
-                    candidate = await self._full(target)
-                if self.revision is None:
-                    self._state = candidate
-                    return candidate
-                if await self._target_revision() == target:
-                    self._state = candidate
-                    return candidate
-            # The source stayed unstable through the bounded retries. Serve one
-            # uncached repository read for this request without publishing it.
-            return await self._full(
-                await self._target_revision(),
-                cacheable=False,
+            raise ValueError(
+                "a revisioned layer requires a StorageMetadataBackend"
             )
+        self.backend = backend
+        self.policy = policy
+        self.info_key = info_key
+        self.initializer = initializer
+        self._state: MetadataState[Any, Any, Any] | None = None
+        self._lock = asyncio.Lock()
+        self._epoch = 0
+        self._always_generation = 0
 
-    async def get(self, key: KeyT) -> EntryT | None:
-        state = await self.refresh()
-        return None if state is None else state.entries.get(key)
+    async def initialize(self, *args: object) -> None:
+        if self.initializer is not None:
+            await self.initializer(*args)
 
+    async def refresh(self) -> MetadataState[Any, Any, Any] | None:
+        if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
+            return self._state
+        observed = self._epoch
+        async with self._lock:
+            if self._state is not None and self._epoch != observed:
+                return self._state
+            return await self._refresh_locked()
 
-class RevisionCacheSource(Protocol):
-    async def revision(self) -> str: ...
+    async def _refresh_locked(self) -> MetadataState[Any, Any, Any] | None:
+        if isinstance(self.backend, StorageMetadataBackend):
+            # REVISIONED patches against the held revision; STATIC loads a full
+            # snapshot once (refresh()'s early return serves it thereafter).
+            after = None if self.policy is LayerRefreshPolicy.STATIC else (
+                None if self._state is None else self._state.revision
+            )
+            load = await self.backend.load_metadata(after)
+            state = apply_metadata_load(self._state, load, info_key=self.info_key)
+            self._state = state
+            self._epoch += 1
+            return state
+        # Non-metadata reader (ALWAYS): reload the full entry set every refresh
+        # under a fresh generation so the effective revision always changes.
+        infos = await self.backend.list_info()
+        self._always_generation += 1
+        revision: Any = ("always", self._always_generation)
+        entries = {self.info_key(info): info for info in infos}
+        state = MetadataState(revision, entries)
+        self._state = state
+        self._epoch += 1
+        return state
 
-    async def list_ids(self, suffix: str) -> tuple[str, ...]: ...
-
-    async def read(self, path: str) -> str: ...
-
-
-class RevisionCacheCodec(Protocol, Generic[EntryT]):
-    def decode(self, item_id: str, raw: str) -> EntryT: ...
-
-
-class RevisionCache(Generic[EntryT]):
-    """Revision-invalidated cache for parsed source items."""
-
-    def __init__(
-        self,
-        source: RevisionCacheSource,
-        codec: RevisionCacheCodec[EntryT],
-        *,
-        suffix: str = ".md",
-        source_name: str | None = None,
-        metrics: Any | None = None,
-    ) -> None:
-        self._source = source
-        self._codec = codec
-        self._suffix = suffix
-        self._source_name = source_name or type(source).__name__
-        self._cache: dict[tuple[str, str], EntryT] = {}
-        self._cached_revision: str | None = None
-        self._ids: tuple[str, ...] | None = None
-        self._refresh_lock = asyncio.Lock()
-        self._inflight: dict[tuple[str, str], asyncio.Future[EntryT]] = {}
-        self._metrics = metrics
-
-    @property
-    def source_name(self) -> str:
-        return self._source_name
-
-    async def _ensure_fresh(self) -> str:
-        async with self._refresh_lock:
-            revision = await self._source.revision()
-            if revision != self._cached_revision:
-                self._cache.clear()
-                self._ids = None
-                self._cached_revision = revision
-                if self._metrics is not None:
-                    self._metrics.counter("spec_revision_refresh_total")
-            return revision
-
-    async def list_ids(self) -> tuple[str, ...]:
-        await self._ensure_fresh()
-        if self._ids is None:
-            self._ids = await self._source.list_ids(self._suffix)
-        return self._ids
-
-    async def get(self, item_id: str) -> EntryT:
-        revision = await self._ensure_fresh()
-        key = (item_id, revision)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        future = self._inflight.get(key)
-        if future is None:
-            future = asyncio.get_running_loop().create_future()
-            self._inflight[key] = future
-            try:
-                value = self._codec.decode(
-                    item_id,
-                    await self._source.read(f"{item_id}{self._suffix}"),
-                )
-                self._cache[key] = value
-                future.set_result(value)
-            except BaseException as exc:
-                future.set_exception(exc)
-            finally:
-                self._inflight.pop(key, None)
-        return await future
+    def invalidate(self) -> None:
+        """Drop the cached state so the next refresh reloads from the backend.
+        Used after a write on a primary that cannot serve a reliable patch
+        (the unversioned case)."""
+        self._state = None
+        self._epoch += 1
 
 
 __all__ = [
-    "ChangeSource",
-    "CompositeRevisionSource",
-    "MetadataSnapshot",
+    "BatchStorageReader",
+    "LayerMetadataView",
+    "LayerRefreshPolicy",
+    "MetadataLoad",
+    "MetadataLoadMode",
     "MetadataState",
-    "Revision",
-    "RevisionCache",
-    "RevisionCacheCodec",
-    "RevisionCacheSource",
-    "RevisionSource",
-    "SnapshotRequired",
+    "StorageChange",
+    "StorageInitializer",
+    "StorageMetadataBackend",
+    "StorageReader",
+    "apply_metadata_load",
 ]

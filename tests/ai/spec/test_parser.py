@@ -108,19 +108,15 @@ def test_spec_loader_from_filesystem_list_ids_lists_files_with_suffix(tmp_path):
     assert asyncio.run(run()) == ("a1", "a2")
 
 
-def test_spec_loader_from_filesystem_revision_is_deterministic(tmp_path):
+def test_spec_loader_identity_is_deterministic_sha256(tmp_path):
     (tmp_path / "a.md").write_text("a", encoding="utf-8")
     loader = SpecLoader.from_filesystem(tmp_path)
-
-    async def run():
-        return await loader.revision()
-
-    first = asyncio.run(run())
-    second = asyncio.run(run())
-    assert isinstance(first, int)
-    # The revision is a stable hash over the file set -- it need only be a
-    # deterministic int that changes when files change, not a positive timestamp.
+    # identity() is a stable SHA-256 of content, not Python hash() (randomized).
+    first = loader.identity("a")
+    second = loader.identity("a")
+    assert isinstance(first, str)
     assert first == second
+    assert loader.identity("a") != loader.identity("b")
 
 
 # 4b. SpecLoader.from_objects is exercised against the real ObjectStore API

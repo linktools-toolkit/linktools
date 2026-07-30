@@ -1,40 +1,46 @@
-"""Storage topology and consistency assembly shared by domain stores."""
+"""Storage topology assembly: per-layer metadata, merge, read, write.
+
+``StorageComposition`` is the unified base for every domain store. It wires a
+primary reader with optional ordered layers (primary-first fallback), a writer,
+and a content cache, and owns: parallel per-layer metadata refresh, owner-aware
+entry merge, effective revision, owner-directed ``get``/``get_many`` with the
+metadata-miss rule, preload via ``contains_many``, and write post-processing.
+
+Layers are ordered fallbacks; earlier readers win."""
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Generic, Protocol, TypeVar, cast, runtime_checkable
+import asyncio
+import hashlib
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from ..errors import StorageFeatureSupportError
-from .cache import ContentCache, ContentCacheKey, read_cache, write_cache
-from .multi import MultiBackend, StorageLayer, StorageReader
+from .cache import ContentCache, ContentCacheKey, contains_many, read_cache, write_cache
+from .multi import StorageReader, batch_get
 from .revision import (
-    ChangeSource,
-    CompositeRevisionSource,
-    MetadataSnapshot,
+    LayerMetadataView,
+    LayerRefreshPolicy,
     MetadataState,
-    Revision,
-    RevisionSource,
+    StorageInitializer,
+    StorageMetadataBackend,
 )
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
 InfoT = TypeVar("InfoT")
-ChangeT = TypeVar("ChangeT")
-PrimaryT = TypeVar("PrimaryT")
 WriterT = TypeVar("WriterT")
 
 
-class StorageAdapter(Protocol[KeyT, ValueT, InfoT, ChangeT]):
+@runtime_checkable
+class StorageAdapter(Protocol[KeyT, ValueT, InfoT]):
     def info_key(self, info: InfoT) -> KeyT: ...
-
-    def change_key(self, change: ChangeT) -> KeyT: ...
-
-    def change_value(self, change: ChangeT) -> InfoT | None: ...
 
     def value_info(self, value: ValueT) -> InfoT: ...
 
 
+@runtime_checkable
 class StorageCacheAdapter(Protocol[KeyT, ValueT, InfoT]):
     def cache_key(self, key: KeyT, info: InfoT) -> ContentCacheKey: ...
 
@@ -43,33 +49,54 @@ class StorageCacheAdapter(Protocol[KeyT, ValueT, InfoT]):
     def from_cache(self, info: InfoT, content: bytes) -> ValueT: ...
 
 
-@runtime_checkable
-class StorageInitializer(Protocol):
-    async def initialize_storage(self, *args: object) -> None: ...
+@dataclass(frozen=True, slots=True)
+class StorageLayer(Generic[KeyT, ValueT, InfoT]):
+    """One read-only layer behind the primary. ``backend`` is a
+    :class:`StorageReader`; ``refresh`` selects how its metadata is loaded."""
+
+    backend: StorageReader[KeyT, ValueT, InfoT]
+    refresh: LayerRefreshPolicy = LayerRefreshPolicy.STATIC
+    initializer: StorageInitializer | None = None
 
 
-class StorageComposition(
-    Generic[PrimaryT, KeyT, ValueT, InfoT, ChangeT, WriterT]
-):
-    """Compose optional storage features without imposing them on backends."""
+@dataclass(frozen=True, slots=True)
+class EffectiveMetadataState(Generic[KeyT, InfoT]):
+    """The merged view across primary + layers at one refresh. ``owners`` maps
+    each key to the index of the layer (0 = primary) that won it, so a read
+    goes straight to that backend instead of probing each layer in order."""
+
+    revision: int | str
+    entries: Mapping[KeyT, InfoT]
+    owners: Mapping[KeyT, int]
+
+
+def _primary_policy(primary: object) -> LayerRefreshPolicy:
+    # A primary that can serve metadata is REVISIONED (patch-able); otherwise
+    # its metadata is reloaded fully every refresh (ALWAYS).
+    return (
+        LayerRefreshPolicy.REVISIONED
+        if isinstance(primary, StorageMetadataBackend)
+        else LayerRefreshPolicy.ALWAYS
+    )
+
+
+class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
+    """Compose a primary reader with layers, a writer, and a content cache."""
 
     def __init__(
         self,
-        primary: PrimaryT,
+        primary: StorageReader[KeyT, ValueT, InfoT],
         *,
         writer: WriterT | None = None,
-        overlays: tuple[StorageLayer[KeyT, ValueT, InfoT], ...] = (),
-        revision: RevisionSource | None = None,
-        changes: ChangeSource[ChangeT] | None = None,
+        layers: tuple[StorageLayer[KeyT, ValueT, InfoT], ...] = (),
+        adapter: StorageAdapter[KeyT, ValueT, InfoT] | None = None,
         cache: ContentCache | None = None,
-        adapter: StorageAdapter[KeyT, ValueT, InfoT, ChangeT] | None = None,
         cache_adapter: StorageCacheAdapter[KeyT, ValueT, InfoT] | None = None,
+        cache_concurrency: int = 16,
         preload_batch_size: int = 100,
         preload_concurrency: int = 8,
     ) -> None:
-        if changes is not None and revision is None:
-            raise ValueError("a change source requires a primary revision source")
-        if adapter is None and (overlays or revision or changes or cache):
+        if adapter is None and (layers or cache):
             raise ValueError("composed storage features require an adapter")
         if cache is not None and cache_adapter is None:
             raise ValueError("a content cache requires a cache adapter")
@@ -77,234 +104,325 @@ class StorageComposition(
             raise ValueError("preload_batch_size must be positive")
         if preload_concurrency < 1:
             raise ValueError("preload_concurrency must be positive")
+        if cache_concurrency < 1:
+            raise ValueError("cache_concurrency must be positive")
         self.primary = primary
         self.writer = writer
-        self.overlays = overlays
+        self.layers = layers
         self.cache = cache
         self.adapter = adapter
         self.cache_adapter = cache_adapter
         self.preload_batch_size = preload_batch_size
         self.preload_concurrency = preload_concurrency
+        self.cache_concurrency = cache_concurrency
+        info_key = adapter.info_key if adapter is not None else lambda info: getattr(info, "path", info)
+        self._views: tuple[LayerMetadataView, ...] = (
+            LayerMetadataView(
+                primary,
+                _primary_policy(primary),
+                info_key=info_key,
+            ),
+            *(
+                LayerMetadataView(
+                    layer.backend,
+                    layer.refresh,
+                    info_key=info_key,
+                    initializer=layer.initializer,
+                )
+                for layer in layers
+            ),
+        )
+        # Marker per key of the cache identity already preloaded into the cache.
         self._preloaded: dict[KeyT, ContentCacheKey] = {}
-        self._primary_revision = revision
-        self._changes = changes
-        self.reader: MultiBackend[KeyT, ValueT, InfoT] | None = None
-        self.revision: RevisionSource | None = None
-        self.snapshot: MetadataSnapshot[KeyT, InfoT, ChangeT] | None = None
-        if adapter is not None:
-            self.reader = MultiBackend(
-                cast("StorageReader[KeyT, ValueT, InfoT]", primary),
-                overlays,
-                info_key=adapter.info_key,
-            )
-            sources = (
-                *((revision,) if revision is not None else ()),
-                *self.reader.overlay_revisions,
-            )
-            if len(sources) == 1:
-                self.revision = sources[0]
-            elif sources:
-                self.revision = CompositeRevisionSource(*sources)
-            self.snapshot = MetadataSnapshot(
-                self.reader,
-                revision=self.revision,
-                changes=changes if not overlays else None,
-                always_refresh=self.reader.always_refresh,
-                entry_key=adapter.info_key,
-                change_key=adapter.change_key,
-                change_value=adapter.change_value,
-            )
+
+    @property
+    def primary_view(self) -> LayerMetadataView:
+        return self._views[0]
 
     async def initialize(self, *args: object) -> None:
-        components = (
-            (self.primary, None),
-            (self.writer, None),
-            *((layer.reader, layer.initializer) for layer in self.overlays),
-            (self._primary_revision, None),
-            (self._changes, None),
-            *((layer.revision, None) for layer in self.overlays),
-        )
-        initialized: set[int] = set()
-        for component, initializer in components:
-            if component is None or id(component) in initialized:
+        seen: set[int] = set()
+        for view in self._views:
+            backend = view.backend
+            if id(backend) in seen:
                 continue
-            initialized.add(id(component))
-            if initializer is not None:
-                await initializer(*args)
-            elif isinstance(component, StorageInitializer):
-                await component.initialize_storage(*args)
+            seen.add(id(backend))
+            await view.initialize(*args)
 
     def require_writer(self) -> WriterT:
         if self.writer is None:
             raise StorageFeatureSupportError("storage is read-only")
         return self.writer
 
-    def _require_reader(
-        self,
-    ) -> tuple[
-        MultiBackend[KeyT, ValueT, InfoT],
-        MetadataSnapshot[KeyT, InfoT, ChangeT],
-        StorageAdapter[KeyT, ValueT, InfoT, ChangeT],
+    def _require_adapter(self) -> tuple[
+        StorageAdapter[KeyT, ValueT, InfoT],
+        StorageCacheAdapter[KeyT, ValueT, InfoT] | None,
     ]:
-        if self.reader is None or self.snapshot is None or self.adapter is None:
-            raise StorageFeatureSupportError("storage composition has no reader adapter")
-        return self.reader, self.snapshot, self.adapter
+        if self.adapter is None:
+            raise StorageFeatureSupportError("storage composition has no adapter")
+        return self.adapter, self.cache_adapter
 
-    async def refresh(
-        self,
-        *,
-        preload: bool = False,
-    ) -> MetadataState[KeyT, InfoT] | None:
-        _, snapshot, _ = self._require_reader()
-        state = await snapshot.refresh()
-        if not preload or state is None:
-            return state
-        return await self._preload(state)
-
-    async def _preload(
-        self,
-        state: MetadataState[KeyT, InfoT],
-    ) -> MetadataState[KeyT, InfoT]:
-        reader, snapshot, adapter = self._require_reader()
-        cache_adapter = self.cache_adapter
-        if self.cache is None or cache_adapter is None:
-            raise StorageFeatureSupportError(
-                "storage composition has no content cache"
-            )
-        if self.revision is None:
-            raise StorageFeatureSupportError(
-                "content preload requires a revision source"
-            )
-        if not state.cacheable:
-            return state
-        for _attempt in range(3):
-            if not state.cacheable:
-                return state
-            identities = {
-                key: cache_adapter.cache_key(key, info)
-                for key, info in state.entries.items()
-            }
-            keys = tuple(
-                [
-                    key
-                    for key, identity in identities.items()
-                    if (
-                        self._preloaded.get(key) != identity
-                        or await read_cache(self.cache, identity) is None
-                    )
-                ]
-            )
-            loaded: dict[KeyT, ValueT] = {}
-            for batch in self._batches(keys):
-                loaded.update(
-                    await reader.get_many(
-                        batch,
-                        concurrency=self.preload_concurrency,
-                    )
-                )
-            valid = {
-                key: value
-                for key, value in loaded.items()
-                if (
-                    key in state.entries
-                    and adapter.value_info(value) == state.entries[key]
-                )
-            }
-            if await self.revision.current_revision() != state.revision:
-                state = await snapshot.refresh()
-                if state is None:
-                    return state
-                if not state.cacheable:
-                    return state
+    async def refresh(self) -> EffectiveMetadataState[KeyT, InfoT] | None:
+        adapter, _ = self._require_adapter()
+        states = await asyncio.gather(*(view.refresh() for view in self._views))
+        if all(state is None for state in states):
+            return None
+        entries: dict[KeyT, InfoT] = {}
+        owners: dict[KeyT, int] = {}
+        for index, state in enumerate(states):
+            if state is None:
                 continue
-            written = await self._write_many(valid, identities)
-            self._preloaded = {
-                key: identity
-                for key, identity in identities.items()
-                if key not in keys or key in written
-            }
-            return state
-        return MetadataState(
-            state.revision,
-            state.entries,
-            cacheable=False,
+            for key, info in state.entries.items():
+                if key not in entries:
+                    entries[key] = info
+                    owners[key] = index
+        return EffectiveMetadataState(
+            self._effective_revision(states),
+            entries,
+            owners,
         )
 
-    def _batches(
+    def _effective_revision(
+        self,
+        states: tuple[MetadataState[Any, Any, Any] | None, ...],
+    ) -> int | str:
+        # Single primary: its revision directly. Multiple layers: a canonical
+        # hash over every loaded layer's revision so any change in any layer
+        # changes the effective revision. ALWAYS layers use a local generation,
+        # so they always change the effective revision.
+        loaded = tuple(state.revision for state in states if state is not None)
+        if len(loaded) <= 1:
+            return loaded[0] if loaded else 0
+        payload = "|".join(str(revision) for revision in loaded)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def current_revision(self) -> int | str:
+        # Reuses refresh() (no separate backend revision query).
+        state = await self.refresh()
+        return 0 if state is None else state.revision
+
+    async def get(self, key: KeyT) -> ValueT | None:
+        return await self._get_with_retry(key, retried=False)
+
+    async def _get_with_retry(self, key: KeyT, *, retried: bool) -> ValueT | None:
+        adapter, cache_adapter = self._require_adapter()
+        state = await self.refresh()
+        if state is None or key not in state.entries:
+            # metadata is loaded and this key is absent: do NOT probe backends.
+            return None
+        owner = state.owners[key]
+        info = state.entries[key]
+        backend = self._views[owner].backend
+        cache_key = (
+            None if cache_adapter is None else cache_adapter.cache_key(key, info)
+        )
+        if self.cache is not None and cache_adapter is not None:
+            cached = await read_cache(self.cache, cache_key)
+            if cached is not None:
+                return cache_adapter.from_cache(info, cached)
+        value = await backend.get(key)
+        if value is None:
+            return None
+        if adapter.value_info(value) != info:
+            # Content raced (metadata is stale). Refresh once; if still a
+            # mismatch, treat as absent rather than serving a wrong version.
+            if not retried:
+                await self._views[owner].refresh()
+                return await self._get_with_retry(key, retried=True)
+            return None
+        if self.cache is not None and cache_adapter is not None:
+            await write_cache(self.cache, cache_key, cache_adapter.cache_content(value))
+        return value
+
+    async def get_many(self, keys: tuple[KeyT, ...]) -> dict[KeyT, ValueT]:
+        if not keys:
+            return {}
+        adapter, cache_adapter = self._require_adapter()
+        state = await self.refresh()
+        result: dict[KeyT, ValueT] = {}
+        if state is None:
+            return result
+        wanted = tuple(dict.fromkeys(k for k in keys if k in state.entries))
+        if not wanted:
+            return result
+        if self.cache is not None and cache_adapter is not None:
+
+            async def _read_one(key: KeyT) -> tuple[KeyT, bytes | None]:
+                return key, await read_cache(
+                    self.cache, cache_adapter.cache_key(key, state.entries[key])
+                )
+
+            miss: list[KeyT] = []
+            for key, cached in await asyncio.gather(*(_read_one(k) for k in wanted)):
+                if cached is not None:
+                    result[key] = cache_adapter.from_cache(state.entries[key], cached)
+                else:
+                    miss.append(key)
+        else:
+            miss = list(wanted)
+        if not miss:
+            return result
+        loaded = await self._load_by_owner(tuple(miss), state)
+        for key in miss:
+            value = loaded.get(key)
+            if value is None or key not in state.entries:
+                continue
+            if adapter.value_info(value) != state.entries[key]:
+                continue
+            result[key] = value
+            if self.cache is not None and cache_adapter is not None:
+                await write_cache(
+                    self.cache,
+                    cache_adapter.cache_key(key, state.entries[key]),
+                    cache_adapter.cache_content(value),
+                )
+        return result
+
+    def _group_by_owner(
         self,
         keys: tuple[KeyT, ...],
-    ) -> Iterable[tuple[KeyT, ...]]:
-        size = self.preload_batch_size
-        for offset in range(0, len(keys), size):
-            yield keys[offset : offset + size]
+        state: EffectiveMetadataState[KeyT, InfoT],
+    ) -> dict[int, tuple[KeyT, ...]]:
+        groups: dict[int, list[KeyT]] = {}
+        for key in keys:
+            groups.setdefault(state.owners[key], []).append(key)
+        return {owner: tuple(keys) for owner, keys in groups.items()}
 
-    async def _write_many(
+    async def _load_by_owner(
         self,
-        values: dict[KeyT, ValueT],
-        identities: dict[KeyT, ContentCacheKey],
-    ) -> set[KeyT]:
-        cache_adapter = self.cache_adapter
-        if cache_adapter is None:
-            return set()
-        written: set[KeyT] = set()
-        for key, value in values.items():
-            if await write_cache(
-                self.cache,
-                identities[key],
-                cache_adapter.cache_content(value),
-            ):
-                written.add(key)
-        return written
+        keys: tuple[KeyT, ...],
+        state: EffectiveMetadataState[KeyT, InfoT],
+        *,
+        batch_size: int | None = None,
+    ) -> dict[KeyT, ValueT]:
+        # Load every key in ``keys`` from its owning layer's backend, grouping by
+        # owner and running the owner groups (and their sub-batches) in parallel.
+        # Shared by get_many and preload. ``batch_size`` splits each owner's
+        # group into bounded chunks (preload uses it to cap SQL IN-clause size);
+        # None reads a whole group in one batch_get.
+        loaded: dict[KeyT, ValueT] = {}
+        by_owner = self._group_by_owner(keys, state)
 
-    async def get_info(self, key: KeyT) -> InfoT | None:
-        state = await self.refresh()
-        return None if state is None else state.entries.get(key)
+        async def _owner_load(owner: int, group: tuple[KeyT, ...]) -> None:
+            loaded.update(
+                await batch_get(
+                    self._views[owner].backend,
+                    group,
+                    concurrency=self.preload_concurrency,
+                )
+            )
+
+        batches = (
+            ((owner, group) for owner, group in by_owner.items())
+            if batch_size is None
+            else (
+                (owner, chunk)
+                for owner, group in by_owner.items()
+                for chunk in self._batches(group)
+            )
+        )
+        await asyncio.gather(*(_owner_load(owner, batch) for owner, batch in batches))
+        return loaded
 
     async def list_info(self, *, preload: bool = False) -> tuple[InfoT, ...]:
-        state = await self.refresh(preload=preload)
+        state = await self.refresh()
         if state is None:
             return ()
+        if preload:
+            await self._preload(state)
         return tuple(
             state.entries[key]
             for key in sorted(state.entries, key=lambda value: str(value))
         )
 
-    async def current_revision(self) -> Revision | None:
-        if self.revision is None:
-            return None
-        return await self.revision.current_revision()
-
-    async def get(self, key: KeyT) -> ValueT | None:
-        reader, _, adapter = self._require_reader()
-        state = await self.refresh()
-        info = None if state is None else state.entries.get(key)
-        if info is None:
-            return await reader.get(key)
-        cache_adapter = self.cache_adapter
-        cache_key = (
-            None
-            if cache_adapter is None
-            else cache_adapter.cache_key(key, info)
+    async def _preload(self, state: EffectiveMetadataState[KeyT, InfoT]) -> None:
+        adapter, cache_adapter = self._require_adapter()
+        if self.cache is None or cache_adapter is None:
+            return
+        identities = {
+            key: cache_adapter.cache_key(key, info)
+            for key, info in state.entries.items()
+        }
+        present = await contains_many(self.cache, tuple(identities.values()))
+        missing = tuple(
+            key
+            for key, identity in identities.items()
+            if identity not in present or self._preloaded.get(key) != identity
         )
-        if state.cacheable and cache_adapter is not None:
-            cached = await read_cache(self.cache, cache_key)
-            if cached is not None:
-                return cache_adapter.from_cache(info, cached)
-        value = await reader.get(key)
-        if value is None or adapter.value_info(value) != info:
-            return None
-        if state.cacheable and cache_adapter is not None:
-            await write_cache(
-                self.cache,
-                cache_key,
-                cache_adapter.cache_content(value),
-            )
-        return value
+        if not missing:
+            return
+        loaded = await self._load_by_owner(
+            missing, state, batch_size=self.preload_batch_size
+        )
+        # Bounded concurrent cache puts.
+        semaphore = asyncio.Semaphore(self.cache_concurrency)
+        verified: set[KeyT] = set()
+
+        async def _cache(key: KeyT) -> None:
+            async with semaphore:
+                value = loaded.get(key)
+                if value is None or adapter.value_info(value) != state.entries[key]:
+                    return
+                if await write_cache(
+                    self.cache,
+                    identities[key],
+                    cache_adapter.cache_content(value),
+                ):
+                    verified.add(key)
+
+        await asyncio.gather(*(_cache(key) for key in missing))
+        for key in missing:
+            if key in verified:
+                self._preloaded[key] = identities[key]
+
+    def _batches(self, keys: tuple[KeyT, ...]) -> Iterable[tuple[KeyT, ...]]:
+        size = self.preload_batch_size
+        for offset in range(0, len(keys), size):
+            yield keys[offset : offset + size]
+
+    # ---- writes --------------------------------------------------------
+
+    async def put(self, value: ValueT) -> ValueT:
+        writer = self.require_writer()
+        result = await writer.put(value)
+        adapter, _ = self._require_adapter()
+        self._after_put(result, adapter)
+        return result
+
+    async def delete(self, key: KeyT) -> None:
+        writer = self.require_writer()
+        await writer.delete(key)
+        self._after_delete(key)
+
+    async def reset(self, values: tuple[ValueT, ...]) -> None:
+        writer = self.require_writer()
+        await writer.reset(values)
+        self._after_reset()
+
+    def _after_put(self, value: ValueT, adapter: StorageAdapter[KeyT, ValueT, InfoT]) -> None:
+        # Clear the preloaded marker for the written key so a later preload
+        # re-reads it. A revisioned primary keeps its old state so the next
+        # refresh fetches the patch from the prior revision; an unversioned
+        # primary invalidates fully.
+        key = adapter.info_key(adapter.value_info(value))
+        self._preloaded.pop(key, None)
+        if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
+            self.primary_view.invalidate()
+
+    def _after_delete(self, key: KeyT) -> None:
+        self._preloaded.pop(key, None)
+        if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
+            self.primary_view.invalidate()
+
+    def _after_reset(self) -> None:
+        self._preloaded.clear()
+        if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
+            self.primary_view.invalidate()
 
 
 __all__ = [
+    "EffectiveMetadataState",
     "StorageAdapter",
     "StorageCacheAdapter",
     "StorageComposition",
-    "StorageInitializer",
+    "StorageLayer",
 ]

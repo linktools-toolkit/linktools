@@ -20,13 +20,11 @@ class MCPServerSpecIndex(SpecIndex[MCPServerSpec]):
         *,
         codec: "MCPSpecCodec | None" = None,
         suffix: str = ".yaml",
-        source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
             codec or MCPSpecCodec(),
             suffix=suffix,
-            source_name=source_name,
         )
 
     @classmethod
@@ -34,12 +32,6 @@ class MCPServerSpecIndex(SpecIndex[MCPServerSpec]):
         cls, loader: SpecLoader, *, suffix: str = ".yaml"
     ) -> "MCPServerSpecIndex":
         return cls(SpecLoaderSource(loader), suffix=suffix)
-
-    async def list_ids(self) -> "tuple[str, ...]":
-        return await self._cache.list_ids()
-
-    async def get(self, mcp_id: str) -> MCPServerSpec:
-        return await self._cache.get(mcp_id)
 
 
 __all__: "list[str]" = ["MCPServerSpecIndex"]

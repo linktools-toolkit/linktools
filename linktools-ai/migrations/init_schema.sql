@@ -194,15 +194,29 @@ CREATE TABLE `ai_spec_changes` (
   `kind` VARCHAR(128) NULL COMMENT 'Kind',
   `version` INT NULL COMMENT 'Version',
   `etag` VARCHAR(255) NULL COMMENT 'Etag',
+  `object_id` VARCHAR(128) NULL COMMENT 'Object id (spec_blobs sha256; null for tombstone)',
   `active` TINYINT(1) NULL COMMENT 'Active',
   `deleted` TINYINT(1) NOT NULL COMMENT 'Deleted',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Updated at',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Created at',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_revision_path` (`revision`, `path`(128)),
+  KEY `ix_object_id` (`object_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Spec change log (append-only)';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Spec change + version log (append-only; retained permanently for audit/rollback)';
+
+CREATE TABLE `ai_spec_blobs` (
+  `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
+  `sha256` VARCHAR(64) NOT NULL COMMENT 'Sha256 content digest',
+  `content` BLOB NOT NULL COMMENT 'Content bytes',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Updated at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Created at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sha256` (`sha256`),
+  KEY `ix_updated_at` (`updated_at`),
+  KEY `ix_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Content-addressed spec document blob (dedup by sha256; immutable)';
 
 CREATE TABLE `ai_artifacts` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',

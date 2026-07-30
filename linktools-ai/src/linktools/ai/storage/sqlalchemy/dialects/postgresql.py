@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
 
 # Postgres SQLSTATE codes (asyncpg exposes these as error.sqlstate; psycopg2
 # as error.orig.pgcode; psycopg3 as error.orig.sqlstate / .diag.sqlstate_).
@@ -52,6 +52,31 @@ class PostgreSQLDialect:
             inserted=row is not None,
             row_id=row[0] if row is not None else None,
         )
+
+    async def upsert_increment(
+        self,
+        session: Any,
+        *,
+        model: type,
+        pk: Any,
+        column: str,
+        step: int = 1,
+    ) -> int:
+        from sqlalchemy.dialects.postgresql import insert
+
+        pk_column = primary_key_column(model)
+        col_attr = getattr(model, column)
+        stmt = (
+            insert(model)
+            .values(**{pk_column.name: pk, column: step})
+            .on_conflict_do_update(
+                index_elements=[pk_column.name],
+                set_={column: col_attr + step},
+            )
+            .returning(col_attr)
+        )
+        result = await session.execute(stmt)
+        return result.scalar()
 
     def classify_integrity_error(
         self, error: BaseException

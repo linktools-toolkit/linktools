@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
 
 
 class SqliteDialect:
@@ -52,6 +52,33 @@ class SqliteDialect:
             inserted=row is not None,
             row_id=row[0] if row is not None else None,
         )
+
+    async def upsert_increment(
+        self,
+        session: Any,
+        *,
+        model: type,
+        pk: Any,
+        column: str,
+        step: int = 1,
+    ) -> int:
+        from sqlalchemy.dialects.sqlite import insert
+
+        pk_column = primary_key_column(model)
+        col_attr = getattr(model, column)
+        # INSERT ... ON CONFLICT (pk) DO UPDATE: the row is seeded with
+        # column = step on first insert; on conflict column = column + step.
+        stmt = (
+            insert(model)
+            .values(**{pk_column.name: pk, column: step})
+            .on_conflict_do_update(
+                index_elements=[pk_column.name],
+                set_={column: col_attr + step},
+            )
+            .returning(col_attr)
+        )
+        result = await session.execute(stmt)
+        return result.scalar()
 
     def classify_integrity_error(
         self, error: BaseException

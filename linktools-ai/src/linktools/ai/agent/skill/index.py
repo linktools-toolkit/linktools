@@ -20,13 +20,11 @@ class SkillSpecIndex(SpecIndex[SkillSpec]):
         *,
         codec: "SkillSpecCodec | None" = None,
         suffix: str = ".md",
-        source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
             codec or SkillSpecCodec(),
             suffix=suffix,
-            source_name=source_name,
         )
 
     @classmethod
@@ -34,12 +32,6 @@ class SkillSpecIndex(SpecIndex[SkillSpec]):
         cls, loader: SpecLoader, *, suffix: str = ".md"
     ) -> "SkillSpecIndex":
         return cls(SpecLoaderSource(loader), suffix=suffix)
-
-    async def list_ids(self) -> "tuple[str, ...]":
-        return await self._cache.list_ids()
-
-    async def get(self, skill_id: str) -> SkillSpec:
-        return await self._cache.get(skill_id)
 
 
 __all__: "list[str]" = ["SkillSpecIndex"]

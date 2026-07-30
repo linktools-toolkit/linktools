@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 """Shared text parsers and strict registry configuration helpers."""
 
+import asyncio
+import hashlib
 import json
 import math
 import os
@@ -83,58 +85,48 @@ def parse_json_text(text: str, *, source: str = "<json>") -> "dict[str, Any]":
 
 
 class SpecLoader:
-    """Reads spec text and lists ids from a filesystem or feature source."""
+    """Reads spec text and lists ids from a filesystem or feature source.
 
-    def __init__(self, *, read, list_ids, revision) -> None:
+    ``identity`` returns a stable content digest (SHA-256) so a caller caches
+    parsed objects by content, not by Python ``hash()`` (which is randomized
+    per process and unsuitable as a cross-process cache key)."""
+
+    def __init__(self, *, read, list_ids) -> None:
         self._read = read
         self._list_ids = list_ids
-        self._revision = revision
 
     @classmethod
     def from_filesystem(cls, *roots: Path) -> "SpecLoader":
         roots_t = tuple(Path(r) for r in roots)
 
         async def read(path: str) -> str:
-            for root in roots_t:
-                candidate = root / path
-                if candidate.is_file():
-                    return candidate.read_text(encoding="utf-8")
-            raise SpecNotFoundError(f"spec file not found: {path}")
+            # Filesystem sync I/O runs in a worker thread, never on the loop.
+            def _read_sync() -> "str | None":
+                for root in roots_t:
+                    candidate = root / path
+                    if candidate.is_file():
+                        return candidate.read_text(encoding="utf-8")
+                return None
+
+            text = await asyncio.to_thread(_read_sync)
+            if text is None:
+                raise SpecNotFoundError(f"spec file not found: {path}")
+            return text
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
-            ids: list[str] = []
-            for root in roots_t:
-                if not root.is_dir():
-                    continue
-                for p in sorted(root.iterdir()):
-                    if p.is_file() and p.name.endswith(suffix):
-                        ids.append(p.name[: -len(suffix)])
-            return tuple(ids)
-
-        async def revision() -> int:
-            # High-resolution revision over the full file set: (relative path,
-            # mtime_ns, size) per file. mtime_ns (nanosecond, not second-level)
-            # avoids same-second collisions; hashing path+size too means an add or
-            # delete changes the revision (the max-mtime approach missed those
-            # and same-second modifies). A file that disappears between rglob
-            # and stat is skipped -- the next revision reflects the final state.
-            state: "list[tuple[str, int, int]]" = []
-            for root in roots_t:
-                if not root.is_dir():
-                    continue
-                for p in root.rglob("*"):
-                    if not p.is_file():
+            def _scan() -> "list[str]":
+                ids: list[str] = []
+                for root in roots_t:
+                    if not root.is_dir():
                         continue
-                    try:
-                        stat = p.stat()
-                    except FileNotFoundError:
-                        continue
-                    state.append(
-                        (str(p.relative_to(root)), stat.st_mtime_ns, stat.st_size)
-                    )
-            return hash(tuple(sorted(state)))
+                    for p in sorted(root.iterdir()):
+                        if p.is_file() and p.name.endswith(suffix):
+                            ids.append(p.name[: -len(suffix)])
+                return ids
 
-        return cls(read=read, list_ids=list_ids, revision=revision)
+            return tuple(await asyncio.to_thread(_scan))
+
+        return cls(read=read, list_ids=list_ids)
 
     @classmethod
     def from_store(cls, store: Any, *, prefix: str) -> "SpecLoader":
@@ -159,17 +151,7 @@ class SpecLoader:
                     ids.append(item.path.rsplit("/", 1)[-1][: -len(suffix)])
             return tuple(sorted(ids))
 
-        async def revision() -> int | str:
-            current = await store.current_revision()
-            if current is not None:
-                return current
-            state = tuple(
-                (item.path, item.version, item.etag, item.active)
-                for item in await store.list_info()
-            )
-            return hash(state)
-
-        return cls(read=read, list_ids=list_ids, revision=revision)
+        return cls(read=read, list_ids=list_ids)
 
     async def read(self, path: str) -> str:
         return await self._read(path)
@@ -177,8 +159,8 @@ class SpecLoader:
     async def list_ids(self, suffix: str) -> "tuple[str, ...]":
         return await self._list_ids(suffix)
 
-    async def revision(self) -> int:
-        return await self._revision()
+    def identity(self, raw: str) -> str:
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def resolved_name(reader: "StrictConfigReader", entity_id: str) -> str:

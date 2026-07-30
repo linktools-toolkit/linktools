@@ -20,13 +20,11 @@ class AgentSpecIndex(SpecIndex[AgentSpec]):
         *,
         codec: "AgentSpecDocumentCodec | None" = None,
         suffix: str = ".md",
-        source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
             codec or AgentSpecDocumentCodec(),
             suffix=suffix,
-            source_name=source_name,
         )
 
     @classmethod
@@ -37,11 +35,5 @@ class AgentSpecIndex(SpecIndex[AgentSpec]):
         or asset-backed loader)."""
         return cls(SpecLoaderSource(loader), suffix=suffix)
 
-    async def list_ids(self) -> "tuple[str, ...]":
-        return await self._cache.list_ids()
 
-    async def get(self, agent_id: str) -> AgentSpec:
-        return await self._cache.get(agent_id)
-
-
-__all__: "list[str]" = ["AgentSpecIndex"]
+__all__ = ["AgentSpecIndex"]

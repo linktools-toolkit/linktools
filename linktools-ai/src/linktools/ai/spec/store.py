@@ -1,107 +1,68 @@
 """Specification storage assembled from independent storage features."""
 
-from typing import Protocol
-
-from ..storage.cache import ContentCache, ContentCacheKey
+from ..storage.cache import ContentCacheKey
 from ..storage.composition import (
     StorageAdapter,
     StorageCacheAdapter,
     StorageComposition,
+    StorageLayer,
 )
-from ..storage.multi import StorageLayer, StorageReader, StorageWriter
-from ..storage.revision import (
-    ChangeSource,
-    Revision,
-    RevisionSource,
-)
-from .document import SpecDocument, SpecDocumentChange, SpecDocumentInfo
-
-
-class SpecReader(
-    StorageReader[str, SpecDocument, SpecDocumentInfo],
-    Protocol,
-):
-    pass
-
-
-class SpecWriter(StorageWriter[str, SpecDocument], Protocol):
-    pass
+from .document import SpecDocument, SpecDocumentInfo
 
 
 class SpecStorageAdapter(
-    StorageAdapter[str, SpecDocument, SpecDocumentInfo, SpecDocumentChange],
+    StorageAdapter[str, SpecDocument, SpecDocumentInfo],
     StorageCacheAdapter[str, SpecDocument, SpecDocumentInfo],
 ):
     def info_key(self, info: SpecDocumentInfo) -> str:
         return info.path
 
-    def change_key(self, change: SpecDocumentChange) -> str:
-        return change.path
-
-    def change_value(
-        self,
-        change: SpecDocumentChange,
-    ) -> SpecDocumentInfo | None:
-        return change.info
-
     def value_info(self, value: SpecDocument) -> SpecDocumentInfo:
         return value.info
 
-    def cache_key(
-        self,
-        key: str,
-        info: SpecDocumentInfo,
-    ) -> ContentCacheKey:
-        return key, info.version, info.etag
+    def cache_key(self, key: str, info: SpecDocumentInfo) -> ContentCacheKey:
+        # spec:{path}:{version}:{etag} -- content changes alter the etag, so a
+        # stale cache entry can never be served against changed content.
+        return f"spec:{key}:{info.version}:{info.etag}"
 
     def cache_content(self, value: SpecDocument) -> bytes:
         return value.content
 
-    def from_cache(
-        self,
-        info: SpecDocumentInfo,
-        content: bytes,
-    ) -> SpecDocument:
+    def from_cache(self, info: SpecDocumentInfo, content: bytes) -> SpecDocument:
         return SpecDocument(info, content)
 
 
 class SpecStore:
-    """Compose spec reads with optional writes, overlays, revision, delta, and cache."""
+    """Compose spec reads with optional writes, layers, and a content cache."""
 
     def __init__(
         self,
-        reader: SpecReader,
+        primary,
         *,
-        writer: SpecWriter | None = None,
-        overlays: tuple[
-            StorageLayer[str, SpecDocument, SpecDocumentInfo],
-            ...,
-        ] = (),
-        revision: RevisionSource | None = None,
-        changes: ChangeSource[SpecDocumentChange] | None = None,
-        content_cache: ContentCache | None = None,
+        writer=None,
+        layers: "tuple[StorageLayer[str, SpecDocument, SpecDocumentInfo], ...]" = (),
+        cache=None,
     ) -> None:
         adapter = SpecStorageAdapter()
         self._storage = StorageComposition(
-            primary=reader,
+            primary,
             writer=writer,
-            overlays=overlays,
-            revision=revision,
-            changes=changes,
-            cache=content_cache,
+            layers=layers,
+            cache=cache,
             adapter=adapter,
             cache_adapter=adapter,
         )
 
     @property
-    def writer(self) -> SpecWriter | None:
+    def writer(self):
         return self._storage.writer
 
     async def initialize_storage(self, *args: object) -> None:
         await self._storage.initialize(*args)
 
     async def stat(self, path: str) -> SpecDocumentInfo | None:
-        return await self._storage.get_info(path)
+        state = await self._storage.refresh()
+        return None if state is None else state.entries.get(path)
 
     async def list_active(
         self,
@@ -109,38 +70,33 @@ class SpecStore:
         *,
         preload: bool = False,
     ) -> tuple[str, ...]:
-        state = await self._storage.refresh(preload=preload)
-        if state is None:
-            return ()
+        infos = await self._storage.list_info(preload=preload)
         return tuple(
-            sorted(
-                path
-                for path, info in state.entries.items()
-                if info.active and (kind is None or info.kind == kind)
-            )
+            info.path
+            for info in infos
+            if info.active and (kind is None or info.kind == kind)
         )
 
-    async def list_info(
-        self,
-        *,
-        preload: bool = False,
-    ) -> tuple[SpecDocumentInfo, ...]:
+    async def list_info(self, *, preload: bool = False) -> tuple[SpecDocumentInfo, ...]:
         return await self._storage.list_info(preload=preload)
 
-    async def current_revision(self) -> Revision | None:
+    async def current_revision(self):
         return await self._storage.current_revision()
 
     async def get(self, path: str) -> SpecDocument | None:
         return await self._storage.get(path)
 
+    async def get_many(self, paths: tuple[str, ...]) -> dict[str, SpecDocument]:
+        return await self._storage.get_many(paths)
+
     async def put(self, document: SpecDocument) -> SpecDocument:
-        return await self._storage.require_writer().put(document)
+        return await self._storage.put(document)
 
     async def delete(self, path: str) -> None:
-        await self._storage.require_writer().delete(path)
+        await self._storage.delete(path)
 
     async def reset(self, documents: tuple[SpecDocument, ...]) -> None:
-        await self._storage.require_writer().reset(documents)
+        await self._storage.reset(documents)
 
 
-__all__ = ["SpecReader", "SpecStore", "SpecWriter"]
+__all__ = ["SpecStore"]

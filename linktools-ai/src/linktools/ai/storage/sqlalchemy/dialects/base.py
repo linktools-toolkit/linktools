@@ -11,6 +11,11 @@ of their own; they all share this one seam for:
 - ``insert_ignore_conflict`` -- INSERT ``values`` into any mapped model's
   table if no row conflicts on the given unique columns; return whether the
   insert landed.
+- ``upsert_increment`` -- self-seed a singleton counter row keyed by ``pk``
+  and atomically add ``step`` to its ``column`` in one statement, returning the
+  new value (SQLite/PostgreSQL via ``INSERT ... ON CONFLICT ... RETURNING``;
+  MySQL via ``INSERT ... ON DUPLICATE KEY UPDATE col = LAST_INSERT_ID(col +
+  step)`` read back from the driver's ``lastrowid``).
 - ``classify_integrity_error`` -- map a caught SQLAlchemy IntegrityError to
   one of the kernel-level integrity kinds so the caller can re-raise the
   original error for non-unique-constraint violations.
@@ -91,6 +96,32 @@ class SqlAlchemyDialect(Protocol):
         targeted unique-key case is absorbed."""
         ...
 
+    async def upsert_increment(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        pk: Any,
+        column: str,
+        step: int = 1,
+    ) -> int:
+        """Self-seed ``model``'s singleton row keyed by ``pk`` and add ``step``
+        to ``column`` in one statement, returning the resulting value. The row
+        is created on the first call with ``column = step`` (the first-increment
+        value); a unique-key conflict advances ``column = column + step``
+        instead. The singleton can therefore never be absent, so this never
+        returns ``None``.
+
+        This is the vendor seam for an atomic read-modify-write on a
+        self-seeding counter: SQLite/PostgreSQL fold it into one
+        ``INSERT ... ON CONFLICT (pk) DO UPDATE ... RETURNING`` round trip;
+        MySQL (no portable RETURNING) wraps the upsert in a
+        ``LAST_INSERT_ID(expr)`` idiom so the incremented value is observable
+        via the driver's ``lastrowid`` in a single statement. The atomic
+        increment itself (``column = column + step``) is enforced by the
+        database under row locking, so concurrent callers never lose an update."""
+        ...
+
     def classify_integrity_error(
         self,
         error: BaseException,
@@ -128,9 +159,27 @@ def classify_integrity_error_by_message(
     return IntegrityViolationKind.UNKNOWN
 
 
+def primary_key_column(model: type) -> Any:
+    """Return the single primary-key :class:`InstrumentedAttribute` of a mapped
+    ``model``. Shared by the ``upsert_increment`` implementations (every
+    built-in keys the singleton counter row on its PK). A model with a
+    composite primary key has no single keying column and this raises
+    ``ValueError`` -- ``upsert_increment`` targets singleton counter rows,
+    none of which have composite keys."""
+    table = model.__table__
+    pk_columns = list(table.primary_key.columns)
+    if len(pk_columns) != 1:
+        raise ValueError(
+            f"{model.__name__} has {len(pk_columns)} primary-key columns; "
+            f"upsert_increment keys a singleton row on a single PK"
+        )
+    return getattr(model, pk_columns[0].name)
+
+
 __all__: "list[str]" = (
     "InsertResult",
     "IntegrityViolationKind",
     "SqlAlchemyDialect",
     "classify_integrity_error_by_message",
+    "primary_key_column",
 )

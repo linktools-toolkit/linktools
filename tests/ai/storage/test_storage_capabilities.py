@@ -1,364 +1,176 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""StorageComposition capability recording and layer merge.
+
+Validates that composition records only the features explicitly given, merges
+layers primary-first with owner tracking, and reports an effective revision
+without re-querying backends."""
+
 from dataclasses import dataclass
 
 import pytest
 
 from linktools.ai.errors import StorageFeatureSupportError
-from linktools.ai.storage.cache import MemoryContentCache
-from linktools.ai.storage.composition import StorageComposition
-from linktools.ai.storage.multi import OverlayRefreshPolicy, StorageLayer
-
-
-class Source:
-    def __init__(self):
-        self.revision = 2
-
-    async def current_revision(self):
-        return self.revision
-
-    async def list_changes(self, *, after_revision, through_revision):
-        return tuple(range(after_revision + 1, through_revision + 1))
-
-    async def get(self, key):
-        return None
-
-    async def list_info(self):
-        return ()
-
-
-def test_storage_composition_only_records_explicit_capabilities():
-    source = Source()
-    composition = StorageComposition(primary=source, writer=source)
-    assert not hasattr(composition, "backend")
-    assert composition.writer is source
+from linktools.ai.storage.composition import StorageComposition, StorageLayer
+from linktools.ai.storage.revision import (
+    LayerRefreshPolicy,
+    MetadataLoad,
+    MetadataLoadMode,
+    StorageChange,
+)
 
 
 @dataclass(frozen=True)
 class Info:
-    key: str
-    version: int
+    path: str
 
 
 @dataclass(frozen=True)
-class Value:
+class Doc:
     info: Info
     content: bytes
 
 
-@dataclass(frozen=True)
-class Change:
-    key: str
-    info: Info | None
-
-
-class Reader:
-    def __init__(self, values, revision=1):
-        self.values = {value.info.key: value for value in values}
-        self.revision = revision
-        self.changes = ()
-        self.batch_reads = []
-
-    async def current_revision(self):
-        return self.revision
-
-    async def list_changes(self, *, after_revision, through_revision):
-        return self.changes
-
-    async def get(self, key):
-        return self.values.get(key)
-
-    async def list_info(self):
-        return tuple(value.info for value in self.values.values())
-
-    async def get_many(self, keys):
-        self.batch_reads.append(keys)
-        return {
-            key: self.values[key]
-            for key in keys
-            if key in self.values
-        }
-
-
 class Adapter:
     def info_key(self, info):
-        return info.key
-
-    def change_key(self, change):
-        return change.key
-
-    def change_value(self, change):
-        return change.info
+        return info.path
 
     def value_info(self, value):
         return value.info
 
     def cache_key(self, key, info):
-        return key, info.version, str(info.version)
+        return f"k:{key}"
 
     def cache_content(self, value):
         return value.content
 
     def from_cache(self, info, content):
-        return Value(info, content)
+        return Doc(info, content)
+
+
+class MetadataBackend:
+    def __init__(self, docs, revision=1):
+        self.docs = {d.info.path: d for d in docs}
+        self.revision = revision
+        self.loads = 0
+
+    async def load_metadata(self, after_revision):
+        self.loads += 1
+        if after_revision == self.revision:
+            return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
+        changes = tuple(
+            StorageChange(d.info.path, d.info)
+            for d in sorted(self.docs.values(), key=lambda d: d.info.path)
+        )
+        return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, changes)
+
+    async def get(self, path):
+        return self.docs.get(path)
+
+    async def put(self, doc):
+        self.docs[doc.info.path] = doc
+        self.revision += 1
+        return doc
+
+    async def delete(self, path):
+        self.docs.pop(path, None)
+        self.revision += 1
+
+    async def reset(self, docs):
+        self.docs = {d.info.path: d for d in docs}
+        self.revision += 1
+
+
+def _doc(path, body=b"b"):
+    return Doc(Info(path), body)
+
+
+def test_composition_records_only_explicit_features():
+    primary = MetadataBackend((_doc("a"),))
+    composition = StorageComposition(primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter())
+    assert composition.writer is primary
+    assert composition.adapter is not None
+    assert composition.layers == ()
+
+
+def test_composition_requires_adapter_for_features():
+    primary = MetadataBackend((_doc("a"),))
+    with pytest.raises(ValueError, match="adapter"):
+        StorageComposition(primary, layers=(StorageLayer(backend=primary),))
+
+
+def test_read_only_composition_requires_writer_to_write():
+    primary = MetadataBackend((_doc("a"),))
+    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    with pytest.raises(StorageFeatureSupportError, match="read-only"):
+        composition.require_writer()
 
 
 @pytest.mark.asyncio
-async def test_composition_owns_layers_revision_snapshot_and_cache():
-    primary_value = Value(Info("shared", 1), b"primary")
-    overlay_shared = Value(Info("shared", 2), b"overlay-shared")
-    overlay_value = Value(Info("overlay", 1), b"overlay")
-    primary = Reader((primary_value,))
-    overlay = Reader((overlay_shared, overlay_value))
+async def test_layer_merge_records_owner_and_earlier_wins():
+    primary = MetadataBackend((_doc("same", b"primary"), _doc("only-primary", b"pp"),))
+    layer = MetadataBackend((_doc("same", b"layer"), _doc("only-layer", b"ll"),))
     composition = StorageComposition(
         primary,
-        overlays=(
-            StorageLayer(
-                overlay,
-                refresh=OverlayRefreshPolicy.REVISIONED,
-                revision=overlay,
-            ),
-        ),
-        revision=primary,
-        changes=primary,
-        cache=MemoryContentCache(max_bytes=100),
+        layers=(StorageLayer(backend=layer),),
         adapter=Adapter(),
         cache_adapter=Adapter(),
     )
-
-    first_revision = await composition.current_revision()
-    assert await composition.list_info() == (
-        overlay_value.info,
-        primary_value.info,
-    )
-    assert await composition.get("shared") == primary_value
-    primary.values.clear()
-    primary.revision += 1
-    assert await composition.get("shared") == overlay_shared
-    overlay.revision += 1
-    assert await composition.current_revision() != first_revision
+    state = await composition.refresh()
+    assert state.owners["same"] == 0  # primary wins
+    assert state.owners["only-layer"] == 1
+    assert (await composition.get("same")).content == b"primary"
+    assert (await composition.get("only-layer")).content == b"ll"
 
 
 @pytest.mark.asyncio
-async def test_composition_initializes_independent_revision_and_change_sources():
-    class Revision:
-        initialized_with = None
+async def test_effective_revision_single_primary_is_primary_revision():
+    primary = MetadataBackend((_doc("a"),), revision=7)
+    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    state = await composition.refresh()
+    assert state.revision == 7
 
-        async def initialize_storage(self, value):
-            self.initialized_with = value
 
-        async def current_revision(self):
-            return 1
-
-    class Changes:
-        initialized_with = None
-
-        async def initialize_storage(self, value):
-            self.initialized_with = value
-
-        async def list_changes(self, *, after_revision, through_revision):
-            return ()
-
-    revision = Revision()
-    changes = Changes()
+@pytest.mark.asyncio
+async def test_effective_revision_multi_layer_is_hash_of_loaded():
+    primary = MetadataBackend((_doc("a"),), revision=3)
+    layer = MetadataBackend((_doc("b"),), revision=5)
     composition = StorageComposition(
-        Reader(()),
-        revision=revision,
-        changes=changes,
+        primary,
+        layers=(StorageLayer(backend=layer),),
         adapter=Adapter(),
+        cache_adapter=Adapter(),
     )
-    await composition.initialize("configured")
-    assert revision.initialized_with == "configured"
-    assert changes.initialized_with == "configured"
+    s1 = await composition.refresh()
+    s2 = await composition.refresh()
+    # No change -> same hash revision.
+    assert s1.revision == s2.revision
+    assert isinstance(s1.revision, str)  # hashed, not a bare int
 
 
 @pytest.mark.asyncio
-async def test_metadata_preload_batches_initial_and_changed_content():
-    first = Value(Info("a", 1), b"a1")
-    unchanged = Value(Info("b", 1), b"b1")
-    reader = Reader((first, unchanged))
-    cache = MemoryContentCache(max_bytes=100)
-    adapter = Adapter()
+async def test_revisioned_layer_keeps_independent_patch_from_primary():
+    primary = MetadataBackend((_doc("a"),))
+    layer = MetadataBackend((_doc("b"),))
     composition = StorageComposition(
-        reader,
-        revision=reader,
-        changes=reader,
-        cache=cache,
-        adapter=adapter,
-        cache_adapter=adapter,
+        primary,
+        layers=(StorageLayer(backend=layer, refresh=LayerRefreshPolicy.REVISIONED),),
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
     )
+    await composition.refresh()
+    captured: list = []
+    orig = layer.load_metadata
 
-    assert await composition.list_info(preload=True) == (
-        first.info,
-        unchanged.info,
-    )
-    assert reader.batch_reads == [("a", "b")]
+    async def spy(after_revision):
+        load = await orig(after_revision)
+        captured.append(load.mode)
+        return load
 
-    updated = Value(Info("a", 2), b"a2")
-    reader.values["a"] = updated
-    reader.revision = 2
-    reader.changes = (Change("a", updated.info),)
-    assert await composition.list_info(preload=True) == (
-        updated.info,
-        unchanged.info,
-    )
-    assert reader.batch_reads == [("a", "b"), ("a",)]
-
-    reader.values.clear()
-    assert await composition.get("a") == updated
-    assert await composition.get("b") == unchanged
-
-
-@pytest.mark.asyncio
-async def test_unstable_metadata_does_not_preload_content():
-    class UnstableReader(Reader):
-        async def list_info(self):
-            values = await super().list_info()
-            self.revision += 1
-            return values
-
-    value = Value(Info("a", 1), b"a")
-    reader = UnstableReader((value,))
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        revision=reader,
-        cache=MemoryContentCache(max_bytes=100),
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    state = await composition.refresh(preload=True)
-    assert state is not None
-    assert state.cacheable is False
-    assert reader.batch_reads == []
-
-
-@pytest.mark.asyncio
-async def test_preload_requires_revision_source():
-    value = Value(Info("a", 1), b"a")
-    reader = Reader((value,))
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        cache=MemoryContentCache(max_bytes=100),
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    with pytest.raises(
-        StorageFeatureSupportError,
-        match="preload requires a revision source",
-    ):
-        await composition.refresh(preload=True)
-
-
-@pytest.mark.asyncio
-async def test_preload_retries_when_revision_changes_during_batch_read():
-    initial = Value(Info("a", 1), b"a1")
-    updated = Value(Info("a", 2), b"a2")
-
-    class ChangingReader(Reader):
-        changed = False
-
-        async def get_many(self, keys):
-            values = await super().get_many(keys)
-            if not self.changed:
-                self.changed = True
-                self.values["a"] = updated
-                self.changes = (Change("a", updated.info),)
-                self.revision += 1
-            return values
-
-    reader = ChangingReader((initial,))
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        revision=reader,
-        changes=reader,
-        cache=MemoryContentCache(max_bytes=100),
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    state = await composition.refresh(preload=True)
-    assert state is not None
-    assert state.entries == {"a": updated.info}
-    assert reader.batch_reads == [("a",), ("a",)]
-    reader.values.clear()
-    assert await composition.get("a") == updated
-
-
-@pytest.mark.asyncio
-async def test_preload_cache_failure_is_best_effort_and_retryable():
-    class FailingCache:
-        async def get(self, key):
-            return None
-
-        async def put(self, key, content):
-            raise RuntimeError("cache unavailable")
-
-    value = Value(Info("a", 1), b"a")
-    reader = Reader((value,))
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        revision=reader,
-        cache=FailingCache(),
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    assert await composition.list_info(preload=True) == (value.info,)
-    assert await composition.list_info(preload=True) == (value.info,)
-    assert reader.batch_reads == [("a",), ("a",)]
-
-
-@pytest.mark.asyncio
-async def test_content_revision_change_to_unstable_snapshot_never_caches():
-    value = Value(Info("a", 1), b"a")
-
-    class ChangingThenUnstableReader(Reader):
-        unstable_metadata = False
-
-        async def list_info(self):
-            values = await super().list_info()
-            if self.unstable_metadata:
-                self.revision += 1
-            return values
-
-        async def get_many(self, keys):
-            values = await super().get_many(keys)
-            self.unstable_metadata = True
-            self.revision += 1
-            return values
-
-    reader = ChangingThenUnstableReader((value,))
-    cache = MemoryContentCache(max_bytes=100)
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        revision=reader,
-        cache=cache,
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    state = await composition.refresh(preload=True)
-    assert state is not None
-    assert state.cacheable is False
-    assert reader.batch_reads == [("a",)]
-    assert await cache.get(adapter.cache_key("a", value.info)) is None
-
-
-@pytest.mark.asyncio
-async def test_preload_restores_content_evicted_from_cache():
-    first = Value(Info("a", 1), b"a")
-    second = Value(Info("b", 1), b"b")
-    reader = Reader((first, second))
-    cache = MemoryContentCache(max_bytes=2)
-    adapter = Adapter()
-    composition = StorageComposition(
-        reader,
-        revision=reader,
-        cache=cache,
-        adapter=adapter,
-        cache_adapter=adapter,
-    )
-    await composition.refresh(preload=True)
-    await cache.put(("external", 1, "1"), b"x")
-    await composition.refresh(preload=True)
-    assert reader.batch_reads == [("a", "b"), ("a",)]
+    layer.load_metadata = spy
+    # Mutating primary must not force the layer into a REPLACE (full reload);
+    # the layer still serves PATCH (unchanged revision -> empty PATCH).
+    await primary.put(_doc("c"))
+    await composition.refresh()
+    assert captured, "layer was not consulted at all"
+    assert all(mode is not MetadataLoadMode.REPLACE for mode in captured), captured

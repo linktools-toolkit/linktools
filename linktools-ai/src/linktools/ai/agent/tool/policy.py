@@ -564,13 +564,11 @@ class ToolSpecIndex(SpecIndex[ToolSpec]):
         *,
         codec: "ToolSpecCodec | None" = None,
         suffix: str = ".yaml",
-        source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
             codec or ToolSpecCodec(),
             suffix=suffix,
-            source_name=source_name,
         )
 
     @classmethod
@@ -578,12 +576,6 @@ class ToolSpecIndex(SpecIndex[ToolSpec]):
         cls, loader: SpecLoader, *, suffix: str = ".yaml"
     ) -> "ToolSpecIndex":
         return cls(SpecLoaderSource(loader), suffix=suffix)
-
-    async def list_ids(self) -> "tuple[str, ...]":
-        return await self._cache.list_ids()
-
-    async def get(self, tool_id: str) -> ToolSpec:
-        return await self._cache.get(tool_id)
 
     async def get_metadata_map(self) -> "Mapping[str, ToolPolicyMetadata]":
         """Return {tool_name: ToolPolicyMetadata} for every loaded tool -- the

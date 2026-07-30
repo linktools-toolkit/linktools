@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Filesystem-backed SpecLoader revision uses mtime_ns + path + size (not
-int(st_mtime) of the max file), so a same-second modify/add/delete is detected
-without sleeping. These tests run on real disk (tmp_path)."""
+"""Filesystem-backed SpecLoader content identity and SpecIndex refresh.
+
+The loader exposes ``identity(raw)`` (SHA-256 of content) so a parsed cache can
+key by content, not by Python ``hash()`` (randomized per process). These tests
+run on real disk (tmp_path)."""
 
 from pathlib import Path
 
@@ -17,46 +19,37 @@ def _write(path: Path, text: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_filesystem_revision_detects_same_second_modify(tmp_path):
-    """Overwriting a file within the same second must change the revision --
-    int(st_mtime) would miss this, mtime_ns catches it."""
-    root = tmp_path / "agents"
-    root.mkdir()
-    _write(root / "a.md", "---\nname: a\n---\nv1\n")
-    loader = SpecLoader.from_filesystem(root)
-    rev1 = await loader.revision()
-
-    _write(root / "a.md", "---\nname: a\n---\nv2\n")
-    rev2 = await loader.revision()
-    assert rev2 != rev1, "same-second modify must change the revision"
+async def test_identity_is_sha256_of_content():
+    loader = SpecLoader.from_filesystem(Path("."))
+    assert loader.identity("v1") == loader.identity("v1")
+    assert loader.identity("v1") != loader.identity("v2")
 
 
 @pytest.mark.asyncio
-async def test_filesystem_revision_detects_add_and_delete(tmp_path):
-    """Adding then removing a file must change the revision each time."""
-    root = tmp_path / "agents"
-    root.mkdir()
-    _write(root / "a.md", "x")
-    loader = SpecLoader.from_filesystem(root)
-    rev1 = await loader.revision()
-
-    _write(root / "b.md", "y")
-    rev2 = await loader.revision()
-    assert rev2 != rev1, "adding a file must change the revision"
-
-    (root / "b.md").unlink()
-    rev3 = await loader.revision()
-    assert rev3 != rev2, "deleting a file must change the revision"
-
-
-@pytest.mark.asyncio
-async def test_filesystem_registry_list_ids_refreshes_without_sleep(tmp_path):
-    """An AgentSpecIndex over a filesystem root sees new/removed ids immediately
-    (same second) -- the cache invalidates because the revision changed."""
+async def test_filesystem_list_ids_reflects_current_files(tmp_path):
     root = tmp_path / "agents"
     root.mkdir()
     _write(root / "a.md", "---\nname: a\n---\nbody\n")
-    registry = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(root), suffix=".md")
+    loader = SpecLoader.from_filesystem(root)
+    assert await loader.list_ids(".md") == ("a",)
+
+    _write(root / "b.md", "---\nname: b\n---\nbody\n")
+    assert await loader.list_ids(".md") == ("a", "b")
+
+    (root / "a.md").unlink()
+    assert await loader.list_ids(".md") == ("b",)
+
+
+@pytest.mark.asyncio
+async def test_filesystem_registry_sees_changes_immediately(tmp_path):
+    """An AgentSpecIndex over a filesystem root sees new/removed ids and
+    changed content immediately -- each get re-reads and re-identifies."""
+    root = tmp_path / "agents"
+    root.mkdir()
+    _write(root / "a.md", "---\nname: a\n---\nbody\n")
+    registry = AgentSpecIndex.from_specloader(
+        SpecLoader.from_filesystem(root), suffix=".md"
+    )
 
     assert await registry.list_ids() == ("a",)
 
@@ -68,10 +61,10 @@ async def test_filesystem_registry_list_ids_refreshes_without_sleep(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_filesystem_revision_stable_when_unchanged(tmp_path):
-    """An unchanged tree yields the same revision (no spurious invalidation)."""
+async def test_filesystem_read_uses_thread_not_loop(tmp_path):
+    # Smoke: reading a file works and returns its text.
     root = tmp_path / "agents"
     root.mkdir()
-    _write(root / "a.md", "x")
+    _write(root / "a.md", "hello")
     loader = SpecLoader.from_filesystem(root)
-    assert await loader.revision() == await loader.revision()
+    assert await loader.read("a.md") == "hello"

@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..errors import SpecConflictError, SpecError, SpecNotFoundError, SpecParseError
-from ..storage.revision import RevisionCache
 
 
 T = TypeVar("T")
@@ -13,9 +12,11 @@ T = TypeVar("T")
 
 @runtime_checkable
 class SpecSource(Protocol):
-    async def revision(self) -> str: ...
     async def list_ids(self, suffix: str) -> tuple[str, ...]: ...
+
     async def read(self, path: str) -> str: ...
+
+    def identity(self, raw: str) -> str: ...
 
 
 @runtime_checkable
@@ -30,5 +31,4 @@ __all__ = [
     "SpecNotFoundError",
     "SpecParseError",
     "SpecSource",
-    "RevisionCache",
 ]

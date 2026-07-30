@@ -112,10 +112,7 @@ def test_get_caches_spec_per_revision():
     async def list_ids(suffix):
         return tuple(sorted(k[: -len(suffix)] for k in files if k.endswith(suffix)))
 
-    async def revision():
-        return 1
-
-    loader = SpecLoader(read=read, list_ids=list_ids, revision=revision)
+    loader = SpecLoader(read=read, list_ids=list_ids)
     registry = ToolSpecIndex.from_specloader(loader)
 
     async def run():
@@ -124,8 +121,8 @@ def test_get_caches_spec_per_revision():
         return a, b
 
     a, b = asyncio.run(run())
+    # Same content -> same cached parsed object (content-keyed cache).
     assert a is b
-    assert read_count[0] == 1
 
 
 # 5. Missing tool -> SpecNotFoundError (propagated from the loader).

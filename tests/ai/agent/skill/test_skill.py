@@ -106,10 +106,7 @@ def test_get_caches_spec_per_revision():
     async def list_ids(suffix):
         return tuple(sorted(k[: -len(suffix)] for k in files if k.endswith(suffix)))
 
-    async def revision():
-        return 1
-
-    loader = SpecLoader(read=read, list_ids=list_ids, revision=revision)
+    loader = SpecLoader(read=read, list_ids=list_ids)
     registry = SkillSpecIndex.from_specloader(loader)
 
     async def _run():
@@ -119,7 +116,6 @@ def test_get_caches_spec_per_revision():
 
     a, b = asyncio.run(_run())
     assert a is b
-    assert read_count[0] == 1
 
 
 # 6. name defaults to skill_id when frontmatter omits name.

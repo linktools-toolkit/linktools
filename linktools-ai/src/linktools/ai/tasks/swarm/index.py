@@ -20,13 +20,11 @@ class SwarmSpecIndex(SpecIndex[SwarmSpec]):
         *,
         codec: "SwarmSpecCodec | None" = None,
         suffix: str = ".yaml",
-        source_name: "str | None" = None,
     ) -> None:
         super().__init__(
             source,
             codec or SwarmSpecCodec(),
             suffix=suffix,
-            source_name=source_name,
         )
 
     @classmethod
@@ -34,12 +32,6 @@ class SwarmSpecIndex(SpecIndex[SwarmSpec]):
         cls, loader: SpecLoader, *, suffix: str = ".yaml"
     ) -> "SwarmSpecIndex":
         return cls(SpecLoaderSource(loader), suffix=suffix)
-
-    async def list_ids(self) -> "tuple[str, ...]":
-        return await self._cache.list_ids()
-
-    async def get(self, swarm_id: str) -> SwarmSpec:
-        return await self._cache.get(swarm_id)
 
 
 __all__: "list[str]" = ["SwarmSpecIndex"]

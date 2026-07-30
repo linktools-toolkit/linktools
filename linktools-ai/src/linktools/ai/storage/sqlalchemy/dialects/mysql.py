@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message
+from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
 
 # MySQL error codes (mysqlclient/PyMySQL/aiomysql/asyncmy all surface these as
 # error.orig.args[0]).
@@ -31,7 +31,11 @@ class MySQLDialect:
     """MySQL dialect. ``insert_ignore_conflict`` issues an ``ON DUPLICATE KEY
     UPDATE`` insert into the given model's table; the resulting ``rowcount``
     signals whether the row landed (1) or was left unchanged because a
-    conflicting row already existed (0)."""
+    conflicting row already existed (0). ``upsert_increment`` issues a
+    self-seeding ``INSERT ... ON DUPLICATE KEY UPDATE column =
+    LAST_INSERT_ID(column + step)`` and reads the incremented value back from
+    the driver's ``lastrowid`` in one statement (MySQL has no portable
+    RETURNING)."""
 
     @property
     def name(self) -> str:
@@ -62,6 +66,54 @@ class MySQLDialect:
             lastrowid = getattr(result, "lastrowid", None)
             return InsertResult(inserted=True, row_id=lastrowid or None)
         return InsertResult(inserted=False)
+
+    async def upsert_increment(
+        self,
+        session: Any,
+        *,
+        model: type,
+        pk: Any,
+        column: str,
+        step: int = 1,
+    ) -> int:
+        # MySQL has no portable RETURNING (only >= 8.0.21, and the project
+        # keeps no minimum-version promise). The LAST_INSERT_ID(expr) idiom
+        # makes the incremented value observable in one statement on BOTH
+        # paths: wrap step in LAST_INSERT_ID on the INSERT values so a fresh
+        # row's connection id == step, and LAST_INSERT_ID(col + step) on the
+        # UPDATE branch so a conflict's id == existing + step. Either way the
+        # server exposes the value via the C-API mysql_insert_id() and every
+        # compliant driver forwards it as cursor.lastrowid. (Wrapping step on
+        # the INSERT side is what makes the INSERT path correct -- without it
+        # lastrowid would be the surrogate PK, not step.) Row-level locking
+        # makes the increment itself race-free.
+        from sqlalchemy import func, select
+        from sqlalchemy.dialects.mysql import insert
+
+        pk_column = primary_key_column(model)
+        col_attr = getattr(model, column)
+        result = await session.execute(
+            insert(model)
+            .values(
+                **{
+                    pk_column.name: pk,
+                    column: func.last_insert_id(step),
+                }
+            )
+            .on_duplicate_key_update(
+                **{
+                    column: func.last_insert_id(col_attr + step),
+                }
+            )
+        )
+        value = getattr(result, "lastrowid", None)
+        if value:
+            return int(value)
+        # Defensive: a driver that does not forward LAST_INSERT_ID(expr) on the
+        # UPDATE path reports lastrowid==0 -- read it back in the same tx so
+        # the value is never wrong. This branch is unreachable under any
+        # spec-compliant MySQL driver.
+        return await session.scalar(select(col_attr).where(pk_column == pk))
 
     def classify_integrity_error(
         self, error: BaseException
