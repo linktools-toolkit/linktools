@@ -14,10 +14,14 @@ on JobRuntime only through the duck-typed ``run_one_task`` surface and reads
     the result via attributes + the ArtifactStore, so it imports NO task-domain
 module -- the evaluation package itself never reaches into task."""
 
+
 import json
+from ..models import EvalExecution, normalize_usage
 
-from ..models import EvalCase, EvalExecution, EvalTarget, normalize_usage
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalTarget
 
 class TaskEvalExecutor:
     def __init__(
@@ -41,7 +45,7 @@ class TaskEvalExecutor:
         self._retry_policy = retry_policy
         self._wait_timeout = wait_timeout
 
-    async def execute(self, target: EvalTarget, case: EvalCase) -> EvalExecution:
+    async def execute(self, target: "EvalTarget", case: "EvalCase") -> EvalExecution:
         try:
             task = await self._runtime.run_one_task(
                 self._handler_name,

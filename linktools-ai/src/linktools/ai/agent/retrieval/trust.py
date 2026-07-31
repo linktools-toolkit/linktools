@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Trust metadata for retrieved context; retrieved text is never trusted instructions."""
 
 from dataclasses import dataclass
@@ -15,6 +18,6 @@ class ContextItem:
     content: str
     source_id: str
     tenant_id: str
-    revision: str | None = None
-    sha256: str | None = None
+    revision: "str | None" = None
+    sha256: "str | None" = None
     trust_level: ContextTrustLevel = ContextTrustLevel.UNTRUSTED

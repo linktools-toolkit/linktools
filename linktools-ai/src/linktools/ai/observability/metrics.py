@@ -49,17 +49,17 @@ class InMemoryMetrics:
     """Small default sink useful for tests and local diagnostics."""
 
     def __init__(self) -> None:
-        self.counters: dict[str, int] = {}
+        self.counters: "dict[str, int]" = {}
 
-    def counter(self, name: str, *, value: int = 1, attributes=None) -> None:
+    def counter(self, name: str, *, value: int = 1, attributes: "Mapping[str, Any] | None" = None) -> None:
         if name not in HARDENING_METRICS:
             return
         self.counters[name] = self.counters.get(name, 0) + value
 
-    def histogram(self, name: str, *, value: float, attributes=None) -> None:
+    def histogram(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
         return None
 
-    def gauge(self, name: str, *, value: float, attributes=None) -> None:
+    def gauge(self, name: str, *, value: float, attributes: "Mapping[str, Any] | None" = None) -> None:
         return None
 
 

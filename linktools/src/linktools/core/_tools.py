@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Tool definitions, runtime resolution, and transactional installation."""
 
 import datetime
@@ -8,6 +11,7 @@ import shutil
 import stat
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.decorator import cached_property, timeoutable
@@ -15,6 +19,11 @@ from linktools.errors import ToolDefinitionError, ToolExecError, ToolInstallErro
 from linktools.errors import ToolNotFound, ToolNotSupport
 from linktools.runtime import popen
 from linktools.system import CommandStub, get_interpreter, get_interpreter_ident
+
+if TYPE_CHECKING:
+    from typing import Any, Callable, Iterable
+    from linktools.runtime import Process
+    from ._environ import BaseEnviron
 
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -112,7 +121,7 @@ class InstallSpec(object):
             _error(name, source, "install.size must be a non-negative integer")
 
     @classmethod
-    def from_mapping(cls, data=None, name="<unknown>", source=None):
+    def from_mapping(cls, data: dict = None, name: str = "<unknown>", source: str = None) -> "InstallSpec":
         data = _mapping(data, name, source, "install")
         unknown = set(data) - _SPEC_KEYS["install"]
         if unknown:
@@ -145,7 +154,7 @@ class RunSpec(object):
         self.environment = dict(self.environment)
 
     @classmethod
-    def from_mapping(cls, data=None, name="<unknown>", source=None):
+    def from_mapping(cls, data: dict = None, name: str = "<unknown>", source: str = None) -> "RunSpec":
         data = _mapping(data, name, source, "run")
         unknown = set(data) - _SPEC_KEYS["run"]
         if unknown:
@@ -172,7 +181,8 @@ class ToolDefinition(object):
         self.variants = tuple(variants or ())
 
     @classmethod
-    def from_mapping(cls, name, data, source=None, platform="linux", architecture="x86_64"):
+    def from_mapping(cls, name: str, data: dict, source: str = None,
+                     platform: str = "linux", architecture: str = "x86_64") -> "ToolDefinition":
         if not isinstance(name, str) or not _NAME.match(name):
             _error(name, source, "invalid tool name")
         data = _mapping(data, name, source, "tool definition")
@@ -222,7 +232,7 @@ def _matches(value, actual):
     return value is None or actual in value if isinstance(value, (list, tuple)) else value is None or value == actual
 
 
-def get_tool_stub_path(environ):
+def get_tool_stub_path(environ: "BaseEnviron") -> Path:
     return environ.get_data_path("scripts", get_interpreter_ident(), "tools_v%s" % environ.version)
 
 
@@ -306,26 +316,26 @@ class Tool(object):
         return [str(self._path or self.artifact_path)] + user
 
     @property
-    def supported(self):
+    def supported(self) -> bool:
         install = self.definition.install
         archive = bool(install.extract_dir)
         managed = bool(self._url) and (not archive or bool(install.entrypoint))
         return bool(self._lookup_path or self._path or managed)
 
     @property
-    def exists(self):
+    def exists(self) -> bool:
         return bool(self._lookup_path or (self._path and os.path.isfile(self._path)) or self.artifact_path.is_file())
 
-    def get_variable(self, name, default=None):
+    def get_variable(self, name: str, default: "Any" = None) -> "Any":
         return self.variables.get(name, default)
 
-    def copy(self, **overrides):
+    def copy(self, **overrides: "Any") -> "Tool":
         unknown = set(overrides) - {"version"}
         if unknown:
             raise TypeError("only version may be overridden: %s" % sorted(unknown))
         return Tool(self._tools, self.definition, version=overrides.get("version", self.version))
 
-    def prepare(self):
+    def prepare(self) -> None:
         if not self.supported:
             raise ToolNotSupport("%s is not supported on %s (%s)" % (self.name, self.platform, self.architecture))
         for dependency in self.dependencies:
@@ -349,7 +359,7 @@ class Tool(object):
             stub.write(self.make_cmdargs())
         self._resolve()
 
-    def clear(self):
+    def clear(self) -> None:
         if self.install_dir.exists():
             shutil.rmtree(str(self.install_dir))
         if self._stub.exists:
@@ -362,11 +372,11 @@ class Tool(object):
     def _stub(self):
         return CommandStub(self._tools.stub_path, self.name, system=self.platform)
 
-    def make_cmdargs(self):
+    def make_cmdargs(self) -> "list[str]":
         from linktools.cli import env
         return [get_interpreter(), "-m", env.__name__, "tool", self.name]
 
-    def popen(self, *args, **kwargs):
+    def popen(self, *args: "Any", **kwargs: "Any") -> "Process":
         self.prepare()
         append = self._runtime_environment()
         append.update(kwargs.pop("append_env", {}) or {})
@@ -380,7 +390,10 @@ class Tool(object):
         return dict(self.environment)
 
     @timeoutable
-    def exec(self, *args, timeout=None, ignore_errors=False, on_stdout=None, on_stderr=None, error_type=ToolExecError):
+    def exec(self, *args: "Any", timeout: "Any" = None, ignore_errors: bool = False,
+             on_stdout: "Callable[[str], None] | None" = None,
+             on_stderr: "Callable[[str], None] | None" = None,
+             error_type: "Callable[[str], Exception]" = ToolExecError) -> str:
         return self.popen(*args, capture_output=True).exec(timeout=timeout, ignore_errors=ignore_errors,
                                                           on_stdout=on_stdout, on_stderr=on_stderr, error_type=error_type)
 
@@ -392,7 +405,7 @@ class ToolInstaller(object):
     def __init__(self, environ, base_dir):
         self.environ, self.base_dir = environ, Path(base_dir)
 
-    def is_complete(self, tool):
+    def is_complete(self, tool: "Tool") -> bool:
         target = tool.install_dir
         manifest_path = target / "manifest.json"
         if not tool.artifact_path.is_file() or not manifest_path.is_file():
@@ -426,7 +439,7 @@ class ToolInstaller(object):
                 return False
         return True
 
-    def install(self, tool):
+    def install(self, tool: "Tool") -> None:
         from ._download import DownloadRequest
         if not tool._url:
             raise ToolNotSupport("no install source for %s" % tool.name)
@@ -549,11 +562,11 @@ class Tools(object):
         return self.all[name]
 
     @cached_property
-    def installer(self):
+    def installer(self) -> "ToolInstaller":
         return ToolInstaller(self.environ, self.environ.get_data_path("tools"))
 
     @cached_property
-    def stub_path(self):
+    def stub_path(self) -> Path:
         return get_tool_stub_path(self.environ)
 
     def _validate_dependencies(self):
@@ -568,7 +581,7 @@ class Tools(object):
                     source = self.all[name].definition.source
                     raise ToolDefinitionError("tool %s%s has cyclic dependency: %s -> %s" %
                                                (name, " (%s)" % source if source else "", name, name))
-        def visit(name, stack):
+        def visit(name: str, stack: "list[str]") -> None:
             if name in stack:
                 source = self.all[name].definition.source
                 raise ToolDefinitionError("tool %s%s has cyclic dependency: %s" %
@@ -581,9 +594,9 @@ class Tools(object):
         return self._ensure_tool(name)
     def __getattr__(self, name): return self[name]
     def __iter__(self): return (tool for tool in self.all.values() if tool.supported)
-    def keys(self): return (name for name, tool in self.all.items() if tool.supported)
-    def values(self): return (tool for tool in self.all.values() if tool.supported)
-    def items(self): return ((name, tool) for name, tool in self.all.items() if tool.supported)
+    def keys(self) -> "Iterable[str]": return (name for name, tool in self.all.items() if tool.supported)
+    def values(self) -> "Iterable[Tool]": return (tool for tool in self.all.values() if tool.supported)
+    def items(self) -> "Iterable[tuple[str, Tool]]": return ((name, tool) for name, tool in self.all.items() if tool.supported)
 
 
 def _now_iso():

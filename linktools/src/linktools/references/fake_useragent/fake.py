@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import random
 
 from . import settings
@@ -100,7 +103,7 @@ class FakeUserAgent:
 
     # This method will return an object
     # Usage: ua.getBrowser('firefox')
-    def getBrowser(self, request):
+    def getBrowser(self, request: str) -> dict:
         try:
             # Handle request value
             for value, replacement in settings.REPLACEMENTS.items():
@@ -191,52 +194,52 @@ class FakeUserAgent:
                 return self.fallback
 
     @property
-    def chrome(self):
+    def chrome(self) -> str:
         return self.__getattr__("chrome")
 
     @property
-    def googlechrome(self):
+    def googlechrome(self) -> str:
         return self.chrome
 
     @property
-    def edge(self):
+    def edge(self) -> str:
         return self.__getattr__("edge")
 
     @property
-    def firefox(self):
+    def firefox(self) -> str:
         return self.__getattr__("firefox")
 
     @property
-    def ff(self):
+    def ff(self) -> str:
         return self.firefox
 
     @property
-    def safari(self):
+    def safari(self) -> str:
         return self.__getattr__("safari")
 
     @property
-    def random(self):
+    def random(self) -> str:
         return self.__getattr__("random")
 
     # The following 'get' methods return an object rather than only the UA string
     @property
-    def getFirefox(self):
+    def getFirefox(self) -> dict:
         return self.getBrowser("firefox")
 
     @property
-    def getChrome(self):
+    def getChrome(self) -> dict:
         return self.getBrowser("chrome")
 
     @property
-    def getEdge(self):
+    def getEdge(self) -> dict:
         return self.getBrowser("edge")
 
     @property
-    def getSafari(self):
+    def getSafari(self) -> dict:
         return self.getBrowser("safari")
 
     @property
-    def getRandom(self):
+    def getRandom(self) -> dict:
         return self.getBrowser("random")
 
 

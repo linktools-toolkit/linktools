@@ -53,7 +53,7 @@ def singleton(cls: "type[T]") -> "Callable[P, T]":
     lock = threading.RLock()
 
     @functools.wraps(cls)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs) -> "T":
         nonlocal instance
         if instance is MISSING:
             with lock:
@@ -64,7 +64,10 @@ def singleton(cls: "type[T]") -> "Callable[P, T]":
     return wrapper
 
 
-def try_except(errors: "tuple[type[BaseException]]" = (Exception,), default: "Any" = None):
+def try_except(
+        errors: "tuple[type[BaseException]]" = (Exception,),
+        default: "Any" = None,
+) -> "Callable[[Callable[P, T]], Callable[P, T]]":
     """Decorate a function to return a default value for selected exceptions.
 
     Args:
@@ -150,7 +153,9 @@ class _CachedProperty:
         return val
 
 
-def cached_property(fn: "Callable[P, T]" = None, *, lock: bool = False):
+def cached_property(
+        fn: "Callable[P, T]" = None, *, lock: bool = False,
+) -> "_CachedProperty | Callable[[Callable[P, T]], _CachedProperty]":
     """Create a property that caches its computed value on the instance.
 
     Args:
@@ -163,7 +168,7 @@ def cached_property(fn: "Callable[P, T]" = None, *, lock: bool = False):
     if fn is not None:
         return _CachedProperty(fn, threading.RLock() if lock else None)
 
-    def decorator(fn: "Callable[P, T]"):
+    def decorator(fn: "Callable[P, T]") -> _CachedProperty:
         return _CachedProperty(fn, threading.RLock() if lock else None)
 
     return decorator
@@ -215,7 +220,7 @@ def cached_classproperty(
     if fn is not None:
         return _CachedClassproperty(fn, threading.RLock() if lock else None)
 
-    def decorator(fn: "Callable[P, T]"):
+    def decorator(fn: "Callable[P, T]") -> _CachedClassproperty:
         return _CachedClassproperty(fn, threading.RLock() if lock else None)
 
     return decorator

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Safe local persistence helpers."""
 
 from .files import atomic_write_bytes, atomic_write_json, read_bytes, read_json

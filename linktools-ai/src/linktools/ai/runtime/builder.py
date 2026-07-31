@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """The only runtime composition root."""
 
-from dataclasses import replace
 
+from dataclasses import replace
 from ..agent.assembly.assembler import AgentAssembler
 from ..agent.codec import AgentSpecCodec
 from ..agent.compiler import AgentCompiler
@@ -21,15 +24,18 @@ from ..storage.database import CoordinationScope
 from .dependencies import RuntimeDependencies
 from .facade import Runtime
 from .requirements import RuntimeRequirements, RuntimeTopology
-from .storage import RuntimeStorage
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .storage import RuntimeStorage
 
 def build_runtime(
     *,
-    storage: RuntimeStorage,
-    dependencies: RuntimeDependencies | None = None,
+    storage: "RuntimeStorage",
+    dependencies: "RuntimeDependencies | None" = None,
     requirements: RuntimeRequirements = RuntimeRequirements(),
-    model_resolver: ModelResolver | None = None,
+    model_resolver: "ModelResolver | None" = None,
 ) -> Runtime:
     if requirements.topology is RuntimeTopology.MULTI_PROCESS:
         coordinated = {

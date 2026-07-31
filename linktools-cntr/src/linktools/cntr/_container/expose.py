@@ -13,6 +13,8 @@ from linktools.types import MISSING
 
 if TYPE_CHECKING:
     from typing import Any
+    from linktools.core import LazyProvider
+    from linktools.runtime import Proxy
     from linktools.types import ConfigKeyType, PathType, QueryType
     from ..container import BaseContainer
 
@@ -70,8 +72,8 @@ class ExposeMixin:
     expose_other = ExposeCategory("other", "Tools")
 
     def load_config_url(self: "BaseContainer", key: "ConfigKeyType",
-                        *path: str, queries: "QueryType | None" = None):
-        def make_url():
+                        *path: str, queries: "QueryType | None" = None) -> "Proxy":
+        def make_url() -> str:
             url = self.get_config(key, type=str, default=None)
             if url:
                 return utils.join_url(url, *path, queries=queries)
@@ -81,8 +83,8 @@ class ExposeMixin:
 
     def load_port_url(self: "BaseContainer", key: "ConfigKeyType",
                       *path: str, queries: "QueryType | None" = None,
-                      https: bool = True):
-        def make_url():
+                      https: bool = True) -> "Proxy":
+        def make_url() -> str:
             port = self.get_config(key, type=int, default=0)
             if 0 < port < 65535:
                 return utils.make_url(
@@ -102,7 +104,7 @@ class ExposeMixin:
             proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
             https_enable: bool = MISSING, waf_enable: bool = MISSING,
             auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
-    ):
+    ) -> "Proxy":
 
         if not proxy_conf and not proxy_url:
             return ""
@@ -113,7 +115,7 @@ class ExposeMixin:
         # same frozen copy taken at registration time.
         auth_extra = deepcopy(auth_extra) if auth_extra is not None else None
 
-        def make_url():
+        def make_url() -> str:
             domain = self.get_config(key, type=str, default=None)
             if domain:
                 _https = True if https_enable is MISSING else https_enable
@@ -123,7 +125,7 @@ class ExposeMixin:
                 return utils.make_url(scheme, domain, port, *path, queries=queries)
             return ""
 
-        def make_nginx_conf():
+        def make_nginx_conf() -> None:
             domain = self.get_config(key, type=str, default=None)
             if domain:
 
@@ -158,8 +160,8 @@ class ExposeMixin:
 
     def load_exist_nginx_url(self: "BaseContainer", key: "ConfigKeyType",
                              *path: str, queries: "QueryType | None" = None,
-                             https: bool = True):
-        def make_url():
+                             https: bool = True) -> "Proxy":
+        def make_url() -> str:
             nonlocal https
             domain = self.get_config(key, type=str, default=None)
             if domain:
@@ -174,9 +176,9 @@ class ExposeMixin:
 
 class NginxMixin:
 
-    def get_nginx_domain(self: "BaseContainer", name: str = None):
+    def get_nginx_domain(self: "BaseContainer", name: str = None) -> "LazyProvider":
 
-        def get_domain(cfg):
+        def get_domain(cfg: "dict[str, Any]") -> str:
             if not self.containers["nginx"].enable:
                 return ""
             if not cfg.get("NGINX_WILDCARD_DOMAIN", type=bool):
@@ -198,7 +200,7 @@ class NginxMixin:
             proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
             https_enable: bool = MISSING, waf_enable: bool = MISSING,
             auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
-    ):
+    ) -> None:
 
         nginx = self.containers["nginx"]
         if nginx.enable:

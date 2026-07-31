@@ -11,9 +11,13 @@ backends advertise optimistic_concurrency=True.
 optional orthogonal content filter (it carries no authorization weight)."""
 
 from typing import Protocol, runtime_checkable
+from .models import MemoryMatch
 
-from .models import MemoryMatch, MemoryRecord
-from .scope import MemoryScope
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import MemoryRecord
+    from .scope import MemoryScope
 
 UNSET = (
     object()
@@ -28,12 +32,12 @@ class MemoryBackend(Protocol):
         self,
         query: str,
         *,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         limit: int = 10,
         category: "str | None" = None,
     ) -> "tuple[MemoryMatch, ...]": ...
 
-    async def remember(self, record: MemoryRecord) -> MemoryRecord: ...
+    async def remember(self, record: "MemoryRecord") -> "MemoryRecord": ...
 
     async def update(
         self,
@@ -44,7 +48,7 @@ class MemoryBackend(Protocol):
         category: object = UNSET,
         confidence: object = UNSET,
         metadata: object = UNSET,
-    ) -> MemoryRecord: ...
+    ) -> "MemoryRecord": ...
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None: ...
 
@@ -56,17 +60,17 @@ class MemoryStore:
     async def initialize_storage(self, *args: object) -> None:
         await self._backend.initialize_storage(*args)
 
-    async def get(self, memory_id: str) -> MemoryRecord | None:
+    async def get(self, memory_id: str) -> "MemoryRecord | None":
         return await self._backend.get(memory_id)
 
     async def search(
         self,
         query: str,
         *,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         limit: int = 10,
-        category: str | None = None,
-    ) -> tuple[MemoryMatch, ...]:
+        category: "str | None" = None,
+    ) -> "tuple[MemoryMatch, ...]":
         return await self._backend.search(
             query,
             scope=scope,
@@ -74,7 +78,7 @@ class MemoryStore:
             category=category,
         )
 
-    async def remember(self, record: MemoryRecord) -> MemoryRecord:
+    async def remember(self, record: "MemoryRecord") -> "MemoryRecord":
         return await self._backend.remember(record)
 
     async def update(
@@ -86,7 +90,7 @@ class MemoryStore:
         category: object = UNSET,
         confidence: object = UNSET,
         metadata: object = UNSET,
-    ) -> MemoryRecord:
+    ) -> "MemoryRecord":
         return await self._backend.update(
             memory_id,
             expected_version=expected_version,

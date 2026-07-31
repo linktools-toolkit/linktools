@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Validation and containment checks for local storage identifiers."""
 
-from __future__ import annotations
 
 import re
 from dataclasses import dataclass
@@ -47,7 +49,7 @@ class Sha256Digest:
         return cls(raw)
 
 
-def safe_child(root: str | Path, *validated_parts: StorageId | StoragePath | Sha256Digest | str) -> Path:
+def safe_child(root: "str | Path", *validated_parts: "StorageId | StoragePath | Sha256Digest | str") -> Path:
     root_path = Path(root).resolve(strict=False)
     candidate = root_path.joinpath(*(part.value if hasattr(part, "value") else part for part in validated_parts)).resolve(strict=False)
     if not candidate.is_relative_to(root_path):

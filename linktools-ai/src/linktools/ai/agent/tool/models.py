@@ -1,17 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Core tool-domain values: declarations, invocation, policy spec, and operation state."""
 
+from typing import TYPE_CHECKING, Any, Mapping, Protocol
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, StrEnum
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Mapping, Protocol
-
 from ...governance.policy.rule import ApprovalMode, Permission, RiskLevel, SideEffectKind
-from ...json import JsonValue, canonical_json_bytes, freeze_value, normalize_json
+from ...json import canonical_json_bytes, freeze_value, normalize_json
 from ...storage.coordination.lease import Lease
 
 if TYPE_CHECKING:
+    from ...json import JsonValue
     from ..assembly.models import AgentFeatureRef
     from ..dependencies import AgentDependencies
     from ...execution.context import RunContext
@@ -47,7 +50,7 @@ class ToolDescriptor:
     risk: RiskLevel
     side_effect: SideEffectKind
     feature: "AgentFeatureRef"
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -66,7 +69,7 @@ class ToolDescriptor:
         }
 
     def fingerprint(self) -> str:
-        payload: JsonValue = {
+        payload: "JsonValue" = {
             "name": self.name,
             "source": self.source.value,
             "category": self.category.value,
@@ -86,8 +89,8 @@ class ToolDescriptor:
 class ToolDefinition:
     descriptor: ToolDescriptor
     handler: ToolHandler
-    input_schema: Mapping[str, JsonValue] | None = None
-    description: str | None = None
+    input_schema: "Mapping[str, JsonValue] | None" = None
+    description: "str | None" = None
     input_schema_version: str = "1"
     provider_revision: str = ""
     handler_revision: str = ""
@@ -97,7 +100,7 @@ class ToolDefinition:
 class ToolHandlerSet:
     """Provider-owned handlers before the sole SDK adapter boundary."""
 
-    handlers: dict[str, ToolHandler] = field(default_factory=dict)
+    handlers: "dict[str, ToolHandler]" = field(default_factory=dict)
 
     def add_function(self, handler: ToolHandler) -> None:
         self.handlers[handler.__name__] = handler
@@ -105,8 +108,8 @@ class ToolHandlerSet:
 
 def declared_tool_definitions(
     handler_set: ToolHandlerSet,
-    descriptors: tuple[ToolDescriptor, ...],
-) -> tuple[ToolDefinition, ...]:
+    descriptors: "tuple[ToolDescriptor, ...]",
+) -> "tuple[ToolDefinition, ...]":
     """Pair provider-native handlers with their internal declarations."""
     handlers = handler_set.handlers
     declared = {descriptor.name for descriptor in descriptors}
@@ -127,7 +130,7 @@ def declared_tool_definitions(
 
 
 class ToolTraceSink(Protocol):
-    async def tool_result(self, payload: JsonValue) -> None: ...
+    async def tool_result(self, payload: "JsonValue") -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,16 +139,16 @@ class ToolExecutionContext:
     tool_call_id: str
     dependencies: "AgentDependencies"
     run_context: "RunContext | None" = None
-    approved_tool_call_id: str | None = None
-    approved_binding_fingerprint: str | None = None
-    trace_sink: ToolTraceSink | None = None
-    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    approved_tool_call_id: "str | None" = None
+    approved_binding_fingerprint: "str | None" = None
+    trace_sink: "ToolTraceSink | None" = None
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
 class ExecuteTool:
     definition: ToolDefinition
-    arguments: Mapping[str, JsonValue]
+    arguments: "Mapping[str, JsonValue]"
     context: ToolExecutionContext
 
 
@@ -186,7 +189,7 @@ class ToolOperationStatus(str, Enum):
 @dataclass(frozen=True, slots=True)
 class ToolOperation:
     id: str
-    tenant_id: str | None
+    tenant_id: "str | None"
     execution_id: str
     tool_call_id: str
     idempotency_key: str
@@ -196,13 +199,13 @@ class ToolOperation:
     status: ToolOperationStatus
     replay_safe: bool = False
     lease: Lease = Lease()
-    result: JsonValue | None = None
-    error: JsonValue | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    result: "JsonValue | None" = None
+    error: "JsonValue | None" = None
+    created_at: "datetime | None" = None
+    updated_at: "datetime | None" = None
 
     @property
-    def owner(self) -> str | None:
+    def owner(self) -> "str | None":
         return self.lease.owner
 
     @property
@@ -210,5 +213,5 @@ class ToolOperation:
         return self.lease.fence
 
     @property
-    def lease_expires_at(self) -> datetime | None:
+    def lease_expires_at(self) -> "datetime | None":
         return self.lease.expires_at

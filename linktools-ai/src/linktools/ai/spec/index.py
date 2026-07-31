@@ -1,12 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Content-addressed parsed index shared by every specification domain."""
 
-from __future__ import annotations
 
 from typing import Generic, TypeVar
-
-from .contracts import SpecCodec, SpecSource
-from .parsing import SpecLoader
+from .contracts import SpecCodec
 from .source import SpecLoaderSource
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .contracts import SpecSource
+    from .parsing import SpecLoader
 
 T = TypeVar("T")
 
@@ -17,21 +23,21 @@ class SpecIndex(Generic[T]):
 
     def __init__(
         self,
-        source: SpecSource,
-        codec: SpecCodec[T],
+        source: "SpecSource",
+        codec: "SpecCodec[T]",
         *,
         suffix: str,
     ) -> None:
         self._suffix = suffix
         self._codec = codec
         self._source = source
-        self._cache: dict[tuple[str, str], T] = {}
+        self._cache: "dict[tuple[str, str], T]" = {}
 
     @classmethod
-    def source_from_loader(cls, loader: SpecLoader) -> SpecSource:
+    def source_from_loader(cls, loader: "SpecLoader") -> "SpecSource":
         return SpecLoaderSource(loader)
 
-    async def list_ids(self) -> tuple[str, ...]:
+    async def list_ids(self) -> "tuple[str, ...]":
         return await self._source.list_ids(self._suffix)
 
     async def get(self, item_id: str) -> T:

@@ -4,15 +4,14 @@
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from .models import EvalCase, EvalExecution, EvalScore, EvalTarget
-
 if TYPE_CHECKING:
+    from .models import EvalCase, EvalExecution, EvalScore, EvalTarget
     from .snapshot import EvalSnapshot
 
 
 @runtime_checkable
 class EvalExecutor(Protocol):
-    async def execute(self, target: EvalTarget, case: EvalCase) -> EvalExecution: ...
+    async def execute(self, target: "EvalTarget", case: "EvalCase") -> "EvalExecution": ...
 
 
 @runtime_checkable
@@ -26,10 +25,10 @@ class Evaluator(Protocol):
 
     async def evaluate(
         self,
-        case: EvalCase,
-        execution: EvalExecution,
+        case: "EvalCase",
+        execution: "EvalExecution",
         snapshot: "EvalSnapshot | None" = None,
-    ) -> EvalScore: ...
+    ) -> "EvalScore": ...
 
 
 __all__: "list[str]" = ["EvalExecutor", "Evaluator"]

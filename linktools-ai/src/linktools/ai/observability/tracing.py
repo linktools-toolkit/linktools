@@ -8,13 +8,18 @@ is tracked with a contextvar so callers do not have to thread parent spans
 through every call site -- use the `use_span` async context manager to set the
 current span for the duration of a body, and `current_span()` to read it."""
 
+
 import contextlib
 import uuid
+from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Mapping, Protocol, runtime_checkable
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class Span:
@@ -24,7 +29,7 @@ class Span:
     name: str
     span_id: str
     parent_id: "str | None"
-    started_at: datetime
+    started_at: "datetime"
     attributes: "Mapping[str, Any]"
 
 
@@ -74,7 +79,7 @@ async def use_span(
     name: str,
     *,
     attributes: "Mapping[str, Any] | None" = None,
-):
+) -> "AsyncIterator[Span]":
     """Async context manager: start a span parented to `current_span()`, set it
     as the contextvar for the body, and end it on exit -- even on exception.
 

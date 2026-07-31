@@ -9,11 +9,14 @@ log implements this Protocol; backends that keep no history (e.g. a local
 directory backend) simply omit it, and callers gate access with an
 ``isinstance(backend, VersionedStorage)`` capability check."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Protocol, TypeVar, runtime_checkable
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 RevisionT = TypeVar("RevisionT")
 KeyT = TypeVar("KeyT")
@@ -30,13 +33,13 @@ class VersionSummary:
     revision: int
     etag: "str | None"
     object_id: "str | None"
-    created_at: datetime
+    created_at: "datetime"
     deleted: bool
 
 
 @runtime_checkable
 class VersionedStorage(Protocol[RevisionT, KeyT, ValueT]):
-    async def list_versions(self, key: KeyT) -> tuple[VersionSummary, ...]: ...
+    async def list_versions(self, key: KeyT) -> "tuple[VersionSummary, ...]": ...
 
     async def get_at_revision(
         self, key: KeyT, revision: RevisionT

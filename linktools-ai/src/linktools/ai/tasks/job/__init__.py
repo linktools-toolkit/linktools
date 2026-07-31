@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Task execution is provided by :mod:`linktools.ai.tasks`."""
 
 from .. import TaskExecution, TaskNode, TaskPlan, TaskStore

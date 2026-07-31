@@ -34,7 +34,7 @@ class WorkspaceManager(Protocol):
     receive a WorkspaceRef, never a raw Path, until the moment of tool
     execution."""
 
-    async def create(self, *, run_id: str, tenant_id: str | None) -> WorkspaceRef: ...
+    async def create(self, *, run_id: str, tenant_id: "str | None") -> WorkspaceRef: ...
 
     async def resolve(self, workspace: WorkspaceRef) -> Workspace: ...
 
@@ -48,7 +48,7 @@ class LocalWorkspaceManager:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
 
-    async def create(self, *, run_id: str, tenant_id: str | None) -> WorkspaceRef:
+    async def create(self, *, run_id: str, tenant_id: "str | None") -> WorkspaceRef:
         ref = WorkspaceRef(id=run_id, run_id=run_id, tenant_id=tenant_id)
         (self._root / run_id).mkdir(parents=True, exist_ok=True)
         return ref

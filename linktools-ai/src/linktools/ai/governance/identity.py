@@ -14,6 +14,7 @@ storage backend. The task and security domains import identity; identity never
 imports them.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from ..errors import PrincipalAccessDeniedError
@@ -34,7 +35,7 @@ class ActorRef:
 @dataclass(frozen=True, slots=True)
 class ScopeSet:
     unrestricted: bool = False
-    values: tuple[str, ...] = ()
+    values: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         normalized = tuple(sorted({
@@ -58,7 +59,7 @@ class ScopeSet:
         return cls(values=tuple(scopes))
 
     @classmethod
-    def from_any(cls, value):
+    def from_any(cls, value: "ScopeSet | Iterable[str]") -> "ScopeSet":
         if value is None:
             raise TypeError("ScopeSet cannot be constructed from None")
         if isinstance(value, cls):

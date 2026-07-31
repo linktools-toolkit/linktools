@@ -50,7 +50,7 @@ class PathPermission(PatternMatcher):
         self.read_permission = utils.get_item(obj, "readPermission", type=Permission, default=Permission.default())
         self.write_permission = utils.get_item(obj, "writePermission", type=Permission, default=Permission.default())
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.read_permission.is_dangerous() or self.write_permission.is_dangerous()
 
     def __repr__(self):
@@ -96,10 +96,10 @@ class Permission:
         self.name = utils.get_item(obj, "name", type=str, default="")
         self.protection = utils.get_item(obj, "protection", type=str, default="normal")
 
-    def is_defined(self):
+    def is_defined(self) -> bool:
         return not utils.is_empty(self.name)
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.protection in ["dangerous", "normal"]
 
     def __str__(self):
@@ -117,7 +117,7 @@ class Component:
         self.enabled = utils.get_item(obj, "enabled", type=bool, default=False)
         self.intents = utils.get_list_item(obj, "intents", type=IntentFilter, default=[])
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return True
 
     def __str__(self):
@@ -133,7 +133,7 @@ class Activity(Component):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.enabled and self.exported and self.permission.is_dangerous()
 
     def __str__(self):
@@ -149,7 +149,7 @@ class Service(Component):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.enabled and self.exported and self.permission.is_dangerous()
 
     def __str__(self):
@@ -165,7 +165,7 @@ class Receiver(Component):
         super().__init__(obj)
         self.permission = utils.get_item(obj, "permission", type=Permission, default=Permission.default())
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.enabled and self.exported and self.permission.is_dangerous()
 
     def __str__(self):
@@ -186,7 +186,7 @@ class Provider(Component):
                                                            default=[])
         self.path_permissions = utils.get_list_item(obj, "pathPermissions", type=PathPermission, default=[])
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         if self.enabled and self.exported:
             if self.read_permission.is_dangerous() or self.write_permission.is_dangerous():
                 return True
@@ -242,7 +242,7 @@ class App:
 
         return None
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.enabled and (
                 self.debuggable or
                 self.allow_backup or
@@ -253,31 +253,31 @@ class App:
                 self.has_dangerous_provider()
         )
 
-    def has_dangerous_permission(self):
+    def has_dangerous_permission(self) -> bool:
         for permission in self.permissions:
             if permission.is_dangerous():
                 return True
         return False
 
-    def has_dangerous_activity(self):
+    def has_dangerous_activity(self) -> bool:
         for activity in self.activities:
             if activity.is_dangerous():
                 return True
         return False
 
-    def has_dangerous_service(self):
+    def has_dangerous_service(self) -> bool:
         for service in self.services:
             if service.is_dangerous():
                 return True
         return False
 
-    def has_dangerous_receiver(self):
+    def has_dangerous_receiver(self) -> bool:
         for receiver in self.receivers:
             if receiver.is_dangerous():
                 return True
         return False
 
-    def has_dangerous_provider(self):
+    def has_dangerous_provider(self) -> bool:
         for provider in self.providers:
             if provider.is_dangerous():
                 return True
@@ -298,7 +298,7 @@ class Socket:
         self.inode = utils.get_item(obj, "inode", type=int, default=0)
         self.listening = utils.get_item(obj, "listening", type=bool, default=False)
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.listening
 
     def __repr__(self):
@@ -332,7 +332,7 @@ class UnixSocket(Socket):
         self.readable = utils.get_item(obj, "readable", type=bool, default=False)
         self.writable = utils.get_item(obj, "writable", type=bool, default=False)
 
-    def is_dangerous(self):
+    def is_dangerous(self) -> bool:
         return self.listening and (self.readable or self.writable)
 
     def __repr__(self):

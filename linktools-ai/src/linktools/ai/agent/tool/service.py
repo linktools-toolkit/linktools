@@ -1,60 +1,47 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """The sole entry point for model-driven tool calls."""
+
 
 import asyncio
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import uuid4
-
-from ...errors import (
-    RunPaused,
-    RuntimeInitializationError,
-    ToolIdempotencyConflictError,
-    ToolDeniedError,
-    ToolResultDeniedError,
-    ToolTimeoutError,
-)
-from ...json import JsonValue, canonical_json_bytes, normalize_json
+from ...errors import RunPaused, RuntimeInitializationError, ToolIdempotencyConflictError, ToolDeniedError, ToolResultDeniedError, ToolTimeoutError
+from ...json import canonical_json_bytes, normalize_json
 from ...execution.trace_models import ToolResultTrace
 from ...governance.policy.engine import PolicyEngine
-from ...governance.policy.rule import (
-    PolicyDecisionKind,
-    ToolContext,
-    ToolRequest,
-)
-from ...governance.security.pipeline import (
-    PipelineAction,
-    SecurityPipeline,
-    ToolInvocationEvent,
-    ToolResultEvent,
-    validate_tool_decision,
-)
-from .policy import (
-    EffectiveToolPolicy,
-    IdempotencyStrategy,
-    ToolPolicyResolver,
-    finalize_policy,
-)
+from ...governance.policy.rule import PolicyDecisionKind, ToolContext, ToolRequest
+from ...governance.security.pipeline import PipelineAction, SecurityPipeline, ToolInvocationEvent, ToolResultEvent, validate_tool_decision
+from .policy import IdempotencyStrategy, ToolPolicyResolver, finalize_policy
 from .models import ToolOperation, ToolOperationStatus
 from .store import ToolStateStore
 from .idempotency import ToolExecutionBinding, ToolRevisionSet
 from .idempotency import hash_tool_arguments, operation_id
-from .models import ExecuteTool
-from .retry import DefaultRetryPolicy, RetryPolicy, backoff_delay
+from .retry import DefaultRetryPolicy, backoff_delay
 from .schema import validate_arguments
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...json import JsonValue
+    from .policy import EffectiveToolPolicy
+    from .models import ExecuteTool
+    from .retry import RetryPolicy
 
 class ToolExecutionHook(Protocol):
-    async def before(self, request: ExecuteTool) -> None: ...
+    async def before(self, request: "ExecuteTool") -> None: ...
 
     async def after(
         self,
-        request: ExecuteTool,
-        result: JsonValue,
-    ) -> JsonValue: ...
+        request: "ExecuteTool",
+        result: "JsonValue",
+    ) -> "JsonValue": ...
 
 
-def normalize_tool_error(error: BaseException) -> JsonValue:
+def normalize_tool_error(error: BaseException) -> "JsonValue":
     return {
         "type": type(error).__name__,
         "message": str(error),
@@ -65,16 +52,16 @@ def normalize_tool_error(error: BaseException) -> JsonValue:
 class ToolExecutionService:
     """Govern and durably execute one tool call in the mandated order."""
 
-    state: ToolStateStore | None = None
-    policy: ToolPolicyResolver | None = None
-    policy_engine: PolicyEngine | None = None
-    security: SecurityPipeline | None = None
+    state: "ToolStateStore | None" = None
+    policy: "ToolPolicyResolver | None" = None
+    policy_engine: "PolicyEngine | None" = None
+    security: "SecurityPipeline | None" = None
     policy_revision: str = "default"
-    hooks: tuple[ToolExecutionHook, ...] = ()
-    retry: RetryPolicy = DefaultRetryPolicy()
+    hooks: "tuple[ToolExecutionHook, ...]" = ()
+    retry: "RetryPolicy" = DefaultRetryPolicy()
     lease_seconds: float = 300.0
 
-    async def execute(self, request: ExecuteTool) -> JsonValue:
+    async def execute(self, request: "ExecuteTool") -> "JsonValue":
         started_at = datetime.now(timezone.utc)
         try:
             result, replayed = await self._execute(request)
@@ -132,8 +119,8 @@ class ToolExecutionService:
         return result
 
     async def _execute(
-        self, request: ExecuteTool
-    ) -> tuple[JsonValue, bool]:
+        self, request: "ExecuteTool"
+    ) -> "tuple[JsonValue, bool]":
         definition = request.definition
         descriptor = definition.descriptor
         arguments = normalize_json(dict(request.arguments))
@@ -159,7 +146,7 @@ class ToolExecutionService:
         if not effective.enabled:
             raise ToolDeniedError(f"tool {descriptor.name!r} is disabled")
 
-        policy_approval_reason: str | None = None
+        policy_approval_reason: "str | None" = None
         if self.policy_engine is not None:
             decision = await self.policy_engine.evaluate(
                 ToolRequest(
@@ -179,7 +166,7 @@ class ToolExecutionService:
             if decision.kind is PolicyDecisionKind.REQUIRE_APPROVAL:
                 policy_approval_reason = decision.reason or "policy requires approval"
 
-        security_approval_reason: str | None = None
+        security_approval_reason: "str | None" = None
         if self.security is not None:
             run = request.context.run_context
             security_decision = await self.security.before_tool(
@@ -404,11 +391,11 @@ class ToolExecutionService:
 
     async def _record_trace(
         self,
-        request: ExecuteTool,
+        request: "ExecuteTool",
         *,
-        result: JsonValue | None,
+        result: "JsonValue | None",
         status: str,
-        error: BaseException | None,
+        error: "BaseException | None",
         replayed: bool,
         started_at: datetime,
     ) -> None:
@@ -437,10 +424,10 @@ class ToolExecutionService:
 
     async def _invoke(
         self,
-        request: ExecuteTool,
-        arguments: dict[str, JsonValue],
-        policy: EffectiveToolPolicy,
-    ) -> JsonValue:
+        request: "ExecuteTool",
+        arguments: "dict[str, JsonValue]",
+        policy: "EffectiveToolPolicy",
+    ) -> "JsonValue":
         attempt = 0
         while True:
             attempt += 1
@@ -474,9 +461,9 @@ class ToolExecutionService:
 
     def _binding(
         self,
-        request: ExecuteTool,
+        request: "ExecuteTool",
         arguments_hash: str,
-        policy: EffectiveToolPolicy,
+        policy: "EffectiveToolPolicy",
     ) -> ToolExecutionBinding:
         definition = request.definition
         descriptor = definition.descriptor
@@ -496,10 +483,10 @@ class ToolExecutionService:
 
     @staticmethod
     def _idempotency_key(
-        request: ExecuteTool,
-        arguments: dict[str, JsonValue],
+        request: "ExecuteTool",
+        arguments: "dict[str, JsonValue]",
         arguments_hash: str,
-        policy: EffectiveToolPolicy,
+        policy: "EffectiveToolPolicy",
     ) -> str:
         if policy.idempotency_strategy is IdempotencyStrategy.BUSINESS_KEY:
             field = policy.idempotency_key_field
@@ -507,7 +494,7 @@ class ToolExecutionService:
                 raise ValueError(
                     f"missing business idempotency key field: {field!r}"
                 )
-            payload: JsonValue = {
+            payload: "JsonValue" = {
                 "tenant_id": (
                     request.context.run_context.tenant_id
                     if request.context.run_context is not None
@@ -533,7 +520,7 @@ class ToolExecutionService:
 
         return timedelta(seconds=self.lease_seconds)
 
-    async def deny(self, request: ExecuteTool, reason: str) -> None:
+    async def deny(self, request: "ExecuteTool", reason: str) -> None:
         raise ToolDeniedError(
             f"tool {request.definition.descriptor.name!r} denied: {reason}"
         )

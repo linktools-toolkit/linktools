@@ -19,6 +19,7 @@ from linktools.git import GitRepository, GitSyncPolicy, get_git_unavailable_reas
 from ..container import ContainerError
 
 if TYPE_CHECKING:
+    import logging
     from typing import Any
     from ..manager import ContainerManager
 
@@ -40,7 +41,7 @@ class RepoGit(object):
         self._warned = False
 
     @property
-    def logger(self):
+    def logger(self) -> "logging.Logger":
         return self.manager.logger
 
     @property

@@ -1,20 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Construct one low-level Pydantic AI MCP client from a server spec."""
+
 
 from dataclasses import dataclass
 from typing import Any, Mapping
+from ...errors import MCPAuthenticationError, MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError, MCPToolDefinitionError
+from .models import MCPDiscoveryResult, MCPToolInfo
 
-from ...errors import (
-    MCPAuthenticationError,
-    MCPConnectionError,
-    MCPDiscoveryError,
-    MCPDiscoveryUnsupportedError,
-    MCPToolDefinitionError,
-)
-from .models import MCPConnectionRef, MCPDiscoveryResult, MCPToolInfo
-from .spec import MCPServerSpec
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .models import MCPConnectionRef
+    from .spec import MCPServerSpec
 
-def _resolved_tool_prefix(spec: MCPServerSpec) -> str | None:
+def _resolved_tool_prefix(spec: "MCPServerSpec") -> "str | None":
     value = spec.tool_prefix
     if value is False:
         return None
@@ -23,7 +24,7 @@ def _resolved_tool_prefix(spec: MCPServerSpec) -> str | None:
     return value
 
 
-def build_mcp_server(spec: MCPServerSpec) -> Any:
+def build_mcp_server(spec: "MCPServerSpec") -> Any:
     from pydantic_ai.mcp import MCPServerHTTP, MCPServerSSE, MCPServerStdio
 
     prefix = _resolved_tool_prefix(spec)
@@ -71,7 +72,7 @@ class MCPClient:
         self,
         *,
         server_id: str,
-        connection_ref: MCPConnectionRef,
+        connection_ref: "MCPConnectionRef",
     ) -> MCPDiscoveryResult:
         try:
             lister = getattr(self.toolset, "list_tools", None)
@@ -104,7 +105,7 @@ class MCPClient:
         *,
         server_id: str,
         tool_name: str,
-        arguments: Mapping[str, Any],
+        arguments: "Mapping[str, Any]",
     ) -> Any:
         caller = getattr(self.toolset, "direct_call_tool", None)
         if caller is None:

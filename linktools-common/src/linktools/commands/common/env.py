@@ -45,7 +45,7 @@ class InitCommand(BaseCommandGroup):
         return "init"
 
     @subcommand("android", help="initialize android environment")
-    def on_init_android(self):
+    def on_init_android(self) -> None:
         try:
             self.logger.info("initialize adb ...")
             self.environ.get_tool("adb").prepare()
@@ -60,7 +60,7 @@ class InitCommand(BaseCommandGroup):
             self.logger.warning(f"initialize android frida server failed: {e}")
 
     @subcommand("ios", help="initialize ios environment")
-    def on_init_ios(self):
+    def on_init_ios(self) -> None:
         try:
             self.logger.info("initialize go-ios ...")
             self.environ.get_tool("ios").prepare()

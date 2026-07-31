@@ -1,14 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Assembly-time tool exposure and schema enforcement."""
+
 
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-
 from ...errors import ToolConflictError
 from ..assembly.models import AgentFeatureRef
-from .schema import ToolSchemaValidator
 from .models import ToolCategory, ToolDefinition
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .schema import ToolSchemaValidator
 
 @dataclass(frozen=True, slots=True)
 class ToolExposurePolicy:
@@ -22,21 +28,21 @@ class ToolAssembler:
     def __init__(
         self,
         *,
-        exposure: ToolExposurePolicy,
-        schema_validator: ToolSchemaValidator,
+        exposure: "ToolExposurePolicy",
+        schema_validator: "ToolSchemaValidator",
     ) -> None:
         self._exposure = exposure
         self._schema_validator = schema_validator
 
     def assemble(
         self,
-        definitions: Iterable[ToolDefinition],
+        definitions: "Iterable[ToolDefinition]",
         *,
-        owner_by_definition: Mapping[int, AgentFeatureRef],
-    ) -> tuple[ToolDefinition, ...]:
-        exposed: list[ToolDefinition] = []
-        owner_counts: Counter[tuple[str, str]] = Counter()
-        names: set[str] = set()
+        owner_by_definition: "Mapping[int, AgentFeatureRef]",
+    ) -> "tuple[ToolDefinition, ...]":
+        exposed: "list[ToolDefinition]" = []
+        owner_counts: "Counter[tuple[str, str]]" = Counter()
+        names: "set[str]" = set()
         for definition in definitions:
             if definition.input_schema is not None:
                 self._schema_validator.validate_schema(definition.input_schema)

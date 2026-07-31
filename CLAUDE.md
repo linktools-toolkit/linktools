@@ -129,10 +129,12 @@ On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels
 
 ## Python Code Style (All Sub-packages)
 
-- **Python ≥3.10 minimum** — no `from __future__ import annotations` (PEP 585/604 supported natively)
-- **Type annotations**: Quote any annotation containing `|` (unions, e.g. `"float | None"`) or `[...]` (generics, e.g. `"list[str]"`, `"dict[str, Any]"`). Bare simple names stay unquoted (`kernel: AgentKernel`, `path: str`)
-- **File headers**: Every `.py` must start with:
+- **Python ≥3.10 minimum** — no `from __future__ import annotations` (annotations are evaluated eagerly, so the quoting rule below is mandatory).
+- **File headers**: every `.py` starts with:
   ```python
   #!/usr/bin/env python3
   # -*- coding: utf-8 -*-
   ```
+- **Public API is annotated**: every public method/function (not `_`-prefixed) has parameter and return annotations, inferred from body/call sites. Use `Any` only for genuinely untyped values.
+- **Quoting**: quote annotations containing `|` or `[...]` (`"float | None"`, `"list[str]"`); bare primitives (`str`, `int`, `bool`, `Any`, …) and bare class names stay unquoted — unless the name is imported under `TYPE_CHECKING`, in which case it must be quoted.
+- **`TYPE_CHECKING`**: annotation-only imports go under `if TYPE_CHECKING:`; runtime imports stay at module scope. Never move names in `__all__` or referenced by runtime-resolved annotations (SQLAlchemy `Mapped[...]`, Pydantic fields).

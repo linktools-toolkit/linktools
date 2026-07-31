@@ -16,9 +16,8 @@ happened to return -- a declared-but-unobserved service becomes a synthetic
 ``ServiceStatus(observed=False, state="missing")`` entry that exists only in
 this display layer, never written to persisted/runtime state.
 """
-import json
 from typing import TYPE_CHECKING
-
+import json
 from linktools.cli import subcommand, subcommand_argument
 from linktools.cli.argparse import LazyChoices
 from ..container import ContainerError
@@ -27,6 +26,7 @@ from . import _shared
 from ._order import ROOT_COMMAND_ORDER
 
 if TYPE_CHECKING:
+    import logging
     from typing import Any
     from ..container import BaseContainer
     from ..manager import ContainerManager
@@ -212,7 +212,7 @@ def collect_status(
     return payload
 
 
-def render_status(logger, payload: "dict[str, Any]") -> None:
+def render_status(logger: "logging.Logger", payload: "dict[str, Any]") -> None:
     if not payload["queryable"] and payload.get("error"):
         logger.warning(f"Unable to query actual runtime state: {payload['error']}")
 
@@ -253,7 +253,7 @@ class StatusCommands:
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     @subcommand_argument("--all-services", dest="all_services", action="store_true", default=False,
                          help="also include services not owned by any installed container")
-    def on_command_status(self, names: "list[str]" = None, as_json: bool = False, all_services: bool = False):
+    def on_command_status(self, names: "list[str]" = None, as_json: bool = False, all_services: bool = False) -> None:
         payload = collect_status(_shared.manager, names=names, all_services=all_services)
         if as_json:
             print(json.dumps(payload, indent=2, sort_keys=True))

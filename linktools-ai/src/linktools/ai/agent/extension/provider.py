@@ -11,26 +11,24 @@ An extension NEVER auto-exposes all its assets/entrypoints as tools: only the
 explicitly declared extension ids become reachable, and only the read/list tools
 are added by default."""
 
+
 from dataclasses import dataclass
 from typing import ClassVar
-
-
-from ..assembly.models import AgentContribution, AgentFeatureRef
-from ..assembly.provider import AgentFeatureContext
+from ..assembly.models import AgentContribution
 from .spec import ExtensionContentSource
 from ...execution.identity import ParentRunIdentity
 from ...governance.policy.rule import RiskLevel, SideEffectKind
-from ..tool.models import (
-    ToolCategory,
-    ToolDescriptor,
-    ToolSource,
-    declared_tool_definitions,
-)
+from ..tool.models import ToolCategory, ToolDescriptor, ToolSource, declared_tool_definitions
 from ..subagent.runner import SubagentExecutorProtocol
 from .resolver import EntrypointResolver
 from .scope import ExtensionScope
 from .toolset import build_extension_entrypoint_toolset, build_extension_resource_toolset
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..assembly.models import AgentFeatureRef
+    from ..assembly.provider import AgentFeatureContext
 
 @dataclass
 class ExtensionProvider:
@@ -54,8 +52,8 @@ class ExtensionProvider:
 
     async def resolve(
         self,
-        ref: AgentFeatureRef,
-        context: AgentFeatureContext,
+        ref: "AgentFeatureRef",
+        context: "AgentFeatureContext",
     ) -> AgentContribution:
         # ``extension:<id>`` (this provider's own kind) -> prompt catalog only.
         if ref.kind == "extension":

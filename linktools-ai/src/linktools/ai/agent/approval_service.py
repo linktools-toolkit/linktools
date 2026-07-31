@@ -1,17 +1,23 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Principal-bound approval operations."""
 
+
 from typing import Any
-
 from ..errors import PrincipalAccessDeniedError
-from ..governance.identity import PrincipalContext
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..governance.identity import PrincipalContext
 
 class ApprovalService:
     def __init__(self, store: Any, authorization: Any = None) -> None:
         self._store = store
         self._authorization = authorization
 
-    async def approve(self, request_id: str, *, principal: PrincipalContext, expected_version: int):
+    async def approve(self, request_id: str, *, principal: "PrincipalContext", expected_version: int) -> Any:
         request = await self._store.get(request_id)
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")
@@ -30,7 +36,7 @@ class ApprovalService:
             resolved_by=principal.resolved_by,
         )
 
-    async def reject(self, request_id: str, *, principal: PrincipalContext, expected_version: int, reason: str | None = None):
+    async def reject(self, request_id: str, *, principal: "PrincipalContext", expected_version: int, reason: "str | None" = None) -> Any:
         request = await self._store.get(request_id)
         if request is None:
             raise PrincipalAccessDeniedError("approval does not exist")

@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Single-process JSON-file execution persistence."""
 
-from __future__ import annotations
 
 import asyncio
 import os
@@ -8,45 +10,31 @@ from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
-
 from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
 from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageCorruptionError, StorageError
-from ...storage.local.files import (
-    atomic_write_bytes,
-    atomic_write_json,
-    read_bytes,
-    read_json,
-)
+from ...storage.local.files import atomic_write_bytes, atomic_write_json, read_bytes, read_json
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import StorageId, safe_child
-from ..commands import (
-    AbortExecution,
-    AcknowledgeCancellation,
-    ClaimExecution,
-    CompleteExecution,
-    DecideApproval,
-    FailExecution,
-    HeartbeatExecution,
-    PauseExecution,
-    RequestCancellation,
-    ResumeExecution,
-    StartExecution,
-)
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
 from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
 from ..domain import Page
 from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
-from ..snapshots import AgentSnapshotData, RunSnapshot
+from ..snapshots import RunSnapshot
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
+    from ..snapshots import AgentSnapshotData
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _dt(value: object) -> datetime | None:
+def _dt(value: object) -> "datetime | None":
     return None if value is None else datetime.fromisoformat(str(value))
 
 
@@ -98,7 +86,7 @@ class LocalExecutionBackend:
 
     coordination_scope = CoordinationScope.PROCESS
 
-    def __init__(self, root: str | Path = ".linktools") -> None:
+    def __init__(self, root: "str | Path" = ".linktools") -> None:
         self.root = Path(root)
         self._locks = KeyedLocks()
         self._recovery_locks = KeyedLocks()
@@ -149,7 +137,7 @@ class LocalExecutionBackend:
             pass
 
     def _cleanup_journal(self, journal_path: Path, journal: dict) -> None:
-        transaction_dirs: set[Path] = set()
+        transaction_dirs: "set[Path]" = set()
         for entry in journal["entries"]:
             staged = Path(entry["staged"])
             transaction_dirs.add(staged.parent)
@@ -232,14 +220,14 @@ class LocalExecutionBackend:
     async def _recover_run(self, run_id: str) -> None:
         await self._recover_directory(self._journal_dir(run_id))
 
-    async def _run_journal_sessions(self, run_id: str) -> tuple[str, ...]:
+    async def _run_journal_sessions(self, run_id: str) -> "tuple[str, ...]":
         directory = self._journal_dir(run_id)
         paths = await asyncio.to_thread(
             lambda: tuple(directory.glob("*.json"))
             if directory.exists()
             else ()
         )
-        session_ids: set[str] = set()
+        session_ids: "set[str]" = set()
         for path in paths:
             try:
                 journal = dict(await asyncio.to_thread(read_json, path))
@@ -258,14 +246,14 @@ class LocalExecutionBackend:
 
     async def _session_journal_runs(
         self, session_id: str
-    ) -> tuple[str, ...]:
+    ) -> "tuple[str, ...]":
         directory = self._session_journal_dir(session_id)
         paths = await asyncio.to_thread(
             lambda: tuple(directory.glob("*.json"))
             if directory.exists()
             else ()
         )
-        run_ids: set[str] = set()
+        run_ids: "set[str]" = set()
         for path in paths:
             try:
                 journal = dict(await asyncio.to_thread(read_json, path))
@@ -280,13 +268,13 @@ class LocalExecutionBackend:
     def _commit_files(
         self,
         run_id: str,
-        writes: tuple[tuple[Path, object, bool], ...],
+        writes: "tuple[tuple[Path, object, bool], ...]",
     ) -> None:
         transaction_id = uuid4().hex
         journal_dir = self._journal_dir(run_id)
         transaction_dir = journal_dir / transaction_id
         journal_paths = [journal_dir / f"{transaction_id}.json"]
-        entries: list[dict] = []
+        entries: "list[dict]" = []
         transaction_dir.mkdir(parents=True, exist_ok=False)
         try:
             for index, (target, value, manifest) in enumerate(writes):
@@ -356,7 +344,7 @@ class LocalExecutionBackend:
     async def initialize_storage(self) -> None:
         await asyncio.to_thread(self.root.mkdir, parents=True, exist_ok=True)
 
-    async def create_session(self, *, session_id: str, user_id: str | None, tenant_id: str | None) -> SessionRecord:
+    async def create_session(self, *, session_id: str, user_id: "str | None", tenant_id: "str | None") -> SessionRecord:
         path = self._session_path(session_id)
         async with self._locks.acquire(("session", session_id)):
             if await self._exists(path):
@@ -374,7 +362,7 @@ class LocalExecutionBackend:
             await asyncio.to_thread(atomic_write_json, path, asdict(value))
             return value
 
-    async def get_session(self, session_id: str) -> SessionRecord | None:
+    async def get_session(self, session_id: str) -> "SessionRecord | None":
         run_ids = await self._session_journal_runs(session_id)
         async with self._locks.acquire(
             ("session", session_id),
@@ -383,13 +371,13 @@ class LocalExecutionBackend:
             await self._recover_session(session_id)
             return await self._read_session(session_id)
 
-    async def _read_session(self, session_id: str) -> SessionRecord | None:
+    async def _read_session(self, session_id: str) -> "SessionRecord | None":
         path = self._session_path(session_id)
         if not await self._exists(path):
             return None
         return _session(dict(await asyncio.to_thread(read_json, path)))
 
-    async def start_run(self, command: StartExecution) -> RunRecord:
+    async def start_run(self, command: "StartExecution") -> RunRecord:
         journal_runs = await self._session_journal_runs(command.session_id)
         async with self._locks.acquire(
             ("session", command.session_id),
@@ -430,7 +418,7 @@ class LocalExecutionBackend:
                 error=None,
                 input=command.input,
             )
-            writes: list[tuple[Path, object, bool]] = [
+            writes: "list[tuple[Path, object, bool]]" = [
                 (
                     self._numbered(command.run_id, "events", 1),
                     asdict(RunEvent(command.run_id, 1, "run.started", {}, now)),
@@ -462,7 +450,7 @@ class LocalExecutionBackend:
             )
             return record
 
-    async def get_run(self, run_id: str) -> RunRecord | None:
+    async def get_run(self, run_id: str) -> "RunRecord | None":
         sessions = await self._run_journal_sessions(run_id)
         async with self._locks.acquire(
             *((("session", session_id) for session_id in sessions)),
@@ -471,13 +459,13 @@ class LocalExecutionBackend:
             await self._recover_run(run_id)
             return await self._read_run(run_id)
 
-    async def _read_run(self, run_id: str) -> RunRecord | None:
+    async def _read_run(self, run_id: str) -> "RunRecord | None":
         path = self._run_path(run_id)
         if not await self._exists(path):
             return None
         return _run(dict(await asyncio.to_thread(read_json, path)))
 
-    async def claim_run(self, command: ClaimExecution) -> RunRecord:
+    async def claim_run(self, command: "ClaimExecution") -> RunRecord:
         await self.get_run(command.run_id)
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._read_run(command.run_id)
@@ -488,7 +476,7 @@ class LocalExecutionBackend:
             await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
             return updated
 
-    async def heartbeat_run(self, command: HeartbeatExecution) -> RunRecord:
+    async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         await self.get_run(command.run_id)
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
@@ -496,7 +484,7 @@ class LocalExecutionBackend:
             await asyncio.to_thread(atomic_write_json, self._run_path(command.run_id), asdict(updated))
             return updated
 
-    async def request_cancel(self, command: RequestCancellation) -> RunRecord:
+    async def request_cancel(self, command: "RequestCancellation") -> RunRecord:
         current = await self.get_run(command.run_id)
         if current is None:
             raise StorageError(f"unknown run: {command.run_id}")
@@ -510,7 +498,7 @@ class LocalExecutionBackend:
                 # check needed.
                 now = command.requested_at
                 updated = replace(record, status=RunStatus.CANCELLED, lease=release(record.lease), cancel_requested_at=now, event_sequence=record.event_sequence + 1, updated_at=now)
-                additional: tuple[tuple[Path, object], ...] = ()
+                additional: "tuple[tuple[Path, object], ...]" = ()
                 if record.session_turn_sequence is not None:
                     turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(record.session_id, record.session_turn_sequence))))
                     additional = (
@@ -546,10 +534,10 @@ class LocalExecutionBackend:
             await self._write_run_event(updated, "run.cancelling", command.requested_at)
             return updated
 
-    async def pause_run(self, command: PauseExecution) -> RunRecord:
+    async def pause_run(self, command: "PauseExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.PAUSED, command.pending_approval)
 
-    async def resume_run(self, command: ResumeExecution) -> RunRecord:
+    async def resume_run(self, command: "ResumeExecution") -> RunRecord:
         await self.get_run(command.run_id)
         async with self._locks.acquire(("run", command.run_id)):
             record = await self._required_run(command.run_id)
@@ -559,7 +547,7 @@ class LocalExecutionBackend:
             await self._write_run_event(updated, "run.resumed", updated.updated_at)
             return updated
 
-    async def decide_approval(self, command: DecideApproval) -> RunRecord:
+    async def decide_approval(self, command: "DecideApproval") -> RunRecord:
         current = await self.get_run(command.run_id)
         if current is None:
             raise StorageError(f"unknown run: {command.run_id}")
@@ -620,16 +608,16 @@ class LocalExecutionBackend:
             )
             return updated
 
-    async def complete_run(self, command: CompleteExecution) -> RunRecord:
+    async def complete_run(self, command: "CompleteExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.COMPLETED)
 
-    async def fail_run(self, command: FailExecution) -> RunRecord:
+    async def fail_run(self, command: "FailExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.FAILED, error=command.error)
 
-    async def acknowledge_cancel(self, command: AcknowledgeCancellation) -> RunRecord:
+    async def acknowledge_cancel(self, command: "AcknowledgeCancellation") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.CANCELLED)
 
-    async def abort_run(self, command: AbortExecution) -> RunRecord:
+    async def abort_run(self, command: "AbortExecution") -> RunRecord:
         # Unlike fail_run, there is no snapshot to persist here -- an
         # AbortExecution fires on a programming/config/protocol error, before
         # the engine ever produced a coherent outcome to snapshot.
@@ -669,7 +657,7 @@ class LocalExecutionBackend:
             )
             return updated
 
-    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: AgentSnapshotData, status: RunStatus, pending_approval: RunApproval | None = None, error: RunError | None = None) -> RunRecord:
+    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: "AgentSnapshotData", status: RunStatus, pending_approval: "RunApproval | None" = None, error: "RunError | None" = None) -> RunRecord:
         record = await self.get_run(run_id)
         if record is None:
             raise StorageError(f"unknown run: {run_id}")
@@ -698,7 +686,7 @@ class LocalExecutionBackend:
                 event_sequence=record.event_sequence + 1,
                 updated_at=now,
             )
-            writes: list[tuple[Path, object, bool]] = [
+            writes: "list[tuple[Path, object, bool]]" = [
                 (self._snapshot_path(run_id), asdict(stored_snapshot), False),
                 (
                     self._numbered(run_id, "events", updated.event_sequence),
@@ -772,8 +760,8 @@ class LocalExecutionBackend:
         event_type: str,
         created_at: datetime,
         *,
-        payload: dict | None = None,
-        additional_immutable: tuple[tuple[Path, object], ...] = (),
+        payload: "dict | None" = None,
+        additional_immutable: "tuple[tuple[Path, object], ...]" = (),
     ) -> None:
         immutable = tuple(
             (path, value, False) for path, value in additional_immutable
@@ -802,14 +790,14 @@ class LocalExecutionBackend:
             ),
         )
 
-    async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: tuple[NewRunTraceStep, ...]) -> int:
+    async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: "tuple[NewRunTraceStep, ...]") -> int:
         await self.get_run(run_id)
         async with self._locks.acquire(("run", run_id)):
             record = await self._required_run(run_id)
             if record.trace_sequence != expected_sequence:
                 raise StorageConflictError("trace sequence conflict")
             sequence = expected_sequence
-            writes: list[tuple[Path, object, bool]] = []
+            writes: "list[tuple[Path, object, bool]]" = []
             for step in steps:
                 sequence += 1
                 writes.append(
@@ -832,7 +820,7 @@ class LocalExecutionBackend:
             await asyncio.to_thread(self._commit_files, run_id, tuple(writes))
             return sequence
 
-    async def list_trace_steps(self, run_id: str, *, after_sequence: int = 0, through_sequence: int | None = None) -> tuple[RunTraceStep, ...]:
+    async def list_trace_steps(self, run_id: str, *, after_sequence: int = 0, through_sequence: "int | None" = None) -> "tuple[RunTraceStep, ...]":
         await self.get_run(run_id)
         async with self._locks.acquire(("run", run_id)):
             record = await self._required_run(run_id)
@@ -847,7 +835,7 @@ class LocalExecutionBackend:
                 values.append(RunTraceStep(**raw))
             return tuple(values)
 
-    async def get_snapshot(self, run_id: str) -> RunSnapshot | None:
+    async def get_snapshot(self, run_id: str) -> "RunSnapshot | None":
         sessions = await self._run_journal_sessions(run_id)
         async with self._locks.acquire(
             *((("session", session_id) for session_id in sessions)),
@@ -869,7 +857,7 @@ class LocalExecutionBackend:
                 dict(await asyncio.to_thread(read_json, path))
             )
 
-    async def list_session_turns(self, session_id: str, *, before_sequence: int | None = None, limit: int = 50) -> Page[SessionTurn]:
+    async def list_session_turns(self, session_id: str, *, before_sequence: "int | None" = None, limit: int = 50) -> "Page[SessionTurn]":
         run_ids = await self._session_journal_runs(session_id)
         async with self._locks.acquire(
             ("session", session_id),
@@ -882,7 +870,7 @@ class LocalExecutionBackend:
                 limit=limit,
             )
 
-    async def _list_session_turns(self, session_id: str, *, before_sequence: int | None = None, limit: int = 50) -> Page[SessionTurn]:
+    async def _list_session_turns(self, session_id: str, *, before_sequence: "int | None" = None, limit: int = 50) -> "Page[SessionTurn]":
         if not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         session = await self._read_session(session_id)
@@ -901,7 +889,7 @@ class LocalExecutionBackend:
         items = tuple(reversed(values[:limit]))
         return Page(items, has_more, values[limit - 1].sequence if has_more else None)
 
-    async def load_session_context(self, session_id: str) -> tuple[object, ...]:
+    async def load_session_context(self, session_id: str) -> "tuple[object, ...]":
         current = await self.get_session(session_id)
         if current is None or current.latest_completed_run_id is None:
             return ()
@@ -938,7 +926,7 @@ class LocalExecutionBackend:
             )
             return () if snapshot is None else snapshot.resume_messages
 
-    async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> Page[RunEvent]:
+    async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> "Page[RunEvent]":
         await self.get_run(run_id)
         async with self._locks.acquire(("run", run_id)):
             record = await self._required_run(run_id)
@@ -956,7 +944,7 @@ class LocalExecutionBackend:
     async def save_evaluation(self, evaluation: RunEvaluation) -> None:
         await asyncio.to_thread(atomic_write_json, self._numbered(evaluation.run_id, "evaluations", 0).with_name(f"{StorageId.parse(evaluation.evaluation_id).value}.json"), asdict(evaluation))
 
-    async def list_evaluations(self, run_id: str) -> tuple[RunEvaluation, ...]:
+    async def list_evaluations(self, run_id: str) -> "tuple[RunEvaluation, ...]":
         directory = self._run_dir(run_id) / "evaluations"
         names = await asyncio.to_thread(lambda: tuple(directory.iterdir()) if directory.exists() else ())
         values = []

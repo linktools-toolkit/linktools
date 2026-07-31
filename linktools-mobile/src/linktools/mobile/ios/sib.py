@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 import json
 import subprocess
@@ -216,7 +216,7 @@ class SibDevice(BaseDevice):
 
             class Client(SSHClient):
 
-                def close(self):
+                def close(self) -> None:
                     try:
                         super().close()
                     finally:
@@ -252,7 +252,7 @@ class Forward(Stoppable):
         self._remote_port = remote_port
         self._process = None
 
-        def start():
+        def start() -> None:
             self._process = device.popen(
                 "proxy",
                 "--local-port", local_port,
@@ -273,7 +273,7 @@ class Forward(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         process, self._process = self._process, None
         if process is not None:
             try:

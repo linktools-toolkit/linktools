@@ -18,19 +18,18 @@ runner uses to construct the builtin file/terminal toolset at execution time
 exposes no builtin tools -- a conversational-only agent. Decoupling the backend
 from ``AgentCompiler`` keeps the compiler stateless (no filesystem surface)."""
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping
-
-from ..governance.policy.rule import ToolContext
+from dataclasses import dataclass
 
 if TYPE_CHECKING:
+    from ..governance.policy.rule import ToolContext
     from .sandbox.protocols import Sandbox
     from .tool.models import ToolDescriptor
 
 
 @dataclass(frozen=True, slots=True)
 class AgentDependencies:
-    tool_context: ToolContext
+    tool_context: "ToolContext"
     sandbox: "Sandbox | None" = None
     # Per-run tool-name -> ToolDescriptor lookup, populated once the
     # AgentAssembler has resolved this run's tool contributions. Lets

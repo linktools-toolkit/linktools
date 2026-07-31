@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 
 from .log import logger
@@ -7,7 +10,7 @@ str_types = (str,)
 
 # Load all lines from browser.json file
 # Returns array of objects
-def load(path):
+def load(path: str) -> "list[dict]":
     data, ret = [], None
     try:
         with open(path, "rt") as fd:

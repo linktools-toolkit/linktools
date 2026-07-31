@@ -23,26 +23,29 @@ candidates' non-secret identity plus ``request_retries``: reordering the chain,
 swapping an endpoint field, or changing the retry count are real revision changes;
 rotating an api_key is not."""
 
+
 import hashlib
 from dataclasses import dataclass
-
-from pydantic_ai.models import Model
-from pydantic_ai.usage import UsageLimits
-
 from ..errors import ModelRoutingError, ModelRetryConfigurationError
 from ..json import canonical_json_bytes
-from .policy import ModelPolicy
-from .registry import ModelBundle, ModelClientUnavailable, ModelRegistry, model_registry
+from .registry import ModelBundle, ModelClientUnavailable, model_registry
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model
+    from pydantic_ai.usage import UsageLimits
+    from .policy import ModelPolicy
+    from .registry import ModelRegistry
 
 @dataclass(frozen=True)
 class ResolvedModel:
     """The real model + its stable revision + per-call limits, ready to inject
     into a pydantic-ai Agent."""
 
-    model: Model
+    model: "Model"
     revision: str
-    usage_limits: UsageLimits
+    usage_limits: "UsageLimits"
 
 
 class ModelResolver:
@@ -50,10 +53,10 @@ class ModelResolver:
     candidate chain once and, for multiple registered candidates, wrapping them
     in a pydantic-ai ``FallbackModel`` (request-layer fallback)."""
 
-    def __init__(self, *, registry: ModelRegistry = model_registry) -> None:
+    def __init__(self, *, registry: "ModelRegistry" = model_registry) -> None:
         self._registry = registry
 
-    def resolve(self, policy: ModelPolicy) -> ResolvedModel:
+    def resolve(self, policy: "ModelPolicy") -> ResolvedModel:
         bundles: "list[ModelBundle]" = []
         for model_type in (policy.primary, *policy.fallbacks):
             try:
@@ -106,7 +109,7 @@ def effective_request_retries(
     return None
 
 
-def _candidate_model(bundle: ModelBundle, request_retries: "int | None") -> Model:
+def _candidate_model(bundle: ModelBundle, request_retries: "int | None") -> "Model":
     """Pick the model for one candidate, applying the policy's retry semantics
     via :func:`effective_request_retries` (the shared normalization).
 

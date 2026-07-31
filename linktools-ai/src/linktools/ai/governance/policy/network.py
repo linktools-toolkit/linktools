@@ -4,22 +4,21 @@
 the host from request.arguments["url"] (via urllib.parse.urlparse) or, failing
 that, request.arguments["host"]. Calls with neither argument are unrestricted."""
 
+
 from urllib.parse import urlparse
+from .rule import PolicyDecision, PolicyDecisionKind
 
-from .rule import (
-    PolicyDecision,
-    PolicyDecisionKind,
-    ToolContext,
-    ToolRequest,
-)
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .rule import ToolContext, ToolRequest
 
 class NetworkRule:
     def __init__(self, *, allowed_hosts: "frozenset[str]") -> None:
         self._allowed_hosts = allowed_hosts
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         host: "str | None" = None
         url = request.arguments.get("url")

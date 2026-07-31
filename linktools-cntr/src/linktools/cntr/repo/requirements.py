@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Repository profile requirement checks owned by cntr."""
 
 from typing import TYPE_CHECKING

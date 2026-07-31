@@ -3,10 +3,12 @@
 
 """Port helpers (spec §14.1, §14.3 SYS-002)."""
 
+from typing import Iterator
+
 from ..errors import NoFreePortFoundError
 
 
-def bind(port, socket_type, socket_proto):
+def bind(port: int, socket_type: int, socket_proto: int) -> "int | None":
     """Try to bind ``port`` on both AF_INET6 and AF_INET; return the bound port
     or None if it cannot be bound."""
     import socket
@@ -30,7 +32,7 @@ def bind(port, socket_type, socket_proto):
     return port if got_socket else None
 
 
-def is_port_free(port):
+def is_port_free(port: int) -> bool:
     """Return whether ``port`` is free for both TCP and UDP binding.
 
     Note (§14.3): there is an inherent TOCTOU race between this check and an
@@ -42,7 +44,7 @@ def is_port_free(port):
         bind(port, socket.SOCK_DGRAM, socket.IPPROTO_UDP) is not None
 
 
-def get_free_port():
+def get_free_port() -> int:
     """Return a likely-free port (advisory only, spec §14.3)."""
     import socket
 
@@ -67,7 +69,7 @@ import contextlib
 
 
 @contextlib.contextmanager
-def reserve_tcp_port(host="127.0.0.1", port=0):
+def reserve_tcp_port(host: str = "127.0.0.1", port: int = 0) -> "Iterator[tuple[str, int]]":
     """Bind a TCP socket and yield (host, port) without closing it (§14.3).
 
     Unlike :func:`get_free_port`, the socket stays bound for the duration of the

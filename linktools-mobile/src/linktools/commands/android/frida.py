@@ -38,6 +38,7 @@ from linktools.mobile.frida import FridaApplication, FridaShareScript, FridaScri
 from linktools.errors import DownloadError
 
 if TYPE_CHECKING:
+    import frida
     from linktools.cli import CommandParser
     from linktools.mobile.cli import AndroidNamespace
 
@@ -112,7 +113,7 @@ class Command(AndroidCommand):
 
         class Application(FridaApplication):
 
-            def on_session_detached(self, session, reason, crash) -> None:
+            def on_session_detached(self, session: "frida.Session", reason: str, crash: "frida.Crash | None") -> None:
                 logger.info(f"{session} detached, reason={reason}")
                 if reason in ("connection-terminated", "device-lost"):
                     self.signal_stop()

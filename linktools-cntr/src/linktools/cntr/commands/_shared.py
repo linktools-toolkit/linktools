@@ -9,9 +9,9 @@ from ..manager import ContainerManager
 manager = ContainerManager(environ)
 
 
-def iter_container_names():
+def iter_container_names() -> "list[str]":
     return [container.name for container in manager.containers.values()]
 
 
-def iter_installed_container_names():
+def iter_installed_container_names() -> "list[str]":
     return [container.name for container in manager.installed_state.get()]

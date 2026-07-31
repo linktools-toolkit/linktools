@@ -14,23 +14,26 @@ directory or its ``agents/`` tree; this index is the directory-aware complement
 used by :func:`linktools.ai.cli.runtime.build_cli_runtime` to back the
 skill-private subagent provider."""
 
+
 from dataclasses import dataclass
 from hashlib import sha256
-from pathlib import Path
-
 from ..spec.parsing import parse_markdown_text
 from ..agent.skill.codec import parse_skill_spec
-from ..agent.skill.spec import SkillSpec
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
+    from ..agent.skill.spec import SkillSpec
 
 @dataclass(frozen=True, slots=True)
 class SkillInfo:
     """A discovered skill directory."""
 
     id: str
-    root: Path
+    root: "Path"
     revision: str
-    spec: SkillSpec
+    spec: "SkillSpec"
 
     def list_private_agents(self) -> "list[Path]":
         """The skill's ``agents/*.md`` files (sorted), for listing/inspection.
@@ -41,7 +44,7 @@ class SkillInfo:
         return sorted(p for p in agents.iterdir() if p.is_file() and p.suffix == ".md")
 
 
-def _skill_revision(skill_root: Path) -> str:
+def _skill_revision(skill_root: "Path") -> str:
     """A stable revision over the skill's SKILL.md + its agents/*.md tree, so a
     change to either invalidates an active-skill context."""
     state: "list[tuple[str, int, int]]" = []
@@ -62,11 +65,11 @@ def _skill_revision(skill_root: Path) -> str:
 class DirectorySkillIndex:
     """Read-only index over ``<skills_root>/<id>/SKILL.md`` skill directories."""
 
-    def __init__(self, skills_root: Path) -> None:
+    def __init__(self, skills_root: "Path") -> None:
         self._root = skills_root
 
     @property
-    def root(self) -> Path:
+    def root(self) -> "Path":
         return self._root
 
     async def list_ids(self) -> "tuple[str, ...]":

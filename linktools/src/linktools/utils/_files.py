@@ -9,10 +9,13 @@ from typing import overload, TYPE_CHECKING
 from ..errors import Error
 from ._common import get_environ, get_logger
 
+if TYPE_CHECKING:
+    from ..types import PathType
+
 DEFAULT_ENCODING = "utf-8"
 
 
-def is_sub_path(path, root_path) -> bool:
+def is_sub_path(path: "PathType", root_path: "PathType") -> bool:
     try:
         abs_path = os.path.abspath(os.path.expanduser(path))
         abs_root_path = os.path.abspath(os.path.expanduser(root_path))
@@ -21,7 +24,7 @@ def is_sub_path(path, root_path) -> bool:
         return False
 
 
-def join_path(root_path, *paths: str) -> "Path":
+def join_path(root_path: "PathType", *paths: str) -> "Path":
     target_path = str(root_path)
     for path in paths:
         parent_path = target_path
@@ -34,7 +37,7 @@ def join_path(root_path, *paths: str) -> "Path":
     return Path(target_path)
 
 
-def ensure_within(path, root):
+def ensure_within(path: "PathType", root: "PathType") -> Path:
     """Raise Error if ``path`` does not resolve within ``root`` (spec §17.2).
 
     Unlike ``is_sub_path`` (which returns a bool), this raises on violation and
@@ -52,26 +55,26 @@ safe_join = join_path
 if TYPE_CHECKING:
 
     @overload
-    def read_file(path):
+    def read_file(path: "PathType") -> bytes:
         ...
 
 
     @overload
-    def read_file(path, text: False):
+    def read_file(path: "PathType", text: False) -> bytes:
         ...
 
 
     @overload
-    def read_file(path, text: True, encoding: str = DEFAULT_ENCODING):
+    def read_file(path: "PathType", text: True, encoding: str = DEFAULT_ENCODING) -> str:
         ...
 
 
     @overload
-    def read_file(path, text: bool, encoding: str = DEFAULT_ENCODING):
+    def read_file(path: "PathType", text: bool, encoding: str = DEFAULT_ENCODING) -> "bytes | str":
         ...
 
 
-def read_file(path, text: bool = False, encoding: str = DEFAULT_ENCODING):
+def read_file(path: "PathType", text: bool = False, encoding: str = DEFAULT_ENCODING) -> "bytes | str":
     if text:
         with open(path, "rt", encoding=encoding) as fd:
             return fd.read()
@@ -79,7 +82,7 @@ def read_file(path, text: bool = False, encoding: str = DEFAULT_ENCODING):
         return fd.read()
 
 
-def write_file(path, data, encoding: str = DEFAULT_ENCODING) -> None:
+def write_file(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_ENCODING) -> None:
     if isinstance(data, str):
         with open(path, "wt", encoding=encoding) as fd:
             fd.write(data)
@@ -88,7 +91,7 @@ def write_file(path, data, encoding: str = DEFAULT_ENCODING) -> None:
             fd.write(data)
 
 
-def atomic_write(path, data, encoding: str = DEFAULT_ENCODING) -> None:
+def atomic_write(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_ENCODING) -> None:
     """Write ``data`` to ``path`` atomically (spec §3.7/§17.1 UTL-001).
 
     temp-in-same-dir -> write -> flush -> fsync -> os.replace. A crash mid-write
@@ -116,12 +119,12 @@ def atomic_write(path, data, encoding: str = DEFAULT_ENCODING) -> None:
         raise
 
 
-def atomic_replace(source, target) -> None:
+def atomic_replace(source: "PathType", target: "PathType") -> None:
     """Atomically replace ``target`` with ``source`` (spec §17.1 UTL-001)."""
     os.replace(str(source), str(target))
 
 
-def remove_file(path) -> None:
+def remove_file(path: "PathType") -> None:
     if not os.path.exists(path):
         return
     environ = get_environ()
@@ -137,7 +140,7 @@ def remove_file(path) -> None:
             pass
 
 
-def clear_directory(path) -> None:
+def clear_directory(path: "PathType") -> None:
     if not os.path.isdir(path):
         return
     if get_environ().debug:
@@ -154,7 +157,7 @@ def clear_directory(path) -> None:
                 pass
 
 
-def safe_remove(path, root=None) -> bool:
+def safe_remove(path: "PathType", root: "PathType | None" = None) -> bool:
     """Remove a file or directory after verifying it is within ``root`` (§17.5).
 
     ``root`` defaults to the parent directory of ``path``. A target resolving
@@ -179,6 +182,6 @@ def safe_remove(path, root=None) -> bool:
     return True
 
 
-def safe_rmtree(path, root=None) -> bool:
+def safe_rmtree(path: "PathType", root: "PathType | None" = None) -> bool:
     """Remove a directory tree after verifying it is within ``root`` (§17.5)."""
     return safe_remove(path, root=root)

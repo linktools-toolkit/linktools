@@ -4,17 +4,14 @@
 asks for anything the runner has not granted. Tools with no ToolPolicyMetadata
 are unrestricted (default ALLOW) -- only declared tools are policed."""
 
+
 from typing import Mapping
+from .rule import Permission, PolicyDecision, PolicyDecisionKind, ToolPolicyMetadata
 
-from .rule import (
-    Permission,
-    PolicyDecision,
-    PolicyDecisionKind,
-    ToolContext,
-    ToolPolicyMetadata,
-    ToolRequest,
-)
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .rule import ToolContext, ToolRequest
 
 class PermissionRule:
     def __init__(
@@ -27,7 +24,7 @@ class PermissionRule:
         self._tool_metadata: "Mapping[str, ToolPolicyMetadata]" = tool_metadata or {}
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         meta = self._tool_metadata.get(request.tool_name)
         if meta is None:

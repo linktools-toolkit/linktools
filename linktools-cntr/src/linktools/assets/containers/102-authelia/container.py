@@ -15,6 +15,7 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider, AliasProvi
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from linktools.cntr import EventContext, ExposeLink
 
@@ -26,7 +27,7 @@ class Container(BaseContainer):
         return ["nginx", "lldap"]
 
     @cached_property
-    def configs(self):
+    def configs(self) -> "dict[str, Any]":
         return dict(
             AUTHELIA_TAG="latest",
             AUTHELIA_DOMAIN=self.get_nginx_domain("sso"),
@@ -72,7 +73,7 @@ class Container(BaseContainer):
         return f"{self.get_config('AUTHELIA_DOMAIN')}_{self.get_config('NGINX_HTTPS_PORT')}"
 
     @cached_property
-    def acl_rules(self):
+    def acl_rules(self) -> "dict[str, Any]":
         result = None
 
         with self.settings.transaction() as settings:
@@ -92,7 +93,7 @@ class Container(BaseContainer):
         return [dict(client, RedirectURLs=sorted(client.get("RedirectURLs", ()))) for client in result]
 
     @cached_property
-    def oidc_clients(self):
+    def oidc_clients(self) -> "list[dict[str, Any]]":
         result = None
 
         with self.settings.transaction() as settings:
@@ -127,10 +128,10 @@ class Container(BaseContainer):
 
         return result
 
-    def on_init(self):
+    def on_init(self) -> None:
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
-    def on_check(self, context: "EventContext"):
+    def on_check(self, context: "EventContext") -> None:
         if not self.get_config("NGINX_HTTPS_ENABLE"):
             raise ContainerError("Authelia requires HTTPS. Please set NGINX_HTTPS_ENABLE to true.")
 
@@ -165,17 +166,17 @@ class Container(BaseContainer):
             settings.set(f"{self._key_prefix}_acl_rules", self.acl_rules)
             settings.set(f"{self._key_prefix}_oidc_clients", self._oidc_clients_json_safe(self.oidc_clients))
 
-    def on_stopped(self, context: "EventContext"):
+    def on_stopped(self, context: "EventContext") -> None:
         if context.is_full_containers:
             self.on_removed(context)
 
-    def on_removed(self, context: "EventContext"):
+    def on_removed(self, context: "EventContext") -> None:
         with self.settings.transaction() as settings:
             settings.pop(f"{self._key_prefix}_acl_rules", None)
             settings.pop(f"{self._key_prefix}_oidc_clients", None)
 
     @subcommand("show-notification", help="show notification")
-    def on_show_notification(self):
+    def on_show_notification(self) -> None:
         path = self.get_app_path("config", "notification.txt")
         if path.exists():
             self.logger.info(utils.read_file(path, text=True))
@@ -183,13 +184,13 @@ class Container(BaseContainer):
             self.logger.warning("No notification.")
 
     @subcommand("list-oidc-clients", help="list OIDC clients")
-    def on_list_oidc_clients(self):
+    def on_list_oidc_clients(self) -> None:
         self.logger.info(
             yaml.dump(self.oidc_clients, sort_keys=False)
         )
 
     @subcommand("list-acl-rules", help="list acl rules")
-    def on_list_acl_rules(self):
+    def on_list_acl_rules(self) -> None:
         self.logger.info(
             yaml.dump(self.acl_rules, sort_keys=False)
         )

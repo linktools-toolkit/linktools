@@ -177,7 +177,7 @@ class AdbDevice(BaseDevice):
         args = ["-s", self.id, *args]
         return self._adb.exec(*args, **kwargs)
 
-    def make_shell_args(self, *args: "Any", privilege: bool = False, user: str = None):
+    def make_shell_args(self, *args: "Any", privilege: bool = False, user: str = None) -> "list[str]":
         """
         生成shell参数
         :param args: 参数
@@ -217,7 +217,7 @@ class AdbDevice(BaseDevice):
         return self.shell(*args, **kwargs)
 
     @timeoutable
-    def install(self, path_or_url: str, opts: "Iterable[str]" = None, **kwargs):
+    def install(self, path_or_url: str, opts: "Iterable[str]" = None, **kwargs) -> None:
         """
         安装apk
         :param path_or_url: apk文件路径
@@ -248,7 +248,7 @@ class AdbDevice(BaseDevice):
                 self.shell("rm", remote_path, **dict(kwargs, ignore_errors=True))
 
     @timeoutable
-    def uninstall(self, package_name: str, **kwargs):
+    def uninstall(self, package_name: str, **kwargs) -> None:
         """
         卸载apk
         :param package_name: 包名
@@ -861,7 +861,7 @@ class AdbForward(Stoppable):
         self._local = None
         self._remote = None
 
-        def start():
+        def start() -> None:
             nonlocal local
             result = self._device.exec("forward", local, remote)
             if local == "tcp:0":
@@ -871,7 +871,7 @@ class AdbForward(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         if self._local is not None:
             self._device.exec("forward", "--remove", ":".join(self._local), ignore_errors=True)
 
@@ -887,7 +887,7 @@ class AdbReverse(Stoppable):
         self._local = None
         self._remote = None
 
-        def start():
+        def start() -> "AdbReverse":
             nonlocal remote
             result = self._device.exec("reverse", remote, local)
             if remote == "tcp:0":
@@ -898,7 +898,7 @@ class AdbReverse(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         if self._remote is not None:
             self._device.exec("reverse", "--remove", ":".join(self._remote), ignore_errors=True)
 
@@ -913,7 +913,7 @@ class AdbRedirect(Stoppable):
         self._port = None
         self._reverse_port = None
 
-        def start():
+        def start() -> None:
             self._port = port
             if not address:
                 # 如果没有指定目标地址，则通过reverse端口访问
@@ -939,7 +939,7 @@ class AdbRedirect(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         # 清空iptables -t nat配置
         self._device.sudo("iptables", "-t", "nat", "-F", ignore_errors=True)
         # 如果占用reverse端口，则释放端口

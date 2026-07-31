@@ -1,11 +1,20 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Semantic model-call recording at the model boundary."""
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.models import Model
+
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelMessage, ModelResponse
+    from pydantic_ai.models import ModelRequestParameters, ModelSettings, StreamedResponse
+    from pydantic_ai.tools import RunContext
 
 class SemanticRecordingModel(Model):
     def __init__(self, delegate: Model, collector: Any, codec: Any) -> None:
@@ -24,10 +33,15 @@ class SemanticRecordingModel(Model):
     def system(self) -> str:
         return self._delegate.system
 
-    def _request(self, messages: Any, settings: Any, parameters: Any) -> dict[str, Any]:
+    def _request(self, messages: Any, settings: Any, parameters: Any) -> "dict[str, Any]":
         return dict(self._codec.encode_model_request(tuple(messages), settings, parameters))
 
-    async def request(self, messages, model_settings, model_request_parameters):  # type: ignore[override]
+    async def request(
+        self,
+        messages: "list[ModelMessage]",
+        model_settings: "ModelSettings | None",
+        model_request_parameters: "ModelRequestParameters",
+    ) -> "ModelResponse":
         started = datetime.now(timezone.utc)
         request = self._request(messages, model_settings, model_request_parameters)
         try:
@@ -39,7 +53,13 @@ class SemanticRecordingModel(Model):
         return response
 
     @asynccontextmanager
-    async def request_stream(self, messages, model_settings, model_request_parameters, run_context=None):  # type: ignore[override]
+    async def request_stream(
+        self,
+        messages: "list[ModelMessage]",
+        model_settings: "ModelSettings | None",
+        model_request_parameters: "ModelRequestParameters",
+        run_context: "RunContext[Any] | None" = None,
+    ) -> "AsyncIterator[StreamedResponse]":
         started = datetime.now(timezone.utc)
         request = self._request(messages, model_settings, model_request_parameters)
         try:

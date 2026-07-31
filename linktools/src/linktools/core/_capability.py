@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 import abc
 import pathlib
@@ -118,7 +118,7 @@ class GitUpdater(Updater):
         return ["--ignore-installed", f"{name}{deps}@git+{repository_url.strip()}"]
 
     @classmethod
-    def get_repository_url(cls, name: str):
+    def get_repository_url(cls, name: str) -> "str | None":
         """Return the repository URL recorded in package metadata.
 
         Args:

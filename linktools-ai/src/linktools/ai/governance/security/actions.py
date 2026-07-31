@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Stable action names used by authorization call sites."""
 
 class SecurityAction:

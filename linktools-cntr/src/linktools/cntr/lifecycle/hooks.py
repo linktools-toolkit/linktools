@@ -132,7 +132,7 @@ class HookRegistry:
 
     def register(
             self,
-            phase,
+            phase: "HookPhase | str",
             callback: "Callable",
             key: "Hashable | None" = None,
             name: "str | None" = None,
@@ -203,15 +203,15 @@ class HookRegistry:
         bucket[key] = hook
         return hook
 
-    def unregister(self, phase, key: "Hashable") -> None:
+    def unregister(self, phase: "HookPhase | str", key: "Hashable") -> None:
         phase = HookPhase(phase)
         self._hooks.get(phase, {}).pop(key, None)
 
-    def get(self, phase, key: "Hashable") -> "Hook | None":
+    def get(self, phase: "HookPhase | str", key: "Hashable") -> "Hook | None":
         phase = HookPhase(phase)
         return self._hooks.get(phase, {}).get(key)
 
-    def iter_phase(self, phase) -> "Iterator[Hook]":
+    def iter_phase(self, phase: "HookPhase | str") -> "Iterator[Hook]":
         yield from self._ordered(HookPhase(phase))
 
     def _ordered(self, phase: "HookPhase") -> "list[Hook]":
@@ -233,14 +233,14 @@ class HookRegistry:
                 if other in bucket:
                     depends_on[other].add(hook.key)
 
-        def sort_key(k):
+        def sort_key(k: "Hashable") -> "tuple[int, int]":
             return (bucket[k].order, registration_order[k])
 
         result: "list[Hook]" = []
         visited: "set" = set()
         visiting: "set" = set()
 
-        def visit(key):
+        def visit(key: "Hashable") -> None:
             if key in visited:
                 return
             if key in visiting:
@@ -256,7 +256,7 @@ class HookRegistry:
             visit(key)
         return result
 
-    def validate(self, phase=None) -> "list[str]":
+    def validate(self, phase: "HookPhase | str | None" = None) -> "list[str]":
         """Raise on a missing *required* before/after reference or an
         ordering cycle; a missing reference listed in optional_before/
         optional_after instead only contributes a warning string to the
@@ -280,7 +280,7 @@ class HookRegistry:
             self._ordered(ph)  # raises HookCycleError on a cycle
         return warnings
 
-    def describe(self, phase=None) -> "list[dict[str, Any]]":
+    def describe(self, phase: "HookPhase | str | None" = None) -> "list[dict[str, Any]]":
         phases = [HookPhase(phase)] if phase is not None else list(HookPhase)
         result = []
         for ph in phases:
@@ -299,10 +299,10 @@ class HookRegistry:
                 ))
         return result
 
-    def legacy_view(self, phase) -> "HookListView":
+    def legacy_view(self, phase: "HookPhase | str") -> "HookListView":
         return HookListView(self, HookPhase(phase))
 
-    def call(self, phase, context: "Any" = None, reverse: bool = False) -> None:
+    def call(self, phase: "HookPhase | str", context: "Any" = None, reverse: bool = False) -> None:
         """Invoke every hook registered for ``phase``, in registry order.
 
         Always validates ``phase`` first: a missing *required* before/after
@@ -404,7 +404,7 @@ class HookListView(MutableSequence):
     def __repr__(self):
         return repr([hook.callback for hook in self._hooks()])
 
-    def insert(self, index, value):
+    def insert(self, index: int, value: "Callable") -> None:
         """Insert ``value`` so that, among this view's own (legacy) hooks,
         it ends up exactly at ``index`` -- existing legacy hooks before
         ``index`` in the current view stay before it, the rest stay after.
@@ -425,5 +425,5 @@ class HookListView(MutableSequence):
         for key in after_keys:
             _requeue(key)
 
-    def append(self, value):
+    def append(self, value: "Callable") -> None:
         self._registry.register(self._phase, value, source="legacy", opaque=True)

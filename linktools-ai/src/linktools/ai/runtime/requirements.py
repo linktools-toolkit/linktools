@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Runtime component and topology requirements."""
 
 from dataclasses import dataclass

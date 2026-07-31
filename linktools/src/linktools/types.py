@@ -61,7 +61,7 @@ if _t.TYPE_CHECKING:
     ConfigTypeMap = Dict[str, Any]
 
 
-def get_origin(tp):
+def get_origin(tp: "Any") -> "Any | None":
     """Return the unsubscripted origin for a typing object."""
     if hasattr(_t, "get_origin"):
         return _t.get_origin(tp)
@@ -75,7 +75,7 @@ def get_origin(tp):
     raise TypeError(f"{tp} has no attribute '__origin__'")
 
 
-def get_args(tp):
+def get_args(tp: "Any") -> "tuple":
     """Return the type arguments for a typing object."""
     if hasattr(_t, "get_args"):
         return _t.get_args(tp)
@@ -175,7 +175,7 @@ class Stoppable(_abc.ABC):
     """Stoppable interface"""
 
     @_abc.abstractmethod
-    def stop(self):
+    def stop(self) -> None:
         """Stop the running resource or background operation."""
         pass
 

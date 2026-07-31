@@ -1,13 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Specification storage assembled from independent storage features."""
 
-from ..storage.cache import ContentCacheKey
-from ..storage.composition import (
-    StorageAdapter,
-    StorageCacheAdapter,
-    StorageComposition,
-    StorageLayer,
-)
+from typing import TYPE_CHECKING
+from ..storage.composition import StorageAdapter, StorageCacheAdapter, StorageComposition, StorageLayer
 from .document import SpecDocument, SpecDocumentInfo
+
+if TYPE_CHECKING:
+    from ..storage.cache import ContentCacheKey
+    from ..storage.cache import ContentCache
+    from ..storage.multi import StorageReader, StorageWriter
 
 
 class SpecStorageAdapter(
@@ -20,7 +23,7 @@ class SpecStorageAdapter(
     def value_info(self, value: SpecDocument) -> SpecDocumentInfo:
         return value.info
 
-    def cache_key(self, key: str, info: SpecDocumentInfo) -> ContentCacheKey:
+    def cache_key(self, key: str, info: SpecDocumentInfo) -> "ContentCacheKey":
         # spec:{path}:{version}:{etag} -- content changes alter the etag, so a
         # stale cache entry can never be served against changed content.
         return f"spec:{key}:{info.version}:{info.etag}"
@@ -37,11 +40,11 @@ class SpecStore:
 
     def __init__(
         self,
-        primary,
+        primary: "StorageReader[str, SpecDocument, SpecDocumentInfo]",
         *,
-        writer=None,
+        writer: "StorageWriter[str, SpecDocument] | None" = None,
         layers: "tuple[StorageLayer[str, SpecDocument, SpecDocumentInfo], ...]" = (),
-        cache=None,
+        cache: "ContentCache | None" = None,
     ) -> None:
         adapter = SpecStorageAdapter()
         self._storage = StorageComposition(
@@ -54,22 +57,22 @@ class SpecStore:
         )
 
     @property
-    def writer(self):
+    def writer(self) -> "StorageWriter[str, SpecDocument] | None":
         return self._storage.writer
 
     async def initialize_storage(self, *args: object) -> None:
         await self._storage.initialize(*args)
 
-    async def stat(self, path: str) -> SpecDocumentInfo | None:
+    async def stat(self, path: str) -> "SpecDocumentInfo | None":
         state = await self._storage.refresh()
         return None if state is None else state.entries.get(path)
 
     async def list_active(
         self,
-        kind: str | None = None,
+        kind: "str | None" = None,
         *,
         preload: bool = False,
-    ) -> tuple[str, ...]:
+    ) -> "tuple[str, ...]":
         infos = await self._storage.list_info(preload=preload)
         return tuple(
             info.path
@@ -77,16 +80,16 @@ class SpecStore:
             if info.active and (kind is None or info.kind == kind)
         )
 
-    async def list_info(self, *, preload: bool = False) -> tuple[SpecDocumentInfo, ...]:
+    async def list_info(self, *, preload: bool = False) -> "tuple[SpecDocumentInfo, ...]":
         return await self._storage.list_info(preload=preload)
 
-    async def current_revision(self):
+    async def current_revision(self) -> "int | str":
         return await self._storage.current_revision()
 
-    async def get(self, path: str) -> SpecDocument | None:
+    async def get(self, path: str) -> "SpecDocument | None":
         return await self._storage.get(path)
 
-    async def get_many(self, paths: tuple[str, ...]) -> dict[str, SpecDocument]:
+    async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, SpecDocument]":
         return await self._storage.get_many(paths)
 
     async def put(self, document: SpecDocument) -> SpecDocument:
@@ -95,7 +98,7 @@ class SpecStore:
     async def delete(self, path: str) -> None:
         await self._storage.delete(path)
 
-    async def reset(self, documents: tuple[SpecDocument, ...]) -> None:
+    async def reset(self, documents: "tuple[SpecDocument, ...]") -> None:
         await self._storage.reset(documents)
 
 

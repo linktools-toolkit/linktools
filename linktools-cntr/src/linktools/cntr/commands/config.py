@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+from typing import TYPE_CHECKING
 import hashlib
 import os
 from collections import namedtuple
-
 from linktools.cli import BaseCommandGroup, CommandParser, subcommand, subcommand_argument
 from linktools.cli.argparse import KeyValueAction, LazyChoices
 from linktools.core import ConfigField
@@ -12,6 +12,11 @@ from linktools.types import MISSING
 from ..container import ContainerError
 from . import _shared
 from ._order import CONFIG_COMMAND_ORDER
+
+if TYPE_CHECKING:
+    from ..container import BaseContainer
+    from collections.abc import Iterable
+    from linktools.core import Config
 
 # A single displayable config entry: which Config object it resolves
 # through (identity is what dedup keys off -- two containers can share one
@@ -56,7 +61,7 @@ def _short_owner_suffix(owner_id):
     return hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:8]
 
 
-def build_display_owner_labels(targets):
+def build_display_owner_labels(targets: "list[ConfigTarget | ConfigListEntry]") -> "dict[str, str]":
     """owner_id -> display label for a set of same-key targets/entries
     (anything with ``.owner_id``/``.owner_label``, i.e. ``ConfigTarget`` or
     ``ConfigListEntry``).
@@ -179,7 +184,7 @@ class ConfigCommand(BaseCommandGroup):
     """
 
     @property
-    def name(self):
+    def name(self) -> str:
         return "config"
 
     def init_arguments(self, parser: "CommandParser") -> None:
@@ -187,7 +192,7 @@ class ConfigCommand(BaseCommandGroup):
 
     @subcommand("set", order=CONFIG_COMMAND_ORDER["set"], help="set container configs")
     @subcommand_argument("configs", action=KeyValueAction, nargs="+", help="container config key=value")
-    def on_command_set(self, configs: "dict[str, str]"):
+    def on_command_set(self, configs: "dict[str, str]") -> None:
         config = _shared.manager.env_config
         containers = _installed_containers_or_empty()
 
@@ -223,7 +228,7 @@ class ConfigCommand(BaseCommandGroup):
 
     @subcommand("unset", order=CONFIG_COMMAND_ORDER["unset"], help="remove container configs")
     @subcommand_argument("configs", action=KeyValueAction, metavar="KEY", nargs="+", help="container config keys")
-    def on_command_remove(self, configs: "dict[str, str]"):
+    def on_command_remove(self, configs: "dict[str, str]") -> None:
         for key in configs.keys():
             _shared.manager.env_config.remove(key)
         self.logger.info(f"Unset {', '.join(configs.keys())} success")
@@ -235,7 +240,7 @@ class ConfigCommand(BaseCommandGroup):
                          help="include configs from dependency containers")
     @subcommand_argument("--show-secret", action="store_true", default=False,
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
-    def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False):
+    def on_command_list(self, names: "list[str]", with_dependencies: bool = False, show_secret: bool = False) -> None:
         containers = _installed_containers_or_empty()
         target_containers = [c for c in containers if c.name in names] if names else containers
         if with_dependencies and names:
@@ -245,7 +250,7 @@ class ConfigCommand(BaseCommandGroup):
         declared_keys = set()
         entries: "list[ConfigListEntry]" = []
 
-        def add_container_entries(container, keys):
+        def add_container_entries(container: "BaseContainer", keys: "Iterable[str]") -> None:
             config = container.env_config
             owner_id, owner_label = _owner_identity(container)
             for key in keys:
@@ -342,7 +347,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand_argument("keys", metavar="KEY", nargs="+", help="config key(s)")
     @subcommand_argument("--show-secret", action="store_true", default=False,
                          help="show secret values in plain text instead of the logger's automatic ***-redaction")
-    def on_command_get(self, keys: "list[str]", show_secret: bool = False):
+    def on_command_get(self, keys: "list[str]", show_secret: bool = False) -> None:
         manager_config = _shared.manager.env_config
         containers = _installed_containers_or_empty()
         for key in keys:
@@ -380,7 +385,7 @@ class ConfigCommand(BaseCommandGroup):
                help="show a value's resolved source, default, persisted state and sensitivity")
     @subcommand_argument("key", help="config key")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    def on_command_explain(self, key: str, as_json: bool = False):
+    def on_command_explain(self, key: str, as_json: bool = False) -> None:
         containers = _installed_containers_or_empty()
         targets = _find_config_targets(key, containers)
         if len(targets) <= 1:
@@ -422,7 +427,7 @@ class ConfigCommand(BaseCommandGroup):
     @subcommand("validate", order=CONFIG_COMMAND_ORDER["validate"],
                help="validate persisted config values' types (never runs docker compose config)")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    def on_command_validate(self, as_json: bool = False):
+    def on_command_validate(self, as_json: bool = False) -> None:
         # Only re-validates already-persisted values (persisted_keys()), the
         # same safe enumeration `config list` uses -- iterating every
         # schema-declared field (keys()) would force-resolve, and possibly
@@ -465,12 +470,12 @@ class ConfigCommand(BaseCommandGroup):
 
     @subcommand("edit", order=CONFIG_COMMAND_ORDER["edit"], help="edit the config file in an editor")
     @subcommand_argument("--editor", help="editor to use to edit the file")
-    def on_command_edit(self, editor: str):
+    def on_command_edit(self, editor: str) -> int:
         return _shared.manager.runtime.create_process(
             editor, str(_shared.manager.environ.paths.config / "settings.json")
         ).call()
 
     @subcommand("reload", order=CONFIG_COMMAND_ORDER["reload"], help="reload container configs")
-    def on_command_reload(self):
+    def on_command_reload(self) -> None:
         _shared.manager.env_config.reload()
         _shared.manager.load_installed_config_metadata()

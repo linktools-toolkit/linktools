@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Download subsystem: DownloadManager + UrlFile thin adapter (compact-layout spec §2.2).
 
 Merged from the former linktools/_download.py and core/_url.py. UrlFile is a
@@ -81,7 +84,7 @@ class SizeValidator(DownloadValidator):
     def __init__(self, size: int) -> None:
         self.size = int(size)
 
-    def validate(self, path):
+    def validate(self, path: "PathLike") -> None:
         actual = os.path.getsize(path)
         if actual != self.size:
             raise DownloadError("size mismatch: expected %d, got %d" % (self.size, actual))
@@ -92,7 +95,7 @@ class HashValidator(DownloadValidator):
         self.digest = digest.lower()
         self.algorithm = algorithm
 
-    def validate(self, path):
+    def validate(self, path: "PathLike") -> None:
         if not utils.verify_file(path, self.digest, algorithm=self.algorithm):
             raise DownloadError("%s hash mismatch" % self.algorithm)
 
@@ -101,7 +104,7 @@ class CompositeValidator(DownloadValidator):
     def __init__(self, validators: "list[DownloadValidator]") -> None:
         self._validators = list(validators)
 
-    def validate(self, path):
+    def validate(self, path: "PathLike") -> None:
         for v in self._validators:
             v.validate(path)
 
@@ -118,7 +121,9 @@ class DownloadTransport(object):
 class FileTransport(DownloadTransport):
     """Copy a local ``file://`` or bare-path source (no resume needed)."""
 
-    def fetch(self, request, part, on_progress=None, meta=None):
+    def fetch(self, request: "DownloadRequest", part: "PathLike",
+              on_progress: "Callable[[DownloadProgress], None] | None" = None,
+              meta: "dict[str, Any] | None" = None) -> None:
         src = request.url
         if src.startswith("file://"):
             src = src[len("file://"):]
@@ -144,7 +149,9 @@ class HttpTransport(DownloadTransport):
     def __init__(self, headers: "dict[str, str] | None" = None) -> None:
         self._base_headers = dict(headers or {})
 
-    def fetch(self, request, part, on_progress=None, meta=None):
+    def fetch(self, request: "DownloadRequest", part: "PathLike",
+              on_progress: "Callable[[DownloadProgress], None] | None" = None,
+              meta: "dict[str, Any] | None" = None) -> None:
         # Imported lazily so `import linktools.core` does not pull urllib (~19ms);
         # only an actual HTTP download pays for it.
         import urllib.error as _urlerror
@@ -258,7 +265,7 @@ class HttpTransport(DownloadTransport):
 # ---------------------------------------------------------------------------
 
 class DownloadManager(object):
-    def __init__(self, environ: "Any") -> None:
+    def __init__(self, environ: Any) -> None:
         self._environ = environ
 
     # -- internals ---------------------------------------------------------
@@ -374,7 +381,7 @@ class UrlFile(metaclass=abc.ABCMeta):
         self._is_local = is_local
 
     @property
-    def is_local(self):
+    def is_local(self) -> bool:
         """Return whether the file is local."""
         return self._is_local
 
@@ -444,7 +451,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             raise DownloadError(e)
 
     @timeoutable
-    def clear(self, timeout: "TimeoutType" = None):
+    def clear(self, timeout: "TimeoutType" = None) -> None:
         """Clear cached download data for this URL."""
         try:
             self._lock.acquire(timeout=timeout.remaining if timeout is not None else None)
@@ -496,7 +503,7 @@ class UrlFile(metaclass=abc.ABCMeta):
     class Validator(abc.ABC):
         """Validate downloaded file content."""
         @abc.abstractmethod
-        def validate(self, file: "UrlFile", path: str):
+        def validate(self, file: "UrlFile", path: str) -> None:
             pass
 
     class HashValidator(Validator):
@@ -505,7 +512,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             self._algorithm = algorithm
             self._hash = hash
 
-        def validate(self, file: "UrlFile", path: str):
+        def validate(self, file: "UrlFile", path: str) -> None:
             if get_file_hash(path, self._algorithm) != self._hash:
                 raise DownloadError(f"{file} {self._algorithm} hash does not match {self._hash}")
 
@@ -514,7 +521,7 @@ class UrlFile(metaclass=abc.ABCMeta):
         def __init__(self, size: int):
             self._size = size
 
-        def validate(self, file: "UrlFile", path: str):
+        def validate(self, file: "UrlFile", path: str) -> None:
             if os.path.getsize(path) != self._size:
                 raise DownloadError(f"{file} size does not match {self._size}")
 
@@ -531,7 +538,7 @@ def _adapt_validators(validators):
         def __init__(self, inner):
             self._inner = inner  # UrlFile.Validator or list thereof
 
-        def validate(self, path):
+        def validate(self, path: "PathLike") -> None:
             # UrlFile validators take (file, path); pass a lightweight stand-in.
             sentinel = type("_F", (), {"__repr__": lambda self: "UrlFile"})()
             if isinstance(self._inner, UrlFile.Validator):

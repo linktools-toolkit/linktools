@@ -38,7 +38,7 @@ def get_md5(data: "str | bytes") -> str:
     return get_hash(data, algorithm="md5")
 
 
-def get_file_md5(path: "PathType"):
+def get_file_md5(path: "PathType") -> str:
     """Return the MD5 digest for a file."""
     return get_file_hash(path, algorithm="md5")
 
@@ -55,7 +55,7 @@ def verify_file(path: "PathType", digest: str, algorithm: "Literal['md5', 'sha1'
     return len(actual) == len(expected) and hmac.compare_digest(actual, expected)
 
 
-def get_hash_ident(data: "str | bytes"):
+def get_hash_ident(data: "str | bytes") -> str:
     """Return a short stable identifier from a hashed value."""
     if isinstance(data, str):
         data = bytes(data, "utf8")

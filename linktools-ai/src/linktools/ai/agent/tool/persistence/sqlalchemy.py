@@ -1,10 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """SQLAlchemy ToolStateStore with one fenced operation aggregate."""
 
+from typing import TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import JSON, Boolean, DateTime, Integer, String, UniqueConstraint, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-
 from ....errors import StorageConflictError
 from ....json import JsonValue, normalize_json
 from ....storage.coordination.lease import Lease, assert_active, claim, release, renew
@@ -13,25 +16,28 @@ from ....storage.sqlalchemy.base import Base
 from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..models import ToolOperation, ToolOperationStatus
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
 
 class OperationRow(Base):
     __tablename__ = f"{TABLE_PREFIX}tool_operations"
     __table_args__ = (UniqueConstraint("run_id", "tool_call_id", name="uq_tool_operation_call"),)
-    operation_id: Mapped[str] = mapped_column(String(128), unique=True)
-    tenant_id: Mapped[str | None] = mapped_column(String(128))
-    run_id: Mapped[str] = mapped_column(String(128), index=True)
-    tool_call_id: Mapped[str] = mapped_column(String(128))
-    idempotency_key: Mapped[str] = mapped_column(String(128))
-    tool_name: Mapped[str] = mapped_column(String(128))
-    arguments_hash: Mapped[str] = mapped_column(String(128))
-    binding_fingerprint: Mapped[str] = mapped_column(String(128))
-    replay_safe: Mapped[bool] = mapped_column(Boolean, default=False)
-    status: Mapped[str] = mapped_column(String(32), index=True)
-    owner: Mapped[str | None] = mapped_column(String(128))
-    fence: Mapped[int] = mapped_column(Integer, default=0)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    result: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
-    error: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
+    operation_id: "Mapped[str]" = mapped_column(String(128), unique=True)
+    tenant_id: "Mapped[str | None]" = mapped_column(String(128))
+    run_id: "Mapped[str]" = mapped_column(String(128), index=True)
+    tool_call_id: "Mapped[str]" = mapped_column(String(128))
+    idempotency_key: "Mapped[str]" = mapped_column(String(128))
+    tool_name: "Mapped[str]" = mapped_column(String(128))
+    arguments_hash: "Mapped[str]" = mapped_column(String(128))
+    binding_fingerprint: "Mapped[str]" = mapped_column(String(128))
+    replay_safe: "Mapped[bool]" = mapped_column(Boolean, default=False)
+    status: "Mapped[str]" = mapped_column(String(32), index=True)
+    owner: "Mapped[str | None]" = mapped_column(String(128))
+    fence: "Mapped[int]" = mapped_column(Integer, default=0)
+    lease_expires_at: "Mapped[datetime | None]" = mapped_column(DateTime(timezone=True), nullable=True)
+    result: "Mapped[JsonValue | None]" = mapped_column(JSON, nullable=True)
+    error: "Mapped[JsonValue | None]" = mapped_column(JSON, nullable=True)
 
 
 class SqlAlchemyToolStateBackend:
@@ -40,7 +46,7 @@ class SqlAlchemyToolStateBackend:
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
-    async def initialize_storage(self, engine) -> None:
+    async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
@@ -145,7 +151,7 @@ class SqlAlchemyToolStateBackend:
             raise StorageConflictError("tool operation idempotency conflict")
         return self._operation(row)
 
-    async def get(self, operation_id: str) -> ToolOperation | None:
+    async def get(self, operation_id: str) -> "ToolOperation | None":
         async with self.session_factory() as session:
             row = await self._row(session, operation_id)
             return None if row is None else self._operation(row)
@@ -221,7 +227,7 @@ class SqlAlchemyToolStateBackend:
                 )
                 return self._operation(updated)
 
-    async def complete(self, operation_id: str, *, owner: str, fence: int, result: JsonValue) -> ToolOperation:
+    async def complete(self, operation_id: str, *, owner: str, fence: int, result: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._row(session, operation_id, for_update=True)
@@ -243,7 +249,7 @@ class SqlAlchemyToolStateBackend:
                 )
                 return self._operation(updated)
 
-    async def fail(self, operation_id: str, *, owner: str, fence: int, error: JsonValue) -> ToolOperation:
+    async def fail(self, operation_id: str, *, owner: str, fence: int, error: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._row(session, operation_id, for_update=True)
@@ -265,7 +271,7 @@ class SqlAlchemyToolStateBackend:
                 )
                 return self._operation(updated)
 
-    async def mark_indeterminate(self, operation_id: str, *, owner: str, fence: int, error: JsonValue) -> ToolOperation:
+    async def mark_indeterminate(self, operation_id: str, *, owner: str, fence: int, error: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._row(session, operation_id, for_update=True)

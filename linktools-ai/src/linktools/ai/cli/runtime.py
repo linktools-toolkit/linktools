@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Composition helpers for the v4 CLI client."""
 
-from dataclasses import dataclass
 
+from dataclasses import dataclass
 from ..agent.index import AgentSpecIndex
 from ..agent.spec import AgentSpec, PromptSpec
 from ..spec.parsing import SpecLoader
@@ -9,17 +12,21 @@ from ..execution.persistence.local import LocalExecutionBackend
 from ..execution.store import ExecutionStore
 from ..agent.mcp.index import MCPServerSpecIndex
 from ..model.policy import ModelPolicy
-from ..runtime import Runtime, RuntimeStorage, build_runtime
+from ..runtime import RuntimeStorage, build_runtime
 from ..agent.skill.index import SkillSpecIndex
-
-from .project import CliProject
 from .skill_index import DirectorySkillIndex
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..model.resolver import ModelResolver
+    from ..runtime import Runtime
+    from .project import CliProject
 
 @dataclass(frozen=True, slots=True)
 class CliRuntimeBundle:
-    project: CliProject
-    runtime: Runtime
+    project: "CliProject"
+    runtime: "Runtime"
     storage: RuntimeStorage
     agents: AgentSpecIndex
     skills: SkillSpecIndex
@@ -35,7 +42,7 @@ _BUILTIN_DEFAULT = AgentSpec(
 )
 
 
-def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundle:
+def build_cli_runtime(*, project: "CliProject", model_resolver: "ModelResolver | None") -> CliRuntimeBundle:
     """Build the CLI bundle with the v4 runtime storage composition."""
     agents = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(project.agents_root))
     skills = SkillSpecIndex.from_specloader(SpecLoader.from_filesystem(project.skills_root), suffix="")
@@ -53,7 +60,7 @@ def build_cli_runtime(*, project: CliProject, model_resolver) -> CliRuntimeBundl
     )
 
 
-async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: str | None) -> AgentSpec:
+async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None") -> AgentSpec:
     target = agent_id or bundle.project.default_agent
     try:
         return await bundle.agents.get(target)

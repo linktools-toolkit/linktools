@@ -73,12 +73,12 @@ class GrepHandler:
     _filter_handlers = {}
 
     @classmethod
-    def match(cls, *mimetypes: "str | Callable[[str], bool]"):
+    def match(cls, *mimetypes: "str | Callable[[str], bool]") -> "Callable[[Callable], Callable]":
 
-        def decorator(fn):
+        def decorator(fn: "Callable") -> "Callable":
 
             @functools.wraps(fn)
-            def wrapper(instance, filename: str, mimetype: str):
+            def wrapper(instance: "GrepMatcher", filename: str, mimetype: str) -> bool:
                 try:
                     fn(instance, filename, mimetype)
                     return True
@@ -104,7 +104,7 @@ class GrepHandler:
         return decorator
 
     @classmethod
-    def handle(cls, instance, filename: str, mimetype: str):
+    def handle(cls, instance: "GrepMatcher", filename: str, mimetype: str) -> bool:
         if mimetype in cls._handlers:
             fn = cls._handlers[mimetype]
             if fn(instance, filename, mimetype):
@@ -126,7 +126,7 @@ class GrepMatcher:
         self._lief = lief
         self._magic = magic
 
-    def match(self, path: str):
+    def match(self, path: str) -> None:
         if not os.path.exists(path):
             return
         elif os.path.isfile(path):
@@ -136,7 +136,7 @@ class GrepMatcher:
             for name in files:
                 self.on_file(os.path.join(root, name))
 
-    def on_file(self, filename: str):
+    def on_file(self, filename: str) -> None:
         if os.path.exists(filename):
             try:
                 with open(filename, "rb") as fd:
@@ -151,7 +151,7 @@ class GrepMatcher:
         "application/xml",
         lambda t: t.startswith("text/"),
     )
-    def on_text(self, filename: str, mimetype: str):
+    def on_text(self, filename: str, mimetype: str) -> None:
         with open(filename, "rb") as fd:
             lines = fd.readlines()
             for i in range(0, len(lines)):
@@ -165,7 +165,7 @@ class GrepMatcher:
         "application/x-gzip",
         "application/java-archive"
     )
-    def on_zip(self, filename: str, mimetype: str):
+    def on_zip(self, filename: str, mimetype: str) -> None:
         dirname = filename + ":"
         while os.path.exists(dirname):
             dirname = dirname + " "
@@ -180,7 +180,7 @@ class GrepMatcher:
         "application/x-executable",
         "application/x-sharedlib"
     )
-    def on_elf(self, filename: str, mimetype: str):
+    def on_elf(self, filename: str, mimetype: str) -> None:
         file: "lief.ELF.Binary" = self._lief.parse(filename)
         for symbol in file.imported_symbols:
             out = self.match_content(symbol.name)
@@ -199,7 +199,7 @@ class GrepMatcher:
     @GrepHandler.match(
         "application/x-mach-binary"
     )
-    def on_mach(self, filename: str, mimetype: str):
+    def on_mach(self, filename: str, mimetype: str) -> None:
         file: "lief.MachO.Binary" = self._lief.parse(filename)
         for symbol in file.imported_symbols:
             out = self.match_content(symbol.name)
@@ -216,7 +216,7 @@ class GrepMatcher:
         self.on_binary(filename, mimetype=mimetype)
 
     @GrepHandler.match()
-    def on_binary(self, filename: str, mimetype: str):
+    def on_binary(self, filename: str, mimetype: str) -> None:
         with open(filename, "rb") as fd:
             for line in fd.readlines():
                 if self.pattern.search(line) is not None:
@@ -224,7 +224,7 @@ class GrepMatcher:
                            Text(mimetype, style="red"), " match")
                     return
 
-    def match_content(self, content):
+    def match_content(self, content: "bytes | str") -> "list":
         out, last = [], 0
         if type(content) == str:
             content = bytes(content, encoding="utf-8")

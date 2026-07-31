@@ -74,7 +74,11 @@ class DefaultMemoryPolicy:
         self._store = store
         self._limit = limit
 
-    async def select_memories(self, context, query):
+    async def select_memories(
+        self,
+        context: "RunContext",
+        query: str,
+    ) -> "tuple[MemoryRecord, ...]":
         from .memory.scope import MemoryScope
 
         if not context.tenant_id:
@@ -91,7 +95,11 @@ class DefaultMemoryPolicy:
         matches = await self._store.search(query, scope=scope, limit=self._limit)
         return tuple(m.record for m in matches)
 
-    async def maybe_write_memories(self, context, result) -> None:
+    async def maybe_write_memories(
+        self,
+        context: "RunContext",
+        result: "RunResult",
+    ) -> None:
         return None
 
 
@@ -103,7 +111,11 @@ class DefaultRetrievalPolicy:
         self._retriever = retriever
         self._limit = limit
 
-    async def retrieve(self, context, query):
+    async def retrieve(
+        self,
+        context: "RunContext",
+        query: str,
+    ) -> "Sequence[KnowledgeItem]":
         from .retrieval.scope import RetrievalScope
 
         if not context.tenant_id:
@@ -121,12 +133,12 @@ class DefaultPromptContextFormatter:
     """Renders memory/knowledge into the prompt sections (the historical shape).
     Substitute this to change titles or ordering."""
 
-    def format_memory(self, records):
+    def format_memory(self, records: "Sequence[MemoryRecord]") -> str:
         from .retrieval.context import format_memory
 
         return format_memory(records)
 
-    def format_knowledge(self, items):
+    def format_knowledge(self, items: "Sequence[KnowledgeItem]") -> str:
         from .retrieval.context import KnowledgeContext
 
         return KnowledgeContext(documents=list(items)).format()

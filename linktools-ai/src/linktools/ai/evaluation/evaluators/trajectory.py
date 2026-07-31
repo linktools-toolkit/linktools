@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 """TrajectoryEvaluator: check required/forbidden actions in the trajectory."""
 
-from ..models import EvalCase, EvalExecution, EvalScore
 
+from ..models import EvalScore
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalExecution
 
 class TrajectoryEvaluator:
     @property
@@ -12,8 +17,8 @@ class TrajectoryEvaluator:
 
     async def evaluate(
         self,
-        case: EvalCase,
-        execution: EvalExecution,
+        case: "EvalCase",
+        execution: "EvalExecution",
         snapshot: "object | None" = None,
     ) -> EvalScore:
         config = case.metadata.get("trajectory", {})

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Docker-backed execution boundary for untrusted process tools."""
 
 import asyncio
@@ -24,24 +27,36 @@ class ContainerSandbox:
         self.image = image
         self.timeout_seconds = timeout_seconds
         self._files = LocalSandbox(runtime_dir=self.runtime_dir)
-        self._processes: set[asyncio.subprocess.Process] = set()
+        self._processes: "set[asyncio.subprocess.Process]" = set()
 
-    async def list_dir(self, path=".", recursive=False):
+    async def list_dir(
+        self, path: str = ".", recursive: bool = False
+    ) -> "dict[str, Any]":
         return await self._files.list_dir(path, recursive)
 
-    async def read_file(self, path, selectors=None, max_chars=6000):
+    async def read_file(
+        self,
+        path: str,
+        selectors: "list[str] | None" = None,
+        max_chars: int = 6000,
+    ) -> "dict[str, Any]":
         return await self._files.read_file(path, selectors, max_chars)
 
-    async def write_file(self, path, content=None, updates=None):
+    async def write_file(
+        self,
+        path: str,
+        content: Any = None,
+        updates: "list[dict[str, Any]] | None" = None,
+    ) -> "dict[str, Any]":
         return await self._files.write_file(path, content, updates)
 
-    async def batch_files(self, operations):
+    async def batch_files(self, operations: "list[dict[str, Any]]") -> "dict[str, Any]":
         return await self._files.batch_files(operations)
 
-    async def apply_patch(self, diff):
+    async def apply_patch(self, diff: str) -> "dict[str, Any]":
         return await self._files.apply_patch(diff)
 
-    async def run_bash(self, command: str, timeout_ms: int | None = None):
+    async def run_bash(self, command: str, timeout_ms: "int | None" = None) -> "dict[str, Any]":
         if shutil.which("docker") is None:
             raise UnsafeSandboxError("Docker is required for ContainerSandbox")
         timeout = (timeout_ms / 1000) if timeout_ms is not None else self.timeout_seconds
@@ -72,7 +87,7 @@ class ContainerSandbox:
             "stderr": stderr.decode("utf-8", errors="replace")[-4000:],
         }
 
-    async def fork(self, branch_dir: Path):
+    async def fork(self, branch_dir: Path) -> "ContainerSandbox":
         await self._files.fork(branch_dir)
         return ContainerSandbox(runtime_dir=branch_dir, image=self.image, timeout_seconds=self.timeout_seconds)
 

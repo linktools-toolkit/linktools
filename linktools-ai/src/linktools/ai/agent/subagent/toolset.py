@@ -14,14 +14,21 @@ skill-private branch is only active when a ``skill_resolver`` is wired in
 (otherwise ``instruction_path`` raises that skill-private subagents are not
 enabled)."""
 
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from ...errors import SubagentExecutionError, SubagentNotFoundError
 from ..tool.models import ToolHandlerSet
 from ..extension.entrypoint import EntrypointRef
+from ..extension.resolver import EntrypointResolver
 from ..extension.scope import ExtensionScope
 from ...execution.identity import ParentRunIdentity
 from .runner import SubagentExecutorProtocol, enforce_depth
+
+if TYPE_CHECKING:
+    from ...model.policy import ModelPolicy
+    from ..spec import AgentSpec
+    from .provider import SubagentAgentProvider
+    from .skill_resolver import UnifiedSubagentResolver
 
 
 def _parse_scope(raw: "Mapping[str, Any] | None") -> "ExtensionScope | None":
@@ -38,9 +45,9 @@ def _parse_scope(raw: "Mapping[str, Any] | None") -> "ExtensionScope | None":
 async def _resolve_spec(
     agent_id: str,
     scope: "ExtensionScope | None",
-    subagent_provider,
-    entrypoint_resolver,
-):
+    subagent_provider: "SubagentAgentProvider | None",
+    entrypoint_resolver: "EntrypointResolver | None",
+) -> "AgentSpec":
     if scope is not None:
         if entrypoint_resolver is None:
             raise SubagentExecutionError(
@@ -60,8 +67,8 @@ async def _resolve_spec(
 def build_subagent_toolset(
     *,
     allowed_names: "set[str]",
-    subagent_provider,
-    entrypoint_resolver,
+    subagent_provider: "SubagentAgentProvider | None",
+    entrypoint_resolver: "EntrypointResolver | None",
     executor: "SubagentExecutorProtocol | None",
     depth_provider: "Callable[[], int]",
     max_depth: int,
@@ -69,9 +76,9 @@ def build_subagent_toolset(
     max_concurrency: int = 1,
     allowed_extensions: "set[str] | None" = None,
     parent: "ParentRunIdentity | None" = None,
-    skill_resolver=None,
+    skill_resolver: "UnifiedSubagentResolver | None" = None,
     active_skill_provider: "Callable[[], Any] | None" = None,
-    child_model_policy=None,
+    child_model_policy: "ModelPolicy | None" = None,
     parent_delegated_tools: "set[str] | None" = None,
 ) -> ToolHandlerSet:
     """Level-2 execution tool: call_subagent. Declared agent ids are admitted via

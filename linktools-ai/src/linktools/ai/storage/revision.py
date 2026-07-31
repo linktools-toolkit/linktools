@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Single-load metadata protocol and per-layer metadata views.
 
 A backend returns its current revision and the entries that changed since a
@@ -11,7 +14,6 @@ state. See ``.docs/linktools_ai_storage_composition_revision_io_optimization_spe
 so N concurrent readers trigger at most one backend load and a cancelled
 caller never publishes a half-loaded state."""
 
-from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
@@ -39,7 +41,7 @@ class StorageChange(Generic[KeyT, InfoT]):
     row, so a PATCH can delete a key from a caller's entry map."""
 
     key: KeyT
-    current: InfoT | None
+    current: "InfoT | None"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,7 @@ class MetadataLoad(Generic[RevisionT, KeyT, InfoT]):
 
     revision: RevisionT
     mode: MetadataLoadMode
-    changes: tuple[StorageChange[KeyT, InfoT], ...]
+    changes: "tuple[StorageChange[KeyT, InfoT], ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,30 +60,30 @@ class MetadataState(Generic[RevisionT, KeyT, InfoT]):
     """A materialized entry map keyed by business key at a revision."""
 
     revision: RevisionT
-    entries: Mapping[KeyT, InfoT]
+    entries: "Mapping[KeyT, InfoT]"
 
 
 @runtime_checkable
 class StorageReader(Protocol[KeyT, ValueT, InfoT]):
-    async def get(self, key: KeyT) -> ValueT | None: ...
+    async def get(self, key: KeyT) -> "ValueT | None": ...
 
-    async def list_info(self) -> tuple[InfoT, ...]: ...
+    async def list_info(self) -> "tuple[InfoT, ...]": ...
 
 
 @runtime_checkable
 class BatchStorageReader(Protocol[KeyT, ValueT]):
     async def get_many(
         self,
-        keys: tuple[KeyT, ...],
-    ) -> Mapping[KeyT, ValueT]: ...
+        keys: "tuple[KeyT, ...]",
+    ) -> "Mapping[KeyT, ValueT]": ...
 
 
 @runtime_checkable
 class StorageMetadataBackend(Protocol[RevisionT, KeyT, InfoT]):
     async def load_metadata(
         self,
-        after_revision: RevisionT | None,
-    ) -> MetadataLoad[RevisionT, KeyT, InfoT]:
+        after_revision: "RevisionT | None",
+    ) -> "MetadataLoad[RevisionT, KeyT, InfoT]":
         ...
 
     async def head_revision(self) -> RevisionT:
@@ -105,11 +107,11 @@ StorageInitializer = Callable[..., Awaitable[None]]
 
 
 def apply_metadata_load(
-    current: MetadataState[RevisionT, KeyT, InfoT] | None,
-    load: MetadataLoad[RevisionT, KeyT, InfoT],
+    current: "MetadataState[RevisionT, KeyT, InfoT] | None",
+    load: "MetadataLoad[RevisionT, KeyT, InfoT]",
     *,
-    info_key: Callable[[InfoT], KeyT],
-) -> MetadataState[RevisionT, KeyT, InfoT]:
+    info_key: "Callable[[InfoT], KeyT]",
+) -> "MetadataState[RevisionT, KeyT, InfoT]":
     """Fold one backend ``load`` into a caller state. REPLACE discards the
     prior state; PATCH applies only the listed changes (a ``None`` current
     removes the key). Entries are keyed by ``StorageChange.key`` (the
@@ -117,7 +119,7 @@ def apply_metadata_load(
     key is stable whether or not the info happens to encode it. The result is
     always a plain dict the caller owns."""
     if load.mode is MetadataLoadMode.REPLACE:
-        entries: dict[KeyT, InfoT] = {}
+        entries: "dict[KeyT, InfoT]" = {}
         for change in load.changes:
             if change.current is not None:
                 entries[change.key] = change.current
@@ -152,8 +154,8 @@ class LayerMetadataView:
         backend: Any,
         policy: LayerRefreshPolicy,
         *,
-        info_key: Callable[[Any], Any],
-        initializer: StorageInitializer | None = None,
+        info_key: "Callable[[Any], Any]",
+        initializer: "StorageInitializer | None" = None,
     ) -> None:
         if policy is LayerRefreshPolicy.REVISIONED and not isinstance(
             backend, StorageMetadataBackend
@@ -165,7 +167,7 @@ class LayerMetadataView:
         self.policy = policy
         self.info_key = info_key
         self.initializer = initializer
-        self._state: MetadataState[Any, Any, Any] | None = None
+        self._state: "MetadataState[Any, Any, Any] | None" = None
         self._lock = asyncio.Lock()
         self._epoch = 0
         self._always_generation = 0
@@ -174,7 +176,7 @@ class LayerMetadataView:
         if self.initializer is not None:
             await self.initializer(*args)
 
-    async def refresh(self) -> MetadataState[Any, Any, Any] | None:
+    async def refresh(self) -> "MetadataState[Any, Any, Any] | None":
         if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
             return self._state
         observed = self._epoch
@@ -183,7 +185,7 @@ class LayerMetadataView:
                 return self._state
             return await self._refresh_locked()
 
-    async def _refresh_locked(self) -> MetadataState[Any, Any, Any] | None:
+    async def _refresh_locked(self) -> "MetadataState[Any, Any, Any] | None":
         if isinstance(self.backend, StorageMetadataBackend):
             # REVISIONED patches against the held revision; STATIC loads a full
             # snapshot once (refresh()'s early return serves it thereafter).

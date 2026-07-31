@@ -24,17 +24,21 @@ within one process.
 Each public async method delegates to a ``_*_sync`` private method via
 ``asyncio.to_thread`` so blocking file I/O never runs on the event loop."""
 
+
 import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-
 from ....errors import MemoryConflictError, MemoryNotFoundError
 from ..models import MemoryMatch, MemoryRecord
-from ..scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
+from ..scope import LEGACY_TENANT_ID, is_legacy_tenant
 from ..store import UNSET
 from ....storage.filesystem import atomic_write, validate_id_segment
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..scope import MemoryScope
 
 def _record_to_json(record: MemoryRecord) -> dict:
     return {
@@ -76,7 +80,7 @@ def _record_from_json(raw: dict) -> MemoryRecord:
     )
 
 
-def _subscope_matches(record: MemoryRecord, scope: MemoryScope) -> bool:
+def _subscope_matches(record: MemoryRecord, scope: "MemoryScope") -> bool:
     # A NULL sub-scope field on the record means "shared at the tenant level":
     # visible to any user / workspace / session of that tenant. A non-NULL
     # record field is a hard match against the corresponding scope value, and
@@ -159,7 +163,7 @@ class FilesystemMemoryBackend:
         self,
         query: str,
         *,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         category: "str | None",
         limit: int,
     ) -> "tuple[MemoryMatch, ...]":
@@ -188,7 +192,7 @@ class FilesystemMemoryBackend:
         self,
         query: str,
         *,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         limit: int = 10,
         category: "str | None" = None,
     ) -> "tuple[MemoryMatch, ...]":

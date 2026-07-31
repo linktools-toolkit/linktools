@@ -25,7 +25,11 @@ class SessionWindowPolicy(Protocol):
 class NoopWindowPolicy:
     """Returns all messages unchanged."""
 
-    async def select_messages(self, messages, model_policy):  # type: ignore[no-untyped-def]
+    async def select_messages(
+        self,
+        messages: "Sequence[object]",
+        model_policy: "ModelPolicy",
+    ) -> "list[object]":
         return list(messages)
 
 
@@ -37,7 +41,11 @@ class RecentWindowPolicy:
             raise ValueError("max_messages must be >= 1")
         self._max = max_messages
 
-    async def select_messages(self, messages, model_policy):  # type: ignore[no-untyped-def]
+    async def select_messages(
+        self,
+        messages: "Sequence[object]",
+        model_policy: "ModelPolicy",
+    ) -> "list[object]":
         if len(messages) <= self._max:
             return list(messages)
         return list(messages[-self._max :])

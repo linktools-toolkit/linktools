@@ -31,7 +31,7 @@ from dataclasses import dataclass
 LEGACY_TENANT_ID = "__legacy__"
 
 
-def is_legacy_tenant(tenant_id: "object") -> bool:
+def is_legacy_tenant(tenant_id: object) -> bool:
     return tenant_id == LEGACY_TENANT_ID
 
 

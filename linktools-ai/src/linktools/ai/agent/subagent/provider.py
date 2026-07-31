@@ -9,23 +9,17 @@ Subagents are NOT a global default tool -- the tool only exists when an agent
 declares a subagent ref. Extension-scoped subagents resolve through the
 EntrypointResolver; global ones through the SubagentAgentProvider."""
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Protocol, runtime_checkable
-
-from ..assembly.models import AgentContribution, AgentFeatureRef
-from ..assembly.provider import AgentFeatureContext
+from dataclasses import dataclass, field
+from ..assembly.models import AgentContribution
 from ..extension.resolver import EntrypointResolver
 from ...execution.identity import ParentRunIdentity
-from .runner import (
-    DEFAULT_MAX_CONCURRENCY,
-    DEFAULT_MAX_DEPTH,
-    DEFAULT_TIMEOUT_SECONDS,
-    SubagentExecutorProtocol,
-    current_depth,
-)
+from .runner import DEFAULT_MAX_CONCURRENCY, DEFAULT_MAX_DEPTH, DEFAULT_TIMEOUT_SECONDS, SubagentExecutorProtocol, current_depth
 from .toolset import build_subagent_toolset
 
 if TYPE_CHECKING:
+    from ..assembly.models import AgentFeatureRef
+    from ..assembly.provider import AgentFeatureContext
     from ..spec import AgentSpec, AgentSpecProvider
 
 
@@ -33,7 +27,7 @@ if TYPE_CHECKING:
 class SubagentAgentProvider(Protocol):
     """Provides AgentSpec declarations usable as delegated subagents."""
 
-    async def list_ids(self) -> tuple[str, ...]: ...
+    async def list_ids(self) -> "tuple[str, ...]": ...
 
     async def get(self, agent_id: str) -> "AgentSpec": ...
 
@@ -44,7 +38,7 @@ class AgentBackedSubagentProvider:
     def __init__(self, agents: "AgentSpecProvider") -> None:
         self._agents = agents
 
-    async def list_ids(self) -> tuple[str, ...]:
+    async def list_ids(self) -> "tuple[str, ...]":
         return await self._agents.list_ids()
 
     async def get(self, agent_id: str) -> "AgentSpec":
@@ -75,8 +69,8 @@ class SubagentProvider:
 
     async def resolve(
         self,
-        ref: AgentFeatureRef,
-        context: AgentFeatureContext,
+        ref: "AgentFeatureRef",
+        context: "AgentFeatureContext",
     ) -> AgentContribution:
         cfg = dict(ref.config)
         max_depth = int(cfg.get("max_depth", DEFAULT_MAX_DEPTH))
@@ -171,7 +165,7 @@ class SubagentProvider:
             tools=declared_tool_definitions(toolset, descriptors)
         )
 
-    async def _allowed_names(self, ref: AgentFeatureRef) -> "set[str]":
+    async def _allowed_names(self, ref: "AgentFeatureRef") -> "set[str]":
         if ref.name == "*":
             if self.subagent_provider is None:
                 return set()

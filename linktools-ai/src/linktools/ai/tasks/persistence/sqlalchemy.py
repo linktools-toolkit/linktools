@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """SQLAlchemy TaskStore with database-side fencing."""
 
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import JSON, DateTime, Integer, String, select, update
 from sqlalchemy.exc import IntegrityError
@@ -15,25 +18,28 @@ from ...errors import StorageConflictError
 from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
 from ..models import TaskExecution, TaskNode, TaskPlan, TaskStatus
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
 
 class PlanRow(Base):
     __tablename__ = f"{TABLE_PREFIX}task_plans"
-    plan_id: Mapped[str] = mapped_column(String(255), unique=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    plan_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    payload: "Mapped[dict[str, Any]]" = mapped_column(JSON)
 
 
 class ExecutionRow(Base):
     __tablename__ = f"{TABLE_PREFIX}task_executions"
-    execution_id: Mapped[str] = mapped_column(String(255), unique=True)
-    plan_id: Mapped[str] = mapped_column(String(255), index=True)
-    node_id: Mapped[str] = mapped_column(String(255))
-    status: Mapped[str] = mapped_column(String(32), index=True)
-    owner: Mapped[str | None] = mapped_column(String(255))
-    fence: Mapped[int] = mapped_column(Integer, default=0)
-    attempt: Mapped[int] = mapped_column(Integer, default=0)
-    result: Mapped[Any] = mapped_column(JSON, nullable=True)
-    error: Mapped[Any] = mapped_column(JSON, nullable=True)
-    lease_expires_at: Mapped[Any] = mapped_column(DateTime(timezone=True), nullable=True)
+    execution_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    plan_id: "Mapped[str]" = mapped_column(String(255), index=True)
+    node_id: "Mapped[str]" = mapped_column(String(255))
+    status: "Mapped[str]" = mapped_column(String(32), index=True)
+    owner: "Mapped[str | None]" = mapped_column(String(255))
+    fence: "Mapped[int]" = mapped_column(Integer, default=0)
+    attempt: "Mapped[int]" = mapped_column(Integer, default=0)
+    result: "Mapped[Any]" = mapped_column(JSON, nullable=True)
+    error: "Mapped[Any]" = mapped_column(JSON, nullable=True)
+    lease_expires_at: "Mapped[Any]" = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class SqlAlchemyTaskBackend:
@@ -42,7 +48,7 @@ class SqlAlchemyTaskBackend:
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
-    async def initialize_storage(self, engine) -> None:
+    async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
@@ -113,7 +119,7 @@ class SqlAlchemyTaskBackend:
                 if attempt:
                     raise StorageConflictError("task plan write conflict")
 
-    async def get_plan(self, plan_id: str) -> TaskPlan | None:
+    async def get_plan(self, plan_id: str) -> "TaskPlan | None":
         async with self.session_factory() as session:
             row = await self._plan_row(session, plan_id)
             return None if row is None else self._plan(row)
@@ -131,7 +137,7 @@ class SqlAlchemyTaskBackend:
 
     create_execution = add_execution
 
-    async def get_execution(self, execution_id: str) -> TaskExecution | None:
+    async def get_execution(self, execution_id: str) -> "TaskExecution | None":
         async with self.session_factory() as session:
             row = await self._execution_row(session, execution_id)
             return None if row is None else self._execution(row)

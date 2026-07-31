@@ -18,24 +18,27 @@ rejects a tool-less run that actually needs tools, so a compiler without an
 executor is legal for tool-free agents and fails loudly at execution time
 rather than silently governing nothing."""
 
+
 from .middleware.capability import build_middleware_capability
 from .middleware.pipeline import MiddlewarePipeline
-from ..model.resolver import ModelResolver, ResolvedModel
 from .tool.pydantic_ai import build_policy_capability
 from .dependencies import AgentDependencies
 from .models import CompiledAgent
-from .spec import AgentSpec
 from .codec import OutputTypeRegistry
-
 from pydantic_ai import Agent as PydanticAgent
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..model.resolver import ModelResolver, ResolvedModel
+    from .spec import AgentSpec
 
 class AgentCompiler:
     def __init__(
         self,
         *,
-        model_resolver: ModelResolver,
-        tool_executor: object | None = None,
+        model_resolver: "ModelResolver",
+        tool_executor: "object | None" = None,
         middleware_pipeline: "MiddlewarePipeline | None" = None,
         output_types: "OutputTypeRegistry | None" = None,
     ) -> None:
@@ -44,8 +47,8 @@ class AgentCompiler:
         self._middleware_pipeline = middleware_pipeline
         self._output_types = output_types
 
-    async def compile(self, spec: AgentSpec) -> CompiledAgent:
-        resolved: ResolvedModel = self._model_resolver.resolve(spec.model)
+    async def compile(self, spec: "AgentSpec") -> CompiledAgent:
+        resolved: "ResolvedModel" = self._model_resolver.resolve(spec.model)
         capability = build_policy_capability(self._tool_executor) if self._tool_executor is not None else None
         capabilities = [capability] if capability is not None else []
         if self._middleware_pipeline is not None:

@@ -255,7 +255,7 @@ class ModuleError(CapabilityError):
     """A linktools module/capability cannot be loaded or used."""
 
 
-def missing_optional_class(name, extra, exc):
+def missing_optional_class(name: str, extra: str, exc: BaseException) -> type:
     """Return a placeholder class that raises ``ModuleError`` on instantiation.
 
     Used by packages that depend on an optional extra (e.g. ``linktools[git]``

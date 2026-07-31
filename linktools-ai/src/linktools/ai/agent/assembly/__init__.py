@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Agent feature declarations and the single assembly boundary."""
 
 from .assembler import AgentAssembler

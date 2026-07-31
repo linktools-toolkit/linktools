@@ -5,19 +5,22 @@ An agent may only read skills it declared; unauthorized
 reads raise SkillNotFoundError so existence is not leaked."""
 
 from typing import Any, Awaitable, Callable, Iterable
-
 from ...errors import SkillNotFoundError
 from ...observability.events.payloads import SkillListed, SkillRead
 from ..tool.models import ToolHandlerSet
-from .spec import SkillSpecProvider
 from .models import SkillContent, SkillSummary
 from .private import set_active_skill
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .spec import SkillSpec, SkillSpecProvider
 
 # Optional async emitter (event_store-backed) for skill operation events.
 SkillEmitter = "Callable[[Any], Awaitable[None]]"
 
 
-def summary_from_spec(skill_id: str, spec, *, authorized: bool = True) -> SkillSummary:
+def summary_from_spec(skill_id: str, spec: "SkillSpec", *, authorized: bool = True) -> SkillSummary:
     meta = dict(getattr(spec, "metadata", {}) or {})
     return SkillSummary(
         id=skill_id,
@@ -30,7 +33,7 @@ def summary_from_spec(skill_id: str, spec, *, authorized: bool = True) -> SkillS
 
 
 def build_skill_toolset(
-    skill_provider: SkillSpecProvider,
+    skill_provider: "SkillSpecProvider",
     *,
     authorized: "Iterable[str]",
     emit: "SkillEmitter | None" = None,

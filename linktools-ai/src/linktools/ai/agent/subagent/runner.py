@@ -9,13 +9,15 @@ SubagentProvider accepts any executor implementing this Protocol so the
 authorization + depth/concurrency/timeout gates are testable in isolation."""
 
 from typing import Any, Protocol, runtime_checkable
-
-from ..spec import AgentSpec
 from ..extension.scope import ExtensionScope
-from ...execution.identity import ParentRunIdentity
-from .models import SubagentResult
-
 import contextvars
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..spec import AgentSpec
+    from ...execution.identity import ParentRunIdentity
+    from .models import SubagentResult
 
 DEFAULT_MAX_DEPTH = 3
 DEFAULT_MAX_CONCURRENCY = 1
@@ -50,13 +52,13 @@ class SubagentExecutorProtocol(Protocol):
     async def execute(
         self,
         *,
-        agent_spec: AgentSpec,
+        agent_spec: "AgentSpec",
         task: str,
         context: "dict[str, Any] | None",
-        parent: ParentRunIdentity,
+        parent: "ParentRunIdentity",
         scope: "ExtensionScope | None",
         timeout_seconds: "float | None",
-    ) -> SubagentResult: ...
+    ) -> "SubagentResult": ...
 
 
 def enforce_depth(current_depth: int, max_depth: int) -> int:

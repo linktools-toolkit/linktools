@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from .document import Document
 
 
-def format_untrusted_context(content: str, *, source: str, revision: str | None = None) -> str:
+def format_untrusted_context(content: str, *, source: str, revision: "str | None" = None) -> str:
     """Render retrieved text with an explicit non-instruction boundary."""
     source_attr = source.replace('"', "'")
     revision_attr = (revision or "unknown").replace('"', "'")

@@ -21,13 +21,19 @@ passes model=SecuredModel(...) per call (never mutating the shared compiled
 agent)."""
 
 import dataclasses
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models import Model, ModelRequestParameters, StreamedResponse
+
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelMessage
+    from pydantic_ai.models import ModelSettings
+    from pydantic_ai.tools import RunContext
 
 from ...errors import (
     ModelInvocationDeniedError,
@@ -209,7 +215,12 @@ class SecuredModel(Model):
             return response
         return _replace_model_response_output(response, decision.modified_payload)
 
-    async def request(self, messages, model_settings, model_request_parameters):  # type: ignore[override]
+    async def request(
+        self,
+        messages: "list[ModelMessage]",
+        model_settings: "ModelSettings | None",
+        model_request_parameters: "ModelRequestParameters",
+    ) -> ModelResponse:
         effective_messages = await self._before(messages)
         response = await self._delegate.request(
             effective_messages, model_settings, model_request_parameters
@@ -218,8 +229,12 @@ class SecuredModel(Model):
 
     @asynccontextmanager
     async def request_stream(
-        self, messages, model_settings, model_request_parameters, run_context=None
-    ):  # type: ignore[override]
+        self,
+        messages: "list[ModelMessage]",
+        model_settings: "ModelSettings | None",
+        model_request_parameters: "ModelRequestParameters",
+        run_context: "RunContext[Any] | None" = None,
+    ) -> "AsyncIterator[StreamedResponse]":
         if self._pipeline is None:
             # No pipeline: stream the delegate directly (before_model is a no-op
             # when there is no pipeline).

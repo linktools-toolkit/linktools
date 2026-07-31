@@ -13,23 +13,20 @@ also ``sha256(content).hexdigest()``, the returned hex equals that etag, so a
 caller can store it as a history pointer (``object_id``) and have
 ``object_id == info.etag`` hold for free."""
 
-from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING
-
+import hashlib
 from sqlalchemy import select
 
-from .dialects import SqlAlchemyDialect
-
 if TYPE_CHECKING:
+    from .dialects import SqlAlchemyDialect
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import DeclarativeBase
 
 
 async def put_blob(
     session: "AsyncSession",
-    dialect: SqlAlchemyDialect,
+    dialect: "SqlAlchemyDialect",
     model: "type[DeclarativeBase]",
     content: bytes,
 ) -> str:

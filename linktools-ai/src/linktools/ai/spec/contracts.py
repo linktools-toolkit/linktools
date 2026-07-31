@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Specification source and codec contracts."""
 
-from __future__ import annotations
 
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
@@ -12,7 +14,7 @@ T = TypeVar("T")
 
 @runtime_checkable
 class SpecSource(Protocol):
-    async def list_ids(self, suffix: str) -> tuple[str, ...]: ...
+    async def list_ids(self, suffix: str) -> "tuple[str, ...]": ...
 
     async def read(self, path: str) -> str: ...
 

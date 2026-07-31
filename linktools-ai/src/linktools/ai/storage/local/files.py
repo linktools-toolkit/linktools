@@ -1,16 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Atomic local JSON and byte-file operations."""
 
-from __future__ import annotations
 
 import os
 import json
 import tempfile
 from pathlib import Path
+from ...json import normalize_json
 
-from ...json import JsonValue, normalize_json
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from ...json import JsonValue
 
-def atomic_write_bytes(path: str | Path, content: bytes) -> None:
+def atomic_write_bytes(path: "str | Path", content: bytes) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
@@ -24,7 +29,7 @@ def atomic_write_bytes(path: str | Path, content: bytes) -> None:
             os.unlink(temporary)
 
 
-def atomic_write_json(path: str | Path, value: JsonValue) -> None:
+def atomic_write_json(path: "str | Path", value: "JsonValue") -> None:
     atomic_write_bytes(
         path,
         json.dumps(
@@ -35,11 +40,11 @@ def atomic_write_json(path: str | Path, value: JsonValue) -> None:
     )
 
 
-def read_bytes(path: str | Path) -> bytes:
+def read_bytes(path: "str | Path") -> bytes:
     return Path(path).read_bytes()
 
 
-def read_json(path: str | Path) -> JsonValue:
+def read_json(path: "str | Path") -> "JsonValue":
     return normalize_json(
         json.loads(Path(path).read_text(encoding="utf-8"))
     )

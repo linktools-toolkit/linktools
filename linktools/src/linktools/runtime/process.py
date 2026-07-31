@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 import errno
 import io
@@ -80,7 +80,7 @@ if is_unix_like():
             self._stdout = stdout
             self._stderr = stderr
 
-        def get(self, timeout: "Timeout"):
+        def get(self, timeout: "Timeout") -> "Generator[tuple[int, AnyStr], Any, Any]":
             import select
 
             fds = []
@@ -118,7 +118,7 @@ if is_unix_like():
                 self.closed = False
                 self.buffer = bytearray()
 
-            def read_lines(self):
+            def read_lines(self) -> "Generator[tuple[int, AnyStr], Any, Any]":
                 data = None
                 try:
                     if not self.closed:
@@ -142,7 +142,7 @@ if is_unix_like():
                     yield from self.read_remain_line()
                     self.closed = True
 
-            def read_remain_line(self):
+            def read_remain_line(self) -> "Generator[tuple[int, AnyStr], Any, Any]":
                 if self.buffer:
                     self.buffer, line = bytearray(), self.buffer
                     line = line.decode(self.io.encoding, self.io.errors) \
@@ -179,7 +179,7 @@ else:
                 self._stderr_thread.start()
 
         @property
-        def is_alive(self):
+        def is_alive(self) -> bool:
             if self._stdout_finished and not self._stdout_finished.is_set():
                 return True
             if self._stderr_finished and not self._stderr_finished.is_set():
@@ -200,7 +200,7 @@ else:
                 event.set()
                 self._queue.put((None, None))
 
-        def get(self, timeout: "Timeout"):
+        def get(self, timeout: "Timeout") -> "Generator[tuple[int, AnyStr], Any, Any]":
             while self.is_alive:
                 remain = _coalesce(timeout.remaining, 1)
                 if remain <= 0:
@@ -235,7 +235,7 @@ class ProcessResult(object):
         self.timed_out = timed_out
 
     @property
-    def succeeded(self):
+    def succeeded(self) -> bool:
         return self.returncode == 0
 
     def __repr__(self):

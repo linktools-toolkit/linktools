@@ -6,9 +6,12 @@ the model is general (agentpack / toolpack / mcp-pack / workflow / custom)."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
-
-from .content import ExtensionContent, ExtensionContentPage, ExtensionContentRef
 from .scope import ExtensionScope
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .content import ExtensionContent, ExtensionContentPage, ExtensionContentRef
 
 _BUILTIN_KINDS = ("skill", "agentpack", "toolpack", "mcp-pack", "workflow", "custom")
 
@@ -48,11 +51,11 @@ class ExtensionContentSource(Protocol):
         *,
         limit: int = 50,
         cursor: "str | None" = None,
-    ) -> ExtensionContentPage: ...
+    ) -> "ExtensionContentPage": ...
 
     async def read_content(
         self,
-        ref: ExtensionContentRef,
+        ref: "ExtensionContentRef",
         *,
         max_bytes: "int | None" = None,
-    ) -> ExtensionContent: ...
+    ) -> "ExtensionContent": ...

@@ -3,25 +3,18 @@
 """Tool policy: runtime resolution (ResolvedToolPolicy / ToolPolicyResolver),
 the spec codec (ToolSpecCodec), and the spec index (ToolSpecIndex)."""
 
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
-
 from ..assembly.models import AgentFeatureRef
 from ...errors import InvalidSpecError, ToolPolicyResolutionError
-from ...governance.policy.rule import (
-    ApprovalMode,
-    Permission,
-    RiskLevel,
-    SideEffectKind,
-    ToolPolicyMetadata,
-)
+from ...governance.policy.rule import ApprovalMode, Permission, RiskLevel, SideEffectKind, ToolPolicyMetadata
 from ...json import freeze_value
-from ...spec import SpecCodec, SpecSource
+from ...spec import SpecCodec
 from ...spec.index import SpecIndex
-from ...spec.parsing import SpecLoader, StrictConfigReader, parse_yaml_text
+from ...spec.parsing import StrictConfigReader, parse_yaml_text
 from ...spec.source import SpecLoaderSource
-from .models import ToolDescriptor, ToolSpec
+from .models import ToolSpec
 
 
 # --- runtime resolution ------------------------------------------------------
@@ -83,6 +76,9 @@ def validate_idempotency_policy(
 
 
 if TYPE_CHECKING:
+    from ...spec import SpecSource
+    from ...spec.parsing import SpecLoader
+    from .models import ToolDescriptor
     from ..execution.context import RunContext
 
 
@@ -175,7 +171,7 @@ class ToolInvocationContext:
     """Everything the governance chain (pipeline, executor, middleware, events)
     needs for one tool call."""
 
-    descriptor: ToolDescriptor
+    descriptor: "ToolDescriptor"
     arguments: "Mapping[str, Any]"
     run_context: "RunContext"
     policy: ResolvedToolPolicy
@@ -189,7 +185,7 @@ class ToolPolicyResolver(Protocol):
 
     async def resolve(
         self,
-        descriptor: ToolDescriptor,
+        descriptor: "ToolDescriptor",
         context: "RunContext",
     ) -> ResolvedToolPolicy: ...
 
@@ -335,7 +331,7 @@ class MetadataBackedPolicyProvider:
         self._provider = metadata_provider
 
     async def resolve(
-        self, descriptor: ToolDescriptor, context: "RunContext"
+        self, descriptor: "ToolDescriptor", context: "RunContext"
     ) -> ResolvedToolPolicy:
         # Fail closed: if the underlying metadata source is unavailable, raise
         # so ToolExecutionService can emit a degraded event and deny
@@ -560,7 +556,7 @@ class ToolSpecIndex(SpecIndex[ToolSpec]):
 
     def __init__(
         self,
-        source: SpecSource,
+        source: "SpecSource",
         *,
         codec: "ToolSpecCodec | None" = None,
         suffix: str = ".yaml",
@@ -573,7 +569,7 @@ class ToolSpecIndex(SpecIndex[ToolSpec]):
 
     @classmethod
     def from_specloader(
-        cls, loader: SpecLoader, *, suffix: str = ".yaml"
+        cls, loader: "SpecLoader", *, suffix: str = ".yaml"
     ) -> "ToolSpecIndex":
         return cls(SpecLoaderSource(loader), suffix=suffix)
 

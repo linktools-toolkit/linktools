@@ -20,8 +20,10 @@ from .structured import StructuredCommandError, StructuredCommandOutputError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
+    from typing import Any
     from ..container import BaseContainer
     from ..manager import ContainerManager
+    from .structured import CommandResult
 
 
 class RuntimeInspectionError(ContainerError):
@@ -117,7 +119,7 @@ def _looks_like_not_found(message: str) -> bool:
     return "no such" in lowered and ("container" in lowered or "object" in lowered)
 
 
-def validate_inspect_payload(payload, expected_non_empty: bool = False) -> "list[dict]":
+def validate_inspect_payload(payload: "Any", expected_non_empty: bool = False) -> "list[dict[str, Any]]":
     """Shared shape validator for both the batch and per-ID ``docker
     inspect`` paths: root must be a JSON array, every item must be a JSON
     object. ``expected_non_empty=True`` additionally rejects a
@@ -353,7 +355,7 @@ class DockerInspector:
             backend=self.manager.container_type,
         )
 
-    def validate_compose(self, containers: "Iterable[BaseContainer]"):
+    def validate_compose(self, containers: "Iterable[BaseContainer]") -> "CommandResult":
         process = self.manager.runtime.create_docker_compose_process(
             tuple(containers), *self.manager.compose_runner.config_args(quiet=True),
             privilege=False, capture_output=True,

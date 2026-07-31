@@ -1,18 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """SQLAlchemy execution persistence with transactional lifecycle commands."""
 
-from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from dataclasses import asdict
 from datetime import datetime, timezone
 from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, asc, desc, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
-
 from ...storage.coordination.lease import Lease, claim, renew
 from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageError
 from ...json import JsonValue, normalize_json
-from ..commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
 from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
 from ...storage.sqlalchemy.base import Base
@@ -20,8 +21,13 @@ from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
 from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
-from ..snapshots import AgentSnapshotData, RunSnapshot
+from ..snapshots import RunSnapshot
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
+
+if TYPE_CHECKING:
+    from ..commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
+    from ..snapshots import AgentSnapshotData
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class SessionRow(Base):
@@ -29,11 +35,11 @@ class SessionRow(Base):
     __table_args__ = (
         Index("ix_tenant_user", "tenant_id", "user_id", "id"),
     )
-    session_id: Mapped[str] = mapped_column(String(255), unique=True)
-    tenant_id: Mapped[str | None] = mapped_column(String(255))
-    user_id: Mapped[str | None] = mapped_column(String(255))
-    next_turn_sequence: Mapped[int] = mapped_column(Integer, default=1)
-    latest_completed_run_id: Mapped[str | None] = mapped_column(String(255))
+    session_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    tenant_id: "Mapped[str | None]" = mapped_column(String(255))
+    user_id: "Mapped[str | None]" = mapped_column(String(255))
+    next_turn_sequence: "Mapped[int]" = mapped_column(Integer, default=1)
+    latest_completed_run_id: "Mapped[str | None]" = mapped_column(String(255))
 
 
 class TurnRow(Base):
@@ -42,53 +48,53 @@ class TurnRow(Base):
         UniqueConstraint("session_id", "sequence", name="uq_session_turn_sequence"),
         Index("ix_session_sequence", "session_id", "sequence"),
     )
-    session_id: Mapped[str] = mapped_column(String(255))
-    sequence: Mapped[int] = mapped_column(Integer)
-    execution_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    input: Mapped[JsonValue] = mapped_column(JSON)
-    assistant_summary: Mapped[JsonValue | None] = mapped_column(JSON, nullable=True)
-    status: Mapped[str] = mapped_column(String(32), index=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    session_id: "Mapped[str]" = mapped_column(String(255))
+    sequence: "Mapped[int]" = mapped_column(Integer)
+    execution_id: "Mapped[str]" = mapped_column(String(255), unique=True, index=True)
+    input: "Mapped[JsonValue]" = mapped_column(JSON)
+    assistant_summary: "Mapped[JsonValue | None]" = mapped_column(JSON, nullable=True)
+    status: "Mapped[str]" = mapped_column(String(32), index=True)
+    completed_at: "Mapped[datetime | None]" = mapped_column(DateTime(timezone=True))
 
 
 class ExecutionRow(Base):
     __tablename__ = f"{TABLE_PREFIX}executions"
-    execution_id: Mapped[str] = mapped_column(String(255), unique=True)
-    session_id: Mapped[str] = mapped_column(String(255), index=True)
-    kind: Mapped[str] = mapped_column(String(40))
-    runnable_id: Mapped[str] = mapped_column(String(255))
-    runnable_type: Mapped[str] = mapped_column(String(40))
-    session_turn_sequence: Mapped[int | None] = mapped_column(Integer)
-    parent_execution_id: Mapped[str | None] = mapped_column(String(255))
-    root_execution_id: Mapped[str] = mapped_column(String(255), index=True)
-    status: Mapped[str] = mapped_column(String(40), index=True)
-    definition: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
-    definition_hash: Mapped[str] = mapped_column(String(64))
+    execution_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    session_id: "Mapped[str]" = mapped_column(String(255), index=True)
+    kind: "Mapped[str]" = mapped_column(String(40))
+    runnable_id: "Mapped[str]" = mapped_column(String(255))
+    runnable_type: "Mapped[str]" = mapped_column(String(40))
+    session_turn_sequence: "Mapped[int | None]" = mapped_column(Integer)
+    parent_execution_id: "Mapped[str | None]" = mapped_column(String(255))
+    root_execution_id: "Mapped[str]" = mapped_column(String(255), index=True)
+    status: "Mapped[str]" = mapped_column(String(40), index=True)
+    definition: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
+    definition_hash: "Mapped[str]" = mapped_column(String(64))
     # Variable payload (input / approval / error) packed into one JSON column to
     # keep the table's large-field count within the DBA limit; _record/_finish
     # (un)pack it. `definition` stays separate (it drives definition_hash + the
     # RunDefinition rebuild).
-    data: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
-    owner: Mapped[str | None] = mapped_column(String(255))
-    fence: Mapped[int] = mapped_column(Integer, default=0)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    snapshot_revision: Mapped[int] = mapped_column(Integer, default=0)
-    trace_sequence: Mapped[int] = mapped_column(Integer, default=0)
-    event_sequence: Mapped[int] = mapped_column(Integer, default=0)
-    tenant_id: Mapped[str | None] = mapped_column(String(255))
-    user_id: Mapped[str | None] = mapped_column(String(255))
+    data: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
+    owner: "Mapped[str | None]" = mapped_column(String(255))
+    fence: "Mapped[int]" = mapped_column(Integer, default=0)
+    lease_expires_at: "Mapped[datetime | None]" = mapped_column(DateTime(timezone=True), index=True)
+    cancel_requested_at: "Mapped[datetime | None]" = mapped_column(DateTime(timezone=True))
+    snapshot_revision: "Mapped[int]" = mapped_column(Integer, default=0)
+    trace_sequence: "Mapped[int]" = mapped_column(Integer, default=0)
+    event_sequence: "Mapped[int]" = mapped_column(Integer, default=0)
+    tenant_id: "Mapped[str | None]" = mapped_column(String(255))
+    user_id: "Mapped[str | None]" = mapped_column(String(255))
 
 
 class SnapshotRow(Base):
     __tablename__ = f"{TABLE_PREFIX}execution_snapshots"
-    execution_id: Mapped[str] = mapped_column(String(255), unique=True)
-    revision: Mapped[int] = mapped_column(Integer)
-    resume_messages: Mapped[list[JsonValue]] = mapped_column(JSON)
+    execution_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    revision: "Mapped[int]" = mapped_column(Integer)
+    resume_messages: "Mapped[list[JsonValue]]" = mapped_column(JSON)
     # final_output + usage packed into one JSON column (DBA large-field limit).
-    outcome: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
-    status: Mapped[str] = mapped_column(String(32))
-    trace_end_sequence: Mapped[int] = mapped_column(Integer)
+    outcome: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
+    status: "Mapped[str]" = mapped_column(String(32))
+    trace_end_sequence: "Mapped[int]" = mapped_column(Integer)
 
 
 class TraceRow(Base):
@@ -96,10 +102,10 @@ class TraceRow(Base):
     __table_args__ = (
         UniqueConstraint("execution_id", "sequence", name="uq_execution_trace_sequence"),
     )
-    execution_id: Mapped[str] = mapped_column(String(255))
-    sequence: Mapped[int] = mapped_column(Integer)
-    kind: Mapped[str] = mapped_column(String(40))
-    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    execution_id: "Mapped[str]" = mapped_column(String(255))
+    sequence: "Mapped[int]" = mapped_column(Integer)
+    kind: "Mapped[str]" = mapped_column(String(40))
+    payload: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
 
 
 class EventRow(Base):
@@ -107,10 +113,10 @@ class EventRow(Base):
     __table_args__ = (
         UniqueConstraint("execution_id", "sequence", name="uq_execution_event_sequence"),
     )
-    execution_id: Mapped[str] = mapped_column(String(255))
-    sequence: Mapped[int] = mapped_column(Integer)
-    type: Mapped[str] = mapped_column(String(120))
-    payload: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    execution_id: "Mapped[str]" = mapped_column(String(255))
+    sequence: "Mapped[int]" = mapped_column(Integer)
+    type: "Mapped[str]" = mapped_column(String(120))
+    payload: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
 
 
 class EvaluationRow(Base):
@@ -118,14 +124,14 @@ class EvaluationRow(Base):
     __table_args__ = (
         Index("ix_execution_created", "execution_id", "created_at"),
     )
-    evaluation_id: Mapped[str] = mapped_column(String(255), unique=True)
-    execution_id: Mapped[str] = mapped_column(String(255), index=True)
-    evaluator: Mapped[str] = mapped_column(String(255), index=True)
-    score: Mapped[float | None] = mapped_column(Float)
-    result: Mapped[dict[str, JsonValue]] = mapped_column(JSON)
+    evaluation_id: "Mapped[str]" = mapped_column(String(255), unique=True)
+    execution_id: "Mapped[str]" = mapped_column(String(255), index=True)
+    evaluator: "Mapped[str]" = mapped_column(String(255), index=True)
+    score: "Mapped[float | None]" = mapped_column(Float)
+    result: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
 
 
-def _approval(data: dict[str, JsonValue]) -> RunApproval:
+def _approval(data: "dict[str, JsonValue]") -> RunApproval:
     decision = data.get("decision")
     return RunApproval(
         data["approval_id"],
@@ -174,7 +180,7 @@ class SqlAlchemyExecutionBackend:
     def __init__(self, session_factory) -> None:
         self.session_factory = session_factory
 
-    async def initialize_storage(self, engine) -> None:
+    async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
@@ -215,7 +221,7 @@ class SqlAlchemyExecutionBackend:
             query = query.with_for_update()
         return await session.scalar(query)
 
-    async def create_session(self, *, session_id: str, user_id: str | None, tenant_id: str | None) -> SessionRecord:
+    async def create_session(self, *, session_id: str, user_id: "str | None", tenant_id: "str | None") -> SessionRecord:
         try:
             async with self.session_factory() as session:
                 async with session.begin():
@@ -255,8 +261,8 @@ class SqlAlchemyExecutionBackend:
     def _owned_session(
         row: SessionRow,
         *,
-        user_id: str | None,
-        tenant_id: str | None,
+        user_id: "str | None",
+        tenant_id: "str | None",
     ) -> SessionRecord:
         if row.user_id != user_id or row.tenant_id != tenant_id:
             raise StorageConflictError("session ownership conflict")
@@ -270,12 +276,12 @@ class SqlAlchemyExecutionBackend:
             as_utc(row.updated_at),
         )
 
-    async def get_session(self, session_id: str) -> SessionRecord | None:
+    async def get_session(self, session_id: str) -> "SessionRecord | None":
         async with self.session_factory() as session:
             row = await self._session_row(session, session_id)
             return None if row is None else SessionRecord(row.session_id, row.user_id, row.tenant_id, row.next_turn_sequence, row.latest_completed_run_id, row.created_at, row.updated_at)
 
-    async def list_session_turns(self, session_id: str, *, before_sequence: int | None = None, limit: int = 50) -> Page[SessionTurn]:
+    async def list_session_turns(self, session_id: str, *, before_sequence: "int | None" = None, limit: int = 50) -> "Page[SessionTurn]":
         async with self.session_factory() as session:
             query = select(TurnRow).where(TurnRow.session_id == session_id)
             if before_sequence is not None:
@@ -284,14 +290,14 @@ class SqlAlchemyExecutionBackend:
         values = tuple(reversed(tuple(SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, row.assistant_summary, RunStatus(row.status), row.created_at, row.completed_at) for row in rows[:limit])))
         return Page(values, len(rows) > limit, rows[limit - 1].sequence if len(rows) > limit else None)
 
-    async def load_session_context(self, session_id: str) -> tuple[JsonValue, ...]:
+    async def load_session_context(self, session_id: str) -> "tuple[JsonValue, ...]":
         session = await self.get_session(session_id)
         if session is None or session.latest_completed_run_id is None:
             return ()
         snapshot = await self.get_snapshot(session.latest_completed_run_id)
         return () if snapshot is None else snapshot.resume_messages
 
-    async def start_run(self, command: StartExecution) -> RunRecord:
+    async def start_run(self, command: "StartExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 owner = await self._session_row(session, command.session_id, for_update=True)
@@ -319,12 +325,12 @@ class SqlAlchemyExecutionBackend:
                 await session.flush()
                 return _record(row)
 
-    async def get_run(self, run_id: str) -> RunRecord | None:
+    async def get_run(self, run_id: str) -> "RunRecord | None":
         async with self.session_factory() as session:
             row = await self._run_row(session, run_id)
             return None if row is None else _record(row)
 
-    async def claim_run(self, command: ClaimExecution) -> RunRecord:
+    async def claim_run(self, command: "ClaimExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id, for_update=True)
@@ -357,7 +363,7 @@ class SqlAlchemyExecutionBackend:
                 await session.flush()
                 return _record(claimed)
 
-    async def heartbeat_run(self, command: HeartbeatExecution) -> RunRecord:
+    async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id, for_update=True)
@@ -379,7 +385,7 @@ class SqlAlchemyExecutionBackend:
                 updated = await self._run_row(session, command.run_id)
                 return _record(updated)
 
-    async def request_cancel(self, command: RequestCancellation) -> RunRecord:
+    async def request_cancel(self, command: "RequestCancellation") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id, for_update=True)
@@ -441,7 +447,7 @@ class SqlAlchemyExecutionBackend:
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.cancelling", payload={}, created_at=command.requested_at))
                 return _record(cancelling)
 
-    async def decide_approval(self, command: DecideApproval) -> RunRecord:
+    async def decide_approval(self, command: "DecideApproval") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id, for_update=True)
@@ -516,7 +522,7 @@ class SqlAlchemyExecutionBackend:
                         turn.completed_at = decided_at
                 return _record(await self._run_row(session, command.run_id))
 
-    async def resume_run(self, command: ResumeExecution) -> RunRecord:
+    async def resume_run(self, command: "ResumeExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id, for_update=True)
@@ -547,7 +553,7 @@ class SqlAlchemyExecutionBackend:
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.resumed", payload={}, created_at=resumed_at))
                 return _record(resumed)
 
-    async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: tuple[NewRunTraceStep, ...]) -> int:
+    async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: "tuple[NewRunTraceStep, ...]") -> int:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, run_id, for_update=True)
@@ -568,7 +574,7 @@ class SqlAlchemyExecutionBackend:
                     session.add(TraceRow(execution_id=run_id, sequence=expected_sequence + offset, kind=step.kind, payload=step.payload, created_at=step.created_at))
                 return next_sequence
 
-    async def list_trace_steps(self, run_id: str, *, after_sequence: int = 0, through_sequence: int | None = None) -> tuple[RunTraceStep, ...]:
+    async def list_trace_steps(self, run_id: str, *, after_sequence: int = 0, through_sequence: "int | None" = None) -> "tuple[RunTraceStep, ...]":
         async with self.session_factory() as session:
             query = select(TraceRow).where(TraceRow.execution_id == run_id, TraceRow.sequence > after_sequence).order_by(asc(TraceRow.sequence))
             if through_sequence is not None:
@@ -576,7 +582,7 @@ class SqlAlchemyExecutionBackend:
             rows = (await session.scalars(query)).all()
         return tuple(RunTraceStep(row.execution_id, row.sequence, row.kind, row.payload, row.created_at) for row in rows)
 
-    async def get_snapshot(self, run_id: str) -> RunSnapshot | None:
+    async def get_snapshot(self, run_id: str) -> "RunSnapshot | None":
         async with self.session_factory() as session:
             row = await self._snapshot_row(session, run_id)
             if row is None:
@@ -584,7 +590,7 @@ class SqlAlchemyExecutionBackend:
             outcome = row.outcome or {}
             return RunSnapshot("run-snapshot.v1", row.execution_id, row.revision, tuple(row.resume_messages), outcome.get("final_output"), RunStatus(row.status), RunUsage(**(outcome.get("usage") or {})), row.trace_end_sequence, row.created_at)
 
-    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: AgentSnapshotData, status: RunStatus, pending_approval: RunApproval | None = None, error: RunError | None = None) -> RunRecord:
+    async def _finish(self, run_id: str, owner: str, fence: int, snapshot: "AgentSnapshotData", status: RunStatus, pending_approval: "RunApproval | None" = None, error: "RunError | None" = None) -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, run_id, for_update=True)
@@ -651,19 +657,19 @@ class SqlAlchemyExecutionBackend:
                 await session.flush()
                 return _record(finished)
 
-    async def pause_run(self, command: PauseExecution) -> RunRecord:
+    async def pause_run(self, command: "PauseExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.PAUSED, command.pending_approval)
 
-    async def complete_run(self, command: CompleteExecution) -> RunRecord:
+    async def complete_run(self, command: "CompleteExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.COMPLETED)
 
-    async def fail_run(self, command: FailExecution) -> RunRecord:
+    async def fail_run(self, command: "FailExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.FAILED, error=command.error)
 
-    async def acknowledge_cancel(self, command: AcknowledgeCancellation) -> RunRecord:
+    async def acknowledge_cancel(self, command: "AcknowledgeCancellation") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.CANCELLED)
 
-    async def abort_run(self, command: AbortExecution) -> RunRecord:
+    async def abort_run(self, command: "AbortExecution") -> RunRecord:
         # Unlike fail_run, there is no snapshot to persist here -- an
         # AbortExecution fires on a programming/config/protocol error, before
         # the engine ever produced a coherent outcome to snapshot.
@@ -707,7 +713,7 @@ class SqlAlchemyExecutionBackend:
                 await session.flush()
                 return _record(aborted)
 
-    async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> Page[RunEvent]:
+    async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> "Page[RunEvent]":
         async with self.session_factory() as session:
             rows = (await session.scalars(select(EventRow).where(EventRow.execution_id == run_id, EventRow.sequence > after_sequence).order_by(asc(EventRow.sequence)).limit(limit + 1))).all()
         values = tuple(RunEvent(row.execution_id, row.sequence, row.type, row.payload, row.created_at) for row in rows)
@@ -718,7 +724,7 @@ class SqlAlchemyExecutionBackend:
             async with session.begin():
                 session.add(EvaluationRow(evaluation_id=evaluation.evaluation_id, execution_id=evaluation.run_id, evaluator=evaluation.evaluator, score=evaluation.score, result=evaluation.result, created_at=evaluation.created_at, updated_at=evaluation.created_at))
 
-    async def list_evaluations(self, run_id: str) -> tuple[RunEvaluation, ...]:
+    async def list_evaluations(self, run_id: str) -> "tuple[RunEvaluation, ...]":
         async with self.session_factory() as session:
             rows = (await session.scalars(select(EvaluationRow).where(EvaluationRow.execution_id == run_id).order_by(asc(EvaluationRow.created_at)))).all()
         return tuple(RunEvaluation(row.evaluation_id, row.execution_id, row.evaluator, row.score, row.result, row.created_at) for row in rows)

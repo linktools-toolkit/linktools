@@ -15,6 +15,7 @@ from linktools.decorator import cached_property
 from .container import BaseContainer, ContainerError, NoContainerInstalledError
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from typing import Any
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
@@ -162,23 +163,23 @@ class ContainerManager:
         return self.env_config.get("COMPOSE_PROJECT_NAME")
 
     @cached_property
-    def root_path(self):
+    def root_path(self) -> "Path":
         return pathlib.Path(os.path.dirname(__file__))
 
     @property
-    def app_path(self):
+    def app_path(self) -> "Path":
         return self.env_config.get("DOCKER_APP_PATH")
 
     @property
-    def app_data_path(self):
+    def app_data_path(self) -> "Path":
         return self.env_config.get("DOCKER_APP_DATA_PATH")
 
     @cached_property
-    def data_path(self):
+    def data_path(self) -> "Path":
         return self.environ.get_data_path("container")
 
     @cached_property
-    def temp_path(self):
+    def temp_path(self) -> "Path":
         return self.environ.get_temp_path("container")
 
     @cached_property

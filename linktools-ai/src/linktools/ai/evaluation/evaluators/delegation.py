@@ -9,8 +9,13 @@ chosen, was context passed correctly, did permissions shrink, was output
 reused) is a business-layer concern that builds on the snapshot this evaluator
 reads."""
 
-from ..models import EvalCase, EvalExecution, EvalScore
 
+from ..models import EvalScore
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalExecution
 
 class DelegationEvaluator:
     @property
@@ -19,8 +24,8 @@ class DelegationEvaluator:
 
     async def evaluate(
         self,
-        case: EvalCase,
-        execution: EvalExecution,
+        case: "EvalCase",
+        execution: "EvalExecution",
         snapshot: "object | None" = None,
     ) -> EvalScore:
         expected = case.metadata.get("expects_delegation")

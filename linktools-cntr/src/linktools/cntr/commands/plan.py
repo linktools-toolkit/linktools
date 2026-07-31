@@ -1,9 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Plan serialization and read-only lifecycle rendering helpers."""
+from typing import TYPE_CHECKING
 import dataclasses
 import json
-
 from ..container import ContainerError
 from ..execution.model import ExecutionPlan
+
+if TYPE_CHECKING:
+    import logging
+    from ..manager import ContainerManager
 
 
 def _plan_to_dict(plan: "ExecutionPlan") -> dict:
@@ -13,7 +20,7 @@ def _plan_to_dict(plan: "ExecutionPlan") -> dict:
     return data
 
 
-def render_plan(logger, plan: "ExecutionPlan") -> None:
+def render_plan(logger: "logging.Logger", plan: "ExecutionPlan") -> None:
     logger.info("action: %s" % plan.action)
     logger.info("project: %s" % plan.project)
     logger.info("full: %s" % plan.full)
@@ -44,7 +51,9 @@ def render_plan(logger, plan: "ExecutionPlan") -> None:
         logger.info("[WARN] %s" % warning)
 
 
-def maybe_dry_run(manager, logger, action, names=None, pull=False, dry_run=False, as_json=False):
+def maybe_dry_run(manager: "ContainerManager", logger: "logging.Logger", action: str,
+                  names: "list[str] | None" = None, pull: bool = False,
+                  dry_run: bool = False, as_json: bool = False) -> bool:
     if as_json and not dry_run:
         raise ContainerError("--json requires --dry-run")
     if not dry_run:

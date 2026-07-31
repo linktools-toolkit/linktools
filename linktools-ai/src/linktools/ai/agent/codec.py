@@ -17,27 +17,22 @@ The shared markdown and strict-config primitives live in ``spec.parsing``;
 this module imports them one-way.
 """
 
-from __future__ import annotations
 
 from typing import Any
-
 from collections.abc import Mapping
-
 from ..spec import SpecCodec
-from ..spec.parsing import (
-    StrictConfigReader,
-    parse_markdown_text,
-    resolved_name,
-)
+from ..spec.parsing import StrictConfigReader, parse_markdown_text, resolved_name
 from decimal import Decimal
-
-from ..json import JsonValue
 from ..model.codec import parse_model_policy
 from ..model.policy import ModelPolicy
 from .assembly.models import AgentFeatureRef
 from ..errors import InvalidSpecError
 from .spec import AgentSpec, MiddlewareRef, PromptSpec
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..json import JsonValue
 
 def parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
     """Build a tuple[MiddlewareRef] from a list of names or {name, config}
@@ -71,12 +66,12 @@ def parse_middleware_refs(items: Any) -> "tuple[MiddlewareRef, ...]":
     return tuple(refs)
 
 
-def _parse_feature_refs(items: Any) -> tuple[AgentFeatureRef, ...]:
+def _parse_feature_refs(items: Any) -> "tuple[AgentFeatureRef, ...]":
     if items is None:
         return ()
     if not isinstance(items, (list, tuple)):
         raise InvalidSpecError("features must be a list")
-    refs: list[AgentFeatureRef] = []
+    refs: "list[AgentFeatureRef]" = []
     for index, item in enumerate(items):
         if not isinstance(item, Mapping):
             raise InvalidSpecError(f"features[{index}]: invalid feature ref")
@@ -180,7 +175,7 @@ class AgentSpecCodec:
     def __init__(self, output_types: "OutputTypeRegistry | None" = None) -> None:
         self._output_types = output_types
 
-    def encode(self, spec: AgentSpec) -> JsonValue:
+    def encode(self, spec: AgentSpec) -> "JsonValue":
         output_ref = None
         if spec.output_schema is not None:
             if self._output_types is None:
@@ -217,7 +212,7 @@ class AgentSpecCodec:
             "metadata": dict(spec.metadata),
         }
 
-    def decode(self, value: JsonValue) -> AgentSpec:
+    def decode(self, value: "JsonValue") -> AgentSpec:
         data = dict(value)
         raw_features = data.get("features") or ()
         instructions = data["instructions"]

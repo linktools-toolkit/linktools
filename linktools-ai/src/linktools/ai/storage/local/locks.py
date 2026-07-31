@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Ordered keyed locks for single-process local stores."""
 
-from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -10,13 +12,13 @@ from typing import AsyncIterator
 class KeyedLocks:
     def __init__(self) -> None:
         self._guard = asyncio.Lock()
-        self._locks: dict[tuple[str, str], tuple[asyncio.Lock, int]] = {}
+        self._locks: "dict[tuple[str, str], tuple[asyncio.Lock, int]]" = {}
 
     @asynccontextmanager
-    async def acquire(self, *keys: tuple[str, str]) -> AsyncIterator[None]:
+    async def acquire(self, *keys: "tuple[str, str]") -> "AsyncIterator[None]":
         rank = {"session": 0, "run": 1}
         ordered = tuple(sorted(set(keys), key=lambda item: (rank.get(item[0], 2), item)))
-        acquired: list[asyncio.Lock] = []
+        acquired: "list[asyncio.Lock]" = []
         async with self._guard:
             locks = []
             for key in ordered:

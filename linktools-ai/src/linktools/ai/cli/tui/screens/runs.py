@@ -6,15 +6,15 @@
 Read-only listing of sessions / runs / pending approvals through
 ``RuntimeClient``. Esc returns to chat."""
 
-from typing import TYPE_CHECKING
-
+from typing import TYPE_CHECKING, Any
+from collections.abc import Awaitable, Callable
 from rich.markup import escape
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import RichLog
 
 if TYPE_CHECKING:
+    from textual.app import ComposeResult
     from ...client import RuntimeClient
 
 
@@ -27,7 +27,7 @@ class RunsScreen(Screen):
         super().__init__()
         self.client = client
 
-    def compose(self) -> ComposeResult:
+    def compose(self) -> "ComposeResult":
         yield RichLog(id="runs-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:
@@ -36,7 +36,7 @@ class RunsScreen(Screen):
     async def _load(self) -> None:
         log = self.query_one("#runs-log", RichLog)
 
-        async def section(title: str, fetch, render) -> None:
+        async def section(title: str, fetch: "Callable[[], Awaitable[list[Any]]]", render: "Callable[[Any], str]") -> None:
             log.write(f"[b]{title}[/b]")
             items = await fetch()
             if not items:

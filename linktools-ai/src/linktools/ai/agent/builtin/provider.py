@@ -15,15 +15,15 @@ Recognized refs:
 
 from ...errors import AgentFeatureNotFoundError, AgentAssemblyError
 from ...governance.policy.rule import RiskLevel, SideEffectKind
-from ..assembly.models import AgentContribution, AgentFeatureRef
-from ..assembly.provider import AgentFeatureContext
-from ..tool.models import (
-    ToolCategory,
-    ToolDescriptor,
-    ToolSource,
-    declared_tool_definitions,
-)
+from ..assembly.models import AgentContribution
+from ..tool.models import ToolCategory, ToolDescriptor, ToolSource, declared_tool_definitions
 from .toolset import BuiltinToolContext, build_builtin_toolset
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..assembly.models import AgentFeatureRef
+    from ..assembly.provider import AgentFeatureContext
 
 _WILDCARD = {"*", ""}
 
@@ -38,8 +38,8 @@ class BuiltinToolProvider:
 
     async def resolve(
         self,
-        ref: AgentFeatureRef,
-        context: AgentFeatureContext,
+        ref: "AgentFeatureRef",
+        context: "AgentFeatureContext",
     ) -> AgentContribution:
         if context.sandbox is None:
             raise AgentAssemblyError(
@@ -56,7 +56,7 @@ class BuiltinToolProvider:
 
 
 def _builtin_descriptors(
-    enabled: "set[str]", ref: AgentFeatureRef
+    enabled: "set[str]", ref: "AgentFeatureRef"
 ) -> "tuple[ToolDescriptor, ...]":
     """Build per-tool descriptors. The Provider knows its tools' categories —
     this is a declaration, not name-based inference by the governance layer."""

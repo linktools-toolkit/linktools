@@ -64,8 +64,8 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
     commands: "list[SubCommand]" = []
 
-    def register_command(name: str, description: str):
-        def wrapper(cls: "Callable[[str, str], SubCommand]"):
+    def register_command(name: str, description: str) -> "Callable[[Callable[[str, str], SubCommand]], None]":
+        def wrapper(cls: "Callable[[str, str], SubCommand]") -> None:
             commands.append(cls(name, description))
             return None
 
@@ -85,7 +85,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             f"alias_v{environ.version}",
         )
 
-    def remove_cache_files():
+    def remove_cache_files() -> None:
         stub_path = get_stub_path()
         if os.path.exists(stub_path):
             environ.logger.info(f"Remove stub path {stub_path} ...")
@@ -107,7 +107,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("-c", "--command", help="shell command", default=None)
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace") -> int:
             shell = environ.get_tool("shell")
             if not shell.exists:
                 raise NotImplementedError(f"Not found shell path")
@@ -137,7 +137,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("--reload", action="store_true", help="reload alias script", default=False)
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace") -> None:
             shell = args.shell or get_default_shell(environ)
             alias_path = get_alias_path() / f"alias.{shell}"
             alias_path.parent.mkdir(parents=True, exist_ok=True)
@@ -196,7 +196,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                 help="java version, such as 11.0.23 / 17.0.11 / 22.0.1")
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace") -> None:
             java = environ.get_tool("java")
             if args.version:
                 java = java.copy(version=args.version)
@@ -228,19 +228,19 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                                     help="Disable isolation when building a modern source distribution")
                 return parser
 
-            def run(self, args: "argparse.Namespace"):
+            def run(self, args: "argparse.Namespace") -> int:
 
-                def unify_name(name):
+                def unify_name(name: str) -> str:
                     return name.lower().replace("-", "_") if name else name
 
-                def parse_package(package):
+                def parse_package(package: str) -> "tuple[str, list[str]]":
                     match = re.match(r"^([a-zA-Z0-9_-]+)(?:\[([a-zA-Z0-9_,-]+)\])?$", package)
                     if not match:
                         raise CommandError(f"Invalid package: {package}")
                     name, deps = match.group(1), match.group(2)
                     return unify_name(name), deps.split(",") if deps else []
 
-                def get_package(name):
+                def get_package(name: str) -> "tuple[str | None, str | None, str | None]":
                     name = unify_name(name)
                     if not args.packages:  # Update all packages when no package arguments are provided.
                         return name, name, ""
@@ -300,7 +300,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
             parser.add_argument("days", metavar="DAYS", nargs="?", type=int, default=7, help="expire days")
             return parser
 
-        def run(self, args: "argparse.Namespace"):
+        def run(self, args: "argparse.Namespace") -> None:
             remove_cache_files()
             environ.clean_temp_files(expire_days=args.days)
 
@@ -322,12 +322,12 @@ if __name__ == '__main__':
 
             class Main(CommandMain):
 
-                def init_logging(self):
+                def init_logging(self) -> None:
                     environ.logging.bootstrap()
 
             return Main(self)
 
-        def init_base_arguments(self, parser: "CommandParser"):
+        def init_base_arguments(self, parser: "CommandParser") -> None:
             pass
 
         def init_global_arguments(self, parser: "CommandParser") -> None:
@@ -354,7 +354,7 @@ if __name__ == '__main__':
                 self.logger.level = logging.DEBUG
             return args.func(args)
 
-        def on_tool(self, args: "argparse.Namespace"):
+        def on_tool(self, args: "argparse.Namespace") -> int:
             return self.environ.get_tool(args.name) \
                 .popen(*args.args) \
                 .call()

@@ -9,6 +9,7 @@ from . import _shared
 if TYPE_CHECKING:
     from argparse import Namespace
     from linktools.cli import SubCommand
+    from linktools.core import Config
 
 
 class ExecCommand(BaseCommand):
@@ -17,11 +18,11 @@ class ExecCommand(BaseCommand):
     """
 
     @property
-    def name(self):
+    def name(self) -> str:
         return "exec"
 
     @property
-    def config(self):
+    def config(self) -> "Config":
         return _shared.manager.env_config
 
     @property

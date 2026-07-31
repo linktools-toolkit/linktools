@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """StorageDatabase: the shared SQLAlchemy database every SQL store binds to.
 
 A ``StorageDatabase`` carries the async engine, session factory, the shared
@@ -9,18 +12,19 @@ server database (MySQL/PostgreSQL) is ``CoordinationScope.SHARED_DATABASE`` and
 may be shared across workers.
 """
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-
 from .sqlalchemy.base import Base
 from .sqlalchemy.conventions import TABLE_PREFIX
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 class CoordinationScope(StrEnum):
     # Single-process: the local SQLite database is owned by one OS process.
@@ -33,7 +37,7 @@ class CoordinationScope(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class StorageDatabase:
-    engine: AsyncEngine
+    engine: "AsyncEngine"
     session_factory: async_sessionmaker
     coordination_scope: CoordinationScope
     metadata: "type[DeclarativeBase]" = Base
@@ -46,7 +50,7 @@ def scope_for_url(url: str) -> CoordinationScope:
     return CoordinationScope.PROCESS if url.startswith("sqlite") else CoordinationScope.SHARED_DATABASE
 
 
-def build_sqlite_storage(path: str | Path) -> StorageDatabase:
+def build_sqlite_storage(path: "str | Path") -> StorageDatabase:
     """Build a single-process SQLite StorageDatabase. No file is created until
     ``initialize_storage`` runs -- ``create_async_engine`` opens lazily."""
     from sqlalchemy.ext.asyncio import create_async_engine
@@ -60,7 +64,7 @@ def build_sqlite_storage(path: str | Path) -> StorageDatabase:
     )
 
 
-def build_storage(url: str, *, coordination_scope: CoordinationScope | None = None) -> StorageDatabase:
+def build_storage(url: str, *, coordination_scope: "CoordinationScope | None" = None) -> StorageDatabase:
     """Build a StorageDatabase for an arbitrary async URL. The coordination scope
     defaults to PROCESS for SQLite and SHARED_DATABASE for server databases."""
     from sqlalchemy.ext.asyncio import create_async_engine

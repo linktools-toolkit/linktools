@@ -9,6 +9,7 @@ screens binds Esc to pop back. ``run_tui`` is the function the thin ``lt ai
 tui`` shell reaches through :mod:`linktools.ai.cli.tui` (which translates a
 missing Textual install)."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from textual.app import App
@@ -66,8 +67,8 @@ class LinktoolsAIApp(App):
 
 def run_tui(
     *,
-    project,
-    remote,
+    project: "str | Path | None",
+    remote: "str | None",
     base_url: "str | None" = None,
     model: "str | None" = None,
     api_key: "str | None" = None,

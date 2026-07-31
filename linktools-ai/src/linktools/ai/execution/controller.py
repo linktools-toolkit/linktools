@@ -1,23 +1,29 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """In-process ownership and cancellation of active executions."""
+
 
 import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any
-
 from ..errors import ExecutionAlreadyActiveError
-from .cancellation import CancellationToken
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .cancellation import CancellationToken
 
 @dataclass(slots=True)
 class ActiveExecution:
     task: asyncio.Task
-    token: CancellationToken
+    token: "CancellationToken"
 
 
 class ExecutionControllerRegistry:
     def __init__(self) -> None:
-        self._active: dict[str, ActiveExecution] = {}
+        self._active: "dict[str, ActiveExecution]" = {}
         self._lock = asyncio.Lock()
 
     async def register(
@@ -36,8 +42,8 @@ class ExecutionControllerRegistry:
     async def start(
         self,
         execution_id: str,
-        coroutine: Coroutine[Any, Any, object],
-        token: CancellationToken,
+        coroutine: "Coroutine[Any, Any, object]",
+        token: "CancellationToken",
     ) -> asyncio.Task:
         """Atomically reject duplicates before scheduling the new execution."""
         async with self._lock:
@@ -72,6 +78,6 @@ class ExecutionControllerRegistry:
             if active is not None and active.task is task:
                 self._active.pop(execution_id, None)
 
-    def get_token(self, execution_id: str) -> CancellationToken | None:
+    def get_token(self, execution_id: str) -> "CancellationToken | None":
         active = self._active.get(execution_id)
         return active.token if active is not None else None

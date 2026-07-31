@@ -10,17 +10,17 @@ from .platform import get_system, is_unix_like, is_windows
 
 if is_windows():
 
-    def get_user(uid=None):
+    def get_user(uid: "int | str | None" = None) -> str:
         import getpass
         return getpass.getuser()
 
-    def get_uid(user=None):
+    def get_uid(user: "str | None" = None) -> int:
         return 0
 
-    def get_gid(user=None):
+    def get_gid(user: "str | None" = None) -> int:
         return 0
 
-    def get_shell_path():
+    def get_shell_path() -> str:
         import shutil
         shell_path = shutil.which("powershell") or shutil.which("cmd")
         if shell_path:
@@ -33,26 +33,26 @@ if is_windows():
 
 elif is_unix_like():
 
-    def get_user(uid=None):
+    def get_user(uid: "int | str | None" = None) -> str:
         if uid is not None:
             import pwd
             return pwd.getpwuid(int(uid)).pw_name
         import getpass
         return getpass.getuser()
 
-    def get_uid(user=None):
+    def get_uid(user: "str | None" = None) -> int:
         if user is not None:
             import pwd
             return pwd.getpwnam(str(user)).pw_uid
         return os.getuid()
 
-    def get_gid(user=None):
+    def get_gid(user: "str | None" = None) -> int:
         if user is not None:
             import pwd
             return pwd.getpwnam(str(user)).pw_gid
         return os.getgid()
 
-    def get_shell_path():
+    def get_shell_path() -> str:
         if "SHELL" in os.environ:
             shell_path = os.environ["SHELL"]
             if shell_path and os.path.exists(shell_path):
@@ -66,14 +66,14 @@ elif is_unix_like():
 
 else:
 
-    def get_user(uid=None):
+    def get_user(uid: "int | str | None" = None) -> str:
         raise NotImplementedError("Unsupported system `%s`" % get_system())
 
-    def get_uid(user=None):
+    def get_uid(user: "str | None" = None) -> int:
         raise NotImplementedError("Unsupported system `%s`" % get_system())
 
-    def get_gid(user=None):
+    def get_gid(user: "str | None" = None) -> int:
         raise NotImplementedError("Unsupported system `%s`" % get_system())
 
-    def get_shell_path():
+    def get_shell_path() -> str:
         raise NotImplementedError("Unsupported system `%s`" % get_system())

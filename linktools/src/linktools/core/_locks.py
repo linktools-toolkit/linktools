@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Unified locking (LockManager).
 
 Cache no longer owns general-purpose locks. LockManager provides

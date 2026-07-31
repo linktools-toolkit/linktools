@@ -1,31 +1,33 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Single-process content-addressed artifact persistence."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
-
 from ...errors import ArtifactRecordConflictError
 from ...storage.local.files import atomic_write_bytes, atomic_write_json, read_json
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import Sha256Digest, StorageId, safe_child
 from ..digest import ArtifactDigest
-from ..models import (
-    ArtifactBlobNotFoundError,
-    ArtifactProvenance,
-    ArtifactRecord,
-    ArtifactRef,
-)
+from ..models import ArtifactBlobNotFoundError, ArtifactProvenance, ArtifactRecord, ArtifactRef
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterable
 
 _BATCH_SIZE = 4 * 1024 * 1024
 
 
 class LocalArtifactBackend:
-    def __init__(self, root: str | Path = ".linktools") -> None:
+    def __init__(self, root: "str | Path" = ".linktools") -> None:
         self.root = Path(root)
         self._temp = self.root / "temp"
         self._locks = KeyedLocks()
@@ -51,7 +53,7 @@ class LocalArtifactBackend:
     def _blob_path(self, digest: str) -> Path:
         return safe_child(self.root, "blobs", Sha256Digest.parse(digest))
 
-    async def put(self, *, record: ArtifactRecord, content) -> ArtifactRecord:
+    async def put(self, *, record: ArtifactRecord, content: "AsyncIterable[bytes]") -> ArtifactRecord:
         StorageId.parse(record.ref.id)
         StorageId.parse(record.tenant_id)
         ArtifactDigest.parse(record.ref.sha256)
@@ -118,7 +120,7 @@ class LocalArtifactBackend:
             return
         temporary.replace(blob)
 
-    async def get_record(self, artifact_id: str, *, tenant_id: str) -> ArtifactRecord | None:
+    async def get_record(self, artifact_id: str, *, tenant_id: str) -> "ArtifactRecord | None":
         path = self._record_path(artifact_id, tenant_id)
         if not await asyncio.to_thread(path.exists):
             return None
@@ -130,7 +132,7 @@ class LocalArtifactBackend:
         record = ArtifactRecord(**raw)
         return record if record.tenant_id == tenant_id else None
 
-    async def open(self, artifact_id: str, *, tenant_id: str):
+    async def open(self, artifact_id: str, *, tenant_id: str) -> "AsyncIterator[bytes]":
         record = await self.get_record(artifact_id, tenant_id=tenant_id)
         if record is None:
             raise ArtifactBlobNotFoundError(artifact_id)

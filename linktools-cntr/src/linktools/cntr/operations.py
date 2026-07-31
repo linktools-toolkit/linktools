@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from .container import BaseContainer
     from .manager import ContainerManager
+    from .runtime.inspect import ProjectRuntimeState
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,7 @@ class ComposeOperations:
             context, selection.services, output_format=output_format, quiet=check,
         )
 
-    def status(self):
+    def status(self) -> "tuple[tuple[BaseContainer, ...], ProjectRuntimeState]":
         """Full-project actual status: always queries every
         installed container -- the CONTAINER filter for ``ct-cntr status`` is
         a display-only narrowing, applied by the caller."""

@@ -1,11 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Canonical identity for tool calls: binding fingerprints and idempotency keys."""
+
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+from ...json import canonical_json_bytes, normalize_json
 
-from ...json import JsonValue, canonical_json_bytes, normalize_json
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from ...json import JsonValue
 
 @dataclass(frozen=True, slots=True)
 class ToolRevisionSet:
@@ -32,9 +39,9 @@ class ToolExecutionBinding:
 
 def hash_tool_arguments(
     tool_name: str,
-    arguments: Mapping[str, JsonValue],
+    arguments: "Mapping[str, JsonValue]",
 ) -> str:
-    payload: JsonValue = {
+    payload: "JsonValue" = {
         "tool_name": tool_name,
         "arguments": normalize_json(dict(arguments)),
     }

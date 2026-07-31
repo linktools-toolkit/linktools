@@ -6,6 +6,7 @@ from linktools.cli import CommandMain
 from linktools.mobile.cli import IOSCommand
 
 if TYPE_CHECKING:
+    from linktools.cli import CommandParser
     from linktools.mobile.cli import IOSNamespace
 
 
@@ -22,10 +23,10 @@ class Command(IOSCommand):
     ]
 
     @property
-    def main(self):
+    def main(self) -> "CommandMain":
         return CommandMain(self, show_log_level=False, show_log_time=False)
 
-    def init_arguments(self, parser) -> None:
+    def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("ios_args", nargs="...", metavar="args", help="go-ios args")
 
     def run(self, args: "IOSNamespace") -> "int | None":

@@ -385,7 +385,7 @@ _widths = [
 ]
 
 
-def get_char_width(char):
+def get_char_width(char: str) -> int:
     """Return the display width of a character.
 
     Args:

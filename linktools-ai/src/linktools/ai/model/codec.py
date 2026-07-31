@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Strict decoding helpers for model configuration."""
 
 from typing import Any
@@ -7,7 +10,7 @@ from ..spec.parsing import StrictConfigReader
 from .policy import ModelPolicy
 
 
-def parse_model_policy(payload: dict[str, Any]) -> ModelPolicy:
+def parse_model_policy(payload: "dict[str, Any]") -> ModelPolicy:
     reader = StrictConfigReader(
         payload,
         allowed={

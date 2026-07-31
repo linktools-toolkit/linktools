@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Shared event emission policy for security and observability events."""
 
 import logging
@@ -65,7 +68,7 @@ class DefaultSecurityEventSanitizer:
             )
         return result
 
-    def _value(self, value: Any, key: str | None = None) -> Any:
+    def _value(self, value: Any, key: "str | None" = None) -> Any:
         if key and key.lower() in self._SECRET_KEYS:
             return "***REDACTED***"
         if isinstance(value, str):
@@ -126,7 +129,7 @@ class DurableSecurityEventEmitter:
         *,
         context: Any = None,
         failure_mode: Any = "fail_closed",
-        sanitizer: SecurityEventSanitizer | None = None,
+        sanitizer: "SecurityEventSanitizer | None" = None,
     ) -> None:
         self._store = event_store
         self._context = context

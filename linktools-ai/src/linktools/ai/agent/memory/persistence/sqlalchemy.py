@@ -10,22 +10,25 @@ Search uses ``content LIKE`` with optional ``owner_id`` / ``category`` filters
 "omit this field" from `category=None` meaning "explicitly clear" (same
 semantics as FilesystemMemoryBackend)."""
 
+
 import json
 from datetime import datetime, timezone
 from typing import Callable
-
 from sqlalchemy import DECIMAL, Index, Integer, String, Text, UniqueConstraint, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
-
 from ....errors import MemoryConflictError, MemoryNotFoundError
 from ....storage.sqlalchemy.base import Base
 from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ..models import MemoryMatch, MemoryRecord
-from ..scope import LEGACY_TENANT_ID, MemoryScope, is_legacy_tenant
+from ..scope import LEGACY_TENANT_ID, is_legacy_tenant
 from ..store import UNSET
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from ..scope import MemoryScope
 
 class MemoryRow(Base):
     __tablename__ = f"{TABLE_PREFIX}memories"
@@ -35,17 +38,17 @@ class MemoryRow(Base):
         *timestamp_indexes(),
     )
 
-    memory_id: Mapped[str] = mapped_column(String(128), comment="Memory id")
-    tenant_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Tenant id")
-    owner_id: Mapped[str] = mapped_column(String(128), comment="Owner id")
-    content: Mapped[str] = mapped_column(Text, comment="Memory content")
-    category: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="Category")
-    confidence: Mapped[float | None] = mapped_column(DECIMAL(5, 4), nullable=True, comment="Confidence [0,1]")
-    version: Mapped[int] = mapped_column(Integer, comment="Version (optimistic lock)")
-    metadata_json: Mapped[str] = mapped_column(Text, comment="Metadata (JSON)")
-    user_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="User id")
-    workspace_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Workspace id")
-    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True, comment="Session id")
+    memory_id: "Mapped[str]" = mapped_column(String(128), comment="Memory id")
+    tenant_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Tenant id")
+    owner_id: "Mapped[str]" = mapped_column(String(128), comment="Owner id")
+    content: "Mapped[str]" = mapped_column(Text, comment="Memory content")
+    category: "Mapped[str | None]" = mapped_column(String(64), nullable=True, comment="Category")
+    confidence: "Mapped[float | None]" = mapped_column(DECIMAL(5, 4), nullable=True, comment="Confidence [0,1]")
+    version: "Mapped[int]" = mapped_column(Integer, comment="Version (optimistic lock)")
+    metadata_json: "Mapped[str]" = mapped_column(Text, comment="Metadata (JSON)")
+    user_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="User id")
+    workspace_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Workspace id")
+    session_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Session id")
 
 
 def _row_to_record(row: MemoryRow) -> MemoryRecord:
@@ -116,7 +119,7 @@ class SqlAlchemyMemoryBackend:
         self,
         query: str,
         *,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         limit: int = 10,
         category: "str | None" = None,
     ) -> "tuple[MemoryMatch, ...]":
@@ -259,7 +262,7 @@ class SqlAlchemyMemoryBackend:
 
     @staticmethod
     async def _raise_write_conflict(
-        session: AsyncSession,
+        session: "AsyncSession",
         memory_id: str,
         expected_version: int,
     ) -> None:

@@ -7,21 +7,15 @@ and a max_bytes read clamp."""
 
 from pathlib import Path
 from typing import Mapping
-
-from ...errors import (
-    ExtensionNotFoundError,
-    ExtensionContentAccessDeniedError,
-    ExtensionContentNotFoundError,
-)
+from ...errors import ExtensionNotFoundError, ExtensionContentAccessDeniedError, ExtensionContentNotFoundError
 from .spec import ExtensionContentSource
-from .content import (
-    ExtensionContent,
-    ExtensionContentInfo,
-    ExtensionContentPage,
-    ExtensionContentRef,
-    sanitize_extension_path,
-)
-from .scope import ExtensionScope
+from .content import ExtensionContent, ExtensionContentInfo, ExtensionContentPage, sanitize_extension_path
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .content import ExtensionContentRef
+    from .scope import ExtensionScope
 
 DEFAULT_MAX_READ_BYTES = 65536
 DEFAULT_LIST_LIMIT = 50
@@ -77,7 +71,7 @@ class DirectoryExtensionContentSource:
 
     async def list_entries(
         self,
-        scope: ExtensionScope,
+        scope: "ExtensionScope",
         path: str = "",
         *,
         limit: int = DEFAULT_LIST_LIMIT,
@@ -120,7 +114,7 @@ class DirectoryExtensionContentSource:
 
     async def read_content(
         self,
-        ref: ExtensionContentRef,
+        ref: "ExtensionContentRef",
         *,
         max_bytes: "int | None" = None,
     ) -> ExtensionContent:

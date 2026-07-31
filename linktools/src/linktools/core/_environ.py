@@ -17,7 +17,7 @@ from linktools.decorator import cached_property
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import IO, Any, Callable
     from linktools.types import T, Config, Tools, Tool, UrlFile, PathType
     from ._paths import EnvironmentPaths
     from ._logging import LoggingManager
@@ -40,25 +40,25 @@ class ConfigDict(dict):
         super().__init__(*args, **kwargs)
 
     @property
-    def revision(self):
+    def revision(self) -> int:
         return self._revision
 
     def __setitem__(self, key, value):
         super().__setitem__(key, value)
         self._revision += 1
 
-    def update(self, *args, **kwargs):
+    def update(self, *args, **kwargs) -> None:
         values = dict(*args, **kwargs)
         if values:
             super().update(values)
             self._revision += 1
 
-    def clear(self):
+    def clear(self) -> None:
         if self:
             super().clear()
             self._revision += 1
 
-    def update_from_file(self, filename, load, silent=False):
+    def update_from_file(self, filename: "PathType", load: "Callable[[IO], Any]", silent: bool = False) -> bool:
         try:
             with open(filename, "rb") as f:
                 obj = load(f)
@@ -192,7 +192,7 @@ class BaseEnviron(abc.ABC):
         prefix = metadata.__name__.upper()
         environment = profile.get("env", {})
 
-        def resolve(key, default):
+        def resolve(key: str, default: "Any") -> "Any":
             names = (f"{prefix}_PATH", f"{prefix}_STORAGE_PATH") \
                 if key == "STORAGE_PATH" else (f"{prefix}_{key}",)
             raw = environment.get(key, MISSING)
@@ -614,7 +614,7 @@ class Environ(BaseEnviron):
                              _tool_payload, _validate_user_tool_payload)
         from linktools.errors import ToolDefinitionError
 
-        def definition_error(message):
+        def definition_error(message: str) -> None:
             raise ToolDefinitionError("tool configuration: %s" % message)
 
         definitions = {}

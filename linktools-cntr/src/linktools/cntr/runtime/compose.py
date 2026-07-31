@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import Any
     from ..context import EventContext
     from ..manager import ContainerManager
 
@@ -86,24 +87,24 @@ class ComposeRunner:
         args.extend(options.services)
         return args
 
-    def build(self, context: "EventContext", options: ComposeOptions):
+    def build(self, context: "EventContext", options: ComposeOptions) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.build_args(options)
         ).check_call()
 
-    def pull_args(self, services):
+    def pull_args(self, services: "Sequence[str]") -> "list[str]":
         return ["pull", "--ignore-buildable", *services]
 
-    def pull(self, context: "EventContext", services):
+    def pull(self, context: "EventContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.pull_args(services)
         ).check_call()
 
-    def options_for_build(self, services, pull=False):
+    def options_for_build(self, services: "Sequence[str]", pull: bool = False) -> ComposeOptions:
         return ComposeOptions(pull=pull, services=list(services),
                               emit_default_pull=False)
 
-    def final_model(self, context: "EventContext"):
+    def final_model(self, context: "EventContext") -> "dict[str, Any]":
         result = self.manager.structured_runner.execute_json(
             self.manager.runtime.create_docker_compose_process(
                 context.containers, *self.config_args(output_format="json"),
@@ -115,17 +116,17 @@ class ComposeRunner:
             raise ContainerError("Docker Compose returned an invalid final model")
         return result
 
-    def up(self, context: "EventContext", options: ComposeOptions):
+    def up(self, context: "EventContext", options: ComposeOptions) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, *self.up_args(options)
         ).check_call()
 
-    def stop(self, context: "EventContext", services: "Sequence[str]"):
+    def stop(self, context: "EventContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, "stop", *services
         ).check_call()
 
-    def down(self, context: "EventContext", services: "Sequence[str]"):
+    def down(self, context: "EventContext", services: "Sequence[str]") -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers, "down", *services
         ).check_call()
@@ -155,7 +156,7 @@ class ComposeRunner:
             services: "Sequence[str]" = (),
             output_format: "str | None" = None,
             quiet: bool = False,
-    ):
+    ) -> int:
         return self.manager.runtime.create_docker_compose_process(
             context.containers,
             *self.config_args(services=services, output_format=output_format, quiet=quiet),

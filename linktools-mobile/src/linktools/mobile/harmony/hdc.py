@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 from typing import TYPE_CHECKING
 
@@ -124,7 +124,7 @@ class HdcDevice(BaseDevice):
         args = ["-t", self.id, *args]
         return self._hdc.exec(*args, **kwargs)
 
-    def make_shell_args(self, *args: "Any"):
+    def make_shell_args(self, *args: "Any") -> "list[str]":
         """
         生成shell命令参数
         :param args: shell命令

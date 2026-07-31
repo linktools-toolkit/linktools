@@ -5,8 +5,15 @@ never mutating history. Before re-running, the snapshot is validated: every
 referenced artifact must exist and hash to its id, so a tampered or truncated
 snapshot is refused."""
 
+from typing import TYPE_CHECKING
 from ..artifact import ArtifactIntegrityError
-from .models import EvalCase, EvalExecution, EvalTarget
+from .models import EvalCase
+
+if TYPE_CHECKING:
+    from .models import EvalExecution, EvalTarget
+    from ..artifact.store import ArtifactStore
+    from .protocols import EvalExecutor
+    from .snapshot import EvalSnapshot
 
 # EvalSnapshot is imported lazily (string annotation) to avoid an import cycle
 # with snapshot.py at module load; both live in the same package.
@@ -16,7 +23,7 @@ class SnapshotValidationError(Exception):
     """Raised when a snapshot's artifacts are missing or fail integrity checks."""
 
 
-async def validate_snapshot(snapshot, artifact_store, *, tenant_id: str) -> None:
+async def validate_snapshot(snapshot: "EvalSnapshot", artifact_store: "ArtifactStore", *, tenant_id: str) -> None:
     """Validate a EvalSnapshot before replay. Every artifact it references (run
     record, run definition, input, output, events, asset snapshots) must
     resolve for this tenant AND hash back to its content-addressed id -- get()
@@ -46,13 +53,13 @@ async def validate_snapshot(snapshot, artifact_store, *, tenant_id: str) -> None
 
 
 async def replay(
-    snapshot,
-    executor,
-    target: EvalTarget,
-    artifact_store,
+    snapshot: "EvalSnapshot",
+    executor: "EvalExecutor",
+    target: "EvalTarget",
+    artifact_store: "ArtifactStore",
     *,
     tenant_id: str,
-) -> EvalExecution:
+) -> "EvalExecution":
     """Re-run a snapshot: validate it, then drive ``executor`` against a case
     reconstructed from the snapshot's input. The executor mints a fresh run, so
     history is never modified -- replay always creates a new execution."""

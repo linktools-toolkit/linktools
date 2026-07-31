@@ -8,7 +8,6 @@ SwarmSpec. Parse failures propagate the domain's existing errors
 (InvalidSpecError / SpecParseError). SwarmSpec itself already lives in
 swarm/spec.py."""
 
-from __future__ import annotations
 
 from typing import Any
 

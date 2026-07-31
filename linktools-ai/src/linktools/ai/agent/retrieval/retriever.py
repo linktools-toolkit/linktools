@@ -3,11 +3,10 @@
 """Retriever Protocol + MemoryRetriever: projects MemoryRecord -> Document."""
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
-
 from .document import Document
-from .scope import RetrievalScope
 
 if TYPE_CHECKING:
+    from .scope import RetrievalScope
     from ..memory.scope import MemoryScope
     from ..memory.store import MemoryStore
 
@@ -18,7 +17,7 @@ class Retriever(Protocol):
         self,
         query: str,
         *,
-        scope: RetrievalScope,
+        scope: "RetrievalScope",
         limit: int = 10,
     ) -> "tuple[Document, ...]": ...
 
@@ -37,7 +36,7 @@ class MemoryRetriever:
         self,
         query: str,
         *,
-        scope: RetrievalScope,
+        scope: "RetrievalScope",
         limit: int = 10,
     ) -> "tuple[Document, ...]":
         from ..memory.scope import MemoryScope

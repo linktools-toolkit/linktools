@@ -8,7 +8,7 @@ from ._common import get_environ, get_logger
 _user_agent = None
 
 
-def user_agent(style=None) -> str:
+def user_agent(style: "str | None" = None) -> str:
     global _user_agent
 
     if _user_agent is None:
@@ -35,7 +35,7 @@ def user_agent(style=None) -> str:
     return _user_agent.fallback
 
 
-def make_url(scheme: str, host: str, port: int, *paths: str, queries=None) -> str:
+def make_url(scheme: str, host: str, port: int, *paths: str, queries: "dict[str, object] | None" = None) -> str:
     url = f"{scheme}://{host}"
     if port is not None:
         if (scheme == "http" and port != 80) or (scheme == "https" and port != 443):
@@ -43,7 +43,7 @@ def make_url(scheme: str, host: str, port: int, *paths: str, queries=None) -> st
     return join_url(url, *paths, queries=queries)
 
 
-def join_url(url: str, *paths: str, queries=None) -> str:
+def join_url(url: str, *paths: str, queries: "dict[str, object] | None" = None) -> str:
     from urllib import parse
 
     result = url
@@ -86,7 +86,7 @@ def _parseparam(s):
         s = s[end:]
 
 
-def parse_header(line):
+def parse_header(line: str) -> "tuple[str, dict[str, str]]":
     parts = _parseparam(";" + line)
     key = parts.__next__()
     pdict = {}

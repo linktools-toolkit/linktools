@@ -4,12 +4,15 @@
 MemoryMatch (a search result pairing a record with an optional relevance
 score)."""
 
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Mapping
 
+from dataclasses import dataclass
+from typing import Mapping
 from ..._typing import JSONValue
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 @dataclass(frozen=True, slots=True)
 class MemoryRecord:
@@ -26,8 +29,8 @@ class MemoryRecord:
     category: "str | None"
     confidence: "float | None"
     version: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: "datetime"
+    updated_at: "datetime"
     metadata: "Mapping[str, JSONValue]"
     user_id: "str | None" = None
     workspace_id: "str | None" = None

@@ -24,6 +24,7 @@ from .git import RepoGit
 from .requirements import ensure_requirement
 
 if TYPE_CHECKING:
+    import logging
     from typing import Any
     from ..manager import ContainerManager
 
@@ -127,7 +128,7 @@ class RepoService(object):
         self.git = RepoGit(manager)
 
     @property
-    def logger(self):
+    def logger(self) -> "logging.Logger":
         return self.manager.logger
 
     @cached_property

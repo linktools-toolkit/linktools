@@ -13,15 +13,12 @@ Both default to 0 when absent, so an empty/missing counter never trips the rule.
 Other keys in `limits` are accepted but ignored at present (extensibility)."""
 
 from typing import Mapping
+from .rule import PolicyDecision, PolicyDecisionKind, ToolPolicyMetadata
 
-from .rule import (
-    PolicyDecision,
-    PolicyDecisionKind,
-    RiskLevel,
-    ToolContext,
-    ToolPolicyMetadata,
-    ToolRequest,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .rule import RiskLevel, ToolContext, ToolRequest
 
 _LIMIT_TO_USAGE_KEY: "Mapping[str, str]" = {
     "max_tokens": "tokens_used",
@@ -33,14 +30,14 @@ class RiskRule:
     def __init__(
         self,
         *,
-        max_allowed: RiskLevel,
+        max_allowed: "RiskLevel",
         tool_metadata: "Mapping[str, ToolPolicyMetadata]",
     ) -> None:
         self._max_allowed = max_allowed
         self._tool_metadata = tool_metadata
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         meta = self._tool_metadata.get(request.tool_name)
         if meta is None:
@@ -63,7 +60,7 @@ class UsageLimitRule:
         self._limits = limits
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         for limit_key, ceiling in self._limits.items():
             usage_key = _LIMIT_TO_USAGE_KEY.get(limit_key)

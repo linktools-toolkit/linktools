@@ -26,7 +26,7 @@ class ContainerResolver:
         visited: "set[BaseContainer]" = set()
         visiting: "set[BaseContainer]" = set()
 
-        def visit(container: "BaseContainer"):
+        def visit(container: "BaseContainer") -> None:
             if container in visited:
                 return
             if container in visiting:

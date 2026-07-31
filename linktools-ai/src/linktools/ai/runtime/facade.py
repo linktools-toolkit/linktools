@@ -1,38 +1,42 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Public runtime facade over execution orchestration and authorized queries."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 from uuid import uuid4
-
-from ..agent.spec import AgentSpec
-from ..agent.assembly.assembler import AgentAssembler
 from ..agent.sandbox.protocols import Sandbox
 from ..agent.mcp.connection import MCPConnectionPool
 from ..errors import PrincipalAccessDeniedError
-from ..execution.domain import ApprovalDecision, RunRecord
-from ..execution.query import ExecutionQueryService, ExecutionDetailView
-from ..execution.service import ExecutionService
 from ..governance.identity import PrincipalContext
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..agent.spec import AgentSpec
+    from ..agent.assembly.assembler import AgentAssembler
+    from ..execution.domain import ApprovalDecision, RunRecord
+    from ..execution.query import ExecutionQueryService, ExecutionDetailView
+    from ..execution.service import ExecutionService
 
 @dataclass(frozen=True, slots=True)
 class Runtime:
-    execution: ExecutionService
-    query: ExecutionQueryService
-    assembler: AgentAssembler
+    execution: "ExecutionService"
+    query: "ExecutionQueryService"
+    assembler: "AgentAssembler"
     tool_execution_ready: bool
-    sandbox: Sandbox | None = None
-    mcp_connections: MCPConnectionPool | None = None
+    sandbox: "Sandbox | None" = None
+    mcp_connections: "MCPConnectionPool | None" = None
 
     async def run(
         self,
-        spec: AgentSpec,
+        spec: "AgentSpec",
         prompt: str,
         *,
         principal: PrincipalContext,
-        session_id: str | None = None,
-        execution_id: str | None = None,
+        session_id: "str | None" = None,
+        execution_id: "str | None" = None,
     ) -> object:
         # A session is never implicitly shared: omitting session_id starts an
         # isolated single-turn session rather than collapsing every anonymous
@@ -64,9 +68,9 @@ class Runtime:
         execution_id: str,
         *,
         approval_id: str,
-        decision: ApprovalDecision,
+        decision: "ApprovalDecision",
         principal: PrincipalContext,
-    ) -> RunRecord:
+    ) -> "RunRecord":
         return await self.execution.decide_approval(
             execution_id,
             approval_id=approval_id,
@@ -74,7 +78,7 @@ class Runtime:
             principal=principal,
         )
 
-    async def inspect(self, *, run_id: str, principal: PrincipalContext) -> ExecutionDetailView:
+    async def inspect(self, *, run_id: str, principal: PrincipalContext) -> "ExecutionDetailView":
         return await self.query.get_run_detail(run_id=run_id, principal=principal)
 
     async def aclose(self) -> None:

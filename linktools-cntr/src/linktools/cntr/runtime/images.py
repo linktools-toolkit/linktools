@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Strict image preparation for the final Docker Compose model."""
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -7,6 +9,8 @@ from ..container import ContainerError
 from .structured import StructuredCommandError
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from typing import Any
     from ..context import EventContext
     from ..manager import ContainerManager
 
@@ -17,15 +21,15 @@ class ImagePreparationError(ContainerError):
 
 @dataclass(frozen=True)
 class ImagePlan:
-    build: tuple[str, ...]
-    pull: tuple[str, ...]
-    targets: tuple[str, ...]
+    build: "tuple[str, ...]"
+    pull: "tuple[str, ...]"
+    targets: "tuple[str, ...]"
 
 
 def _dependencies(services, targets):
     result, seen = [], set()
 
-    def visit(name):
+    def visit(name: str) -> None:
         if name in seen:
             return
         if name not in services:
@@ -49,7 +53,7 @@ class ImagePreparer:
     def __init__(self, manager: "ContainerManager"):
         self.manager = manager
 
-    def plan(self, model, services=(), force_pull=False) -> ImagePlan:
+    def plan(self, model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
         all_services = model["services"]
         targets = list(all_services) if not services else _dependencies(all_services, services)
         build, pull = [], []
@@ -71,7 +75,7 @@ class ImagePreparer:
                 pull_images.add(image)
         return ImagePlan(tuple(build), tuple(pull), tuple(targets))
 
-    def image_exists(self, image):
+    def image_exists(self, image: str) -> bool:
         try:
             process = self.manager.runtime.create_docker_process(
                 "image", "inspect", image, capture_output=True)
@@ -88,7 +92,7 @@ class ImagePreparer:
             return False
         raise ImagePreparationError(f"Unable to inspect image `{image}`: {result.stderr.strip()}")
 
-    def execute(self, context: "EventContext", model, services=(), force_pull=False):
+    def execute(self, context: "EventContext", model: "dict[str, Any]", services: "Sequence[str]" = (), force_pull: bool = False) -> ImagePlan:
         plan = self.plan(model, services, force_pull=force_pull)
         if plan.pull:
             self.manager.compose_runner.pull(context, list(plan.pull))

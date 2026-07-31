@@ -99,16 +99,16 @@ class Command(AndroidCommand):
 
         RESET = '\033[0m'
 
-        def termcolor(fg=None, bg=None):
+        def termcolor(fg: "int | None" = None, bg: "int | None" = None) -> str:
             codes = []
             if fg is not None: codes.append('3%d' % fg)
             if bg is not None: codes.append('10%d' % bg)
             return '\033[%sm' % ';'.join(codes) if codes else ''
 
-        def colorize(message, fg=None, bg=None):
+        def colorize(message: str, fg: "int | None" = None, bg: "int | None" = None) -> str:
             return termcolor(fg, bg) + message + RESET
 
-        def truncated_string(message, offset, width):
+        def truncated_string(message: str, offset: int, width: int) -> int:
             next = offset
             length = len(message)
             while next < length:
@@ -118,7 +118,7 @@ class Command(AndroidCommand):
                 next = next + 1
             return next
 
-        def indent_wrap(message):
+        def indent_wrap(message: str) -> str:
             if width == -1:
                 return message
             message = message.replace('\t', '    ')
@@ -147,7 +147,7 @@ class Command(AndroidCommand):
             'DEBUG': YELLOW,
         }
 
-        def allocate_color(tag):
+        def allocate_color(tag: str) -> int:
             # this will allocate a unique format for the given tag
             # since we dont have very many colors, we always keep track of the LRU
             if tag not in KNOWN_TAGS:
@@ -209,7 +209,7 @@ class Command(AndroidCommand):
             def __init__(self):
                 self.stdout = sys.stdin
 
-            def poll(self):
+            def poll(self) -> "int | None":
                 return None
 
         if sys.stdin.isatty():
@@ -220,7 +220,7 @@ class Command(AndroidCommand):
         last_tag = None
         app_pid = None
 
-        def match_packages(token):
+        def match_packages(token: str) -> bool:
             if len(package) == 0:
                 return True
             if token in named_processes:
@@ -228,7 +228,7 @@ class Command(AndroidCommand):
             index = token.find(':')
             return (token in catchall_package) if index == -1 else (token[:index] in catchall_package)
 
-        def parse_death(tag, message):
+        def parse_death(tag: str, message: str) -> "tuple[str | None, str | None]":
             if tag != 'ActivityManager':
                 return None, None
             kill = PID_KILL.match(message)
@@ -251,7 +251,7 @@ class Command(AndroidCommand):
                     return pid, package_line
             return None, None
 
-        def parse_start_proc(line):
+        def parse_start_proc(line: str) -> "tuple | None":
             start = PID_START_5_1.match(line)
             if start is not None:
                 line_pid, line_package, target = start.groups()
@@ -266,7 +266,7 @@ class Command(AndroidCommand):
                 return line_package, '', line_pid, line_uid, ''
             return None
 
-        def tag_in_tags_regex(tag, tags):
+        def tag_in_tags_regex(tag: str, tags: "list[str]") -> bool:
             return any(re.match(r'^' + t + r'$', tag) for t in map(str.strip, tags))
 
         for line in device.shell("ps").splitlines():

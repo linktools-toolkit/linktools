@@ -65,12 +65,12 @@ class Command(AndroidCommand):
 
     @subcommand("info", help="display certificate information")
     @subcommand_argument("path", help="cert path")
-    def on_info(self, path: str, test: int):
-        def format_date(date: str):
+    def on_info(self, path: str, test: int) -> None:
+        def format_date(date: str) -> str:
             date = datetime.strptime(date, '%Y%m%d%H%M%SZ')
             return date.strftime('%Y-%m-%d %H:%M:%S')
 
-        def format_hex(data: "int | bytes", length: int = None):
+        def format_hex(data: "int | bytes", length: int = None) -> str:
             result = f"{data:x}"
             if len(result) % 2 != 0:
                 result = f"0{result}"
@@ -78,7 +78,7 @@ class Command(AndroidCommand):
                 result = result.zfill(length)
             return f"0x{result}"
 
-        def format_components(issuer: "OpenSSL.SSL.X509Name"):
+        def format_components(issuer: "OpenSSL.SSL.X509Name") -> str:
             components = []
             for item in issuer.get_components():
                 key = item[0].decode("utf-8")
@@ -86,10 +86,10 @@ class Command(AndroidCommand):
                 components.append(f"{key}={value}")
             return ", ".join(components)
 
-        def dump_pubkey(cert: "OpenSSL.SSL.X509"):
+        def dump_pubkey(cert: "OpenSSL.SSL.X509") -> bytes:
             return OpenSSL.crypto.dump_publickey(OpenSSL.crypto.FILETYPE_PEM, cert.get_pubkey())
 
-        def subject_name_hash_old(cert: "OpenSSL.SSL.X509"):
+        def subject_name_hash_old(cert: "OpenSSL.SSL.X509") -> str:
             subject_name = cert.get_subject().der()
             hash_obj = hashlib.md5(subject_name)
             hash_value = hash_obj.digest()
@@ -125,7 +125,7 @@ class Command(AndroidCommand):
 
     @subcommand("install", help="start setting activity", pass_args=True)
     @subcommand_argument("path", help="cert path")
-    def on_install(self, args: "AndroidNamespace", path: str):
+    def on_install(self, args: "AndroidNamespace", path: str) -> None:
         device = args.device_selector.select()
         dest = device.push_file(path, device.get_data_path("cert"), log_output=True)
         device.shell("am", "start", "--user", "0",

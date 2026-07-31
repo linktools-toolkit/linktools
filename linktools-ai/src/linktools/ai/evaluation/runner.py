@@ -7,21 +7,18 @@ JobRuntime). For each case: execute → collect evaluator scores → produce an
 EvalResult. One failing case does not abort the suite.
 """
 
+
 import asyncio
 import time
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timezone
+from .models import EvalResult, EvalRun, EvalRunStatus
 
-from .models import (
-    EvalCase,
-    EvalResult,
-    EvalRun,
-    EvalRunStatus,
-    EvalScore,
-    EvalSuite,
-)
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .models import EvalCase, EvalScore, EvalSuite
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -41,7 +38,7 @@ class EvalRunner:
 
     async def run_suite(
         self,
-        suite: EvalSuite,
+        suite: "EvalSuite",
         cases: "Mapping[str, EvalCase]",
     ) -> "tuple[EvalResult, ...]":
         run_id = f"eval-{uuid.uuid4().hex[:12]}"
@@ -61,7 +58,7 @@ class EvalRunner:
             )
         sem = asyncio.Semaphore(max(suite.max_concurrency, 1))
 
-        async def run_case(case_id: str):
+        async def run_case(case_id: str) -> "EvalResult | None":
             case = cases.get(case_id)
             if case is None:
                 return None
@@ -84,7 +81,7 @@ class EvalRunner:
         return results
 
     async def _run_one(
-        self, suite: EvalSuite, case: EvalCase, run_id: str
+        self, suite: "EvalSuite", case: "EvalCase", run_id: str
     ) -> EvalResult:
         start = time.monotonic()
         try:
@@ -121,8 +118,8 @@ class EvalRunner:
             )
         latency = time.monotonic() - start
 
-        scores: dict[str, float] = {}
-        metrics: dict[str, object] = {"latency_seconds": latency}
+        scores: "dict[str, float]" = {}
+        metrics: "dict[str, object]" = {"latency_seconds": latency}
         # Thread the executor's captured stats (tokens / cost / retries /
         # safety refusal) into the result metrics so aggregate() can compute
         # avg tokens, avg cost, retry rate, safety refusal rate.
@@ -136,7 +133,7 @@ class EvalRunner:
             if evaluator is None:
                 continue
             try:
-                score: EvalScore = await evaluator.evaluate(
+                score: "EvalScore" = await evaluator.evaluate(
                     case, execution, snapshot=execution.snapshot
                 )
                 scores[name] = score.score

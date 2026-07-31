@@ -38,6 +38,9 @@ from ..decorator import cached_classproperty
 from ..types import MISSING
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Callable
+
+if typing.TYPE_CHECKING:
     from .command import CommandParser
 
 if sys.version_info < (3, 10):
@@ -59,7 +62,7 @@ if sys.version_info < (3, 10):
 ##############################
 
 
-def range_type(min: int, max: int):
+def range_type(min: int, max: int) -> "Callable[[str], int]":
     """Create an argparse converter that accepts integers in a range.
 
     Args:
@@ -73,7 +76,7 @@ def range_type(min: int, max: int):
         Exception: Propagates errors raised while completing the operation.
     """
 
-    def wrapper(o):
+    def wrapper(o: str) -> int:
         value = utils.int(o)
         if min <= value <= max:
             return value
@@ -228,7 +231,7 @@ if not hasattr(argparse, "BooleanOptionalAction"):
             if option_string in self.option_strings:
                 setattr(namespace, self.dest, not option_string.startswith("--no-"))
 
-        def format_usage(self):
+        def format_usage(self) -> str:
             return " | ".join(self.option_strings)
 
 else:
@@ -299,7 +302,7 @@ class ArgParseComplete:
             return None
 
     @classmethod
-    def is_invocation(cls):
+    def is_invocation(cls) -> bool:
         """Return whether the current process is an argcomplete invocation.
 
         Returns:

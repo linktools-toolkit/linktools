@@ -8,10 +8,13 @@ the executor runs. The core does NOT scan the filesystem or the agent registry
 -- a caller supplies the mapping (explicit registration), so the evaluation
 plane stays business-neutral and deterministic across replays."""
 
+
 from collections.abc import Mapping
 
-from .models import EvalTarget
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .models import EvalTarget
 
 class MappingTargetResolver:
     """Resolve an EvalTarget to its spec by ``id`` from a caller-supplied
@@ -21,7 +24,7 @@ class MappingTargetResolver:
     def __init__(self, mapping: "Mapping[str, object]") -> None:
         self._mapping = dict(mapping)
 
-    async def resolve(self, target: EvalTarget) -> object:
+    async def resolve(self, target: "EvalTarget") -> object:
         if target.id not in self._mapping:
             raise KeyError(f"target not found: {target.kind}:{target.id}")
         return self._mapping[target.id]

@@ -52,21 +52,21 @@ class Command(AndroidCommand):
         return subcommand.run(args)
 
     @subcommand("setting", help="start setting activity", pass_args=True)
-    def on_setting(self, args: "AndroidNamespace"):
+    def on_setting(self, args: "AndroidNamespace") -> None:
         device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.settings.SETTINGS",
                      log_output=True)
 
     @subcommand("setting-dev", help="start development setting activity", pass_args=True)
-    def on_setting_dev(self, args: "AndroidNamespace"):
+    def on_setting_dev(self, args: "AndroidNamespace") -> None:
         device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS",
                      log_output=True)
 
     @subcommand("setting-dev2", help="start development setting activity", pass_args=True)
-    def on_setting_dev2(self, args: "AndroidNamespace"):
+    def on_setting_dev2(self, args: "AndroidNamespace") -> None:
         device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.intent.action.View",
@@ -76,7 +76,7 @@ class Command(AndroidCommand):
     @subcommand("setting-app", help="start application setting activity (default: current running package)",
                 pass_args=True)
     @subcommand_argument("package", nargs="?", help="package name")
-    def on_setting_app(self, args: "AndroidNamespace", package: str = None):
+    def on_setting_app(self, args: "AndroidNamespace", package: str = None) -> None:
         device = args.device_selector.select()
         package = package or device.get_current_package()
         device.shell("am", "start", "--user", "0",
@@ -86,7 +86,7 @@ class Command(AndroidCommand):
 
     @subcommand("setting-cert", help="install cert (require \'/data/local/tmp\' write permission)", pass_args=True)
     @subcommand_argument("path", help="cert file path")
-    def on_setting_cert(self, args: "AndroidNamespace", path: str):
+    def on_setting_cert(self, args: "AndroidNamespace", path: str) -> None:
         device = args.device_selector.select()
         dest = device.push_file(path, device.get_data_path("cert"), log_output=True)
         device.shell("am", "start", "--user", "0",
@@ -98,7 +98,7 @@ class Command(AndroidCommand):
 
     @subcommand("install", help="install apk file (require \'/data/local/tmp\' write permission)", pass_args=True)
     @subcommand_argument("path", help="apk file path or url")
-    def on_install(self, args: "AndroidNamespace", path: str):
+    def on_install(self, args: "AndroidNamespace", path: str) -> None:
         device = args.device_selector.select()
         device.install(path,
                        opts=["-r", "-t", "-d", "-f"],
@@ -106,7 +106,7 @@ class Command(AndroidCommand):
 
     @subcommand("browser", help="start browser activity and jump to url", pass_args=True)
     @subcommand_argument("url", help="e.g. https://antiy.cn")
-    def on_browser(self, args: "AndroidNamespace", url: str):
+    def on_browser(self, args: "AndroidNamespace", url: str) -> None:
         device = args.device_selector.select()
         device.shell("am", "start", "--user", "0",
                      "-a", "android.intent.action.VIEW",
@@ -115,7 +115,7 @@ class Command(AndroidCommand):
 
     @subcommand("start", help="start app by package name", pass_args=True)
     @subcommand_argument("package", help="package name")
-    def on_start(self, args: "AndroidNamespace", package: str = None):
+    def on_start(self, args: "AndroidNamespace", package: str = None) -> None:
         device = args.device_selector.select()
         device.start(package, log_output=True)
 

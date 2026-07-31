@@ -44,13 +44,13 @@ from linktools.errors import CliError
 _no_input = False
 
 
-def set_no_input(enabled=True):
+def set_no_input(enabled: bool = True) -> None:
     """Enable or disable non-interactive mode."""
     global _no_input
     _no_input = bool(enabled)
 
 
-def is_no_input():
+def is_no_input() -> bool:
     """Return whether non-interactive mode is active."""
     return _no_input
 
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from rich.console import ConsoleRenderable, Console
     from rich.prompt import PromptBase
     from rich.text import Text, TextType
-    from rich.progress import Task
+    from rich.progress import Progress, Task
 
     T = TypeVar("T")
 
@@ -101,23 +101,23 @@ class _FakeText:
         return _FakeText(self._text + str(other))
 
     @property
-    def cell_len(self):
+    def cell_len(self) -> int:
         return len(self._text)
 
     @classmethod
-    def from_markup(cls, text, style=None):
+    def from_markup(cls, text: str, style: "str | None" = None) -> "_FakeText":
         clean = re.sub(r'\[/?[^\]]*\]', '', str(text))
         return cls(clean)
 
-    def append(self, text, style=None):
+    def append(self, text: str, style: "str | None" = None) -> "_FakeText":
         self._text += str(text)
         return self
 
-    def split(self, separator=None, include_separator=False, allow_blank=False):
+    def split(self, separator: "str | None" = None, include_separator: bool = False, allow_blank: bool = False) -> "list[_FakeText]":
         parts = self._text.split('\n')
         return [_FakeText(p) for p in parts]
 
-    def pad_left(self, n):
+    def pad_left(self, n: int) -> "_FakeText":
         self._text = " " * n + self._text
         return self
 
@@ -131,7 +131,7 @@ class _LogHandlerMixin(metaclass=ABCMeta):
 
     @show_level.setter
     @abstractmethod
-    def show_level(self, value: bool):
+    def show_level(self, value: bool) -> None:
         ...
 
     @property
@@ -141,7 +141,7 @@ class _LogHandlerMixin(metaclass=ABCMeta):
 
     @show_time.setter
     @abstractmethod
-    def show_time(self, value: bool):
+    def show_time(self, value: bool) -> None:
         ...
 
     @abstractmethod
@@ -194,19 +194,19 @@ def _get_rich_log_handler_class():
             }
 
         @property
-        def show_level(self):
+        def show_level(self) -> bool:
             return self._log_render.show_level
 
         @show_level.setter
-        def show_level(self, value: bool):
+        def show_level(self, value: bool) -> None:
             self._log_render.show_level = value
 
         @property
-        def show_time(self):
+        def show_time(self) -> bool:
             return self._log_render.show_time
 
         @show_time.setter
-        def show_time(self, value: bool):
+        def show_time(self, value: bool) -> None:
             self._log_render.show_time = value
 
         def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
@@ -232,19 +232,19 @@ def _get_rich_log_handler_class():
                     style = "log.level"
             return Text(f" {level_name[:1].upper()} ", style=style)
 
-        def get_time_style(self, level_no):
+        def get_time_style(self, level_no: int) -> "str | None":
             style = self._styles.get(level_no)
             if style:
                 return style.get("time")
             return None
 
-        def get_level_style(self, level_no):
+        def get_level_style(self, level_no: int) -> "str | None":
             style = self._styles.get(level_no)
             if style:
                 return style.get("level")
             return None
 
-        def get_message_style(self, level_no):
+        def get_message_style(self, level_no: int) -> "str | None":
             style = self._styles.get(level_no)
             if style:
                 return style.get("message")
@@ -283,22 +283,22 @@ def _get_plain_log_handler_class():
             self._show_time = show_time
 
         @property
-        def show_level(self):
+        def show_level(self) -> bool:
             return self._show_level
 
         @show_level.setter
-        def show_level(self, value: bool):
+        def show_level(self, value: bool) -> None:
             self._show_level = value
 
         @property
-        def show_time(self):
+        def show_time(self) -> bool:
             return self._show_time
 
         @show_time.setter
-        def show_time(self, value: bool):
+        def show_time(self, value: bool) -> None:
             self._show_time = value
 
-        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None):
+        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> _FakeText:
             if not time:
                 time = datetime.now()
             elif isinstance(time, (int, float)):
@@ -307,7 +307,7 @@ def _get_plain_log_handler_class():
                 format = "[%x %X]"
             return _FakeText(time.strftime(format))
 
-        def make_level_text(self, level_no: int, level_name: str = None, style: str = None):
+        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> _FakeText:
             if not level_name:
                 level_name = logging.getLevelName(level_no)
             return _FakeText(f" {level_name[:1].upper()} ")
@@ -315,7 +315,7 @@ def _get_plain_log_handler_class():
     return LogHandler
 
 
-def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False):
+def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False) -> None:
     """Initialize root logging with rich output when available.
 
     Args:
@@ -391,10 +391,10 @@ class _FakeProgress:
     def __exit__(self, *args):
         self._finish()
 
-    def start(self):
+    def start(self) -> None:
         pass
 
-    def stop(self):
+    def stop(self) -> None:
         self._finish()
 
     def _finish(self):
@@ -403,7 +403,7 @@ class _FakeProgress:
             sys.stderr.flush()
             self._last_line_len = 0
 
-    def add_task(self, description: str = "", total=None, **kwargs) -> int:
+    def add_task(self, description: str = "", total: "float | None" = None, **kwargs) -> int:
         task_id = self._next_id
         self._next_id += 1
         self._tasks[task_id] = {
@@ -415,7 +415,7 @@ class _FakeProgress:
         self._render(task_id)
         return task_id
 
-    def update(self, task_id: int, **kwargs):
+    def update(self, task_id: int, **kwargs) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
@@ -431,7 +431,7 @@ class _FakeProgress:
         task["fields"].update(kwargs)
         self._render(task_id)
 
-    def advance(self, task_id: int, advance: float = 1):
+    def advance(self, task_id: int, advance: float = 1) -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
@@ -517,7 +517,7 @@ def _get_log_column():
     return _LogColumn()
 
 
-def create_progress(*fields: str, transfer: bool = False):
+def create_progress(*fields: str, transfer: bool = False) -> "_FakeProgress | Progress":
     """Create a progress renderer with optional task fields.
 
     Args:

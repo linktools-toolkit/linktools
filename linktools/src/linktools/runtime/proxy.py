@@ -463,7 +463,7 @@ def lazy_load(fn: "Callable[P, T]", *args: "P.args", **kwargs: "P.kwargs") -> "T
     return Proxy(functools.partial(fn, *args, **kwargs))
 
 
-def raise_error(e: "BaseException"):
+def raise_error(e: "BaseException") -> "_t.NoReturn":
     raise e
 
 

@@ -5,8 +5,12 @@ Replaces the old security hook's hardcoded regex blocklist with
 a PolicyRule -- same default patterns, now configurable."""
 
 import re
+from .engine import PolicyDecision, PolicyDecisionKind
 
-from .engine import PolicyDecision, PolicyDecisionKind, ToolContext, ToolRequest
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .engine import ToolContext, ToolRequest
 
 DEFAULT_DENIED_COMMAND_PATTERNS: "tuple[str, ...]" = (
     r"rm\s+-rf\s+/(\s|$)",
@@ -24,7 +28,7 @@ class CommandRule:
         self._compiled = tuple(re.compile(pattern) for pattern in denied_patterns)
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         # Category-based: a tool is subject to the command denylist because its
         # descriptor declares category="terminal", not because of what it

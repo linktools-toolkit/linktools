@@ -13,15 +13,13 @@ concurrent Runs sharing one CompiledAgent.
 Middlewares observe tool calls; they do not mutate args
 (before_tool_execute returns `args` unchanged)."""
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
+from dataclasses import dataclass
 from pydantic_ai.capabilities import AbstractCapability
-
 from ...governance.policy.engine import ToolRequest
-from .pipeline import MiddlewarePipeline
 
 if TYPE_CHECKING:
+    from .pipeline import MiddlewarePipeline
     from pydantic_ai import RunContext
     from pydantic_ai.messages import ModelResponse, ToolCallPart
     from pydantic_ai.models import ModelRequestContext
@@ -30,7 +28,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class MiddlewareCapability(AbstractCapability[None]):
-    pipeline: MiddlewarePipeline
+    pipeline: "MiddlewarePipeline"
 
     async def before_model_request(
         self, ctx: "RunContext[Any]", request_context: "ModelRequestContext"
@@ -91,5 +89,5 @@ class MiddlewareCapability(AbstractCapability[None]):
         raise error
 
 
-def build_middleware_capability(pipeline: MiddlewarePipeline) -> MiddlewareCapability:
+def build_middleware_capability(pipeline: "MiddlewarePipeline") -> MiddlewareCapability:
     return MiddlewareCapability(pipeline=pipeline)

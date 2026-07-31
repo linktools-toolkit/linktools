@@ -6,25 +6,26 @@ pagination + size limits at the provider layer and an allowlist at the toolset
 layer (an agent may only touch extensions it declared). Execution tools
 (``call_extension_entrypoint``) stay opt-in and are wired through the subagent path."""
 
-from typing import Any, Mapping
-
-from ...errors import (
-    ExtensionEntrypointDeniedError,
-    ExtensionEntrypointNotFoundError,
-    ExtensionContentAccessDeniedError,
-)
+from typing import TYPE_CHECKING, Any, Mapping
+from collections.abc import Awaitable, Callable
+from ...errors import ExtensionEntrypointDeniedError, ExtensionEntrypointNotFoundError, ExtensionContentAccessDeniedError
 from ..tool.models import ToolHandlerSet
-from .spec import ExtensionContentSource
 from ...execution.identity import ParentRunIdentity
 from .entrypoint import EntrypointRef
 from .content_source import DEFAULT_LIST_LIMIT, DEFAULT_MAX_READ_BYTES
-from .resolver import EntrypointResolver
-from .scope import ExtensionScope
+
+if TYPE_CHECKING:
+    from .spec import ExtensionContentSource
+    from .resolver import EntrypointResolver
+    from .scope import ExtensionScope
+    from ..subagent.runner import SubagentExecutorProtocol
+
+EventEmitter = "Callable[[Any], Awaitable[None]]"
 
 
 def _check_allowed(
     extension_id: str, allowed: "Mapping[str, ExtensionScope]"
-) -> ExtensionScope:
+) -> "ExtensionScope":
     scope = allowed.get(extension_id)
     if scope is None:
         raise ExtensionContentAccessDeniedError(
@@ -34,12 +35,12 @@ def _check_allowed(
 
 
 def build_extension_resource_toolset(
-    provider: ExtensionContentSource,
+    provider: "ExtensionContentSource",
     *,
     allowed: "Mapping[str, ExtensionScope]",
     max_resources_per_list: int = DEFAULT_LIST_LIMIT,
     max_read_bytes: int = DEFAULT_MAX_READ_BYTES,
-    emit=None,
+    emit: "EventEmitter | None" = None,
 ) -> ToolHandlerSet:
     """Level-1 read tools: list_extension_content / read_extension_content.
     ``allowed`` maps a declared extension_id to its scope; undeclared ids are
@@ -103,15 +104,15 @@ def build_extension_resource_toolset(
 
 
 def build_extension_entrypoint_toolset(
-    resolver: EntrypointResolver,
+    resolver: "EntrypointResolver",
     *,
     allowed: "Mapping[str, ExtensionScope]",
     allowed_kinds: "tuple[str, ...]" = ("agent",),
     allowed_names: "tuple[str, ...] | None" = None,
     expose_call_tool: bool = False,
     max_entrypoints_per_list: int = DEFAULT_LIST_LIMIT,
-    emit=None,
-    executor=None,
+    emit: "EventEmitter | None" = None,
+    executor: "SubagentExecutorProtocol | None" = None,
     parent: "ParentRunIdentity | None" = None,
 ) -> ToolHandlerSet:
     """Level-1 list tool for extension entrypoints (``list_extension_entrypoints``).

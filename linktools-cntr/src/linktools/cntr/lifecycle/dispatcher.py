@@ -9,6 +9,7 @@ from linktools.types import MISSING
 from .hooks import HookPhase
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from typing import Any
     from ..context import EventContext
     from ..manager import ContainerManager
@@ -35,7 +36,7 @@ class LifecycleDispatcher:
             return func(context)
 
     @contextlib.contextmanager
-    def notify_start(self, context: "EventContext"):
+    def notify_start(self, context: "EventContext") -> "Iterator[None]":
         for container in context.target_containers:
             self._invoke_callback(container.on_check, context)
             container.hooks.call(HookPhase.CHECK, context)
@@ -58,7 +59,7 @@ class LifecycleDispatcher:
             container.hooks.call(HookPhase.AFTER_START, context, reverse=True)
 
     @contextlib.contextmanager
-    def notify_stop(self, context: "EventContext"):
+    def notify_stop(self, context: "EventContext") -> "Iterator[None]":
         for container in reversed(context.target_containers):
             self._invoke_callback(container.on_stopping, context)
             container.hooks.call(HookPhase.BEFORE_STOP, context, reverse=True)
@@ -75,7 +76,7 @@ class LifecycleDispatcher:
         self.manager.hooks.call(HookPhase.AFTER_STOP, context)
 
     @contextlib.contextmanager
-    def notify_remove(self, context: "EventContext"):
+    def notify_remove(self, context: "EventContext") -> "Iterator[None]":
         yield
 
         # context.containers is always the FULL installed project (see

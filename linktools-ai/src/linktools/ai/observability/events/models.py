@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Shared event value types with no registry or codec dependencies."""
 
 from enum import Enum

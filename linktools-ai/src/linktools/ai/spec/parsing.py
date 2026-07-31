@@ -8,13 +8,16 @@ import json
 import math
 import os
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypeVar
 
 import yaml  # type: ignore
 
 from ..errors import InvalidSpecError, SpecNotFoundError, SpecParseError
+
+E = TypeVar("E", bound=Enum)
 
 
 def _resolve_env_refs(value: Any) -> Any:
@@ -38,7 +41,7 @@ def load_yaml_text(
     source: str = "<yaml>",
     *,
     resolve_env: bool = False,
-) -> dict[str, object]:
+) -> "dict[str, object]":
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{source} must contain a YAML object")
@@ -48,7 +51,7 @@ def load_yaml_text(
 def load_markdown_text(
     text: str,
     source: str = "<md>",
-) -> tuple[dict[str, object], str]:
+) -> "tuple[dict[str, object], str]":
     if text.startswith("---\n"):
         parts = text.split("---", 2)
         if len(parts) == 3:
@@ -115,7 +118,7 @@ class SpecLoader:
 
         async def list_ids(suffix: str) -> "tuple[str, ...]":
             def _scan() -> "list[str]":
-                ids: list[str] = []
+                ids: "list[str]" = []
                 for root in roots_t:
                     if not root.is_dir():
                         continue
@@ -207,7 +210,7 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must not be null")
         return True, value
 
-    def required_str(self, name):
+    def required_str(self, name: str) -> str:
         present, value = self._present(name)
         if not present:
             raise InvalidSpecError(f"{self._context}: {name} is required")
@@ -215,7 +218,7 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must be a string")
         return value
 
-    def optional_str(self, name):
+    def optional_str(self, name: str) -> "str | None":
         present, value = self._present(name)
         if not present:
             return None
@@ -228,7 +231,7 @@ class StrictConfigReader:
         """The validation context label (used by shared helpers for errors)."""
         return self._context
 
-    def bool(self, name, default=None):
+    def bool(self, name: str, default: "bool | None" = None) -> "bool | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -236,7 +239,7 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must be a boolean")
         return value
 
-    def non_negative_int(self, name, default=None):
+    def non_negative_int(self, name: str, default: "int | None" = None) -> "int | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -246,7 +249,7 @@ class StrictConfigReader:
             )
         return value
 
-    def positive_number(self, name, default=None):
+    def positive_number(self, name: str, default: "float | None" = None) -> "float | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -259,7 +262,7 @@ class StrictConfigReader:
             raise InvalidSpecError(f"{self._context}: {name} must be a positive number")
         return float(value)
 
-    def positive_int(self, name, default=None):
+    def positive_int(self, name: str, default: "int | None" = None) -> "int | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -269,7 +272,7 @@ class StrictConfigReader:
             )
         return value
 
-    def non_negative_decimal(self, name):
+    def non_negative_decimal(self, name: str) -> "Decimal | None":
         present, value = self._present(name)
         if not present:
             return None
@@ -287,7 +290,7 @@ class StrictConfigReader:
             )
         return result
 
-    def string_mapping(self, name):
+    def string_mapping(self, name: str) -> "dict[str, str] | None":
         present, value = self._present(name)
         if not present:
             return None
@@ -302,7 +305,7 @@ class StrictConfigReader:
             result[key] = item
         return result
 
-    def str_or_bool(self, name):
+    def str_or_bool(self, name: str) -> "str | bool | None":
         present, value = self._present(name)
         if not present:
             return None
@@ -312,7 +315,7 @@ class StrictConfigReader:
             return value.strip()
         raise InvalidSpecError(f"{self._context}: {name} must be a string or boolean")
 
-    def enum(self, name, enum_type, *, default=None):
+    def enum(self, name: str, enum_type: "type[E]", *, default: "E | None" = None) -> "E | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -325,7 +328,7 @@ class StrictConfigReader:
                 f"{self._context}: invalid {name}: {value!r}"
             ) from exc
 
-    def string_tuple(self, name, *, default=None):
+    def string_tuple(self, name: str, *, default: "tuple[str, ...] | None" = None) -> "tuple[str, ...] | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -340,7 +343,7 @@ class StrictConfigReader:
             result.append(item.strip())
         return tuple(result)
 
-    def mapping(self, name):
+    def mapping(self, name: str) -> "dict[str, Any] | None":
         present, value = self._present(name)
         if not present:
             return None

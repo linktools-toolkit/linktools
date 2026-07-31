@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """State for approved tool execution only."""
 
 from dataclasses import dataclass
@@ -19,7 +22,7 @@ class ToolOperationStatus(str, Enum):
 @dataclass(frozen=True, slots=True)
 class ToolOperation:
     id: str
-    tenant_id: str | None
+    tenant_id: "str | None"
     execution_id: str
     tool_call_id: str
     idempotency_key: str
@@ -29,13 +32,13 @@ class ToolOperation:
     status: ToolOperationStatus
     replay_safe: bool = False
     lease: Lease = Lease()
-    result: JsonValue | None = None
-    error: JsonValue | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
+    result: "JsonValue | None" = None
+    error: "JsonValue | None" = None
+    created_at: "datetime | None" = None
+    updated_at: "datetime | None" = None
 
     @property
-    def owner(self) -> str | None:
+    def owner(self) -> "str | None":
         return self.lease.owner
 
     @property
@@ -43,5 +46,5 @@ class ToolOperation:
         return self.lease.fence
 
     @property
-    def lease_expires_at(self) -> datetime | None:
+    def lease_expires_at(self) -> "datetime | None":
         return self.lease.expires_at

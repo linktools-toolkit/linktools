@@ -1,16 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Authorization boundary for runtime execution operations."""
 
-from __future__ import annotations
 
 from enum import StrEnum
 from typing import Protocol
-
 from ..errors import PrincipalAccessDeniedError
-from .identity import PrincipalContext
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .identity import PrincipalContext
 
 class OwnedSession(Protocol):
-    tenant_id: str | None
-    user_id: str | None
+    tenant_id: "str | None"
+    user_id: "str | None"
 
 
 class ExecutionAction(StrEnum):
@@ -25,16 +30,16 @@ class AuthorizationPolicy(Protocol):
     def assert_execution_access(
         self,
         *,
-        principal: PrincipalContext,
-        tenant_id: str | None,
-        user_id: str | None,
+        principal: "PrincipalContext",
+        tenant_id: "str | None",
+        user_id: "str | None",
         action: ExecutionAction,
     ) -> None: ...
 
     def assert_session_access(
         self,
         *,
-        principal: PrincipalContext,
+        principal: "PrincipalContext",
         session: OwnedSession,
     ) -> None: ...
 
@@ -48,9 +53,9 @@ class OwnershipAuthorizationPolicy:
     def assert_execution_access(
         self,
         *,
-        principal: PrincipalContext,
-        tenant_id: str | None,
-        user_id: str | None,
+        principal: "PrincipalContext",
+        tenant_id: "str | None",
+        user_id: "str | None",
         action: ExecutionAction,
     ) -> None:
         principal.require_tenant(tenant_id)
@@ -67,7 +72,7 @@ class OwnershipAuthorizationPolicy:
     def assert_session_access(
         self,
         *,
-        principal: PrincipalContext,
+        principal: "PrincipalContext",
         session: OwnedSession,
     ) -> None:
         self.assert_execution_access(

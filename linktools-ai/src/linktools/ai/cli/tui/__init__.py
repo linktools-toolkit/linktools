@@ -9,9 +9,21 @@ is the single entry point the thin ``lt ai tui`` shell calls; it translates a
 missing Textual install into an explicit, actionable error rather than a crash.
 """
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..client import RuntimeClient
+
 
 def run_tui(
-    *, project, remote, base_url=None, model=None, api_key=None, client=None
+    *,
+    project: "str | Path | None",
+    remote: "str | None",
+    base_url: "str | None" = None,
+    model: "str | None" = None,
+    api_key: "str | None" = None,
+    client: "RuntimeClient | None" = None,
 ) -> int:
     try:
         from .app import run_tui as _run_tui

@@ -12,11 +12,11 @@ only after :func:`is_git_available` confirms it will succeed.
 import sys
 
 
-def is_git_supported_python():
+def is_git_supported_python() -> bool:
     return sys.version_info >= (3, 10)
 
 
-def get_git_unavailable_reason():
+def get_git_unavailable_reason() -> "str | None":
     if not is_git_supported_python():
         return "Git repository operations require Python 3.10 or newer."
 
@@ -28,11 +28,11 @@ def get_git_unavailable_reason():
     return None
 
 
-def is_git_available():
+def is_git_available() -> bool:
     return get_git_unavailable_reason() is None
 
 
-def require_git_available(action="Git repository operation"):
+def require_git_available(action: str = "Git repository operation") -> None:
     reason = get_git_unavailable_reason()
 
     if reason is not None:

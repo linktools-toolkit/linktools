@@ -10,7 +10,7 @@ from .. import utils
 _interpreter = _interpreter_ident = None
 
 
-def get_interpreter():
+def get_interpreter() -> str:
     """Return the current Python interpreter executable path."""
     global _interpreter
     if _interpreter is None:

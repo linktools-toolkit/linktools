@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Process-local event sink protocols used by AgentEngine."""
 
 from typing import Any, Protocol

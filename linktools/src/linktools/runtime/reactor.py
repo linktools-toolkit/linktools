@@ -31,7 +31,7 @@ class _ReactorEvent:
         self.when = when
         self.interval = interval
 
-    def copy(self, **kwargs):
+    def copy(self, **kwargs) -> "_ReactorEvent":
         return _ReactorEvent(
             kwargs.get("fn", self.fn),
             kwargs.get("when", self.when),
@@ -54,7 +54,7 @@ class Reactor:
         with self._lock:
             return self._running
 
-    def start(self):
+    def start(self) -> None:
         if self._running:
             return
         with self._lock:
@@ -65,7 +65,7 @@ class Reactor:
             self._worker.daemon = True
             self._worker.start()
 
-    def run(self, timeout: "TimeoutType"):
+    def run(self, timeout: "TimeoutType") -> None:
         with self:
             self.wait(Timeout(timeout))
 
@@ -110,18 +110,18 @@ class Reactor:
         if self._on_stop is not None:
             self._on_stop()
 
-    def stop(self):
+    def stop(self) -> None:
         self.signal_stop()
         self.wait()
 
-    def _stop(self):
+    def _stop(self) -> None:
         with self._lock:
             self._running = False
 
-    def signal_stop(self, delay: float = None):
+    def signal_stop(self, delay: float = None) -> None:
         self.schedule(self._stop, delay)
 
-    def schedule(self, fn: "_t.Callable[[], any]", delay: float = None, interval: float = None):
+    def schedule(self, fn: "_t.Callable[[], any]", delay: float = None, interval: float = None) -> None:
         now = _time.monotonic()  # spec  RUN-REA-001
         when = now + delay if delay is not None else now
         with self._lock:

@@ -22,15 +22,17 @@ Execution history is stored by the execution persistence layer.
 
 from dataclasses import dataclass
 from typing import Any, Literal
-
-from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
-
 from linktools.core import environ
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model
 
 logger = environ.get_logger("ai.core.model.runtime")
 
@@ -94,7 +96,7 @@ class ModelBundle:
     # ``pydantic_ai.models.Model`` via ``from_instance`` (FunctionModel,
     # FallbackModel, TestModel, ...), so the public type must not bind callers
     # to the OpenAI implementation that ``from_config`` happens to build.
-    model: Model
+    model: "Model"
     settings: ModelSettings
     usage_limits: UsageLimits
 

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Shared storage primitives and SQL conventions for domain stores.
 
 Generic composition/revision/cache/overlay machinery lives here

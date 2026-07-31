@@ -21,9 +21,12 @@ change the wire event type or the criticality.
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generic, Mapping, TypeVar
-
 from .models import EventCriticality
-from .payloads import EventPayload
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .payloads import EventPayload
 
 T = TypeVar("T")
 
@@ -137,7 +140,7 @@ class EventRegistry:
         """A read-only view of every registered event_type -> descriptor."""
         return dict(self._by_type)
 
-    def event_type_for(self, payload: EventPayload) -> str:
+    def event_type_for(self, payload: "EventPayload") -> str:
         """The stable wire type for ``payload``. Raises if the payload's class
         was never registered -- encoding an unregistered payload is a bug."""
         try:
@@ -147,7 +150,7 @@ class EventRegistry:
                 f"payload type {type(payload).__name__!r} is not registered"
             ) from None
 
-    def criticality_of(self, payload: EventPayload) -> EventCriticality:
+    def criticality_of(self, payload: "EventPayload") -> EventCriticality:
         """The single source of criticality."""
         event_type = self._by_payload.get(type(payload))
         if event_type is None:
@@ -176,7 +179,7 @@ class EventCodec:
     def registry(self) -> EventRegistry:
         return self._registry
 
-    def encode(self, payload: EventPayload) -> "tuple[str, int, dict[str, Any]]":
+    def encode(self, payload: "EventPayload") -> "tuple[str, int, dict[str, Any]]":
         """Return ``(event_type, schema_version, data)`` for ``payload``."""
         try:
             event_type = self._registry.event_type_for(payload)
@@ -196,7 +199,7 @@ class EventCodec:
         event_type: str,
         schema_version: "int | None",
         data: "Mapping[str, Any]",
-    ) -> EventPayload:
+    ) -> "EventPayload":
         """Reconstruct a payload. Unknown types decode to
         :class:`UnknownEventPayload` (never raise)."""
         descriptor = self._registry.descriptor_for(event_type)
@@ -219,7 +222,7 @@ class EventCodec:
             raise
 
 
-def _payload_to_mapping(payload: EventPayload) -> "dict[str, Any]":
+def _payload_to_mapping(payload: "EventPayload") -> "dict[str, Any]":
     """Structural payload -> dict, independent of the codec the store uses for
     envelope-level persistence (kept here so encode/decode are symmetric)."""
     import dataclasses as _dc

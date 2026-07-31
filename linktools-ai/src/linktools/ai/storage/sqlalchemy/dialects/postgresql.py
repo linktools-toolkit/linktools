@@ -7,7 +7,6 @@ SQLite later adopted, so this mirrors the SQLite reference dialect almost
 exactly -- the only real difference is error classification, which reads
 Postgres's SQLSTATE codes instead of SQLite's message text."""
 
-from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 

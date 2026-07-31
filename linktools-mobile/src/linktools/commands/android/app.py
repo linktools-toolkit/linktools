@@ -53,12 +53,12 @@ class PrintLevel:
 
 class PrintStream(PrintLevel):
 
-    def __init__(self, max_level=PrintLevel.max, min_level=PrintLevel.min, file=None):
+    def __init__(self, max_level: int = PrintLevel.max, min_level: int = PrintLevel.min, file=None):
         self.max = max_level
         self.min = min_level
         self.file = file
 
-    def print(self, text: str = "", indent: int = 0, level=PrintLevel.normal):
+    def print(self, text: str = "", indent: int = 0, level: int = PrintLevel.normal) -> None:
         if not self.min <= level <= self.max:
             pass
         elif level == PrintLevel.title:
@@ -70,7 +70,7 @@ class PrintStream(PrintLevel):
         else:
             environ.logger.info(text, extra=dict(indent=indent))
 
-    def print_line(self):
+    def print_line(self) -> None:
         environ.logger.info("")
 
 
@@ -81,17 +81,17 @@ class PrintStreamWrapper(PrintLevel):
         self.max_level = max_level
         self.min_level = min_level
 
-    def print(self, text: str = "", indent: int = 0, level=PrintLevel.normal):
+    def print(self, text: str = "", indent: int = 0, level: int = PrintLevel.normal) -> None:
         if level > self.max_level:
             level = self.max_level
         elif level < self.min_level:
             level = self.min_level
         self.stream.print(text, indent=indent, level=level)
 
-    def print_line(self):
+    def print_line(self) -> None:
         self.stream.print_line()
 
-    def create(self, max_level: int = PrintLevel.max, min_level: int = PrintLevel.min):
+    def create(self, max_level: int = PrintLevel.max, min_level: int = PrintLevel.min) -> "PrintStreamWrapper":
         if max_level > self.max_level:
             max_level = self.max_level
         elif min_level < self.min_level:
@@ -107,7 +107,7 @@ class AppPrinter:
         self.min_level = PrintLevel.min
         self.stream = PrintStreamWrapper(stream, max_level=self.max_level, min_level=self.min_level)
 
-    def print_app(self, indent: int = 0):
+    def print_app(self, indent: int = 0) -> None:
         self.stream.print("App [%s]" % self.app, indent=indent, level=self.stream.title)
         self.stream.print("name=%s" % self.app.app_name, indent=indent + 4, level=self.stream.normal)
         self.stream.print("userId=%s" % self.app.user_id, indent=indent + 4, level=self.stream.normal)
@@ -128,7 +128,7 @@ class AppPrinter:
                           level=self.stream.normal)
         self.stream.print_line()
 
-    def print_requested_permissions(self, indent: int = 4):
+    def print_requested_permissions(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.requested_permissions):
             stream = self.stream.create(max_level=PrintLevel.normal)
             self.stream.print("RequestedPermissions:", indent=indent, level=self.stream.title)
@@ -136,35 +136,35 @@ class AppPrinter:
                 self._print_permission(stream, permission, indent=indent + 4, identity="RequestedPermission")
             self.stream.print_line()
 
-    def print_permissions(self, indent: int = 4):
+    def print_permissions(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.permissions):
             self.stream.print("Permissions:", indent=indent, level=self.stream.title)
             for permission in self.app.permissions:
                 self._print_permission(self.stream, permission, indent=indent + 4, identity="Permission")
             self.stream.print_line()
 
-    def print_activities(self, indent: int = 4):
+    def print_activities(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.activities):
             self.stream.print("Activities:", indent=indent, level=self.stream.title)
             for activity in self.app.activities:
                 self._print_component(self.stream, self.app, activity, indent=indent + 4, identity="Activity")
             self.stream.print_line()
 
-    def print_services(self, indent: int = 4):
+    def print_services(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.services):
             self.stream.print("Services:", indent=indent, level=self.stream.title)
             for service in self.app.services:
                 self._print_component(self.stream, self.app, service, indent=indent + 4, identity="Service")
             self.stream.print_line()
 
-    def print_receivers(self, indent: int = 4):
+    def print_receivers(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.receivers):
             self.stream.print("Receivers:", indent=indent, level=self.stream.title)
             for receiver in self.app.receivers:
                 self._print_component(self.stream, self.app, receiver, indent=indent + 4, identity="Receiver")
             self.stream.print_line()
 
-    def print_providers(self, indent: int = 4):
+    def print_providers(self, indent: int = 4) -> None:
         if not utils.is_empty(self.app.providers):
             self.stream.print("Providers:", indent=indent, level=self.stream.title)
             for provider in self.app.providers:

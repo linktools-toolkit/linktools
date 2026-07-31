@@ -1,40 +1,46 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """The only adapter between internal tools and Pydantic AI."""
+
 
 from dataclasses import dataclass
 from typing import Any
-
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
-
+from pydantic_ai.toolsets import FunctionToolset
 from .models import ExecuteTool, ToolExecutionContext
-from .service import ToolExecutionService
-from .models import ToolDefinition
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic_ai.toolsets import AbstractToolset
+    from .service import ToolExecutionService
+    from .models import ToolDefinition
 
 @dataclass
 class ToolPolicyCapability(AbstractCapability[None]):
     """SDK capability hook; policy remains owned by ToolExecutionService."""
 
-    service: ToolExecutionService
+    service: "ToolExecutionService"
 
 
 def build_policy_capability(
-    service: ToolExecutionService,
+    service: "ToolExecutionService",
 ) -> ToolPolicyCapability:
     return ToolPolicyCapability(service=service)
 
 
 @dataclass(slots=True)
 class PydanticAIToolAdapter:
-    service: ToolExecutionService
+    service: "ToolExecutionService"
 
     def build_toolset(
         self,
-        definitions: tuple[ToolDefinition, ...],
+        definitions: "tuple[ToolDefinition, ...]",
         *,
         context: ToolExecutionContext,
-    ) -> AbstractToolset:
+    ) -> "AbstractToolset":
         toolset = FunctionToolset()
         for definition in definitions:
             self._add_definition(toolset, definition, context=context)
@@ -43,11 +49,11 @@ class PydanticAIToolAdapter:
     def _add_definition(
         self,
         toolset: FunctionToolset,
-        definition: ToolDefinition,
+        definition: "ToolDefinition",
         *,
         context: ToolExecutionContext,
     ) -> None:
-        async def invoke(run_context: RunContext[Any], **arguments: Any) -> object:
+        async def invoke(run_context: "RunContext[Any]", **arguments: Any) -> object:
             invocation_context = ToolExecutionContext(
                 execution_id=context.execution_id,
                 tool_call_id=run_context.tool_call_id or context.tool_call_id,

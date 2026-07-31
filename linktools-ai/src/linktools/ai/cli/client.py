@@ -14,23 +14,20 @@ Local vs. Remote share the same interface; a remote (HTTP) client is not wired
 up in this build and ``build_runtime_client(remote=...)`` fails explicitly
 rather than pretending to support it (no fake implementation)."""
 
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
-
-from ..runtime import RuntimeStorage
 from linktools.cli import CommandError
 from linktools.system import get_user
-
-from .runtime import (
-    CliRuntimeBundle,
-    build_cli_runtime,
-    load_agent_spec,
-)
+from .runtime import build_cli_runtime, load_agent_spec
 
 if TYPE_CHECKING:
+    from ..runtime import RuntimeStorage
+    from .runtime import CliRuntimeBundle
+    from ..execution.domain import RunRecord
+    from ..execution.session import SessionRecord
     from collections.abc import AsyncIterator
 
 
@@ -120,7 +117,7 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
-async def ensure_session(storage: RuntimeStorage, session_id: str) -> None:
+async def ensure_session(storage: "RuntimeStorage", session_id: str) -> None:
     """Get-or-create a session record.
 
     ``Runtime.run`` requires a pre-existing session when a ``session_id`` is
@@ -132,7 +129,7 @@ async def ensure_session(storage: RuntimeStorage, session_id: str) -> None:
 
 
 async def resolve_approval(
-    storage: RuntimeStorage,
+    storage: "RuntimeStorage",
     approval_id: str,
     *,
     approved: bool,
@@ -147,17 +144,17 @@ async def resolve_approval(
     raise CommandError("approvals are not configured in the v4 runtime storage")
 
 
-async def list_sessions(storage: RuntimeStorage) -> list:
+async def list_sessions(storage: "RuntimeStorage") -> list:
     """Not yet implemented against the v4 runtime storage; returns ``[]``."""
     return []
 
 
-async def list_runs(storage: RuntimeStorage) -> list:
+async def list_runs(storage: "RuntimeStorage") -> list:
     """Not yet implemented against the v4 runtime storage; returns ``[]``."""
     return []
 
 
-async def list_pending_approvals(storage: RuntimeStorage) -> list:
+async def list_pending_approvals(storage: "RuntimeStorage") -> list:
     """Not yet implemented against the v4 runtime storage; returns ``[]``."""
     return []
 
@@ -172,7 +169,7 @@ class RuntimeClient(Protocol):
     """The only backend surface the console/TUI may use."""
 
     async def run_stream(
-        self, request: RunRequest
+        self, request: "RunRequest"
     ) -> "AsyncIterator[Mapping[str, Any]]": ...
 
     async def resume_stream(
@@ -187,15 +184,15 @@ class RuntimeClient(Protocol):
 
     async def list_sessions(self) -> list: ...
 
-    async def get_session(self, session_id: str): ...
+    async def get_session(self, session_id: str) -> "SessionRecord | None": ...
 
     async def list_runs(self) -> list: ...
 
-    async def get_run(self, run_id: str): ...
+    async def get_run(self, run_id: str) -> "RunRecord | None": ...
 
     async def list_approvals(self) -> list: ...
 
-    async def get_approval(self, approval_id: str): ...
+    async def get_approval(self, approval_id: str) -> Any: ...
 
     async def list_agents(self) -> "tuple[str, ...]": ...
 
@@ -203,7 +200,7 @@ class RuntimeClient(Protocol):
 
     async def list_mcp_servers(self) -> "tuple[str, ...]": ...
 
-    async def inspect(self, agent_id: "str | None"): ...
+    async def inspect(self, agent_id: "str | None") -> Any: ...
 
     async def doctor(self) -> DoctorReport: ...
 
@@ -219,15 +216,15 @@ class LocalRuntimeClient:
     Owns the Runtime + Storage + registries so neither the console nor the TUI
     has to know how ``build_runtime`` is wired."""
 
-    def __init__(self, bundle: CliRuntimeBundle) -> None:
+    def __init__(self, bundle: "CliRuntimeBundle") -> None:
         self._bundle = bundle
 
     @property
-    def bundle(self) -> CliRuntimeBundle:
+    def bundle(self) -> "CliRuntimeBundle":
         return self._bundle
 
     async def run_stream(
-        self, request: RunRequest
+        self, request: "RunRequest"
     ) -> "AsyncIterator[Mapping[str, Any]]":
         spec = await load_agent_spec(self._bundle, request.agent_id)
         session_id = validate_session_id(request.session_id)
@@ -258,19 +255,19 @@ class LocalRuntimeClient:
     async def list_sessions(self) -> list:
         return await list_sessions(self._bundle.storage)
 
-    async def get_session(self, session_id: str):
+    async def get_session(self, session_id: str) -> "SessionRecord | None":
         return await self._bundle.storage.execution.get_session(validate_session_id(session_id))
 
     async def list_runs(self) -> list:
         return await list_runs(self._bundle.storage)
 
-    async def get_run(self, run_id: str):
+    async def get_run(self, run_id: str) -> "RunRecord | None":
         return await self._bundle.storage.execution.get_run(run_id)
 
     async def list_approvals(self) -> list:
         return await list_pending_approvals(self._bundle.storage)
 
-    async def get_approval(self, approval_id: str):
+    async def get_approval(self, approval_id: str) -> None:
         """One approval request by id -- the only way the console/TUI reads
         approval detail (no direct run approval access)."""
         return None
@@ -284,7 +281,7 @@ class LocalRuntimeClient:
     async def list_mcp_servers(self) -> "tuple[str, ...]":
         return await self._bundle.mcp.list_ids()
 
-    async def inspect(self, agent_id: "str | None"):
+    async def inspect(self, agent_id: "str | None") -> Any:
         spec = await load_agent_spec(self._bundle, agent_id)
         return await self._bundle.runtime.inspect(spec)
 
@@ -418,7 +415,7 @@ class FakeRuntimeClient:
         self.last_run_id: "str | None" = None
 
     async def run_stream(
-        self, request: RunRequest
+        self, request: "RunRequest"
     ) -> "AsyncIterator[Mapping[str, Any]]":
         self.run_requests.append(request)
         self.last_run_id = request.run_id
@@ -444,19 +441,19 @@ class FakeRuntimeClient:
     async def list_sessions(self) -> list:
         return list(self._sessions)
 
-    async def get_session(self, session_id: str):
+    async def get_session(self, session_id: str) -> Any:
         return self._session_record
 
     async def list_runs(self) -> list:
         return list(self._runs)
 
-    async def get_run(self, run_id: str):
+    async def get_run(self, run_id: str) -> Any:
         return self._run_record
 
     async def list_approvals(self) -> list:
         return list(self._approvals)
 
-    async def get_approval(self, approval_id: str):
+    async def get_approval(self, approval_id: str) -> Any:
         return self._approval
 
     async def list_agents(self) -> "tuple[str, ...]":
@@ -468,7 +465,7 @@ class FakeRuntimeClient:
     async def list_mcp_servers(self) -> "tuple[str, ...]":
         return self._mcp_servers
 
-    async def inspect(self, agent_id: "str | None"):
+    async def inspect(self, agent_id: "str | None") -> Any:
         return self._inspection
 
     async def doctor(self) -> DoctorReport:

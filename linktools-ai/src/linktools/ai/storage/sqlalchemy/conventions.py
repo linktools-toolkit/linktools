@@ -10,7 +10,6 @@
   natural keys (commit_id, scope+key, job_id+key) -- mirrors the storage
   kernel's ``key_hash`` pattern.
 """
-from __future__ import annotations
 
 import hashlib
 from datetime import datetime, timezone

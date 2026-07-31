@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """The runtime composition root and its explicit storage composition."""
 
 from .builder import build_runtime

@@ -31,7 +31,7 @@ class GitProgressStream(object):
             self._parse_line(line)
         return len(data)
 
-    def flush(self):
+    def flush(self) -> None:
         pass
 
     def _parse_line(self, line):

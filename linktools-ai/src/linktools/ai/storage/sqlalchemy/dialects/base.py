@@ -31,7 +31,6 @@ inside the dialects package, not by the store/backend branching on the name
 itself. A downstream wanting a vendor with no built-in ships its own dialect
 implementation and passes it explicitly."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum

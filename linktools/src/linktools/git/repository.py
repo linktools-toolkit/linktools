@@ -12,6 +12,7 @@ clone never leaves a half-valid repository. Write operations are
 serialised per repository via the environment's LockManager.
 """
 
+from typing import TYPE_CHECKING
 import contextlib
 import inspect
 import os
@@ -19,22 +20,19 @@ import re
 import shutil
 import subprocess
 import uuid
-from typing import TYPE_CHECKING
-
 from dulwich import __version__ as _dulwich_version_tuple, porcelain
 from dulwich.errors import GitProtocolError
 from dulwich.repo import Repo as DulwichRepo
-
 from linktools import utils
 from linktools.core import environ
 from linktools.errors import GitError, GitDivergedError, GitStashRestoreError
 from linktools.rich import create_progress
 from linktools.runtime import popen
-
 from .progress import GitProgressStream
 from .sync import GitSyncPolicy
 
 if TYPE_CHECKING:
+    from dulwich.porcelain import GitStatus
     from typing import Any
     from linktools.types import PathType
 
@@ -80,7 +78,7 @@ class GitHead(object):
         self._repository = repository
         self.name = name
 
-    def checkout(self):
+    def checkout(self) -> None:
         """Check out this branch in the working tree, serialized through
         the owning repository's write lock -- same as every other write
         operation on this repository."""
@@ -112,7 +110,7 @@ class GitRepository(object):
         except Exception:
             return None
 
-    def close(self):
+    def close(self) -> None:
         """Release the underlying repository handle (open pack files, etc.)."""
         self._repo.close()
 
@@ -135,14 +133,14 @@ class GitRepository(object):
     # -- reads -------------------------------------------------------------
 
     @property
-    def heads(self):
+    def heads(self) -> "list[str]":
         refs = self._repo.refs.as_dict(b"refs/heads/")
         return [name.decode() for name in refs]
 
-    def status(self):
+    def status(self) -> "GitStatus":
         return porcelain.status(self._path)
 
-    def is_dirty(self):
+    def is_dirty(self) -> bool:
         status = self.status()
         return bool(any(status.staged.values()) or status.unstaged or status.untracked)
 
@@ -160,7 +158,7 @@ class GitRepository(object):
 
     # -- writes (all serialised) ------------------------------------------
 
-    def add(self, *paths):
+    def add(self, *paths) -> None:
         with self._write_lock():
             porcelain.add(self._path, list(paths) or None)
 
@@ -191,7 +189,8 @@ class GitRepository(object):
                 )
             return sha.decode()
 
-    def push(self, remote_location=None, branch=None, force=False):
+    def push(self, remote_location: "str | None" = None,
+             branch: "str | None" = None, force: bool = False) -> None:
         with self._write_lock(), _wrap_protocol_errors():
             refspecs = branch and self._branch_ref(branch).decode()
             porcelain.push(self._path, remote_location, refspecs, force=force)

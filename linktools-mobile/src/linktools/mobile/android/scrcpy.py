@@ -410,9 +410,9 @@ class ScrcpyServer(Stoppable):
         server_data = json.loads(utils.read_file(server_path, text=True))
         return server_data["SCRCPY_SERVER"]
 
-    def start(self, *args: "Any"):
+    def start(self, *args: "Any") -> "ScrcpyServer":
 
-        def start():
+        def start() -> "ScrcpyServer":
             server_info = dict(self._server_info)  # noqa
             server_version = server_info["version"] = self._version or server_info["version"]
             server_name = server_info["name"].format(**server_info)
@@ -452,7 +452,7 @@ class ScrcpyServer(Stoppable):
 
         return self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         if self._process:
             logger.debug(f"{self._device} stop scrcpy server")
             utils.ignore_errors(self._process.recursive_kill)
@@ -491,7 +491,7 @@ class ScrcpySession(Stoppable):
         if not video and not audio and not control:
             raise RuntimeError("video, audio, and control are not allowed to be false at the same time")
 
-        def worker_thread():
+        def worker_thread() -> None:
             server = forward = None
             scid = str(random.randint(0, 5)) + "".join([hex(random.randint(1, 15))[-1] for _ in range(7)])
             try:
@@ -609,14 +609,14 @@ class ScrcpySession(Stoppable):
 
     def _recv_media_packets(self, video_socket, audio_socket, control_socket):
 
-        def recv_data(sock):
+        def recv_data(sock: socket.socket) -> "bytes | None":
             try:
                 return sock.recv(0x100000)
             except OSError as e:
                 logger.debug(f"{self._device} receive scrcpy data error: {e}")
                 return None
 
-        def split_packets(buffer, data):
+        def split_packets(buffer: "bytes | None", data: bytes) -> "tuple[bytes, list[bytes]]":
             # 处理分包和粘包的问题
             packets = list()
             buffer = buffer + data if buffer is not None else data
@@ -634,7 +634,7 @@ class ScrcpySession(Stoppable):
 
             return buffer[index:], packets
 
-        def notify_listeners(event, packets):
+        def notify_listeners(event: str, packets: "list[bytes]") -> None:
             with self._lock:
                 listeners = self._listeners.get(event, empty)
             for package in packets:
@@ -708,45 +708,45 @@ class ScrcpySession(Stoppable):
             except Exception as e:
                 raise ScrcpyError(f"Send scrcpy control packet error: {e}") from None
 
-    def add_init_listener(self, listener: "Callable[[], Any]"):
+    def add_init_listener(self, listener: "Callable[[], Any]") -> None:
         with self._lock:
             listeners = self._listeners.setdefault("init", list())
             listeners.append(listener)
 
-    def remove_init_listener(self, listener: "Callable[[], Any]"):
+    def remove_init_listener(self, listener: "Callable[[], Any]") -> None:
         with self._lock:
             listeners = self._listeners.get("init", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_stop_listener(self, listener: "Callable[[], Any]"):
+    def add_stop_listener(self, listener: "Callable[[], Any]") -> None:
         with self._lock:
             listeners = self._listeners.setdefault("stop", list())
             listeners.append(listener)
 
-    def remove_stop_listener(self, listener: "Callable[[], Any]"):
+    def remove_stop_listener(self, listener: "Callable[[], Any]") -> None:
         with self._lock:
             listeners = self._listeners.get("stop", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_video_listener(self, listener: "Callable[[bytes], Any]"):
+    def add_video_listener(self, listener: "Callable[[bytes], Any]") -> None:
         with self._lock:
             listeners = self._listeners.setdefault("video", list())
             listeners.append(listener)
 
-    def remove_video_listener(self, listener: "Callable[[bytes], Any]"):
+    def remove_video_listener(self, listener: "Callable[[bytes], Any]") -> None:
         with self._lock:
             listeners = self._listeners.get("video", list())
             if listener in listeners:
                 listeners.remove(listener)
 
-    def add_audio_listener(self, listener: "Callable[[bytes], Any]"):
+    def add_audio_listener(self, listener: "Callable[[bytes], Any]") -> None:
         with self._lock:
             listeners = self._listeners.setdefault("audio", list())
             listeners.append(listener)
 
-    def remove_audio_listener(self, listener: "Callable[[bytes], Any]"):
+    def remove_audio_listener(self, listener: "Callable[[bytes], Any]") -> None:
         with self._lock:
             listeners = self._listeners.get("audio", list())
             if listener in listeners:
@@ -767,7 +767,7 @@ class ScrcpySession(Stoppable):
             keycode: int,
             action: int = ScrcpyKeyEvent.ACTION_DOWN,
             repeat: int = 0
-    ):
+    ) -> None:
         """
         Send keycode to device
 
@@ -787,7 +787,7 @@ class ScrcpySession(Stoppable):
             )
         )
 
-    def inject_text(self, text: str):
+    def inject_text(self, text: str) -> None:
         """
         Send text to device
 
@@ -811,7 +811,7 @@ class ScrcpySession(Stoppable):
             y: int,
             action: int = ScrcpyMotionEvent.ACTION_DOWN,
             pointer_id: int = 0x88888888,
-    ):
+    ) -> None:
         """
         Touch screen
 
@@ -848,7 +848,7 @@ class ScrcpySession(Stoppable):
             y: int,
             h: int,
             v: int
-    ):
+    ) -> None:
         """
         Scroll screen
 
@@ -875,7 +875,7 @@ class ScrcpySession(Stoppable):
             )
         )
 
-    def back_or_turn_screen_on(self, action: int = ScrcpyKeyEvent.ACTION_DOWN):
+    def back_or_turn_screen_on(self, action: int = ScrcpyKeyEvent.ACTION_DOWN) -> None:
         """
         If the screen is off, it is turned on only on ACTION_DOWN
 
@@ -890,7 +890,7 @@ class ScrcpySession(Stoppable):
             )
         )
 
-    def expand_notification_panel(self):
+    def expand_notification_panel(self) -> None:
         """
         Expand notification panel
         """
@@ -901,7 +901,7 @@ class ScrcpySession(Stoppable):
             )
         )
 
-    def expand_settings_panel(self):
+    def expand_settings_panel(self) -> None:
         """
         Expand settings panel
         """
@@ -912,7 +912,7 @@ class ScrcpySession(Stoppable):
             )
         )
 
-    def collapse_panels(self):
+    def collapse_panels(self) -> None:
         """
         Collapse all panels
         """
@@ -939,7 +939,7 @@ class ScrcpySession(Stoppable):
         )
         return struct.pack(">b", mode)
 
-    def rotate_device(self):
+    def rotate_device(self) -> None:
         """
         Rotate device
         """
@@ -1011,7 +1011,7 @@ class ScrcpySession(Stoppable):
                 break
             time.sleep(move_steps_delay)
 
-    def stop(self):
+    def stop(self) -> None:
         sock = self._video_socket
         if sock:
             utils.ignore_errors(sock.close)
@@ -1094,12 +1094,12 @@ if __name__ == '__main__':
     video_frames = SlidingQueue[av.VideoFrame](100)
 
 
-    def on_init(session: "ScrcpySession"):
+    def on_init(session: "ScrcpySession") -> None:
         session.inject_keycode(ScrcpyKeyEvent.KEYCODE_HOME, ScrcpyMotionEvent.ACTION_DOWN)
         session.inject_keycode(ScrcpyKeyEvent.KEYCODE_HOME, ScrcpyMotionEvent.ACTION_UP)
 
 
-    def on_video(raw_packet: bytes):
+    def on_video(raw_packet: bytes) -> None:
         packets = video_codec.parse(raw_packet)
         if not packets:
             return

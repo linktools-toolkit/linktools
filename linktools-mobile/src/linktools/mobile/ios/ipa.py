@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 # Author    : HuJi <jihu.hj@alibaba-inc.com>
 # Datetime  : 2022/1/13 下午8:53
@@ -39,7 +39,7 @@ class IPA(object):
         plist_data = self.zip.read(plist_path)
         self._plist[_INFO_PLIST] = plistlib.loads(plist_data)
 
-    def find_file(self, name) -> "str | None":
+    def find_file(self, name: str) -> "str | None":
         name_list = self.zip.namelist()
         pattern = re.compile(rf'Payload/[^/]+\.app/{name}$')
         for path in name_list:
@@ -51,7 +51,7 @@ class IPA(object):
     def list_files(self) -> "list[str]":
         return self.zip.namelist()
 
-    def read_file(self, filename) -> bytes:
+    def read_file(self, filename: str) -> bytes:
         try:
             return self.zip.read(filename)
         except KeyError:

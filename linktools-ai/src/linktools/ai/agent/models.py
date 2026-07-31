@@ -9,17 +9,11 @@ ToolContext reaches them via pydantic-ai dependency injection
 (``deps=AgentDependencies(...)`` -> ``ctx.deps.tool_context``), so one
 CompiledAgent is safe to share across concurrent Runs."""
 
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, TypeAlias, runtime_checkable
-
-from pydantic_ai import Agent as PydanticAgent
+from dataclasses import dataclass, field
 from pydantic_ai.messages import ModelMessage
-
-from ..model.resolver import ResolvedModel
-from ..execution.domain import RunErrorInfo
 from ..json import JsonValue
 from .tool.pydantic_ai import ToolPolicyCapability
-from .spec import AgentSpec
 
 
 @runtime_checkable
@@ -40,14 +34,18 @@ def model_supports_streaming(model: object) -> bool:
     return True
 
 if TYPE_CHECKING:
+    from pydantic_ai import Agent as PydanticAgent
+    from ..model.resolver import ResolvedModel
+    from ..execution.domain import RunErrorInfo
+    from .spec import AgentSpec
     from .middleware.capability import MiddlewareCapability
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledAgent:
-    spec: AgentSpec
-    pydantic_agent: PydanticAgent
-    model_bundle: ResolvedModel
+    spec: "AgentSpec"
+    pydantic_agent: "PydanticAgent"
+    model_bundle: "ResolvedModel"
     policy_capability: "ToolPolicyCapability | None"
     middleware_capability: "MiddlewareCapability | None" = None
 
@@ -71,8 +69,8 @@ class AgentInput:
     # prompt is already baked into ``message_history`` and must not be
     # re-fed alongside it.
     resuming: bool = False
-    approved_tool_call_id: str | None = None
-    approved_binding_fingerprint: str | None = None
+    approved_tool_call_id: "str | None" = None
+    approved_binding_fingerprint: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +145,7 @@ class AgentFailed:
     errors are NOT reported this way; they propagate as raised exceptions
     instead of becoming an ``AgentFailed``."""
 
-    error: RunErrorInfo
+    error: "RunErrorInfo"
     retryable: bool
     usage: AgentUsage
     snapshot: Any = None

@@ -8,18 +8,18 @@ Scoped agents are parsed from ``<root>/agents/<name>.md`` using the canonical
 agent parser and re-id'd as ``extension:<id>:agent:<name>`` so the same entrypoint
 name in two different extensions never collides in the global namespace."""
 
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
-
-from ..spec import AgentSpec
+from pathlib import Path
 from ...errors import ExtensionEntrypointNotFoundError, ExtensionNotFoundError
+from .entrypoint import EntrypointInfo, EntrypointListResult
+from .content import sanitize_extension_path
 
 if TYPE_CHECKING:
+    from ..spec import AgentSpec
+    from .entrypoint import EntrypointRef
+    from .scope import ExtensionScope
     from .content_source import DirectoryExtensionContentSource
-from .entrypoint import EntrypointInfo, EntrypointListResult, EntrypointRef
-from .content import sanitize_extension_path
-from .scope import ExtensionScope
-
+    from .content import ExtensionContent, ExtensionContentPage, ExtensionContentRef
 _KIND_TO_DIR = {
     "agent": "agents",
     "skill": "skills",
@@ -36,14 +36,14 @@ DEFAULT_ENTRYPOINT_LIMIT = 50
 class EntrypointResolver(Protocol):
     async def list_entrypoints(
         self,
-        scope: ExtensionScope,
+        scope: "ExtensionScope",
         *,
         kind: "str | None" = None,
         limit: int = DEFAULT_ENTRYPOINT_LIMIT,
         cursor: "str | None" = None,
     ) -> EntrypointListResult: ...
 
-    async def resolve_agent(self, ref: EntrypointRef) -> AgentSpec: ...
+    async def resolve_agent(self, ref: "EntrypointRef") -> "AgentSpec": ...
 
 
 class DirectoryEntrypointResolver:
@@ -57,7 +57,7 @@ class DirectoryEntrypointResolver:
 
     async def list_entrypoints(
         self,
-        scope: ExtensionScope,
+        scope: "ExtensionScope",
         *,
         kind: "str | None" = None,
         limit: int = DEFAULT_ENTRYPOINT_LIMIT,
@@ -85,7 +85,7 @@ class DirectoryEntrypointResolver:
         )
         return EntrypointListResult(items=page, next_cursor=next_cursor)
 
-    async def resolve_agent(self, ref: EntrypointRef) -> AgentSpec:
+    async def resolve_agent(self, ref: "EntrypointRef") -> "AgentSpec":
         if ref.kind != "agent":
             raise ExtensionEntrypointNotFoundError(
                 f"resolve_agent only resolves kind='agent', got {ref.kind!r}"
@@ -162,13 +162,13 @@ class ExtensionRegistry:
         return ExtensionSpec(id=extension_id, name=name, kind=kind)
 
     async def list_entries(
-        self, scope, path: str = "", *, limit: int = 50, cursor: "str | None" = None
-    ):
+        self, scope: "ExtensionScope", path: str = "", *, limit: int = 50, cursor: "str | None" = None
+    ) -> "ExtensionContentPage":
         return await self._content().list_entries(
             scope, path, limit=limit, cursor=cursor
         )
 
-    async def read_content(self, ref, *, max_bytes: "int | None" = None):
+    async def read_content(self, ref: "ExtensionContentRef", *, max_bytes: "int | None" = None) -> "ExtensionContent":
         return await self._content().read_content(ref, max_bytes=max_bytes)
 
 

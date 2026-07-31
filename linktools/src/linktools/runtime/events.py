@@ -43,7 +43,7 @@ class Subscription(object):
         self._cancelled = False
 
     @property
-    def cancelled(self):
+    def cancelled(self) -> bool:
         return self._cancelled
 
     def cancel(self) -> None:

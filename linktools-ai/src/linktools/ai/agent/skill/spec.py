@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Skill declaration and provider contract."""
 
 from dataclasses import dataclass, field
@@ -12,12 +15,12 @@ class SkillSpec:
     name: str
     description: str = ""
     instructions: str = ""
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
 @runtime_checkable
 class SkillSpecProvider(Protocol):
-    async def list_ids(self) -> tuple[str, ...]: ...
+    async def list_ids(self) -> "tuple[str, ...]": ...
 
     async def get(self, skill_id: str) -> SkillSpec: ...
 

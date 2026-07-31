@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Unified task plan and execution values."""
 
 from dataclasses import dataclass, field
@@ -19,13 +22,13 @@ class TaskStatus(StrEnum):
 class TaskNode:
     id: str
     payload: Any = None
-    dependencies: tuple[str, ...] = ()
+    dependencies: "tuple[str, ...]" = ()
 
 
 @dataclass(frozen=True, slots=True)
 class TaskPlan:
     id: str
-    nodes: tuple[TaskNode, ...]
+    nodes: "tuple[TaskNode, ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +49,7 @@ class TaskExecution:
             object.__setattr__(self, "status", TaskStatus(self.status))
 
     @property
-    def owner(self) -> str | None:
+    def owner(self) -> "str | None":
         return self.lease.owner
 
     @property

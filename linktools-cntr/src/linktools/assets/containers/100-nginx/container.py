@@ -25,12 +25,12 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def dnsapi(self):
+    def dnsapi(self) -> "dict[str, Any]":
         with open(self.get_source_path("dnsapi.json"), "rt") as fd:
             return json.load(fd)
 
     @cached_property
-    def configs(self):
+    def configs(self) -> "dict[str, Any]":
         return dict(
             NGINX_TAG="stable-alpine",
             NGINX_WILDCARD_DOMAIN=ConfigField.chain(AliasProvider("WILDCARD_DOMAIN"), default=False),
@@ -84,7 +84,7 @@ class Container(BaseContainer):
         return choose("ACME_DNS_API", list(self.dnsapi.keys()))
 
     @cached_property
-    def extend_configs(self):
+    def extend_configs(self) -> "dict[str, Any]":
         configs = {}
         if self.get_config("NGINX_HTTPS_ENABLE"):
             dns_api = self.get_config("ACME_DNS_API")
@@ -107,11 +107,11 @@ class Container(BaseContainer):
         return result
 
     @cached_property
-    def acme_ssl_domains_args(self):
+    def acme_ssl_domains_args(self) -> str:
         return " ".join([f"--domain {domain}" for domain in self._acme_ssl_domains if domain])
 
     @cached_property
-    def acme_ssl_certificate_args(self):
+    def acme_ssl_certificate_args(self) -> str:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if domain:
             return " ".join([
@@ -121,7 +121,7 @@ class Container(BaseContainer):
             ])
         return ""
 
-    def append_ssl_domains(self, *domians: str):
+    def append_ssl_domains(self, *domians: str) -> None:
         for domain in domians:
             if domain and domain not in self._acme_ssl_domains:
                 self._acme_ssl_domains.append(domain)
@@ -135,10 +135,10 @@ class Container(BaseContainer):
             self.get_config("NGINX_DEFAULT_PORT")
         )
 
-    def on_init(self):
+    def on_init(self) -> None:
         self.start_hooks.append(lambda: self.manager.start_hooks.append(self._update_files))
 
-    def on_check(self, context: "EventContext"):
+    def on_check(self, context: "EventContext") -> None:
         if self.get_config("NGINX_WILDCARD_DOMAIN") and self.get_config("NGINX_ROOT_DOMAIN") in ("", "_", "localhost"):
             raise ContainerError("Wildcard domain is enabled but root domain is not set.")
         if self.get_config("NGINX_WAF_ENABLE") and not self.containers["safeline"].enable:
@@ -196,7 +196,7 @@ class Container(BaseContainer):
                 flush=True,
             )
 
-    def on_started(self, context: "EventContext"):
+    def on_started(self, context: "EventContext") -> None:
         # 更新证书（如果启用HTTPS）
         if self.get_config("NGINX_HTTPS_ENABLE"):
             self.logger.info("Renew nginx certificates if necessary.")
@@ -221,7 +221,7 @@ class Container(BaseContainer):
             "sh", "-c", "killall nginx 1>/dev/null 2>&1"
         ).call()
 
-    def on_stopped(self, context: "EventContext"):
+    def on_stopped(self, context: "EventContext") -> None:
         if context.is_full_containers:
             self.on_removed(context)
             return
@@ -230,7 +230,7 @@ class Container(BaseContainer):
             if path.exists():
                 utils.remove_file(path)
 
-    def on_removed(self, context: "EventContext"):
+    def on_removed(self, context: "EventContext") -> None:
         utils.clear_directory(self.get_app_path("temporary"))
         utils.clear_directory(self.get_app_path("conf.d"))
 
@@ -241,7 +241,7 @@ class Container(BaseContainer):
         https_enable: bool = MISSING, waf_enable: bool = MISSING,
         auth_enable: bool = False, auth_extra: "dict[str, Any]" = MISSING,
         flush: bool = False,
-    ):
+    ) -> None:
 
         proxy_name = proxy_name or container.name
         proxy_domain_name = proxy_domain_name or domain

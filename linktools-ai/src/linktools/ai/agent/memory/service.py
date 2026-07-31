@@ -6,16 +6,15 @@ id (uuid4)/version/timestamps on remember. Every read/write carries a
 no unscoped path. recall delegates straight to ``MemoryStore.search`` and
 returns its scored :class:`MemoryMatch` results unchanged."""
 
+from typing import TYPE_CHECKING, Mapping
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Mapping
-
 from ..._typing import JSONValue
 from .models import MemoryMatch, MemoryRecord
-from .scope import MemoryScope
 
 if TYPE_CHECKING:
+    from .scope import MemoryScope
     from .store import MemoryStore
 
 
@@ -24,13 +23,13 @@ class MemoryService:
     store: "MemoryStore"
 
     async def recall(
-        self, scope: MemoryScope, query: str, *, limit: int = 10
+        self, scope: "MemoryScope", query: str, *, limit: int = 10
     ) -> "tuple[MemoryMatch, ...]":
         return await self.store.search(query, scope=scope, limit=limit)
 
     async def remember(
         self,
-        scope: MemoryScope,
+        scope: "MemoryScope",
         content: str,
         *,
         owner_id: "str | None" = None,

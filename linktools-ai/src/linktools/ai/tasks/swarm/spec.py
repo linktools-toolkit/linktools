@@ -4,14 +4,17 @@
 agents (AgentRef), a coordinator agent, a strategy declaration, governance limits,
 a context-sharing policy, and an aggregation policy."""
 
+
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
-
 from ...agent.spec import MiddlewareRef
-from .aggregation import AggregationPolicy
-from .limits import SwarmLimits
 from .models import AgentRef
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .aggregation import AggregationPolicy
+    from .limits import SwarmLimits
 
 @dataclass(frozen=True, slots=True)
 class SwarmContextPolicy:
@@ -34,9 +37,9 @@ class SwarmSpec:
     agents: "tuple[AgentRef, ...]"
     coordinator: AgentRef
     strategy: SwarmStrategySpec
-    limits: SwarmLimits
+    limits: "SwarmLimits"
     context_policy: SwarmContextPolicy
-    aggregation: AggregationPolicy
+    aggregation: "AggregationPolicy"
     middleware: "tuple[MiddlewareRef, ...]" = ()
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 

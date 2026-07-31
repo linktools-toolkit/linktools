@@ -14,24 +14,19 @@ context.
 deterministic under a fake clock in tests rather than sleeping for real.
 """
 
+
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
-
-from .models import (
-    RetryPolicy,
-    SideEffectPolicy,
-    ScopeSet,
-    ActorChain,
-    ArtifactRef,
-    TaskBudget,
-    TaskFailureKind,
-    TaskPrincipal,
-)
+from .models import RetryPolicy, SideEffectPolicy, ScopeSet, ArtifactRef
 from ...artifact.models import AssetSnapshotRef
 from ...clock import Clock, SystemClock
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import ActorChain, TaskBudget, TaskFailureKind, TaskPrincipal
 
 class CancellationToken:
     """Cooperative cancellation flag the worker triggers when a task is
@@ -68,12 +63,12 @@ class TaskContext:
     attempt_id: str
     fencing_token: int
     worker_id: str
-    principal: TaskPrincipal
-    actor_chain: ActorChain
+    principal: "TaskPrincipal"
+    actor_chain: "ActorChain"
     delegated_scopes: "ScopeSet"
-    budget: TaskBudget
+    budget: "TaskBudget"
     asset_snapshots: "tuple[AssetSnapshotRef, ...]"
-    cancellation: CancellationToken
+    cancellation: "CancellationToken"
 
     def __post_init__(self) -> None:
         # Normalize tuple/None input to a concrete ScopeSet so a context
@@ -141,7 +136,7 @@ class TaskSuccess:
 
 @dataclass(frozen=True, slots=True)
 class TaskFailure:
-    kind: TaskFailureKind
+    kind: "TaskFailureKind"
     error_type: str
     message: str
     retryable: "bool | None" = None
@@ -155,8 +150,8 @@ TaskOutcome = TaskSuccess | TaskFailure
 class TaskHandler(Protocol):
     async def execute(
         self,
-        request: TaskRequest,
-        context: TaskContext,
+        request: "TaskRequest",
+        context: "TaskContext",
     ) -> TaskOutcome: ...
 
 

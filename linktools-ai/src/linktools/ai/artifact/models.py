@@ -12,14 +12,13 @@ and ``sha256`` is the blob id.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TypeAlias
+from ..errors import ArtifactError, ArtifactRecordConflictError, ArtifactRecordCorruptError
 
-from ..errors import (
-    ArtifactError,
-    ArtifactRecordConflictError,
-    ArtifactRecordCorruptError,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 # A JSON value: scalar | dict[str, JsonValue] | list[JsonValue]. The recursive
 # alias is a string so the self-reference resolves lazily (no runtime eval).
@@ -96,7 +95,7 @@ class ArtifactRecord:
     ref: ArtifactRef
     tenant_id: str
     provenance: ArtifactProvenance
-    created_at: datetime
+    created_at: "datetime"
 
 
 class ArtifactBlobNotFoundError(ArtifactError):

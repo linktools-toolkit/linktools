@@ -52,7 +52,7 @@ def _backup(config_dir: "Path", path: "Path") -> None:
     shutil.move(str(path), str(dest))
 
 
-def migrate_legacy_settings(manager: "ContainerManager", new_store: "ConfigStore"):
+def migrate_legacy_settings(manager: "ContainerManager", new_store: "ConfigStore") -> "ConfigStore":
 
     # One-time migration from v0.9.0: INSTALLED_CONTAINERS/INSTALLED_REPOS
     # used to live in a shelve database at

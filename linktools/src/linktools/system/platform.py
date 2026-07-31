@@ -36,7 +36,7 @@ _ARCH_ALIASES = {
 }
 
 
-def get_system():
+def get_system() -> str:
     """Return the normalised OS name (linux/darwin/windows)."""
     global _system
     if _system is None:
@@ -45,7 +45,7 @@ def get_system():
     return _system
 
 
-def get_machine():
+def get_machine() -> str:
     """Return the raw machine architecture (lowercased), e.g. ``aarch64``.
 
     Use :func:`normalize_arch` for the canonical value (``arm64``).
@@ -57,13 +57,13 @@ def get_machine():
     return _machine
 
 
-def is_unix_like(system=None):
+def is_unix_like(system: "str | None" = None) -> bool:
     if system:
         return normalize_platform(system) in ("darwin", "linux")
     return _is_unix_like
 
 
-def is_windows(system=None):
+def is_windows(system: "str | None" = None) -> bool:
     if system:
         return normalize_platform(system) == "windows"
     return _is_windows_like

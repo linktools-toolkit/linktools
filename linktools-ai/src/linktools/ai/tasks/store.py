@@ -1,24 +1,30 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Structural task-store contract implemented directly by backends."""
+
 
 from datetime import timedelta
 from typing import Protocol
 
-from ..storage.database import CoordinationScope
-from .models import TaskExecution, TaskPlan
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from ..storage.database import CoordinationScope
+    from .models import TaskExecution, TaskPlan
 
 class TaskStore(Protocol):
-    coordination_scope: CoordinationScope
+    coordination_scope: "CoordinationScope"
 
-    async def save_plan(self, plan: TaskPlan) -> None: ...
+    async def save_plan(self, plan: "TaskPlan") -> None: ...
 
-    async def get_plan(self, plan_id: str) -> TaskPlan | None: ...
+    async def get_plan(self, plan_id: str) -> "TaskPlan | None": ...
 
     async def get_execution(
         self, execution_id: str
-    ) -> TaskExecution | None: ...
+    ) -> "TaskExecution | None": ...
 
-    async def add_execution(self, execution: TaskExecution) -> None: ...
+    async def add_execution(self, execution: "TaskExecution") -> None: ...
 
     async def claim(
         self,
@@ -26,7 +32,7 @@ class TaskStore(Protocol):
         *,
         owner: str,
         duration: timedelta = timedelta(minutes=5),
-    ) -> TaskExecution: ...
+    ) -> "TaskExecution": ...
 
     async def renew(
         self,
@@ -35,11 +41,11 @@ class TaskStore(Protocol):
         owner: str,
         fence: int,
         duration: timedelta = timedelta(minutes=5),
-    ) -> TaskExecution: ...
+    ) -> "TaskExecution": ...
 
     async def complete(
         self, execution_id: str, *, owner: str, fence: int, result: object
-    ) -> TaskExecution: ...
+    ) -> "TaskExecution": ...
 
     async def fail(
         self,
@@ -49,7 +55,7 @@ class TaskStore(Protocol):
         fence: int,
         retry: bool = False,
         error: object = None,
-    ) -> TaskExecution: ...
+    ) -> "TaskExecution": ...
 
 
 __all__ = ["TaskStore"]

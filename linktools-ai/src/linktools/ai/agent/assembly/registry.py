@@ -12,11 +12,15 @@ refs into one merged bundle, against this registry) is owned by the internal
 :class:`~linktools.ai.agent.assembly.assembler.AgentAssembler`.
 """
 
+
 from typing import Mapping
-
 from ...errors import AgentAssemblyError, AgentFeatureConflictError
-from .provider import AgentFeatureProvider, provider_kinds
+from .provider import provider_kinds
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .provider import AgentFeatureProvider
 
 class AgentFeatureRegistry:
     """Holds the kind -> AgentFeatureProvider mapping the resolver dispatches over.
@@ -43,7 +47,7 @@ class AgentFeatureRegistry:
     def get(self, kind: str) -> "AgentFeatureProvider | None":
         return self._providers.get(kind)
 
-    def register(self, provider: AgentFeatureProvider) -> None:
+    def register(self, provider: "AgentFeatureProvider") -> None:
         """Register a provider for every kind it supports. Raises
         AgentFeatureConflictError if ANY of its kinds is already registered --
         silently overwriting a wired provider is never the right default. Call
@@ -59,7 +63,7 @@ class AgentFeatureRegistry:
         for k in kinds:
             self._providers[k] = provider
 
-    def replace(self, provider: AgentFeatureProvider) -> None:
+    def replace(self, provider: "AgentFeatureProvider") -> None:
         """Register a provider for every kind it supports, intentionally
         overriding any provider already registered for those kinds."""
         self._assert_mutable()

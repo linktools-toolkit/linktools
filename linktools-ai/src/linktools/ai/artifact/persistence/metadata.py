@@ -7,11 +7,10 @@ different sha256/tenant/provenance under an existing id is refused rather than
 overwriting the prior write's lineage.
 """
 
-from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import JSON, Integer, String, UniqueConstraint, select
 from sqlalchemy.exc import IntegrityError
@@ -28,6 +27,9 @@ from ..models import (
 )
 from .blob import FilesystemArtifactBlobStore
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
 
 class ArtifactRow(Base):
     __tablename__ = f"{TABLE_PREFIX}artifacts"
@@ -36,17 +38,17 @@ class ArtifactRow(Base):
             "tenant_id", "artifact_id", name="uq_artifact_tenant_id"
         ),
     )
-    artifact_id: Mapped[str] = mapped_column(String(128), index=True)
-    sha256: Mapped[str] = mapped_column(String(64), index=True)
-    media_type: Mapped[str] = mapped_column(String(128))
-    size: Mapped[int] = mapped_column(Integer)
-    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
-    producer_kind: Mapped[str] = mapped_column(String(64))
-    producer_id: Mapped[str] = mapped_column(String(128))
-    run_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
-    session_id: Mapped["str | None"] = mapped_column(String(128), nullable=True)
-    parent_artifact_ids: Mapped[Any] = mapped_column(JSON)
-    provenance_metadata: Mapped[Any] = mapped_column(JSON)
+    artifact_id: "Mapped[str]" = mapped_column(String(128), index=True)
+    sha256: "Mapped[str]" = mapped_column(String(64), index=True)
+    media_type: "Mapped[str]" = mapped_column(String(128))
+    size: "Mapped[int]" = mapped_column(Integer)
+    tenant_id: "Mapped[str]" = mapped_column(String(128), index=True)
+    producer_kind: "Mapped[str]" = mapped_column(String(64))
+    producer_id: "Mapped[str]" = mapped_column(String(128))
+    run_id: "Mapped['str | None']" = mapped_column(String(128), nullable=True)
+    session_id: "Mapped['str | None']" = mapped_column(String(128), nullable=True)
+    parent_artifact_ids: "Mapped[Any]" = mapped_column(JSON)
+    provenance_metadata: "Mapped[Any]" = mapped_column(JSON)
 
 
 def _record(row: ArtifactRow) -> ArtifactRecord:
@@ -70,12 +72,12 @@ class SqlArtifactBackend:
         self._session_factory = session_factory
         self._blobs = blobs if isinstance(blobs, FilesystemArtifactBlobStore) else FilesystemArtifactBlobStore(blobs)
 
-    async def initialize_storage(self, engine) -> None:
+    async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         await self._blobs.initialize_storage()
 
-    async def put(self, *, record: ArtifactRecord, content: AsyncIterator[bytes]) -> ArtifactRecord:
+    async def put(self, *, record: ArtifactRecord, content: "AsyncIterator[bytes]") -> ArtifactRecord:
         await self._blobs.put(ref=record.ref, content=content)
         row = ArtifactRow(
             artifact_id=record.ref.id,
@@ -115,7 +117,7 @@ class SqlArtifactBackend:
             )
         return None if row is None else _record(row)
 
-    async def open(self, artifact_id: str, *, tenant_id: str) -> AsyncIterator[bytes]:
+    async def open(self, artifact_id: str, *, tenant_id: str) -> "AsyncIterator[bytes]":
         record = await self.get_record(artifact_id, tenant_id=tenant_id)
         if record is None:
             raise ArtifactBlobNotFoundError(artifact_id)

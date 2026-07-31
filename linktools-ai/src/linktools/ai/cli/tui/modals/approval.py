@@ -10,15 +10,14 @@ the screen owns the side effects (approve+resume, reject+cancel, or leave the
 run waiting)."""
 
 from typing import TYPE_CHECKING, Any, Mapping
-
 from rich.markup import escape
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 if TYPE_CHECKING:
+    from textual.app import ComposeResult
     from ...client import RuntimeClient
 
 _APPROVE = "approve"
@@ -87,7 +86,7 @@ class ApprovalModal(ModalScreen):
         self.client = client
         self.event = event
 
-    def compose(self) -> ComposeResult:
+    def compose(self) -> "ComposeResult":
         run_id = self.event.get("run_id")
         approval_id = self.event.get("approval_id")
         yield Vertical(

@@ -5,7 +5,6 @@ registry/mcp.py so the mcp domain owns its spec type). Carries the full
 transport/discovery contract + ``__post_init__`` domain invariants so a custom
 provider constructing one directly cannot build an ungovernable server."""
 
-from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field

@@ -10,20 +10,22 @@ cancelled through ``RuntimeClient.cancel(run_id)``.
 
 Untrusted text is Rich-markup-escaped before writing."""
 
+
 from rich.markup import escape
 from textual import work
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import RichLog, TextArea
-
 from linktools.core import environ
-
 from ..messages import RunEventMessage, RunFailedMessage, RunFinishedMessage
 from ..modals.approval import ApprovalModal
 from ...client import RunRequest, RuntimeClient, new_run_id
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 class Composer(TextArea):
     """Multi-line text area that submits on Enter (Shift+Enter for newline)."""
@@ -58,7 +60,7 @@ class ChatScreen(Screen):
         self._active_run_id: "str | None" = None
         self._active_worker = None
 
-    def compose(self) -> ComposeResult:
+    def compose(self) -> "ComposeResult":
         yield RichLog(id="conversation", wrap=True, markup=True)
         yield Composer(id="composer")
 

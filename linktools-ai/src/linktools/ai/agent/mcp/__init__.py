@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """MCP connection, discovery, and tool adaptation."""
 
 from .client import build_mcp_server

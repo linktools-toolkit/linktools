@@ -8,13 +8,16 @@ scores it with pluggable evaluators. It does NOT block dynamic asset usage
 or gate production -- it answers "is this target actually better?".
 """
 
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 
-from ..json import JsonValue
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from datetime import datetime
+    from ..json import JsonValue
 
 class EvalRunStatus(str, Enum):
     PENDING = "pending"
@@ -61,7 +64,7 @@ class EvalRun:
     target: EvalTarget
     status: EvalRunStatus
     baseline_target: "EvalTarget | None"
-    created_at: datetime
+    created_at: "datetime"
     started_at: "datetime | None" = None
     finished_at: "datetime | None" = None
     metadata: "Mapping[str, object]" = field(default_factory=dict)
@@ -147,8 +150,8 @@ class RunEvaluation:
     run_id: str
     evaluator: str
     score: "float | None"
-    result: JsonValue
-    created_at: datetime
+    result: "JsonValue"
+    created_at: "datetime"
 
 
 __all__: "list[str]" = [

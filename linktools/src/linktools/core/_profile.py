@@ -5,9 +5,13 @@ import copy
 import json
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from linktools.types import PathType
 from ..errors import ConfigError
+
+if TYPE_CHECKING:
+    from typing import Any
 
 __all__ = [
     "ProjectProfile",
@@ -104,11 +108,11 @@ class ProjectProfile(object):
             raise ConfigError("config file root must be a JSON object: %s" % path)
         return cls(data)
 
-    def get(self, key, default=None):
+    def get(self, key: str, default: "Any" = None) -> "Any":
         """Return a top-level profile value, or ``default`` if absent."""
         return copy.deepcopy(self._data.get(key, default))
 
-    def get_path(self, *keys, **kwargs):
+    def get_path(self, *keys, **kwargs) -> "Any":
         default = kwargs.pop("default", None)
         if kwargs:
             raise TypeError("get_path() got unexpected keyword argument(s): %s" % ", ".join(sorted(kwargs)))
@@ -120,7 +124,7 @@ class ProjectProfile(object):
                 return default
         return copy.deepcopy(node)
 
-    def require_path(self, *keys):
+    def require_path(self, *keys) -> "Any":
         node = self._data
         for index, key in enumerate(keys):
             if isinstance(node, dict) and key in node:
@@ -132,7 +136,7 @@ class ProjectProfile(object):
                 )
         return copy.deepcopy(node)
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return copy.deepcopy(self._data)
 
     def __repr__(self):

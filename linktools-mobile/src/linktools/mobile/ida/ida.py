@@ -1,15 +1,18 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import re
 
 
-def get_point_size():
+def get_point_size() -> int:
     return 8 if BADADDR == 0xFFFFFFFFFFFFFFFF else 4
 
 
-def get_point_value(addr):
+def get_point_value(addr: int) -> int:
     return get_wide_dword(addr) if get_point_size() == 4 else get_qword(addr)
 
 
-def get_func_name_ex(addr):
+def get_func_name_ex(addr: int) -> str:
     func = ida_funcs.get_func(addr)
     if func:
         name = get_func_off_str(func.start_ea)
@@ -84,7 +87,7 @@ def _add_struc_member(struc_id, member_name, member_offset,
     return True
 
 
-def add_vtbl_struc(vtbl_struc_name, vtbl_start, vtbl_end):
+def add_vtbl_struc(vtbl_struc_name: str, vtbl_start: int, vtbl_end: int) -> bool:
     vtbl_struc_id = _get_or_add_struc(vtbl_struc_name)
     if _is_bad_struc_id(vtbl_struc_id):
         print("error: add vtbl struct %s failed" % vtbl_struc_name)
@@ -107,7 +110,7 @@ def add_vtbl_struc(vtbl_struc_name, vtbl_start, vtbl_end):
     return True
 
 
-def add_vtbl_member(struc_name, vtbl_start, vtbl_end, vtbl_offset=0):
+def add_vtbl_member(struc_name: str, vtbl_start: int, vtbl_end: int, vtbl_offset: int = 0) -> bool:
     struc_id = _get_or_add_struc(struc_name)
     vtbl_struc_name = "vtbl_%s_%d" % (struc_name, vtbl_offset)
     vtbl_struc_member = "vtbl_%d" % vtbl_offset
@@ -126,7 +129,7 @@ def add_vtbl_member(struc_name, vtbl_start, vtbl_end, vtbl_offset=0):
     return True
 
 
-def set_user_reg(reg_name, reg_value, addr_start, addr_end):
+def set_user_reg(reg_name: str, reg_value: str, addr_start: int, addr_end: int) -> None:
     for addr in range(addr_start, addr_end):
         SetRegEx(addr, reg_name, reg_value, SR_user)
 
@@ -139,7 +142,7 @@ def _match_interface_end(func_name):
     return func_name.find("onTransact") != -1
 
 
-def scan_interfaces(addr_start, addr_end, max_count=500):
+def scan_interfaces(addr_start: int, addr_end: int, max_count: int = 500) -> "list[list[int]]":
     interfaces = []
     last_addr = BADADDR
     for addr in range(addr_start, addr_end, get_point_size()):
@@ -173,7 +176,7 @@ def _print_interfaces(inteface_start, inteface_end, simple=False):
     print("")
 
 
-def scan_all_interfaces(simple=True):
+def scan_all_interfaces(simple: bool = True) -> None:
     interfaces = []
     addr_start = get_first_seg()
     while addr_start != BADADDR:

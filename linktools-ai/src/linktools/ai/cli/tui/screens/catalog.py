@@ -8,14 +8,14 @@ through ``RuntimeClient`` (no registry access from the UI). Esc returns to
 chat."""
 
 from typing import TYPE_CHECKING
-
+from collections.abc import Awaitable, Callable, Iterable
 from rich.markup import escape
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import RichLog
 
 if TYPE_CHECKING:
+    from textual.app import ComposeResult
     from ...client import RuntimeClient
 
 
@@ -28,7 +28,7 @@ class CatalogScreen(Screen):
         super().__init__()
         self.client = client
 
-    def compose(self) -> ComposeResult:
+    def compose(self) -> "ComposeResult":
         yield RichLog(id="catalog-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:
@@ -37,7 +37,7 @@ class CatalogScreen(Screen):
     async def _load(self) -> None:
         log = self.query_one("#catalog-log", RichLog)
 
-        async def section(title: str, fetch) -> None:
+        async def section(title: str, fetch: "Callable[[], Awaitable[Iterable[str]]]") -> None:
             log.write(f"[b]{title}[/b]")
             ids = await fetch()
             if not ids:

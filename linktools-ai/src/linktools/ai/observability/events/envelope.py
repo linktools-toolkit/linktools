@@ -4,8 +4,12 @@
 in. Generic (not PEP-695 `class Foo[T]`) for Python 3.10 support."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Generic, Mapping, TypeVar
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 TEvent = TypeVar("TEvent")
 
@@ -19,7 +23,7 @@ class EventEnvelope(Generic[TEvent]):
     # first-class rather than conflated with run_id.
     stream_id: str
     sequence: int
-    occurred_at: datetime
+    occurred_at: "datetime"
     run_id: str
     root_execution_id: str
     parent_execution_id: "str | None"

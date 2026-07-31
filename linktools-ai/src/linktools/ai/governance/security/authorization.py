@@ -15,12 +15,15 @@ A complex RBAC DSL is explicitly out of scope: ship the Protocol and
 the two primitives, let downstream callers compose policy on top.
 """
 
+
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
-
 from ...errors import PrincipalAccessDeniedError
-from ..identity import PrincipalContext
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..identity import PrincipalContext
 
 @dataclass(frozen=True, slots=True)
 class AuthorizationTarget:
@@ -38,7 +41,7 @@ class AuthorizationTarget:
 class AuthorizationService(Protocol):
     async def authorize(
         self,
-        principal: PrincipalContext,
+        principal: "PrincipalContext",
         action: str,
         asset: AuthorizationTarget,
     ) -> None:
@@ -56,7 +59,7 @@ class AllowOwnerAuthorization:
 
     async def authorize(
         self,
-        principal: PrincipalContext,
+        principal: "PrincipalContext",
         action: str,
         asset: AuthorizationTarget,
     ) -> None:
@@ -70,7 +73,12 @@ class SameTenantAuthorization(AllowOwnerAuthorization):
 class ScopeAuthorization:
     """Default scoped policy: tenant match plus an explicit action scope."""
 
-    async def authorize(self, principal, action, asset) -> None:
+    async def authorize(
+        self,
+        principal: "PrincipalContext",
+        action: str,
+        asset: AuthorizationTarget,
+    ) -> None:
         principal.require_tenant(asset.tenant_id)
         if not principal.scopes.unrestricted and not principal.scopes.contains(action):
             raise PrincipalAccessDeniedError(
@@ -85,7 +93,7 @@ class DenyAllAuthorization:
 
     async def authorize(
         self,
-        principal: PrincipalContext,
+        principal: "PrincipalContext",
         action: str,
         asset: AuthorizationTarget,
     ) -> None:

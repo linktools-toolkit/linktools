@@ -8,14 +8,13 @@ the resulting ``DoctorReport`` (the screen never re-implements the checks). Esc
 returns to chat."""
 
 from typing import TYPE_CHECKING
-
 from rich.markup import escape
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.screen import Screen
 from textual.widgets import RichLog
 
 if TYPE_CHECKING:
+    from textual.app import ComposeResult
     from ...client import RuntimeClient
 
 
@@ -28,7 +27,7 @@ class DoctorScreen(Screen):
         super().__init__()
         self.client = client
 
-    def compose(self) -> ComposeResult:
+    def compose(self) -> "ComposeResult":
         yield RichLog(id="doctor-log", wrap=True, markup=True)
 
     def on_mount(self) -> None:

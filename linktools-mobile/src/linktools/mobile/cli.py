@@ -64,7 +64,7 @@ class DeviceCache:
 
     def __call__(self, fn: "Callable[..., BaseDevice]"):
         @functools.wraps(fn)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args, **kwargs) -> "BaseDevice":
             device: "BaseDevice" = fn(*args, **kwargs)
             if device is not None:
                 self.write(device.id)
@@ -128,14 +128,14 @@ class IOSSelector(DeviceSelector[GoIOS, GoIOSDevice]):
 
 class DeviceCommandMixin:
 
-    def add_device_options(self: "BaseCommand", parser: "CommandParser"):
+    def add_device_options(self: "BaseCommand", parser: "CommandParser") -> None:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
         cache = DeviceCache(self.environ.cache, "device")
 
         @cache
-        def select(bridge: "Bridge"):
+        def select(bridge: "Bridge") -> "BaseDevice":
             devices = tuple(list_devices(alive=True))
             if len(devices) == 0:
                 raise BridgeError("no devices/emulators found")
@@ -154,7 +154,7 @@ class DeviceCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(bridge: "Bridge"):
+                def select(bridge: "Bridge") -> "BaseDevice":
                     device_id = str(values)
                     for device in list_devices():
                         if device.id == device_id:
@@ -168,7 +168,7 @@ class DeviceCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(bridge: "Bridge"):
+                def select(bridge: "Bridge") -> "BaseDevice":
                     device_id = cache.read()
                     if not device_id:
                         raise BridgeError("no device used last time")
@@ -199,7 +199,7 @@ class AndroidCommandMixin:
         cache = DeviceCache(self.environ.cache, "android")
 
         @cache
-        def select(adb: "Adb"):
+        def select(adb: "Adb") -> "AdbDevice":
             devices = tuple(adb.list_devices(alive=True))
             if len(devices) == 0:
                 raise AdbError("no devices/emulators found")
@@ -218,7 +218,7 @@ class AndroidCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(adb: "Adb"):
+                def select(adb: "Adb") -> "AdbDevice":
                     return AdbDevice(str(values), adb=adb)
 
                 device_parser = AndroidSelector.copy_on_write(namespace, self.dest)
@@ -228,7 +228,7 @@ class AndroidCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(adb: "Adb"):
+                def select(adb: "Adb") -> "AdbDevice":
                     return AdbDevice(adb.exec("-d", "get-serialno").strip(" \r\n"), adb=adb)
 
                 device_parser = AndroidSelector.copy_on_write(namespace, self.dest)
@@ -238,7 +238,7 @@ class AndroidCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(adb: "Adb"):
+                def select(adb: "Adb") -> "AdbDevice":
                     return AdbDevice(adb.exec("-e", "get-serialno").strip(" \r\n"), adb=adb)
 
                 device_parser = AndroidSelector.copy_on_write(namespace, self.dest)
@@ -248,7 +248,7 @@ class AndroidCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(adb: "Adb"):
+                def select(adb: "Adb") -> "AdbDevice":
                     addr = str(values)
                     if addr.find(":") < 0:
                         addr = addr + ":5555"
@@ -263,7 +263,7 @@ class AndroidCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(adb: "Adb"):
+                def select(adb: "Adb") -> "AdbDevice":
                     device_id = cache.read()
                     if device_id:
                         return AdbDevice(device_id, adb=adb)
@@ -321,14 +321,14 @@ class AndroidCommandMixin:
 
 class IOSCommandMixin:
 
-    def add_ios_options(self: "BaseCommand", parser: "CommandParser"):
+    def add_ios_options(self: "BaseCommand", parser: "CommandParser") -> None:
 
         parser = parser or self._argument_parser
         prefix = parser.prefix_chars[0] if parser.prefix_chars else "-"
         cache = DeviceCache(self.environ.cache, "ios")
 
         @cache
-        def select(ios: "GoIOS"):
+        def select(ios: "GoIOS") -> "GoIOSDevice":
             devices = tuple(ios.list_devices(alive=True))
             if len(devices) == 0:
                 raise GoIOSError("no devices/emulators found")
@@ -347,7 +347,7 @@ class IOSCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(ios: "GoIOS"):
+                def select(ios: "GoIOS") -> "GoIOSDevice":
                     return GoIOSDevice(str(values), ios=ios)
 
                 device_parser = IOSSelector.copy_on_write(namespace, self.dest)
@@ -357,7 +357,7 @@ class IOSCommandMixin:
 
             def __call__(self, parser, namespace, values, option_string=None):
                 @cache
-                def select(ios: "GoIOS"):
+                def select(ios: "GoIOS") -> "GoIOSDevice":
                     device_id = cache.read()
                     if device_id:
                         return GoIOSDevice(device_id, ios=ios)
@@ -392,7 +392,7 @@ class AndroidCommand(BaseCommand, metaclass=abc.ABCMeta):
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [AdbError]
 
-    def init_base_arguments(self, parser: "CommandParser"):
+    def init_base_arguments(self, parser: "CommandParser") -> None:
         super().init_base_arguments(parser)
         AndroidCommandMixin.add_android_options(self, parser)
 
@@ -403,6 +403,6 @@ class IOSCommand(BaseCommand, metaclass=abc.ABCMeta):
     def known_errors(self) -> "list[type[BaseException]]":
         return super().known_errors + [GoIOSError]
 
-    def init_base_arguments(self, parser: "CommandParser"):
+    def init_base_arguments(self, parser: "CommandParser") -> None:
         super().init_base_arguments(parser)
         IOSCommandMixin.add_ios_options(self, parser)

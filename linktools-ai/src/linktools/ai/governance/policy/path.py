@@ -6,16 +6,15 @@ under `path_argument` (default "path"). For the terminal tool, also walks the
 shell command (`arguments["command"]`) and checks any token that looks like a
 path (absolute, ./, ../, ~/)."""
 
+
 import shlex
 from pathlib import Path
+from .rule import PolicyDecision, PolicyDecisionKind
 
-from .rule import (
-    PolicyDecision,
-    PolicyDecisionKind,
-    ToolContext,
-    ToolRequest,
-)
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .rule import ToolContext, ToolRequest
 
 def _looks_like_path(token: str) -> bool:
     return (
@@ -38,9 +37,9 @@ class PathRule:
         self._path_argument = path_argument
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
-        candidates: list[str] = []
+        candidates: "list[str]" = []
         path_value = request.arguments.get(self._path_argument)
         if isinstance(path_value, str):
             candidates.append(path_value)

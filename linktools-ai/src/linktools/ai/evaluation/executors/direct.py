@@ -10,20 +10,24 @@ definition, and event stream sealed to artifacts) so the case is replayable and
 evaluators can see the trajectory. The Evaluation core depends on the
 :class:`EvalExecutor` Protocol, not on JobRuntime."""
 
+
 import json
 import uuid
 from typing import Protocol
-
 from ...artifact.models import ArtifactProvenance
 from ...json import normalize_json
-from ..models import EvalCase, EvalExecution, EvalTarget, normalize_usage
+from ..models import EvalExecution, normalize_usage
 from ..snapshot import EvalSnapshot
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalTarget
 
 class EvalTargetResolver(Protocol):
     """Resolve an :class:`EvalTarget` to a Runtime spec (AgentSpec / SwarmSpec)."""
 
-    async def resolve(self, target: EvalTarget) -> object: ...
+    async def resolve(self, target: "EvalTarget") -> object: ...
 
 
 class DirectEvalExecutor:
@@ -48,7 +52,7 @@ class DirectEvalExecutor:
         self._run_definition_store = run_definition_store
         self._event_store = event_store
 
-    async def execute(self, target: EvalTarget, case: EvalCase) -> EvalExecution:
+    async def execute(self, target: "EvalTarget", case: "EvalCase") -> EvalExecution:
         try:
             spec = await self._resolver.resolve(target)
             prompt = await self._read_prompt(case)
@@ -96,7 +100,7 @@ class DirectEvalExecutor:
             snapshot=snapshot,
         )
 
-    async def _read_prompt(self, case: EvalCase) -> str:
+    async def _read_prompt(self, case: "EvalCase") -> str:
         if not case.input_artifact_id:
             return ""
         content = await self._artifact_store.get(

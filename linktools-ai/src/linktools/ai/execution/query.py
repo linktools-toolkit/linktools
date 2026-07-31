@@ -1,36 +1,37 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Authorized stable DTO queries over the execution port."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
-
 from ..errors import PrincipalAccessDeniedError, StorageCorruptionError
-from ..governance.identity import PrincipalContext
-from ..governance.authorization import (
-    AuthorizationPolicy,
-    ExecutionAction,
-    OwnershipAuthorizationPolicy,
-)
-from ..json import JsonValue
-from .domain import Page, RunRecord, RunStatus, RunUsage
-from .store import ExecutionStore
+from ..governance.authorization import AuthorizationPolicy, ExecutionAction, OwnershipAuthorizationPolicy
+from .domain import Page, RunUsage
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..governance.identity import PrincipalContext
+    from ..json import JsonValue
+    from .domain import RunRecord, RunStatus
+    from .store import ExecutionStore
 
 @dataclass(frozen=True, slots=True)
 class SessionTurnView:
     session_id: str
     sequence: int
     run_id: str
-    input: JsonValue
-    assistant_summary: JsonValue | None
-    status: RunStatus
+    input: "JsonValue"
+    assistant_summary: "JsonValue | None"
+    status: "RunStatus"
 
 
 @dataclass(frozen=True, slots=True)
 class ModelInteractionView:
     sequence: int
-    request: JsonValue
-    response: JsonValue | None
+    request: "JsonValue"
+    response: "JsonValue | None"
     status: str
 
 
@@ -38,8 +39,8 @@ class ModelInteractionView:
 class ToolCallView:
     call_id: str
     tool_name: str
-    arguments: JsonValue
-    result: JsonValue | None
+    arguments: "JsonValue"
+    result: "JsonValue | None"
     status: str
 
 
@@ -47,30 +48,30 @@ class ToolCallView:
 class ExecutionDetailView:
     run_id: str
     session_id: str
-    status: RunStatus
-    effective_input: JsonValue | None
-    interactions: tuple[ModelInteractionView, ...]
-    tool_calls: tuple[ToolCallView, ...]
-    final_output: JsonValue | None
-    usage: RunUsage | None
+    status: "RunStatus"
+    effective_input: "JsonValue | None"
+    interactions: "tuple[ModelInteractionView, ...]"
+    tool_calls: "tuple[ToolCallView, ...]"
+    final_output: "JsonValue | None"
+    usage: "RunUsage | None"
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResultView:
     run_id: str
-    output: JsonValue | None
+    output: "JsonValue | None"
 
 
 class ExecutionQueryService:
     def __init__(
         self,
-        store: ExecutionStore,
-        authorization: AuthorizationPolicy | None = None,
+        store: "ExecutionStore",
+        authorization: "AuthorizationPolicy | None" = None,
     ) -> None:
         self._store = store
         self._authorization = authorization or OwnershipAuthorizationPolicy()
 
-    def _authorize(self, record: RunRecord, principal: PrincipalContext) -> None:
+    def _authorize(self, record: "RunRecord", principal: "PrincipalContext") -> None:
         self._authorization.assert_execution_access(
             principal=principal,
             tenant_id=record.tenant_id,
@@ -78,7 +79,7 @@ class ExecutionQueryService:
             action=ExecutionAction.INSPECT,
         )
 
-    async def list_session_turns(self, *, session_id: str, principal: PrincipalContext, before_sequence: int | None = None, limit: int = 50) -> Page[SessionTurnView]:
+    async def list_session_turns(self, *, session_id: str, principal: "PrincipalContext", before_sequence: "int | None" = None, limit: int = 50) -> "Page[SessionTurnView]":
         session = await self._store.get_session(session_id)
         if session is None:
             raise PrincipalAccessDeniedError("session is not visible to this principal")
@@ -91,16 +92,16 @@ class ExecutionQueryService:
         page = await self._store.list_session_turns(session_id, before_sequence=before_sequence, limit=limit)
         return Page(tuple(SessionTurnView(item.session_id, item.sequence, item.run_id, item.input, item.assistant_summary, item.status) for item in page.items), page.has_more, page.next_cursor)
 
-    async def get_run_detail(self, *, run_id: str, principal: PrincipalContext) -> ExecutionDetailView:
+    async def get_run_detail(self, *, run_id: str, principal: "PrincipalContext") -> ExecutionDetailView:
         run = await self._store.get_run(run_id)
         if run is None:
             raise PrincipalAccessDeniedError("run is not visible to this principal")
         self._authorize(run, principal)
         snapshot = await self._store.get_snapshot(run_id)
         steps = await self._store.list_trace_steps(run_id, through_sequence=snapshot.trace_end_sequence if snapshot else None)
-        interactions: list[ModelInteractionView] = []
-        calls: dict[str, ToolCallView] = {}
-        tool_results: dict[str, JsonValue] = {}
+        interactions: "list[ModelInteractionView]" = []
+        calls: "dict[str, ToolCallView]" = {}
+        tool_results: "dict[str, JsonValue]" = {}
         for step in steps:
             payload = step.payload
             if step.kind == "model_interaction":

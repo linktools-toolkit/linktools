@@ -16,17 +16,17 @@ injectable project-agent source, so it is fully unit-testable without a live
 Runtime. The live ``call_subagent`` tool wires this resolver in at assembly
 time; resolution itself is pure."""
 
+
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
-
 from ...errors import SubagentResolutionError
-from ..skill.private import (
-    ActiveSkillContext,
-    SkillSubagentSpec,
-    parse_skill_subagent,
-    resolve_skill_agent_path,
-)
+from ..skill.private import parse_skill_subagent, resolve_skill_agent_path
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..spec import AgentSpec
+    from ..skill.private import ActiveSkillContext, SkillSubagentSpec
 
 @dataclass(frozen=True, slots=True)
 class CallSubagentInput:
@@ -80,9 +80,9 @@ class SkillSubagentProvider:
     async def resolve(
         self,
         *,
-        active_skill: ActiveSkillContext,
+        active_skill: "ActiveSkillContext",
         instruction_path: str,
-    ) -> SkillSubagentSpec:
+    ) -> "SkillSubagentSpec":
         skill = await self._skills.get(active_skill.skill_id)
         if skill is None:
             raise SubagentResolutionError("active skill does not exist")
@@ -108,7 +108,7 @@ class UnifiedSubagentResolver:
         self,
         *,
         project_agents: "_ProjectAgentSource",
-        skill_agents: SkillSubagentProvider,
+        skill_agents: "SkillSubagentProvider",
     ) -> None:
         self._project_agents = project_agents
         self._skill_agents = skill_agents
@@ -116,9 +116,9 @@ class UnifiedSubagentResolver:
     async def resolve(
         self,
         *,
-        request: CallSubagentInput,
+        request: "CallSubagentInput",
         active_skill: "ActiveSkillContext | None",
-    ):
+    ) -> "AgentSpec":
         request.validate()
         if request.name is not None:
             from ...errors import SpecNotFoundError

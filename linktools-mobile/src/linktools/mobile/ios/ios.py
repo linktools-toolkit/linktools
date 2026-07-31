@@ -340,7 +340,7 @@ class GoIOSDevice(BaseDevice):
 
             class Client(SSHClient):
 
-                def close(self):
+                def close(self) -> None:
                     try:
                         super().close()
                     finally:
@@ -376,7 +376,7 @@ class GoIOSForward(Stoppable):
         self._remote_port = remote_port
         self._process = None
 
-        def start():
+        def start() -> None:
             self._process = ios.popen(
                 "forward",
                 local_port,
@@ -424,7 +424,7 @@ class GoIOSForward(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         process, self._process = self._process, None
         if process is not None:
             _logger.debug(f"Kill {self} process")

@@ -1,23 +1,30 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Semantic trace collection with persisted sequence continuity."""
+
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-from ..json import JsonValue, normalize_json
-from .domain import RunStatus, RunUsage
+from ..json import normalize_json
 from .snapshots import AgentSnapshotData
-from .store import ExecutionStore
 from .trace_models import NewRunTraceStep
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..json import JsonValue
+    from .domain import RunStatus, RunUsage
+    from .store import ExecutionStore
 
 @dataclass(slots=True)
 class SemanticTraceCollector:
     run_id: str
-    trace_port: ExecutionStore
+    trace_port: "ExecutionStore"
     next_sequence: int = 0
-    _pending: list[NewRunTraceStep] = field(default_factory=list)
+    _pending: "list[NewRunTraceStep]" = field(default_factory=list)
 
-    def _add(self, kind: str, payload: JsonValue) -> None:
+    def _add(self, kind: str, payload: "JsonValue") -> None:
         self._pending.append(
             NewRunTraceStep(
                 kind=kind,
@@ -26,15 +33,15 @@ class SemanticTraceCollector:
             )
         )
 
-    async def model_request_succeeded(self, payload: JsonValue) -> None:
+    async def model_request_succeeded(self, payload: "JsonValue") -> None:
         self._add("model_interaction", payload)
         await self.flush()
 
-    async def model_request_failed(self, payload: JsonValue) -> None:
+    async def model_request_failed(self, payload: "JsonValue") -> None:
         self._add("model_interaction", payload)
         await self.flush()
 
-    async def tool_result(self, payload: JsonValue) -> None:
+    async def tool_result(self, payload: "JsonValue") -> None:
         self._add("tool_result", payload)
         await self.flush()
 
@@ -48,7 +55,7 @@ class SemanticTraceCollector:
         self._pending.clear()
         return self.next_sequence
 
-    async def build_snapshot(self, *, resume_messages: tuple[JsonValue, ...], final_output: "JsonValue | str | None", status: RunStatus, usage: RunUsage) -> AgentSnapshotData:
+    async def build_snapshot(self, *, resume_messages: "tuple[JsonValue, ...]", final_output: "JsonValue | str | None", status: "RunStatus", usage: "RunUsage") -> AgentSnapshotData:
         await self.flush()
         return AgentSnapshotData(
             tuple(normalize_json(message) for message in resume_messages),

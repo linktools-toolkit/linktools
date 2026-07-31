@@ -1,18 +1,17 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """The single boundary that turns feature declarations into an agent surface."""
 
 from typing import TYPE_CHECKING
-
-from ...errors import (
-    AgentAssemblyError,
-    AgentFeatureConflictError,
-    AgentFeatureNotFoundError,
-)
-from ..tool.exposure import ToolAssembler
+from ...errors import AgentAssemblyError, AgentFeatureConflictError, AgentFeatureNotFoundError
 from .models import AgentAssembly, AgentFeatureRef
-from .provider import AgentAssemblyEventSink, AgentFeatureContext
-from .registry import AgentFeatureRegistry
+from .provider import AgentAssemblyEventSink
 
 if TYPE_CHECKING:
+    from ..tool.exposure import ToolAssembler
+    from .provider import AgentFeatureContext
+    from .registry import AgentFeatureRegistry
     from ..spec import AgentSpec
 
 
@@ -20,16 +19,16 @@ class AgentAssembler:
     def __init__(
         self,
         *,
-        registry: AgentFeatureRegistry,
-        tool_assembler: ToolAssembler,
-        events: AgentAssemblyEventSink | None = None,
+        registry: "AgentFeatureRegistry",
+        tool_assembler: "ToolAssembler",
+        events: "AgentAssemblyEventSink | None" = None,
     ) -> None:
         self._registry = registry
         self._tool_assembler = tool_assembler
         self._events = events
 
     def validate_features(self, spec: "AgentSpec") -> None:
-        seen: set[tuple[str, str]] = set()
+        seen: "set[tuple[str, str]]" = set()
         for ref in spec.features:
             key = (ref.kind, ref.name)
             if key in seen:
@@ -45,13 +44,13 @@ class AgentAssembler:
     async def assemble(
         self,
         spec: "AgentSpec",
-        context: AgentFeatureContext,
+        context: "AgentFeatureContext",
     ) -> AgentAssembly:
         self.validate_features(spec)
-        seen: set[tuple[str, str]] = set()
-        prompt_sections: dict[str, str] = {}
+        seen: "set[tuple[str, str]]" = set()
+        prompt_sections: "dict[str, str]" = {}
         definitions = []
-        owner_by_definition: dict[int, AgentFeatureRef] = {}
+        owner_by_definition: "dict[int, AgentFeatureRef]" = {}
 
         async def emit(event: object) -> None:
             sinks = tuple(
@@ -59,7 +58,7 @@ class AgentAssembler:
                 for sink in (self._events, context.events)
                 if sink is not None
             )
-            seen_sinks: set[int] = set()
+            seen_sinks: "set[int]" = set()
             for sink in sinks:
                 if id(sink) in seen_sinks:
                     continue

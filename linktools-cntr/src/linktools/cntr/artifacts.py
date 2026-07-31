@@ -21,8 +21,10 @@ from linktools import utils
 from .container import ContainerError
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from typing import Any
     from linktools.types import PathType
+    from .container import BaseContainer
     from .manager import ContainerManager
 
 INDEX_SCHEMA_VERSION = 1
@@ -64,7 +66,7 @@ def sha256_of(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def collect_candidates(manager: "ContainerManager", containers) -> "dict[str, tuple[str, str, str]]":
+def collect_candidates(manager: "ContainerManager", containers: "Iterable[BaseContainer]") -> "dict[str, tuple[str, str, str]]":
     """Render each container's compose/Dockerfile candidate content
     in-memory -- never touching the real generated file on disk. Returns
     ``{absolute_destination_path: (kind, container_name, content)}``.

@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 """UsageEvaluator: score based on token/cost efficiency."""
 
-from ..models import EvalCase, EvalExecution, EvalScore
 
+from ..models import EvalScore
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalExecution
 
 class UsageEvaluator:
     @property
@@ -12,8 +17,8 @@ class UsageEvaluator:
 
     async def evaluate(
         self,
-        case: EvalCase,
-        execution: EvalExecution,
+        case: "EvalCase",
+        execution: "EvalExecution",
         snapshot: "object | None" = None,
     ) -> EvalScore:
         limits = case.metadata.get("usage_limits", {})

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Execution lifecycle, persistence, query, and session public surface."""
 
 from .commands import (

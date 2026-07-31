@@ -11,6 +11,7 @@ from linktools.core import ConfigField, PromptProvider, LazyProvider
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from linktools.cntr import EventContext, ExposeLink
 
@@ -18,8 +19,8 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self):
-        def get_base_dn(cfg):
+    def configs(self) -> "dict[str, Any]":
+        def get_base_dn(cfg: "dict[str, Any]") -> str:
             domain = cfg.get("NGINX_ROOT_DOMAIN")
             parts = domain.split(".")
             return ",".join([f"dc={part}" for part in parts])
@@ -44,13 +45,13 @@ class Container(BaseContainer):
             )),
         ]
 
-    def on_check(self, context: "EventContext"):
+    def on_check(self, context: "EventContext") -> None:
         domain = self.get_config("NGINX_ROOT_DOMAIN")
         if not domain or "." not in domain:
             raise ContainerError(f"Invalid domain `{domain}` for LDAP, "
                                  f"Please set NGINX_ROOT_DOMAIN to a valid domain (e.g., example.com).")
 
-    def on_starting(self, context: "EventContext"):
+    def on_starting(self, context: "EventContext") -> None:
         secret_path = self.get_app_path("secrets")
         secret_path.mkdir(parents=True, exist_ok=True)
 

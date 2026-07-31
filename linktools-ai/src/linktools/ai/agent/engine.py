@@ -40,53 +40,29 @@ loop in an outer ``agent.run`` span and the iter() drive in a nested
 wired, records ``counter("agent.run.completed"/"agent.run.failed")`` and
 ``histogram("agent.run.duration_ms")``. Both default to None (no-op)."""
 
+from typing import TYPE_CHECKING, Any
 import asyncio
 import contextlib
 import dataclasses
 import logging
 import time
-from typing import TYPE_CHECKING, Any
-
-from ..errors import (
-    MCPToolError,
-    ModelInvocationDeniedError,
-    ModelOutputValidationError,
-    ModelPolicyExceededError,
-    ModelResultDeniedError,
-    ModelRoutingError,
-    RunPaused,
-    RuntimeInitializationError,
-    ToolError,
-    ToolSchemaError,
-)
+from ..errors import MCPToolError, ModelInvocationDeniedError, ModelOutputValidationError, ModelPolicyExceededError, ModelResultDeniedError, ModelRoutingError, RunPaused, RuntimeInitializationError, ToolError, ToolSchemaError
 from .middleware.pipeline import MiddlewarePipeline
 from ..observability.tracing import use_span
 from .prompt.builder import PromptBuilder
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
-from ..execution.cancellation import CancellationToken
-from ..execution.context import RunContext
-from ..execution.domain import (
-    RunErrorInfo,
-)
+from ..execution.domain import RunErrorInfo
 from .models import RunResult
 from ..model.recording import SemanticRecordingModel
 from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
 from .dependencies import AgentDependencies
-from .models import (
-    AgentCancelled,
-    AgentCompleted,
-    AgentExecutionOutcome,
-    AgentFailed,
-    model_supports_streaming,
-    AgentInput,
-    AgentPaused,
-    AgentUsage,
-    CompiledAgent,
-    PauseRequest,
-)
+from .models import AgentCancelled, AgentCompleted, AgentFailed, model_supports_streaming, AgentPaused, AgentUsage, PauseRequest
 
 if TYPE_CHECKING:
+    from ..execution.cancellation import CancellationToken
+    from ..execution.context import RunContext
+    from .models import AgentExecutionOutcome, AgentInput, CompiledAgent
 
     from pydantic_ai.toolsets import AbstractToolset
 
@@ -151,7 +127,7 @@ class AgentEngine:
         tool_adapter: "PydanticAIToolAdapter | None" = None,
         security_pipeline: "SecurityPipeline | None" = None,
         pricing_provider: "ModelPricingProvider | None" = None,
-        trace_codec: object | None = None,
+        trace_codec: "object | None" = None,
     ) -> None:
         self._middleware_pipeline = middleware_pipeline
         self._session_window = session_window
@@ -197,17 +173,17 @@ class AgentEngine:
 
     async def execute_pure(
         self,
-        agent: CompiledAgent,
-        input: AgentInput,
-        context: RunContext,
+        agent: "CompiledAgent",
+        input: "AgentInput",
+        context: "RunContext",
         *,
-        cancellation: CancellationToken,
+        cancellation: "CancellationToken",
         live_events: "RunLiveEventSink",
         security_events: "SecurityEventSink",
         assembly: "AgentAssembly | None" = None,
         trace_sequence: int = 0,
         trace_collector: "SemanticTraceCollector | None" = None,
-    ) -> AgentExecutionOutcome:
+    ) -> "AgentExecutionOutcome":
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- ExecutionService
         owns RunRecord creation/transition, checkpoint and session storage,
@@ -251,7 +227,7 @@ class AgentEngine:
 
         current_run = None
 
-        def resume_messages() -> tuple[Any, ...]:
+        def resume_messages() -> "tuple[Any, ...]":
             current = current_run
             if current is None:
                 return ()
@@ -262,7 +238,7 @@ class AgentEngine:
         async def _snapshot(
             status: ExecutionRunStatus,
             *,
-            messages: tuple[Any, ...],
+            messages: "tuple[Any, ...]",
             final_output: Any = None,
             usage: "ExecutionRunUsage | None" = None,
         ) -> Any:

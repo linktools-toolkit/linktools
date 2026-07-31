@@ -1,14 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Pure Run domain values and the single Run state machine."""
 
-from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from typing import Generic, Literal, TypeVar
 
-from ..storage.coordination.lease import Lease
-from ..json import JsonValue
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from ..storage.coordination.lease import Lease
+    from ..json import JsonValue
 
 T = TypeVar("T")
 
@@ -52,7 +57,7 @@ class RunDefinition:
     runnable_id: str
     runnable_type: RunnableType
     schema: "Literal['agent-spec.v1']"
-    spec: JsonValue
+    spec: "JsonValue"
     spec_hash: str
 
 
@@ -62,9 +67,9 @@ class RunApproval:
     tool_call_id: str
     tool_name: str
     binding_fingerprint: str
-    decision: ApprovalDecision | None = None
-    decided_by: str | None = None
-    decided_at: datetime | None = None
+    decision: "ApprovalDecision | None" = None
+    decided_by: "str | None" = None
+    decided_at: "datetime | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +83,7 @@ class RunUsage:
 class RunError:
     error_type: str
     message: str
-    detail: JsonValue | None = None
+    detail: "JsonValue | None" = None
 
 
 RunErrorInfo = RunError
@@ -91,32 +96,32 @@ class RunRecord:
     kind: RunKind
     runnable_id: str
     runnable_type: RunnableType
-    input: JsonValue
+    input: "JsonValue"
     definition: RunDefinition
     status: RunStatus
-    session_turn_sequence: int | None
-    parent_execution_id: str | None
+    session_turn_sequence: "int | None"
+    parent_execution_id: "str | None"
     root_execution_id: str
-    approval: RunApproval | None
-    lease: Lease
-    cancel_requested_at: datetime | None
+    approval: "RunApproval | None"
+    lease: "Lease"
+    cancel_requested_at: "datetime | None"
     snapshot_revision: int
     trace_sequence: int
     event_sequence: int
-    tenant_id: str | None
-    user_id: str | None
-    error: RunError | None
-    created_at: datetime
-    updated_at: datetime
+    tenant_id: "str | None"
+    user_id: "str | None"
+    error: "RunError | None"
+    created_at: "datetime"
+    updated_at: "datetime"
 
     @property
-    def pending_approval(self) -> RunApproval | None:
+    def pending_approval(self) -> "RunApproval | None":
         if self.approval is not None and self.approval.decision is None:
             return self.approval
         return None
 
 
-ALLOWED_RUN_TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
+ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
     RunStatus.PENDING: frozenset({RunStatus.RUNNING, RunStatus.CANCELLED}),
     RunStatus.RUNNING: frozenset({RunStatus.PAUSED, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLING}),
     RunStatus.PAUSED: frozenset({RunStatus.PENDING, RunStatus.CANCELLED, RunStatus.CANCELLING}),

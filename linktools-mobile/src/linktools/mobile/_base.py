@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
+
 import subprocess
 from abc import ABCMeta, abstractmethod
 from typing import TypeVar, Generic, TYPE_CHECKING
@@ -168,7 +169,7 @@ class BaseDevice(metaclass=ABCMeta):
         pass
 
     @property
-    def pretty_id(self):
+    def pretty_id(self) -> str:
         """
         获取可读的设备号信息
         :return: 设备号信息

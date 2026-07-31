@@ -4,16 +4,19 @@
 and the SwarmStatus/SwarmStepStatus enums + transition table. Mirrors the
 frozen-dataclass + str-Enum conventions of run/models.py and session/models.py."""
 
+
 from decimal import Decimal
-from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, TypeAlias
-
-from ...execution.domain import RunErrorInfo
-from ...agent.models import RunResult
 from ...json import JsonValue
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+    from ...execution.domain import RunErrorInfo
+    from ...agent.models import RunResult
 
 class SwarmStatus(str, Enum):
     PENDING = "pending"
@@ -138,8 +141,8 @@ class SwarmRun:
     version: int
     token_usage: TokenUsage
     cost: "Decimal"
-    created_at: datetime
-    updated_at: datetime
+    created_at: "datetime"
+    updated_at: "datetime"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
     execution_token: "str | None" = None
     execution_owner_id: "str | None" = None
@@ -175,8 +178,8 @@ class SwarmStep:
     version: int
     claimed_at: "datetime | None"
     lease_expires_at: "datetime | None"
-    created_at: datetime
-    updated_at: datetime
+    created_at: "datetime"
+    updated_at: "datetime"
     # The id of the child RunRecord this task's execution creates (set in
     # strategy._run_task right after claim_task succeeds). The child identity:
     # task.id IS NOT its child RunRecord.id; each (re)execution mints a fresh
@@ -203,7 +206,7 @@ class SwarmStepAttempt:
     agent_id: str
     attempt: int
     status: AttemptStatus
-    started_at: datetime
+    started_at: "datetime"
     finished_at: "datetime | None"
     error: "RunErrorInfo | None"
 
@@ -226,7 +229,7 @@ class SwarmCompleted:
     messages ExecutionService persists to the parent/shared session; ``usage`` is
     the cross-worker aggregate."""
 
-    result: RunResult
+    result: "RunResult"
     aggregate_messages: "tuple[JsonValue, ...]"
     usage: SwarmUsage
 
@@ -247,7 +250,7 @@ class SwarmFailed:
     unknown programming errors propagate as raised exceptions instead -- the
     swarm did not 'fail' in the expected sense."""
 
-    error: RunErrorInfo
+    error: "RunErrorInfo"
 
 
 SwarmExecutionOutcome: TypeAlias = "SwarmCompleted | SwarmPaused | SwarmFailed"

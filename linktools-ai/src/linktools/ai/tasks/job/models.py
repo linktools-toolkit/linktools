@@ -13,15 +13,18 @@ task store enforces them inside its atomic domain operations (claim / commit /
 recover), never as ad-hoc field writes.
 """
 
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from typing import Any
-
 from ...artifact.models import ArtifactRef, AssetSnapshotRef
 from ...governance.identity import ActorRef, ScopeSet
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 # ----------------------------------------------------------------- enums --
 
@@ -161,7 +164,7 @@ class JobRecord:
     input_artifact_id: "str | None"
     output_artifact_id: "str | None"
     version: int
-    created_at: datetime
+    created_at: "datetime"
     started_at: "datetime | None"
     finished_at: "datetime | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
@@ -191,7 +194,7 @@ class TaskRecord:
     retry_policy: RetryPolicy
     side_effect_policy: SideEffectPolicy
     attempt_count: int
-    available_at: datetime
+    available_at: "datetime"
     lease_owner: "str | None"
     lease_expires_at: "datetime | None"
     fencing_token: int
@@ -199,8 +202,8 @@ class TaskRecord:
     timeout_seconds: "float | None"
     asset_snapshots: "tuple[AssetSnapshotRef, ...]"
     version: int
-    created_at: datetime
-    updated_at: datetime
+    created_at: "datetime"
+    updated_at: "datetime"
     depth: int = 0
     delegated_scopes: "ScopeSet" = field(default_factory=ScopeSet.empty)
     actor_chain: "ActorChain | None" = None
@@ -233,7 +236,7 @@ class TaskAttemptRecord:
     fencing_token: int
     status: AttemptStatus
     run_id: "str | None"  # set only by a handler that drives the existing Runtime
-    started_at: datetime
+    started_at: "datetime"
     finished_at: "datetime | None"
     failure_kind: "TaskFailureKind | None"
     error_type: "str | None"
@@ -250,7 +253,7 @@ class TaskTransitionRecord:
     from_status: "str | None"
     to_status: str
     reason: str
-    occurred_at: datetime
+    occurred_at: "datetime"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 
@@ -261,7 +264,7 @@ class TaskSignalRecord:
     name: str
     correlation_key: str
     payload_artifact_id: "str | None"
-    created_at: datetime
+    created_at: "datetime"
     consumed_by_task_id: "str | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 

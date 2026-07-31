@@ -13,7 +13,6 @@ reports 0 affected rows when the no-op update runs against an existing row
 and 1 when a fresh row is inserted, so the same ``rowcount == 1`` check the
 other dialects use holds here too."""
 
-from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Per-document parsed-object cache over a spec store.
 
 ``SpecObjectCache`` caches decoded objects keyed by ``(item_id, version, etag)``.
@@ -10,7 +13,6 @@ Inflight reads of the same key are coalesced so concurrent callers share one
 decode. The cache is keyed by content identity, so a stale cache entry can
 never be served against changed content."""
 
-from __future__ import annotations
 
 import asyncio
 from typing import Any, Generic, Protocol, TypeVar
@@ -32,20 +34,20 @@ class SpecObjectCache(Generic[T]):
     def __init__(
         self,
         store: SpecCacheStore,
-        codec: SpecCacheCodec[T],
+        codec: "SpecCacheCodec[T]",
         *,
         prefix: str,
         suffix: str,
-        source_name: str | None = None,
+        source_name: "str | None" = None,
     ) -> None:
         self._store = store
         self._codec = codec
         self._prefix = prefix.strip("/")
         self._suffix = suffix
         self._source_name = source_name or type(store).__name__
-        self._cache: dict[tuple[str, int, str], T] = {}
-        self._inflight: dict[tuple[str, int, str], "asyncio.Future[T]"] = {}
-        self._ids: tuple[str, ...] | None = None
+        self._cache: "dict[tuple[str, int, str], T]" = {}
+        self._inflight: "dict[tuple[str, int, str], 'asyncio.Future[T]']" = {}
+        self._ids: "tuple[str, ...] | None" = None
 
     @property
     def source_name(self) -> str:
@@ -57,7 +59,7 @@ class SpecObjectCache(Generic[T]):
         )
         return f"{joined}{self._suffix}"
 
-    async def list_ids(self) -> tuple[str, ...]:
+    async def list_ids(self) -> "tuple[str, ...]":
         prefix = f"{self._prefix}/" if self._prefix else ""
         infos = await self._store.list_info()
         ids = [

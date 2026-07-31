@@ -8,19 +8,19 @@ typed in the composer (/help, /new, /clear, ...). Together they replace the old
 flat command surface with two lightweight interaction paths."""
 
 from typing import TYPE_CHECKING, Callable
-
 from rich.markup import escape
 from rich.text import Text
-from textual.command import Hit, Hits, Provider
+from textual.command import Hit, Provider
 
 if TYPE_CHECKING:
+    from textual.command import Hits
     from .screens.chat import ChatScreen
 
 
 class AiCommandProvider(Provider):
     """Command-palette entries that map to app actions."""
 
-    async def search(self, query: str) -> Hits:
+    async def search(self, query: str) -> "Hits":
         app = self.app
         commands: "list[tuple[str, str, Callable[[], None]]]" = [
             ("Catalog", "Open agents, skills, MCP", app.action_catalog),

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
-def get_lan_ip():
+def get_lan_ip() -> "str | None":
     """Return the primary LAN IPv4 address, or None if it cannot be determined."""
     s = None
     try:

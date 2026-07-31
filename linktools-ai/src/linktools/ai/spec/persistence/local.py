@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Single-process spec persistence over a manifest + immutable content objects.
 
 Layout::
@@ -14,7 +17,6 @@ leave only orphan objects -- the manifest never references an unfinished object.
 Metadata reloads read one manifest; content reads read one object. Single
 process only: one ``asyncio.Lock`` serializes every mutation."""
 
-from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
@@ -32,10 +34,10 @@ from ..document import SpecDocument, SpecDocumentInfo
 
 
 class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
-    def __init__(self, root: str | Path = ".linktools") -> None:
+    def __init__(self, root: "str | Path" = ".linktools") -> None:
         self.root = Path(root)
         self._lock = asyncio.Lock()
-        self._manifest: dict | None = None
+        self._manifest: "dict | None" = None
 
     @property
     def _manifest_path(self) -> Path:
@@ -64,7 +66,7 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     # ---- reader --------------------------------------------------------
 
-    async def get(self, path: str) -> SpecDocument | None:
+    async def get(self, path: str) -> "SpecDocument | None":
         await self._ensure_loaded()
         entry = self._manifest["entries"].get(path)
         if entry is None:
@@ -74,9 +76,9 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
             await self._read_object(entry["object_id"]),
         )
 
-    async def get_many(self, paths: tuple[str, ...]) -> dict[str, SpecDocument]:
+    async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, SpecDocument]":
         await self._ensure_loaded()
-        result: dict[str, SpecDocument] = {}
+        result: "dict[str, SpecDocument]" = {}
         for path in paths:
             entry = self._manifest["entries"].get(path)
             if entry is not None:
@@ -86,12 +88,12 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
                 )
         return result
 
-    async def stat(self, path: str) -> SpecDocumentInfo | None:
+    async def stat(self, path: str) -> "SpecDocumentInfo | None":
         await self._ensure_loaded()
         entry = self._manifest["entries"].get(path)
         return None if entry is None else _info(entry["info"])
 
-    async def list_info(self, *, kind: str | None = None) -> tuple[SpecDocumentInfo, ...]:
+    async def list_info(self, *, kind: "str | None" = None) -> "tuple[SpecDocumentInfo, ...]":
         await self._ensure_loaded()
         infos = [_info(entry["info"]) for entry in self._manifest["entries"].values()]
         if kind is not None:
@@ -102,8 +104,8 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     async def load_metadata(
         self,
-        after_revision: int | None,
-    ) -> MetadataLoad[int, str, SpecDocumentInfo]:
+        after_revision: "int | None",
+    ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
         await self._ensure_loaded()
         head = self._manifest["revision"]
         # Local keeps no change log: any request that is not exactly at head
@@ -145,12 +147,12 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
             entries.pop(path)
             await self._publish(entries)
 
-    async def reset(self, entries: tuple[SpecDocument, ...]) -> None:
+    async def reset(self, entries: "tuple[SpecDocument, ...]") -> None:
         for entry in entries:
             entry.validate_etag()
         async with self._lock:
             await self._ensure_loaded()
-            new: dict[str, dict] = {}
+            new: "dict[str, dict]" = {}
             for entry in entries:
                 object_id = _object_id_for(entry.info)
                 # _write_object is a no-op when the object already exists, so
@@ -179,7 +181,7 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
         # Best-effort cleanup of objects no longer referenced after this publish.
         await self._cleanup_orphans(previous_object_ids, entries)
 
-    async def _cleanup_orphans(self, previous_ids: set[str], entries: dict) -> None:
+    async def _cleanup_orphans(self, previous_ids: "set[str]", entries: dict) -> None:
         kept = {entry["object_id"] for entry in entries.values()}
         orphan_paths = [self._object_path(oid) for oid in previous_ids - kept]
 

@@ -2,16 +2,19 @@
 # -*- coding: utf-8 -*-
 """Builtin handler wiring forwarding to a Sandbox."""
 
+
 from dataclasses import dataclass
 from typing import Any
-
 from ..tool.models import ToolHandlerSet
-from ..sandbox.protocols import Sandbox
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..sandbox.protocols import Sandbox
 
 @dataclass(frozen=True, slots=True)
 class BuiltinToolContext:
-    sandbox: Sandbox
+    sandbox: "Sandbox"
     enabled_tools: "set[str]"
 
 

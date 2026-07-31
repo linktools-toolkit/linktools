@@ -16,14 +16,14 @@ class RepoCommand(BaseCommandGroup):
     """
 
     @property
-    def name(self):
+    def name(self) -> str:
         return "repo"
 
     def init_arguments(self, parser: "CommandParser") -> None:
         self.add_subcommands(parser=parser, sort=True)
 
     @subcommand("list", order=REPO_COMMAND_ORDER["list"], help="list repositories")
-    def on_command_list(self):
+    def on_command_list(self) -> None:
         repos = _shared.manager.repos.get_all()
         for key, value in repos.items():
             data = {safe_display_url(key): value}
@@ -36,7 +36,7 @@ class RepoCommand(BaseCommandGroup):
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("--replace", action="store_true",
                          help="replace an already-added repository at this URL/path")
-    def on_command_add(self, url: str, branch: str = None, replace: bool = False):
+    def on_command_add(self, url: str, branch: str = None, replace: bool = False) -> None:
         # A repo may carry executable Python container definitions, so
         # interactive `add` asks for confirmation; the global --yes flag (or
         # any other non-interactive run) skips it via is_no_input() -- there
@@ -53,7 +53,7 @@ class RepoCommand(BaseCommandGroup):
         _shared.manager.repos.add(url, branch=branch, replace=replace)
 
     @subcommand("status", order=REPO_COMMAND_ORDER["status"], help="show repository status (read-only)")
-    def on_command_status(self):
+    def on_command_status(self) -> None:
         repos = _shared.manager.repos.get_all()
         if not repos:
             self.logger.info("No repository found")
@@ -66,7 +66,7 @@ class RepoCommand(BaseCommandGroup):
                help="validate repository local config and compatibility (read-only)")
     @subcommand_argument("url", nargs="?", help="repository url or local path; all repositories if omitted")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    def on_command_validate(self, url: str = None, as_json: bool = False):
+    def on_command_validate(self, url: str = None, as_json: bool = False) -> None:
         if not _shared.manager.repos.get_all():
             self.logger.info("No repository found")
             return
@@ -89,7 +89,7 @@ class RepoCommand(BaseCommandGroup):
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("-f", "--force", help="force update")
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
-    def on_command_update(self, branch: str = None, force: bool = False, as_json: bool = False):
+    def on_command_update(self, branch: str = None, force: bool = False, as_json: bool = False) -> None:
         results = _shared.manager.repos.update(branch=branch, reset=force)
 
         if as_json:
@@ -117,7 +117,7 @@ class RepoCommand(BaseCommandGroup):
 
     @subcommand("remove", order=REPO_COMMAND_ORDER["remove"], help="remove repository")
     @subcommand_argument("url", nargs="?", help="repository url")
-    def on_command_remove(self, url: str = None):
+    def on_command_remove(self, url: str = None) -> None:
         repos = list(_shared.manager.repos.get_all().keys())
         if not repos:
             raise ContainerError("No repository found")

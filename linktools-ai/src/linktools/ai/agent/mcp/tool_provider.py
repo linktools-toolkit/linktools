@@ -27,39 +27,27 @@ governance logic itself (filter_tool_names / detect_mcp_conflicts /
 final_tool_name) is unit-tested with a fake manager that yields canned tool
 names."""
 
+
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Iterable, Mapping
-
-from ..assembly.models import AgentContribution, AgentFeatureRef
-from ..assembly.provider import AgentFeatureContext
-from ...errors import (
-    AgentFeatureConflictError,
-    AgentAssemblyError,
-    MCPServerNotFoundError,
-    RuntimeInitializationError,
-)
+from ..assembly.models import AgentContribution
+from ...errors import AgentFeatureConflictError, AgentAssemblyError, MCPServerNotFoundError, RuntimeInitializationError
 from ...governance.policy.rule import RiskLevel, SideEffectKind
-from ..tool.models import (
-    ToolCategory,
-    ToolDefinition,
-    ToolDescriptor,
-    ToolSource,
-)
-from .spec import MCPServerSpecProvider
-from .connection import MCPConnectionPool
-from .models import (
-    MCPConnectionRef,
-    MCPDiscoveryResult,
-    MCPExposedTool,
-    MCPToolInfo,
-    MCPRuntimePolicy,
-)
+from ..tool.models import ToolCategory, ToolDefinition, ToolDescriptor, ToolSource
+from .models import MCPConnectionRef, MCPDiscoveryResult, MCPExposedTool, MCPToolInfo, MCPRuntimePolicy
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..assembly.models import AgentFeatureRef
+    from ..assembly.provider import AgentFeatureContext
+    from .spec import MCPServerSpecProvider
+    from .connection import MCPConnectionPool
 
 def final_tool_name(
     server_id: str,
     tool_name: str,
-    tool_prefix: str | bool | None,
+    tool_prefix: "str | bool | None",
 ) -> str:
     if tool_prefix is False:
         return tool_name
@@ -68,10 +56,10 @@ def final_tool_name(
 
 
 def filter_tool_names(
-    names: Iterable[str],
-    enabled_tools: tuple[str, ...] | None,
-    disabled_tools: tuple[str, ...],
-) -> tuple[str, ...]:
+    names: "Iterable[str]",
+    enabled_tools: "tuple[str, ...] | None",
+    disabled_tools: "tuple[str, ...]",
+) -> "tuple[str, ...]":
     enabled = set(enabled_tools) if enabled_tools is not None else None
     disabled = set(disabled_tools)
     return tuple(
@@ -82,9 +70,9 @@ def filter_tool_names(
 
 
 def detect_mcp_conflicts(
-    final_names_by_server: Mapping[str, Iterable[str]],
+    final_names_by_server: "Mapping[str, Iterable[str]]",
 ) -> None:
-    seen: dict[str, str] = {}
+    seen: "dict[str, str]" = {}
     for server_id, names in final_names_by_server.items():
         for name in names:
             owner = seen.get(name)
@@ -108,8 +96,8 @@ class MCPToolProvider:
     missing manager is a configuration error and fails at construction -- it
     must never surface as a verified-but-empty discovery result."""
 
-    specs: MCPServerSpecProvider
-    connections: MCPConnectionPool
+    specs: "MCPServerSpecProvider"
+    connections: "MCPConnectionPool"
     policy: MCPRuntimePolicy = field(default_factory=MCPRuntimePolicy)
     supported_kinds: "ClassVar[tuple[str, ...]]" = ("mcp",)
 
@@ -122,11 +110,11 @@ class MCPToolProvider:
 
     async def resolve(
         self,
-        ref: AgentFeatureRef,
-        context: AgentFeatureContext,
+        ref: "AgentFeatureRef",
+        context: "AgentFeatureContext",
     ) -> AgentContribution:
         ids = await self._target_ids(ref, context)
-        definitions: list[ToolDefinition] = []
+        definitions: "list[ToolDefinition]" = []
         final_names_by_server: "dict[str, tuple[str, ...]]" = {}
         runtime_policy = self.policy
         max_per_server = runtime_policy.max_tools_per_server
@@ -213,7 +201,7 @@ class MCPToolProvider:
         return AgentContribution(tools=tuple(definitions))
 
     async def _target_ids(
-        self, ref: AgentFeatureRef, context: AgentFeatureContext
+        self, ref: "AgentFeatureRef", context: "AgentFeatureContext"
     ) -> "tuple[str, ...]":
         if ref.name == "*":
             # Wildcard exposes EVERY server's tools -- deployment-level opt-in
@@ -247,9 +235,9 @@ class MCPToolProvider:
         return await result_getter(spec)
 
     def _handler(
-        self, exposed: MCPExposedTool, connection_ref: MCPConnectionRef | None
+        self, exposed: MCPExposedTool, connection_ref: "MCPConnectionRef | None"
     ):
-        async def call(**arguments: Any) -> Any:
+        async def call(**arguments: "Any") -> Any:
             if connection_ref is None:
                 raise AgentAssemblyError(
                     "MCP discovery did not return a connection reference"

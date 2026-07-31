@@ -169,14 +169,14 @@ class FridaAndroidServer(FridaServer):
         self._server_path = self._device.join_path(self._server_dir, self._server_name)
 
     @property
-    def local_port(self):
+    def local_port(self) -> int:
         return self._local_port
 
     @property
-    def remote_port(self):
+    def remote_port(self) -> int:
         return self._remote_port
 
-    def _start(self):
+    def _start(self) -> None:
         # 转发端口
         if self._forward:
             self._forward.stop()
@@ -264,7 +264,7 @@ class FridaAndroidServer(FridaServer):
         raise FileNotFoundError("Frida server not found ...")
 
     @classmethod
-    def setup(cls, abis: "Iterable[str]" = ("arm", "arm64", "x86_64", "x86"), version: str = frida.__version__):
+    def setup(cls, abis: "Iterable[str]" = ("arm", "arm64", "x86_64", "x86"), version: str = frida.__version__) -> None:
         for abi in abis:
             for executable in cls._get_executables(abi, version):
                 try:
@@ -282,7 +282,7 @@ class FridaAndroidServer(FridaServer):
             self.name = config["name"].format(**config)
             self.path = environ.get_data_path("android", "frida", self.name, create_parent=True)
 
-        def download(self):
+        def download(self) -> None:
             if os.path.exists(self.path):
                 return
             _logger.info("Download frida server ...")
@@ -314,14 +314,14 @@ class FridaIOSServer(FridaServer):  # proxy for frida.core.Device
         self._forward: "Stoppable | None" = None
 
     @property
-    def local_port(self):
+    def local_port(self) -> int:
         return self._local_port
 
     @property
-    def remote_port(self):
+    def remote_port(self) -> int:
         return self._remote_port
 
-    def _start(self):
+    def _start(self) -> None:
         if self._forward:
             self._forward.stop()
 

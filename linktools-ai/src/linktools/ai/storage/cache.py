@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Generic best-effort caches for immutable versioned content.
 
 The cache key is a stable domain-identity string (e.g.
@@ -8,7 +11,6 @@ miss/failed write, never propagated as the origin's result.
 ``contains_many`` answers whether keys already exist WITHOUT reading content --
 preload uses it to avoid reading whole files just to decide a cache miss."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -23,17 +25,17 @@ ContentCacheKey: TypeAlias = str
 
 
 class ContentCache(Protocol):
-    async def get(self, key: ContentCacheKey) -> bytes | None: ...
+    async def get(self, key: ContentCacheKey) -> "bytes | None": ...
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None: ...
 
     async def contains_many(
         self,
-        keys: tuple[ContentCacheKey, ...],
-    ) -> frozenset[ContentCacheKey]: ...
+        keys: "tuple[ContentCacheKey, ...]",
+    ) -> "frozenset[ContentCacheKey]": ...
 
 
-async def read_cache(cache: ContentCache | None, key: ContentCacheKey) -> bytes | None:
+async def read_cache(cache: "ContentCache | None", key: ContentCacheKey) -> "bytes | None":
     if cache is None:
         return None
     try:
@@ -43,7 +45,7 @@ async def read_cache(cache: ContentCache | None, key: ContentCacheKey) -> bytes 
 
 
 async def write_cache(
-    cache: ContentCache | None,
+    cache: "ContentCache | None",
     key: ContentCacheKey,
     content: bytes,
 ) -> bool:
@@ -57,9 +59,9 @@ async def write_cache(
 
 
 async def contains_many(
-    cache: ContentCache | None,
-    keys: tuple[ContentCacheKey, ...],
-) -> frozenset[ContentCacheKey]:
+    cache: "ContentCache | None",
+    keys: "tuple[ContentCacheKey, ...]",
+) -> "frozenset[ContentCacheKey]":
     if cache is None or not keys:
         return frozenset()
     try:
@@ -76,11 +78,11 @@ class MemoryContentCache:
         if max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
         self.max_bytes = max_bytes
-        self._items: OrderedDict[ContentCacheKey, bytes] = OrderedDict()
+        self._items: "OrderedDict[ContentCacheKey, bytes]" = OrderedDict()
         self._size = 0
         self._lock = asyncio.Lock()
 
-    async def get(self, key: ContentCacheKey) -> bytes | None:
+    async def get(self, key: ContentCacheKey) -> "bytes | None":
         async with self._lock:
             value = self._items.get(key)
             if value is not None:
@@ -102,8 +104,8 @@ class MemoryContentCache:
 
     async def contains_many(
         self,
-        keys: tuple[ContentCacheKey, ...],
-    ) -> frozenset[ContentCacheKey]:
+        keys: "tuple[ContentCacheKey, ...]",
+    ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
         async with self._lock:
@@ -119,14 +121,14 @@ class FilesystemContentCache:
     The eviction index is built once, on first write. Reads of an un-indexed
     root simply miss (a cache, not the source of truth)."""
 
-    def __init__(self, root: str | Path, *, max_bytes: int) -> None:
+    def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
         if max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
         self.root = Path(root)
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
         self._indexed = False
-        self._entries: dict[str, tuple[int, int]] = {}
+        self._entries: "dict[str, tuple[int, int]]" = {}
         self._total = 0
         self._clock = 0
 
@@ -137,7 +139,7 @@ class FilesystemContentCache:
     def _path(self, key: ContentCacheKey) -> Path:
         return self.root / self._name(key)
 
-    async def get(self, key: ContentCacheKey) -> bytes | None:
+    async def get(self, key: ContentCacheKey) -> "bytes | None":
         path = self._path(key)
         try:
             value = await asyncio.to_thread(path.read_bytes)
@@ -171,13 +173,13 @@ class FilesystemContentCache:
 
     async def contains_many(
         self,
-        keys: tuple[ContentCacheKey, ...],
-    ) -> frozenset[ContentCacheKey]:
+        keys: "tuple[ContentCacheKey, ...]",
+    ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
         paths = {self._name(key): key for key in keys}
 
-        def _existing() -> set[str]:
+        def _existing() -> "set[str]":
             return {name for name in paths if (self.root / name).exists()}
 
         names = await asyncio.to_thread(_existing)
@@ -198,7 +200,7 @@ class FilesystemContentCache:
             self._entries[name] = (size, self._clock)
             self._total += size
 
-    def _scan_index(self) -> tuple[tuple[str, int], ...]:
+    def _scan_index(self) -> "tuple[tuple[str, int], ...]":
         if not self.root.exists():
             return ()
         return tuple(
@@ -231,11 +233,11 @@ class TieredContentCache:
     misses. ``contains_many`` is satisfied if EITHER tier holds the key, and
     does NOT promote L2 content into L1 (existence is not an access)."""
 
-    def __init__(self, l1: ContentCache, l2: ContentCache | None = None) -> None:
+    def __init__(self, l1: ContentCache, l2: "ContentCache | None" = None) -> None:
         self.l1 = l1
         self.l2 = l2
 
-    async def get(self, key: ContentCacheKey) -> bytes | None:
+    async def get(self, key: ContentCacheKey) -> "bytes | None":
         try:
             value = await self.l1.get(key)
             if value is not None:
@@ -260,8 +262,8 @@ class TieredContentCache:
 
     async def contains_many(
         self,
-        keys: tuple[ContentCacheKey, ...],
-    ) -> frozenset[ContentCacheKey]:
+        keys: "tuple[ContentCacheKey, ...]",
+    ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
         present = await self.l1.contains_many(keys)

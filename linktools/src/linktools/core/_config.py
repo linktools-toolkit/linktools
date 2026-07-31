@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Config subsystem: Config schema/sources/resolver.
 
 ``ConfigStore`` (the persistence layer) lives in ``_config_store.py``;
@@ -516,7 +519,7 @@ class DictSource(ConfigSource):
         self.name = name
 
     @property
-    def revision(self):
+    def revision(self) -> "Any":
         return getattr(self._data, "revision", 0)
 
     def get(self, key: str) -> "tuple[Any, bool]":
@@ -873,7 +876,7 @@ class ConfigResolver:
             return ResolvedConfig(self._cast_validate(field, value), field, "lazy", value)
 
         if isinstance(provider, PromptProvider):
-            def compute_prompt():
+            def compute_prompt() -> "Any":
                 try:
                     return self._prompt_value(provider, field)
                 except CliError as exc:
@@ -895,7 +898,7 @@ class ConfigResolver:
             from ..rich import confirm
             default = provider.default if provider.default is not MISSING else field.default
 
-            def compute_confirm():
+            def compute_confirm() -> bool:
                 try:
                     return confirm(provider.message or field.name, default=default)
                 except CliError as exc:

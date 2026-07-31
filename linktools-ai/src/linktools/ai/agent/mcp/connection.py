@@ -13,12 +13,16 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
-
 from ...errors import MCPConnectionUnavailableError
 from ...json import canonical_json_bytes
-from .models import MCPConnectionRef, MCPDiscoveryResult
-from .spec import MCPServerSpec
+from .models import MCPConnectionRef
 from .client import MCPClient, build_mcp_server
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import MCPDiscoveryResult
+    from .spec import MCPServerSpec
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +45,7 @@ def _digest_mapping(values: "Mapping[str, str]") -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _config_fingerprint(spec: MCPServerSpec) -> str:
+def _config_fingerprint(spec: "MCPServerSpec") -> str:
     """A stable hash of the governance-relevant MCPServerSpec configuration.
 
     The cache key reflects everything that changes which tools a server exposes
@@ -85,7 +89,7 @@ class MCPConnectionPool:
         # server build only ONE toolset (double-checked locking).
         self._lock = asyncio.Lock()
 
-    async def get_toolset(self, server: MCPServerSpec) -> MCPToolsetHandle:
+    async def get_toolset(self, server: "MCPServerSpec") -> MCPToolsetHandle:
         key = (server.id, _config_fingerprint(server))
         cached = self._toolsets.get(key)
         if cached is not None:
@@ -100,7 +104,7 @@ class MCPConnectionPool:
             self._toolsets[key] = toolset
             return MCPToolsetHandle(MCPConnectionRef(*key), toolset)
 
-    async def list_tools(self, server: MCPServerSpec) -> "tuple[str, ...]":
+    async def list_tools(self, server: "MCPServerSpec") -> "tuple[str, ...]":
         """Enumerate a server's live tool names for governance (enabled/disabled
         filtering, conflict detection, max_tools). Best-effort: pydantic-ai's
         MCPToolset resolves names lazily, so a live connection is needed; if the
@@ -109,7 +113,7 @@ class MCPConnectionPool:
         result = await self.list_tools_result(server)
         return tuple(item.name for item in result.tools)
 
-    async def list_tools_result(self, server: MCPServerSpec):
+    async def list_tools_result(self, server: "MCPServerSpec") -> "MCPDiscoveryResult":
         handle = await self.get_toolset(server)
         return await MCPClient(handle.toolset).discover(
             server_id=server.id,
@@ -121,7 +125,7 @@ class MCPConnectionPool:
         *,
         connection_ref: MCPConnectionRef,
         tool_name: str,
-        arguments: Mapping[str, Any],
+        arguments: "Mapping[str, Any]",
     ) -> Any:
         key = (connection_ref.server_id, connection_ref.fingerprint)
         toolset = self._toolsets.get(key)
@@ -145,7 +149,7 @@ class MCPConnectionPool:
 
     async def close(self) -> None:
         keys = list(self._toolsets)
-        errors: list[Exception] = []
+        errors: "list[Exception]" = []
         for key in keys:
             toolset = self._toolsets.pop(key, None)
             if toolset is None:

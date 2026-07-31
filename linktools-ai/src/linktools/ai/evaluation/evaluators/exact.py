@@ -2,8 +2,13 @@
 # -*- coding: utf-8 -*-
 """ExactMatchEvaluator: score 1.0 if output == expected, else 0.0."""
 
-from ..models import EvalCase, EvalExecution, EvalScore
 
+from ..models import EvalScore
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import EvalCase, EvalExecution
 
 class ExactMatchEvaluator:
     @property
@@ -12,8 +17,8 @@ class ExactMatchEvaluator:
 
     async def evaluate(
         self,
-        case: EvalCase,
-        execution: EvalExecution,
+        case: "EvalCase",
+        execution: "EvalExecution",
         snapshot: "object | None" = None,
     ) -> EvalScore:
         output = execution.output

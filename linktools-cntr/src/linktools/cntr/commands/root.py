@@ -63,7 +63,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--detail", action="store_true", help="show container detail info")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
-    def on_command_list(self, names: "list[str]" = None, detail: bool = False):
+    def on_command_list(self, names: "list[str]" = None, detail: bool = False) -> None:
         manager = _shared.manager
         # Registers every resolved-installed container's own config defaults
         # into env_config -- `list` is often the first command run against a
@@ -111,7 +111,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand("add", order=ROOT_COMMAND_ORDER["add"], help="add containers to installed list")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
-    def on_command_add(self, names: "list[str]"):
+    def on_command_add(self, names: "list[str]") -> None:
         containers = _shared.manager.installed_state.add(*names)
         if not containers:
             raise ContainerError("No container added")
@@ -122,7 +122,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("-f", "--force", help="Force remove")
     @subcommand_argument("names", metavar="CONTAINER", nargs="+", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
-    def on_command_remove(self, names: "list[str]", force: bool = False):
+    def on_command_remove(self, names: "list[str]", force: bool = False) -> None:
         containers = _shared.manager.installed_state.remove(*names, force=force)
         if not containers:
             raise ContainerError("No container removed")
@@ -141,7 +141,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     def on_command_up(self, names: "list[str]" = None, pull: str = False,
-                      dry_run: bool = False, report: bool = False, as_json: bool = False):
+                      dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run, as_json=as_json):
             return
         # Root `up` and `compose` (final-model rendering) share one
@@ -160,7 +160,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
     def on_command_restart(self, names: "list[str]" = None, pull: str = False,
-                           dry_run: bool = False, report: bool = False, as_json: bool = False):
+                           dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, pull=pull,
                          dry_run=dry_run, as_json=as_json):
             return
@@ -175,7 +175,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False, as_json: bool = False):
+    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "down", names=names, dry_run=dry_run, as_json=as_json):
             return
         _shared.manager.compose_operations.down(names=names, report=report)
@@ -187,7 +187,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="exit non-zero if any WARN-or-worse finding is present")
     @subcommand_argument("--runtime", action="store_true", default=False,
                          help="also validate compose config against the actual docker/compose runtime")
-    def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False):
+    def on_command_doctor(self, as_json: bool = False, check: bool = False, runtime: bool = False) -> None:
         findings = Doctor(_shared.manager).run(runtime=runtime)
         if as_json:
             import json

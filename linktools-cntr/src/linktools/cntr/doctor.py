@@ -61,7 +61,7 @@ def _image_uses_latest(image: str) -> bool:
     return tail.rsplit(":", 1)[-1] == "latest"
 
 
-def _env_entries(environment: "Any") -> "list[str]":
+def _env_entries(environment: Any) -> "list[str]":
     """Normalize a compose service ``environment`` block to ``KEY=value`` strings."""
     if not environment:
         return []

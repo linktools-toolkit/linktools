@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# -*- coding:utf-8 -*-
+# -*- coding: utf-8 -*-
 
 # Author    : HuJi <jihu.hj@alibaba-inc.com>
 # Datetime  : 2022/1/13 下午8:38

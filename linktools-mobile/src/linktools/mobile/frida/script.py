@@ -61,7 +61,7 @@ class FridaUserScript(metaclass=abc.ABCMeta):
 
     @property
     @abc.abstractmethod
-    def filename(self):
+    def filename(self) -> str:
         pass
 
     @abc.abstractmethod
@@ -88,11 +88,11 @@ class FridaScriptFile(FridaUserScript):
         self._path = file_path
 
     @property
-    def path(self):
+    def path(self) -> str:
         return self._path
 
     @property
-    def filename(self):
+    def filename(self) -> str:
         return self._path
 
     def _load(self) -> "str | None":
@@ -102,15 +102,15 @@ class FridaScriptFile(FridaUserScript):
 
 class FridaEvalCode(FridaUserScript):
 
-    def __init__(self, code):
+    def __init__(self, code: str):
         super().__init__()
         self._code = code
 
     @property
-    def filename(self):
+    def filename(self) -> str:
         return "<anonymous>"
 
-    def _load(self):
+    def _load(self) -> str:
         return self._code
 
 
@@ -123,7 +123,7 @@ class FridaShareScript(FridaUserScript):
         self._trusted = trusted
 
     @property
-    def filename(self):
+    def filename(self) -> str:
         return self._url
 
     def _load(self):

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Model-callable tool declarations and execution services."""
 
 from .models import (

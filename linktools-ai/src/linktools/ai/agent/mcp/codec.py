@@ -7,7 +7,6 @@ Owns the mcp-specific parsing (moved here from registry/mcp.py): a
 MCPServerSpec. Parse failures propagate the domain's existing errors
 (InvalidSpecError / SpecParseError)."""
 
-from __future__ import annotations
 
 from typing import Any
 

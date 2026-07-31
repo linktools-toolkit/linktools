@@ -14,6 +14,7 @@ from linktools.errors import ConfigNotFoundError
 from linktools.rich import prompt
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from linktools.cntr import EventContext
 
@@ -21,7 +22,7 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self):
+    def configs(self) -> "dict[str, Any]":
         return dict(
             # NGINX_WILDCARD_DOMAIN is owned by the nginx container (its own
             # `configs` declares the field's cast/provider/default); this
@@ -62,7 +63,7 @@ class Container(BaseContainer):
             self.expose_container("Flare", "bookmark", "主页", self.load_port_url("FLARE_PORT", https=False)),
         ]
 
-    def on_starting(self, context: "EventContext"):
+    def on_starting(self, context: "EventContext") -> None:
 
         categories = {}
         apps = []

@@ -8,7 +8,6 @@ text, strictly validates the frontmatter, and builds a SkillSpec. Parse failures
 propagate the domain's existing errors (SpecParseError / InvalidSpecError).
 """
 
-from __future__ import annotations
 
 from typing import Any
 

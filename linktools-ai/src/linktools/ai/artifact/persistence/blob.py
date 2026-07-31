@@ -11,7 +11,6 @@ already has a blob is left untouched (content-addressed: identical bytes
 never need rewriting).
 """
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
@@ -19,9 +18,13 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
-
 from ...storage.local.paths import Sha256Digest, safe_child
-from ..models import ArtifactBlobNotFoundError, ArtifactIntegrityError, ArtifactRef
+from ..models import ArtifactBlobNotFoundError, ArtifactIntegrityError
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import ArtifactRef
 
 _BATCH_SIZE = 4 * 1024 * 1024
 
@@ -41,7 +44,7 @@ class FilesystemArtifactBlobStore:
     def _blob_path(self, digest: str) -> Path:
         return safe_child(self._blobs, Sha256Digest.parse(digest))
 
-    async def put(self, *, ref: ArtifactRef, content: AsyncIterator[bytes]) -> None:
+    async def put(self, *, ref: "ArtifactRef", content: "AsyncIterator[bytes]") -> None:
         blob = self._blob_path(ref.sha256)
         if await asyncio.to_thread(blob.exists):
             return
@@ -71,7 +74,7 @@ class FilesystemArtifactBlobStore:
         finally:
             await asyncio.to_thread(Path.unlink, temporary, missing_ok=True)
 
-    async def open(self, digest: str) -> AsyncIterator[bytes]:
+    async def open(self, digest: str) -> "AsyncIterator[bytes]":
         path = self._blob_path(digest)
         if not await asyncio.to_thread(path.exists):
             raise ArtifactBlobNotFoundError(digest)

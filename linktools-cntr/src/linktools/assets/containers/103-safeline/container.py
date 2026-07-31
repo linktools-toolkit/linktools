@@ -9,6 +9,7 @@ from linktools.core import ConfigField
 from linktools.decorator import cached_property
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from linktools.cntr import ExposeLink
 
@@ -20,7 +21,7 @@ class Container(BaseContainer):
         return ["nginx"]
 
     @cached_property
-    def configs(self):
+    def configs(self) -> "dict[str, Any]":
         return dict(
             SAFELINE_TAG="latest",
             SAFELINE_IMAGE_PREFIX="chaitin",
@@ -55,7 +56,7 @@ class Container(BaseContainer):
         ]
 
     @subcommand("reset-admin", help="reset safeline admin password")
-    def on_reset_admin(self):
+    def on_reset_admin(self) -> None:
         self.runtime.create_docker_process(
             "exec", "-it", self.get_service_name("safeline-mgt"),
             "resetadmin"

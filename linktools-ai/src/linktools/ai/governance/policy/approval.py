@@ -6,15 +6,12 @@ is at/above `require_side_effect` (default DESTRUCTIVE). SideEffectKind is a
 str enum (no ordinal), so rank comparison goes through _SIDE_EFFECT_RANK."""
 
 from typing import Mapping
+from .rule import PolicyDecision, PolicyDecisionKind, SideEffectKind, ToolPolicyMetadata
 
-from .rule import (
-    PolicyDecision,
-    PolicyDecisionKind,
-    SideEffectKind,
-    ToolContext,
-    ToolPolicyMetadata,
-    ToolRequest,
-)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .rule import ToolContext, ToolRequest
 
 _SIDE_EFFECT_RANK: "dict[SideEffectKind, int]" = {
     SideEffectKind.NONE: 0,
@@ -37,7 +34,7 @@ class ApprovalRule:
         self._tool_metadata: "Mapping[str, ToolPolicyMetadata]" = tool_metadata or {}
 
     async def evaluate(
-        self, request: ToolRequest, context: ToolContext
+        self, request: "ToolRequest", context: "ToolContext"
     ) -> PolicyDecision:
         if request.tool_name in self._require_for:
             return PolicyDecision(

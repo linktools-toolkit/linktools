@@ -111,7 +111,7 @@ class ToolContext:
     # missing principal is retained for local single-tenant compatibility, but
     # must never widen an idempotency scope.
     principal: Any = None
-    tenant_id: str | None = None
+    tenant_id: "str | None" = None
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
 

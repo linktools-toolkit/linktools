@@ -30,7 +30,7 @@ from linktools.utils import ignore_errors
 from .forward import SSHForward, SSHReverse
 
 if TYPE_CHECKING:
-    from typing import Any
+    from typing import IO, Any
 
 _logger = environ.get_logger("ssh")
 
@@ -53,7 +53,7 @@ class SSHClient(paramiko.SSHClient):
         # STRICT default; overrides paramiko's AutoAddPolicy.
         self.set_missing_host_key_policy(paramiko.RejectPolicy())
 
-    def connect_with_pwd(self, hostname, port=22, username=None, password=None, **kwargs):
+    def connect_with_pwd(self, hostname: str, port: int = 22, username: "str | None" = None, password: "str | None" = None, **kwargs: "Any") -> None:
         """Connect and fall back to password authentication when needed."""
         if username is None:
             username = getpass.getuser()
@@ -107,7 +107,7 @@ class SSHClient(paramiko.SSHClient):
                 get_pty=True
             )
 
-            def iter_lines(io1, io2):
+            def iter_lines(io1: "IO[str]", io2: "IO[str]") -> None:
                 for line in iter(io1.readline, ""):
                     print(line, end="", file=io2)
 
@@ -134,7 +134,7 @@ class SSHClient(paramiko.SSHClient):
         def _open_shell(cls, channel):
             import msvcrt
 
-            def write_all(sock):
+            def write_all(sock: "paramiko.Channel") -> None:
                 while not channel.closed:
                     try:
                         data = sock.recv(1024)
@@ -216,12 +216,12 @@ class SSHClient(paramiko.SSHClient):
         def _open_shell(self, channel):
             raise NotImplementedError("Unsupported platform")
 
-    def get_file(self, remote_path, local_path):
+    def get_file(self, remote_path: str, local_path: str) -> None:
         """Download a remote file or directory through SCP."""
         with self._open_scp() as scp:
             return scp.get(remote_path, local_path, recursive=True, preserve_times=True)
 
-    def put_file(self, local_path, remote_path):
+    def put_file(self, local_path: str, remote_path: str) -> None:
         """Upload a local file or directory through SCP."""
         with self._open_scp() as scp:
             return scp.put(local_path, remote_path, recursive=True, preserve_times=True)
@@ -231,7 +231,7 @@ class SSHClient(paramiko.SSHClient):
         with create_progress(transfer=True) as progress:
             tasks = {}
 
-            def update_progress(filename, size, sent):
+            def update_progress(filename: "str | bytes", size: int, sent: int) -> None:
                 if isinstance(filename, bytes):
                     filename = filename.decode()
                 task_id = tasks.get(filename, None)
@@ -248,11 +248,11 @@ class SSHClient(paramiko.SSHClient):
             with SCPClient(self.get_transport(), progress=update_progress) as scp:
                 yield scp
 
-    def forward(self, forward_host, forward_port, local_port=None):
+    def forward(self, forward_host: str, forward_port: int, local_port: "int | None" = None) -> SSHForward:
         """:param forward_host: The host to forward to."""
         if local_port is None:
             local_port = get_free_port()
         return SSHForward(self, "", local_port, forward_host, forward_port)
 
-    def reverse(self, forward_host, forward_port, remote_port=None):
+    def reverse(self, forward_host: str, forward_port: int, remote_port: "int | None" = None) -> SSHReverse:
         return SSHReverse(self, forward_host, forward_port, "", remote_port)

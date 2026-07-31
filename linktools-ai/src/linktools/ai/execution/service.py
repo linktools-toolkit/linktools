@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Application orchestration for Run execution.
 
 ExecutionService wires a compiled Agent through the AgentEngine and persists the
@@ -7,57 +10,54 @@ RunDefinition is encoded/decoded by ``AgentSpecCodec`` so every spec field --
 tools, middleware, output type -- round-trips across pause/resume.
 """
 
-from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import hmac
 from uuid import uuid4
-
-from ..agent.codec import AgentSpecCodec
-from ..agent.compiler import AgentCompiler
-from ..agent.engine import AgentEngine
-from ..agent.assembly.assembler import AgentAssembler
-from ..agent.assembly.models import AgentAssembly
 from ..agent.assembly.provider import AgentFeatureContext
 from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
 from ..agent.sandbox.protocols import Sandbox
-from ..agent.spec import AgentSpec
 from ..governance.identity import PrincipalContext
-from ..governance.authorization import AuthorizationPolicy, ExecutionAction
-from ..errors import (
-    PrincipalAccessDeniedError,
-    RunDefinitionError,
-    RunDefinitionIntegrityError,
-    RuntimeInitializationError,
-    StorageError,
-)
+from ..governance.authorization import ExecutionAction
+from ..errors import PrincipalAccessDeniedError, RunDefinitionError, RunDefinitionIntegrityError, RuntimeInitializationError, StorageError
 from ..json import canonical_json_bytes
 from ..observability.events.payloads import SecurityDegraded
 from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
-from .domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
+from .domain import RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage
 from .context import RunContext
 from .cancellation import CancellationToken
 from .controller import ExecutionControllerRegistry
-from .live_events import RunLiveEventSink, SecurityEventSink
 from .query import ExecutionResultView
 from .session import SessionRecord
 from .snapshots import AgentSnapshotData
-from .store import ExecutionStore
 from . import trace_codec
 from .trace_collector import SemanticTraceCollector
 
+from typing import TYPE_CHECKING
 
-def _definition(spec: AgentSpec, codec: AgentSpecCodec) -> RunDefinition:
+if TYPE_CHECKING:
+    from ..agent.codec import AgentSpecCodec
+    from ..agent.compiler import AgentCompiler
+    from ..agent.engine import AgentEngine
+    from ..agent.assembly.assembler import AgentAssembler
+    from ..agent.assembly.models import AgentAssembly
+    from ..agent.spec import AgentSpec
+    from ..governance.authorization import AuthorizationPolicy
+    from .domain import ApprovalDecision, RunRecord
+    from .live_events import RunLiveEventSink, SecurityEventSink
+    from .store import ExecutionStore
+
+def _definition(spec: "AgentSpec", codec: "AgentSpecCodec") -> RunDefinition:
     value = codec.encode(spec)
     return RunDefinition(spec.id, RunnableType.AGENT, "agent-spec.v1", value, sha256(canonical_json_bytes(value)).hexdigest())
 
 
 def _decode_definition(
     definition: RunDefinition,
-    codec: AgentSpecCodec,
-) -> AgentSpec:
+    codec: "AgentSpecCodec",
+) -> "AgentSpec":
     if definition.schema != "agent-spec.v1":
         raise RunDefinitionError("unsupported definition schema")
     actual = sha256(canonical_json_bytes(definition.spec)).hexdigest()
@@ -76,7 +76,7 @@ def _snapshot(outcome: object) -> AgentSnapshotData:
     return snapshot
 
 
-def decode_model_messages(messages: tuple[object, ...]) -> tuple[object, ...]:
+def decode_model_messages(messages: "tuple[object, ...]") -> "tuple[object, ...]":
     return trace_codec.decode_model_messages(messages)
 
 
@@ -87,18 +87,18 @@ _HEARTBEAT_INTERVAL = min(max(_LEASE_DURATION / 3, timedelta(seconds=1)), timede
 class ExecutionService:
     def __init__(
         self,
-        store: ExecutionStore,
-        compiler: AgentCompiler,
+        store: "ExecutionStore",
+        compiler: "AgentCompiler",
         *,
-        engine: AgentEngine,
-        assembler: AgentAssembler,
+        engine: "AgentEngine",
+        assembler: "AgentAssembler",
         tool_execution_ready: bool,
-        sandbox: Sandbox | None,
-        spec_codec: AgentSpecCodec,
-        authorization: AuthorizationPolicy,
-        live_events: RunLiveEventSink,
-        security_events: SecurityEventSink,
-        controller: ExecutionControllerRegistry | None = None,
+        sandbox: "Sandbox | None",
+        spec_codec: "AgentSpecCodec",
+        authorization: "AuthorizationPolicy",
+        live_events: "RunLiveEventSink",
+        security_events: "SecurityEventSink",
+        controller: "ExecutionControllerRegistry | None" = None,
     ) -> None:
         self._store = store
         self._compiler = compiler
@@ -118,12 +118,12 @@ class ExecutionService:
 
     async def run(
         self,
-        spec: AgentSpec,
+        spec: "AgentSpec",
         prompt: str,
         *,
         principal: PrincipalContext,
-        session_id: str | None = None,
-        execution_id: str | None = None,
+        session_id: "str | None" = None,
+        execution_id: "str | None" = None,
     ) -> object:
         if not isinstance(principal, PrincipalContext):
             raise TypeError("principal must be a PrincipalContext")
@@ -201,14 +201,14 @@ class ExecutionService:
 
     async def _preflight(
         self,
-        spec: AgentSpec,
+        spec: "AgentSpec",
         *,
         execution_id: str,
         session_id: str,
         root_execution_id: str,
-        parent_execution_id: str | None,
+        parent_execution_id: "str | None",
         principal: PrincipalContext,
-    ) -> AgentAssembly:
+    ) -> "AgentAssembly":
         self._assembler.validate_features(spec)
         assembly = await self._assembler.assemble(
             spec,
@@ -250,7 +250,7 @@ class ExecutionService:
         # a currently-suspended await, e.g. a hanging model call).
         await self._controller.cancel(run_id)
 
-    async def decide_approval(self, run_id: str, *, approval_id: str, decision: ApprovalDecision, principal: PrincipalContext) -> RunRecord:
+    async def decide_approval(self, run_id: str, *, approval_id: str, decision: "ApprovalDecision", principal: PrincipalContext) -> "RunRecord":
         if not isinstance(principal, PrincipalContext):
             raise TypeError("principal must be a PrincipalContext")
         record = await self._required(run_id)
@@ -273,7 +273,7 @@ class ExecutionService:
                 await self._controller.cancel(run_id)
                 return
 
-    async def _execute(self, spec: AgentSpec, prompt: str, record: RunRecord, *, resuming: bool, message_history: tuple[object, ...] = (), assembly: AgentAssembly | None = None) -> object:
+    async def _execute(self, spec: "AgentSpec", prompt: str, record: "RunRecord", *, resuming: bool, message_history: "tuple[object, ...]" = (), assembly: "AgentAssembly | None" = None) -> object:
         owner = record.lease.owner or "runtime"
         compiled = await self._compiler.compile(spec)
         context = RunContext(record.id, record.root_execution_id, record.parent_execution_id, record.session_id, record.runnable_id, record.definition.runnable_type, record.user_id, record.tenant_id, None)
@@ -420,7 +420,7 @@ class ExecutionService:
             raise RuntimeError(outcome.error.message)
         raise AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
 
-    async def _required(self, run_id: str) -> RunRecord:
+    async def _required(self, run_id: str) -> "RunRecord":
         record = await self._store.get_run(run_id)
         if record is None:
             raise KeyError(run_id)
@@ -429,7 +429,7 @@ class ExecutionService:
     def _authorize(
         self,
         principal: PrincipalContext,
-        record: RunRecord,
+        record: "RunRecord",
         action: ExecutionAction,
     ) -> None:
         self._authorization.assert_execution_access(
@@ -440,7 +440,7 @@ class ExecutionService:
         )
 
 
-def spec_type(record: RunRecord) -> RunnableType:
+def spec_type(record: "RunRecord") -> RunnableType:
     return record.definition.runnable_type
 
 

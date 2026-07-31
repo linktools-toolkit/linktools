@@ -8,6 +8,7 @@ from linktools.decorator import cached_property
 from linktools.cntr import BaseContainer
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from linktools.cntr import ExposeLink
 
@@ -15,7 +16,7 @@ if TYPE_CHECKING:
 class Container(BaseContainer):
 
     @cached_property
-    def configs(self):
+    def configs(self) -> "dict[str, Any]":
         return dict(
             PORTAINER_TAG="alpine",
             PORTAINER_DOMAIN=self.get_nginx_domain(),

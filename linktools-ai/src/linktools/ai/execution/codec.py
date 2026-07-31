@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """JSON codec used at the execution persistence boundary."""
 
 import json
@@ -21,7 +24,7 @@ def encode(value: Any) -> str:
 
 
 def decode(value: str) -> Any:
-    def hook(item: dict[str, Any]) -> Any:
+    def hook(item: "dict[str, Any]") -> Any:
         if set(item) == {"__datetime__"}:
             return datetime.fromisoformat(item["__datetime__"])
         return item

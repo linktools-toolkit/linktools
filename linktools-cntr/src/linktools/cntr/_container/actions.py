@@ -15,10 +15,11 @@ from linktools.rich import choose, confirm
 from ..runtime.compose import ComposeOptions
 
 if TYPE_CHECKING:
+    from typing import Any
     from ..container import BaseContainer
 
 
-def up(container: "BaseContainer", pull: bool = False):
+def up(container: "BaseContainer", pull: bool = False) -> None:
     context = container._make_exec_context(["up", pull and "pull"])
     services = container.compose_runner.collect_services(context)
     # exec never emitted default --pull flags -> emit_default_pull=False.
@@ -33,7 +34,7 @@ def up(container: "BaseContainer", pull: bool = False):
         container.running_state.mark_started(context)
 
 
-def restart(container: "BaseContainer", pull: bool = False):
+def restart(container: "BaseContainer", pull: bool = False) -> None:
     context = container._make_exec_context(["restart", pull and "pull"])
     services = container.compose_runner.collect_services(context)
     with container.lifecycle.notify_stop(context):
@@ -50,7 +51,7 @@ def restart(container: "BaseContainer", pull: bool = False):
         container.running_state.mark_started(context)
 
 
-def down(container: "BaseContainer"):
+def down(container: "BaseContainer") -> None:
     context = container._make_exec_context("down")
     services = container.compose_runner.collect_services(context)
 
@@ -59,14 +60,14 @@ def down(container: "BaseContainer"):
         container.running_state.mark_stopped(context)
 
 
-def config(container: "BaseContainer"):
+def config(container: "BaseContainer") -> "dict[str, Any] | None":
     context = container._make_exec_context("config")
     services = container.compose_runner.collect_services(context)
     return container.compose_runner.config(context, services)
 
 
 def shell(container: "BaseContainer", command: str = None, privileged: bool = False,
-          user: str = None, service_name: str = None):
+          user: str = None, service_name: str = None) -> int:
     service = container.choose_service(service_name)
 
     options = []
@@ -96,7 +97,7 @@ def shell(container: "BaseContainer", command: str = None, privileged: bool = Fa
 
 
 def logs(container: "BaseContainer", follow: bool = True, tail: str = None, timestamps: bool = True,
-         since: str = None, until: str = None, service_name: str = None):
+         since: str = None, until: str = None, service_name: str = None) -> int:
     service = container.choose_service(service_name)
 
     options = []
@@ -119,7 +120,7 @@ def logs(container: "BaseContainer", follow: bool = True, tail: str = None, time
 
 
 def mount(container: "BaseContainer", source: str = None, target: str = None,
-          permission: str = "rw", service_name: str = None):
+          permission: str = "rw", service_name: str = None) -> None:
     if not source or not target:
         if not source and not target:
             with container.settings.transaction() as settings:
@@ -160,7 +161,7 @@ def mount(container: "BaseContainer", source: str = None, target: str = None,
         container.logger.info(f"add {container_path}")
 
 
-def umount(container: "BaseContainer", service_name: str = None):
+def umount(container: "BaseContainer", service_name: str = None) -> None:
     service = container.choose_service(service_name)
     with container.settings.transaction() as settings:
         mount_paths = settings.get("mount_paths") or {}

@@ -24,10 +24,16 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
     from typing import Any
+    from linktools.core import Config, ConfigStore, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .manager import ContainerManager
     from .context import EventContext
+    from .repo.context import RepositoryConfigContext
     from .lifecycle.hooks import HookListView, HookRegistry
+    from .runtime.compose import ComposeRunner
+    from .runtime.process import RuntimeProcessFactory
+    from .lifecycle.dispatcher import LifecycleDispatcher
+    from .state.running import RunningStateStore
 
 
 class ContainerError(Error):
@@ -93,7 +99,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return self._enable
 
     @enable.setter
-    def enable(self, value: bool):
+    def enable(self, value: bool) -> None:
         self._enable = value
 
     @property
@@ -113,7 +119,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     @cached_property
-    def settings(self):
+    def settings(self) -> "ConfigStore":
         """Return this container's persistent operational settings namespace.
 
         Backed by ``manager.settings`` (``cntr.json``, not
@@ -145,55 +151,55 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     # already cached on the manager, so these never construct a second copy.
 
     @property
-    def environ(self):
+    def environ(self) -> "Environ":
         return self.manager.environ
 
     @property
-    def repo_context(self):
+    def repo_context(self) -> "RepositoryConfigContext | None":
         """Where this container came from -- ``None`` if never attached by
         ContainerLoader (e.g. a container built directly in a test)."""
         return self._repo_context
 
     @repo_context.setter
-    def repo_context(self, context) -> None:
+    def repo_context(self, context: "RepositoryConfigContext | None") -> None:
         self._repo_context = context
 
     @property
-    def env_config(self):
+    def env_config(self) -> "Config":
         # Every container, builtin or third-party, resolves fields through
         # the manager's own shared Config.
         return self.manager.env_config
 
     @property
-    def runtime(self):
+    def runtime(self) -> "RuntimeProcessFactory":
         return self.manager.runtime
 
     @property
-    def compose_runner(self):
+    def compose_runner(self) -> "ComposeRunner":
         return self.manager.compose_runner
 
     @property
-    def lifecycle(self):
+    def lifecycle(self) -> "LifecycleDispatcher":
         return self.manager.lifecycle
 
     @property
-    def running_state(self):
+    def running_state(self) -> "RunningStateStore":
         return self.manager.running_state
 
     @property
-    def project_name(self):
+    def project_name(self) -> str:
         return self.manager.project_name
 
     @property
-    def host(self):
+    def host(self) -> str:
         return self.manager.host
 
     @property
-    def user(self):
+    def user(self) -> str:
         return self.manager.user
 
     @property
-    def containers(self):
+    def containers(self) -> "dict[str, BaseContainer]":
         return self.manager.containers
 
     @cached_property
@@ -233,48 +239,48 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         from .lifecycle.hooks import HookPhase
         self.hooks.register(HookPhase.AFTER_STOP, hook, key=key, **kwargs)
 
-    def on_init(self):
+    def on_init(self) -> None:
         pass
 
-    def on_prepare(self):
+    def on_prepare(self) -> None:
         pass
 
-    def on_check(self, context: "EventContext"):
+    def on_check(self, context: "EventContext") -> None:
         pass
 
-    def on_starting(self, context: "EventContext"):
+    def on_starting(self, context: "EventContext") -> None:
         pass
 
-    def on_started(self, context: "EventContext"):
+    def on_started(self, context: "EventContext") -> None:
         pass
 
-    def on_stopping(self, context: "EventContext"):
+    def on_stopping(self, context: "EventContext") -> None:
         pass
 
-    def on_stopped(self, context: "EventContext"):
+    def on_stopped(self, context: "EventContext") -> None:
         pass
 
-    def on_removed(self, context: "EventContext"):
+    def on_removed(self, context: "EventContext") -> None:
         pass
 
     @subcommand("up", help="deploy this container")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    def on_exec_up(self, pull: bool = False):
+    def on_exec_up(self, pull: bool = False) -> None:
         return _actions.up(self, pull=pull)
 
     @subcommand("restart", help="restart this container")
     @subcommand_argument("--pull", action=BooleanOptionalAction,
                          help="always attempt to pull a newer version of the image")
-    def on_exec_restart(self, pull: bool = False):
+    def on_exec_restart(self, pull: bool = False) -> None:
         return _actions.restart(self, pull=pull)
 
     @subcommand("down", help="stop this container")
-    def on_exec_down(self):
+    def on_exec_down(self) -> None:
         return _actions.down(self)
 
     @subcommand("config", help="show docker compose config for this container")
-    def on_exec_config(self):
+    def on_exec_config(self) -> "dict[str, Any] | None":
         return _actions.config(self)
 
     @subcommand("shell", help="exec into container using command sh")
@@ -282,7 +288,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--privileged", help="give extended privileges to the command")
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None):
+    def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None) -> int:
         return _actions.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
 
     @subcommand("logs", help="fetch the logs of container")
@@ -299,7 +305,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_exec_logs(self, follow: bool = True, tail: str = None, timestamps: bool = True,
                      since: str = None, until: str = None,
-                     service_name: str = None):
+                     service_name: str = None) -> int:
         return _actions.logs(self, follow=follow, tail=tail, timestamps=timestamps,
                           since=since, until=until, service_name=service_name)
 
@@ -308,12 +314,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("target", nargs='?', help="container path")
     @subcommand_argument("-p", "--permission", choices=("ro", "rw"))
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None):
+    def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None) -> None:
         return _actions.mount(self, source=source, target=target, permission=permission, service_name=service_name)
 
     @subcommand("umount", help="unmount path")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_unmount_file(self, service_name: str = None):
+    def on_unmount_file(self, service_name: str = None) -> None:
         return _actions.umount(self, service_name=service_name)
 
     def register_configs(self) -> None:
@@ -427,7 +433,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def get_service_name(self, key: str) -> str:
         return f"{self.project_name}-{key}"
 
-    def is_depend_on(self, name: str):
+    def is_depend_on(self, name: str) -> bool:
         next_items = set(self.dependencies)
         exclude_items = set()
         while next_items:
@@ -450,7 +456,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         next_items.add(next_dependency)
         return False
 
-    def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any"):
+    def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
 
     def __repr__(self):
@@ -479,7 +485,7 @@ class SourceContainer(BaseContainer):
         source_path = self.get_app_path("source", f"{name}.in")
         dest_path = self.get_app_path("source", f"{name}.out")
 
-        def init_source_code():
+        def init_source_code() -> None:
             if not os.path.isdir(dest_path):
                 file = self.manager.environ.get_url_file(self._source_url)
                 file.save(source_path.parent, source_path.name)
@@ -497,14 +503,14 @@ class SourceContainer(BaseContainer):
         )
         return os.path.join(dest_path, self._source_path)
 
-    def get_docker_context_path(self):
+    def get_docker_context_path(self) -> "Path":
         return self._context_path
 
-    def on_starting(self, context: "EventContext"):
+    def on_starting(self, context: "EventContext") -> None:
         if "pull" in context.commands:
             utils.remove_file(self.get_app_path("source"))
 
-    def on_removed(self, context: "EventContext"):
+    def on_removed(self, context: "EventContext") -> None:
         utils.remove_file(self.get_app_path("source"))
 
 

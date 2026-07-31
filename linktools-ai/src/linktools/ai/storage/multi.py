@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Reader protocols and bounded batch fallback.
 
 The layer topology (primary-first ordered fallback) is owned by
@@ -6,7 +9,6 @@ Protocols and the per-backend batch fallback that fans single ``get`` calls
 out under bounded concurrency when a backend does not implement
 ``get_many``."""
 
-from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
@@ -19,17 +21,17 @@ InfoT = TypeVar("InfoT")
 
 @runtime_checkable
 class StorageReader(Protocol[KeyT, ValueT, InfoT]):
-    async def get(self, key: KeyT) -> ValueT | None: ...
+    async def get(self, key: KeyT) -> "ValueT | None": ...
 
-    async def list_info(self) -> tuple[InfoT, ...]: ...
+    async def list_info(self) -> "tuple[InfoT, ...]": ...
 
 
 @runtime_checkable
 class BatchStorageReader(Protocol[KeyT, ValueT]):
     async def get_many(
         self,
-        keys: tuple[KeyT, ...],
-    ) -> Mapping[KeyT, ValueT]: ...
+        keys: "tuple[KeyT, ...]",
+    ) -> "Mapping[KeyT, ValueT]": ...
 
 
 @runtime_checkable
@@ -38,15 +40,15 @@ class StorageWriter(Protocol[KeyT, ValueT]):
 
     async def delete(self, key: KeyT) -> None: ...
 
-    async def reset(self, values: tuple[ValueT, ...]) -> None: ...
+    async def reset(self, values: "tuple[ValueT, ...]") -> None: ...
 
 
 async def batch_get(
     reader: object,
-    keys: tuple[KeyT, ...],
+    keys: "tuple[KeyT, ...]",
     *,
     concurrency: int = 8,
-) -> dict[KeyT, ValueT]:
+) -> "dict[KeyT, ValueT]":
     """Resolve ``keys`` from one reader. Uses ``get_many`` when the reader
     supports it; otherwise runs single ``get`` calls under a bounded semaphore.
     ``None`` results are dropped (a miss). ``concurrency`` must be positive."""
@@ -57,7 +59,7 @@ async def batch_get(
         return {key: value for key, value in loaded.items() if value is not None}
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def load(key: KeyT) -> tuple[KeyT, ValueT | None]:
+    async def load(key: KeyT) -> "tuple[KeyT, ValueT | None]":
         async with semaphore:
             return key, await reader.get(key)  # type: ignore[attr-defined]
 

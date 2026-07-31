@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """SQLAlchemy specification persistence.
 
 A single ``load_metadata`` call returns the head revision plus either the full
@@ -5,42 +8,32 @@ entry set (REPLACE) or the change log since the caller's revision (PATCH),
 read from a consistent snapshot in one SQL statement. Metadata queries never
 project the ``content`` column; only ``get``/``get_many`` read content."""
 
-from __future__ import annotations
 
-from sqlalchemy import (
-    Boolean,
-    Integer,
-    LargeBinary,
-    String,
-    delete,
-    select,
-    true,
-)
+from typing import TYPE_CHECKING
+from sqlalchemy import Boolean, Integer, LargeBinary, String, delete, select, true
 from sqlalchemy.orm import Mapped, mapped_column
-
 from ...errors import SpecConflictError, StorageCorruptionError
 from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.blob import put_blob, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
-from ...storage.sqlalchemy.dialects import SqlAlchemyDialect, resolve_dialect
+from ...storage.sqlalchemy.dialects import resolve_dialect
 from ...storage.versioning import VersionSummary
 from ..document import SpecDocument, SpecDocumentInfo
-from ...storage.revision import (
-    MetadataLoad,
-    MetadataLoadMode,
-    StorageChange,
-    StorageMetadataBackend,
-)
+from ...storage.revision import MetadataLoad, MetadataLoadMode, StorageChange, StorageMetadataBackend
+
+if TYPE_CHECKING:
+    from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class EntryRow(Base):
     __tablename__ = f"{TABLE_PREFIX}spec_documents"
-    path: Mapped[str] = mapped_column(String(512), unique=True)
-    kind: Mapped[str] = mapped_column(String(128), index=True)
-    version: Mapped[int] = mapped_column(Integer)
-    etag: Mapped[str] = mapped_column(String(255))
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
-    content: Mapped[bytes] = mapped_column(LargeBinary)
+    path: "Mapped[str]" = mapped_column(String(512), unique=True)
+    kind: "Mapped[str]" = mapped_column(String(128), index=True)
+    version: "Mapped[int]" = mapped_column(Integer)
+    etag: "Mapped[str]" = mapped_column(String(255))
+    active: "Mapped[bool]" = mapped_column(Boolean, default=True)
+    content: "Mapped[bytes]" = mapped_column(LargeBinary)
 
 
 class SpecBlobRow(Base):
@@ -51,38 +44,38 @@ class SpecBlobRow(Base):
 
     __tablename__ = f"{TABLE_PREFIX}spec_blobs"
     __table_args__ = (*timestamp_indexes(),)
-    sha256: Mapped[str] = mapped_column(String(64), unique=True)
-    content: Mapped[bytes] = mapped_column(LargeBinary)
+    sha256: "Mapped[str]" = mapped_column(String(64), unique=True)
+    content: "Mapped[bytes]" = mapped_column(LargeBinary)
 
 
 class RevisionRow(Base):
     __tablename__ = f"{TABLE_PREFIX}spec_revision"
-    revision: Mapped[int] = mapped_column(Integer, default=0)
-    minimum_delta_revision: Mapped[int] = mapped_column(Integer, default=0)
+    revision: "Mapped[int]" = mapped_column(Integer, default=0)
+    minimum_delta_revision: "Mapped[int]" = mapped_column(Integer, default=0)
 
 
 class ChangeRow(Base):
     __tablename__ = f"{TABLE_PREFIX}spec_changes"
-    revision: Mapped[int] = mapped_column(Integer, index=True)
-    path: Mapped[str] = mapped_column(String(512))
-    kind: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    version: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    object_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    deleted: Mapped[bool] = mapped_column(Boolean, default=False)
+    revision: "Mapped[int]" = mapped_column(Integer, index=True)
+    path: "Mapped[str]" = mapped_column(String(512))
+    kind: "Mapped[str | None]" = mapped_column(String(128), nullable=True)
+    version: "Mapped[int | None]" = mapped_column(Integer, nullable=True)
+    etag: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
+    object_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, index=True)
+    active: "Mapped[bool | None]" = mapped_column(Boolean, nullable=True)
+    deleted: "Mapped[bool]" = mapped_column(Boolean, default=False)
 
 
-def _info(row: EntryRow | ChangeRow) -> SpecDocumentInfo:
+def _info(row: "EntryRow | ChangeRow") -> SpecDocumentInfo:
     return SpecDocumentInfo(row.path, row.kind, row.version, row.etag, row.active)
 
 
 class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
-    def __init__(self, session_factory, *, dialect: SqlAlchemyDialect | None = None) -> None:
+    def __init__(self, session_factory, *, dialect: "SqlAlchemyDialect | None" = None) -> None:
         self.session_factory = session_factory
         self._dialect = dialect
 
-    async def initialize_storage(self, engine) -> None:
+    async def initialize_storage(self, engine: "AsyncEngine") -> None:
         # No singleton is seeded here: the revision counter row is self-seeded
         # on the first write via ``upsert_increment``.
         async with engine.begin() as connection:
@@ -90,12 +83,12 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     # ---- reader --------------------------------------------------------
 
-    async def get(self, path: str) -> SpecDocument | None:
+    async def get(self, path: str) -> "SpecDocument | None":
         async with self.session_factory() as session:
             row = await session.scalar(select(EntryRow).where(EntryRow.path == path))
             return None if row is None else SpecDocument(_info(row), row.content)
 
-    async def get_many(self, paths: tuple[str, ...]) -> dict[str, SpecDocument]:
+    async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, SpecDocument]":
         if not paths:
             return {}
         async with self.session_factory() as session:
@@ -104,7 +97,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
             ).all()
             return {row.path: SpecDocument(_info(row), row.content) for row in rows}
 
-    async def stat(self, path: str) -> SpecDocumentInfo | None:
+    async def stat(self, path: str) -> "SpecDocumentInfo | None":
         async with self.session_factory() as session:
             row = (
                 await session.execute(
@@ -113,7 +106,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
             ).first()
             return None if row is None else _metadata_info(row)
 
-    async def list_info(self, *, kind: str | None = None) -> tuple[SpecDocumentInfo, ...]:
+    async def list_info(self, *, kind: "str | None" = None) -> "tuple[SpecDocumentInfo, ...]":
         async with self.session_factory() as session:
             rows = await session.execute(_metadata_query(kind=kind))
             return tuple(_metadata_info(row) for row in rows)
@@ -173,8 +166,8 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     async def load_metadata(
         self,
-        after_revision: int | None,
-    ) -> MetadataLoad[int, str, SpecDocumentInfo]:
+        after_revision: "int | None",
+    ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
         # Each call issues exactly one SQL: the singleton RevisionRow (head +
         # minimum) LEFT JOINed with the data rows, so the returned revision and
         # entries/changes come from a single consistent read.
@@ -185,7 +178,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     async def _load_snapshot(
         self, session
-    ) -> MetadataLoad[int, str, SpecDocumentInfo]:
+    ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
         # One SQL: RevisionRow LEFT JOIN Entry metadata. Every entry row joins
         # onto the single revision row, so each result row carries head + one
         # entry's metadata. An empty Entry table still yields one row (head +
@@ -209,7 +202,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
 
     async def _load_after(
         self, session, after: int
-    ) -> MetadataLoad[int, str, SpecDocumentInfo]:
+    ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
         # One SQL: RevisionRow (head + minimum) LEFT JOIN ChangeRow restricted to
         # revisions in (after, head]. head, minimum, and the change set come from
         # a single read; minimum decides whether the caller's after is too old to
@@ -295,7 +288,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
                 await session.execute(delete(EntryRow).where(EntryRow.path == path))
                 session.add(_change_row(revision, tombstone, deleted=True, object_id=None))
 
-    async def reset(self, entries: tuple[SpecDocument, ...]) -> None:
+    async def reset(self, entries: "tuple[SpecDocument, ...]") -> None:
         for entry in entries:
             entry.validate_etag()
         async with self.session_factory() as session:
@@ -354,7 +347,7 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
             column="revision",
         )
 
-    async def _dialect_for(self, session) -> SqlAlchemyDialect:
+    async def _dialect_for(self, session) -> "SqlAlchemyDialect":
         if self._dialect is None:
             self._dialect = resolve_dialect(session)
         return self._dialect
@@ -378,7 +371,7 @@ def _metadata_expr(model):
     return (getattr(model, "path"), getattr(model, "kind"), getattr(model, "version"), getattr(model, "etag"), getattr(model, "active"))
 
 
-def _metadata_query(*, kind: str | None = None):
+def _metadata_query(*, kind: "str | None" = None):
     query = select(*_metadata_expr(EntryRow)).order_by(EntryRow.path)
     if kind is not None:
         query = query.where(EntryRow.kind == kind)
@@ -406,7 +399,6 @@ def _change_row(
         active=info.active,
         deleted=deleted,
     )
-
 
 
 __all__ = ["EntryRow", "SpecBlobRow", "SqlAlchemySpecBackend", "ChangeRow", "RevisionRow"]

@@ -13,12 +13,14 @@ Downstreams with a different engine (their own vendor) implement
 :class:`SqlAlchemyDialect` themselves and run the kernel conformance suite in
 their own CI."""
 
-from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
+from .base import InsertResult, classify_integrity_error_by_message, primary_key_column
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .base import IntegrityViolationKind
 
 class SqliteDialect:
     """The SQLite reference dialect. ``insert_ignore_conflict`` issues an
@@ -82,7 +84,7 @@ class SqliteDialect:
 
     def classify_integrity_error(
         self, error: BaseException
-    ) -> IntegrityViolationKind:
+    ) -> "IntegrityViolationKind":
         return classify_integrity_error_by_message(
             error,
             unique_markers=("unique constraint",),

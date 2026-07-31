@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Explicit, trusted registry for resumable output schemas."""
 
 import hashlib
@@ -9,7 +12,7 @@ from ..errors import ManifestDriftError
 
 class OutputSchemaRegistry:
     def __init__(self) -> None:
-        self._entries: dict[tuple[str, str], tuple[type, str]] = {}
+        self._entries: "dict[tuple[str, str], tuple[type, str]]" = {}
 
     def register(self, schema_id: str, revision: str, model: type) -> None:
         if not schema_id or not revision:

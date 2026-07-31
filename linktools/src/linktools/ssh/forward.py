@@ -12,10 +12,14 @@ import the client (no circular dependency).
 import select
 import socket
 import threading
+from typing import TYPE_CHECKING
 
 from linktools import utils
 from linktools.core import environ
 from linktools.types import Stoppable
+
+if TYPE_CHECKING:
+    import paramiko
 
 try:
     import SocketServer
@@ -45,11 +49,11 @@ class SSHForward(Stoppable):
         self._forward_server = None
         self._forward_thread = None
 
-        def start():
+        def start() -> None:
 
             class ForwardHandler(SocketServer.BaseRequestHandler):
 
-                def handle(self):
+                def handle(self) -> None:
                     try:
                         channel = transport.open_channel(
                             "direct-tcpip",
@@ -109,7 +113,7 @@ class SSHForward(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop local SSH port forwarding."""
         if self._forward_server is not None:
             try:
@@ -142,10 +146,10 @@ class SSHReverse(Stoppable):
         self._transport = transport = client.get_transport()
         self._forward_thread = None
 
-        def start():
+        def start() -> None:
             self._remote_port = self._transport.request_port_forward(remote_host, remote_port or 0)
 
-            def forward_handler(channel):
+            def forward_handler(channel: "paramiko.Channel") -> None:
 
                 sock = socket.socket()
                 try:
@@ -195,7 +199,7 @@ class SSHReverse(Stoppable):
                     super().__init__()
                     self.event = threading.Event()
 
-                def run(self):
+                def run(self) -> None:
                     while not self.event.is_set():
                         channel = transport.accept(.5)
                         if channel is None:
@@ -206,7 +210,7 @@ class SSHReverse(Stoppable):
                         thread.daemon = True
                         thread.start()
 
-                def shutdown(self):
+                def shutdown(self) -> None:
                     self.event.set()
 
             self._forward_thread = ForwardThread()
@@ -215,7 +219,7 @@ class SSHReverse(Stoppable):
 
         self._stop_on_error(start)
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop remote SSH port forwarding."""
         if self._remote_port is not None:
             try:

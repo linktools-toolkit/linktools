@@ -19,10 +19,16 @@ from hashlib import sha256
 from pathlib import Path
 import contextvars
 
+from typing import TYPE_CHECKING
+
 from ..spec import AgentFeatureRef
 from ...errors import SkillAssetAccessError, SubagentResolutionError
 from ...spec.parsing import StrictConfigReader, parse_markdown_text
 from ..assembly.models import parse_agent_feature_refs
+
+if TYPE_CHECKING:
+    from ...model.policy import ModelPolicy
+    from ..spec import AgentSpec
 
 # Default tools for a skill-private agent with no ``tools:`` key.
 _DEFAULT_TOOLS: tuple = (AgentFeatureRef(kind="builtin", name="file-read"),)
@@ -52,16 +58,16 @@ def set_active_skill(
     return _active_skill_var.set(ctx)
 
 
-def reset_active_skill(token) -> None:
+def reset_active_skill(token: "contextvars.Token[ActiveSkillContext | None]") -> None:
     _active_skill_var.reset(token)
 
 
 def skill_subagent_to_agent_spec(
-    spec,
+    spec: "SkillSubagentSpec",
     *,
-    model_policy,
+    model_policy: "ModelPolicy",
     parent_delegated: "set[str] | None" = None,
-):
+) -> "AgentSpec":
     """Build an executable AgentSpec from a skill-private subagent spec, applying
     the permission intersection: a private agent may only keep tools the
     parent can delegate. ``parent_delegated=None`` means "no constraint" (the

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """One canonical codec for model messages and semantic trace payloads.
 
 Resume-message (de)serialization delegates to pydantic-ai's
@@ -6,35 +9,27 @@ part type is silently dropped. Trace-step payloads use a hand-rolled
 shape for human-readable inspection but do not affect resume fidelity.
 """
 
-from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart, ModelMessagesTypeAdapter
+from ..json import normalize_json
 
-from pydantic_ai.messages import (
-    ModelMessage,
-    ModelRequest,
-    ModelResponse,
-    SystemPromptPart,
-    TextPart,
-    ToolCallPart,
-    ToolReturnPart,
-    UserPromptPart,
-    ModelMessagesTypeAdapter,
-)
+from typing import TYPE_CHECKING
 
-from ..json import JsonValue, normalize_json
+if TYPE_CHECKING:
+    from pydantic_ai.messages import ModelMessage
+    from ..json import JsonValue
 
-
-def encode_model_messages(messages: tuple[ModelMessage, ...] | list[ModelMessage]) -> tuple[JsonValue, ...]:
+def encode_model_messages(messages: "tuple[ModelMessage, ...] | list[ModelMessage]") -> "tuple[JsonValue, ...]":
     return tuple(ModelMessagesTypeAdapter.dump_python(list(messages), mode="json"))
 
 
-def decode_model_messages(values: tuple[JsonValue, ...] | list[JsonValue]) -> tuple[ModelMessage, ...]:
+def decode_model_messages(values: "tuple[JsonValue, ...] | list[JsonValue]") -> "tuple[ModelMessage, ...]":
     return tuple(ModelMessagesTypeAdapter.validate_python(list(values)))
 
 
-def _part(value: object) -> JsonValue:
+def _part(value: object) -> "JsonValue":
     if isinstance(value, SystemPromptPart):
         return {"type": "system_prompt", "content": value.content}
     if isinstance(value, UserPromptPart):
@@ -48,7 +43,7 @@ def _part(value: object) -> JsonValue:
     return {"type": "unsupported", "source_type": type(value).__name__, "safe_summary": type(value).__name__}
 
 
-def _message(value: ModelMessage) -> JsonValue:
+def _message(value: "ModelMessage") -> "JsonValue":
     if isinstance(value, ModelRequest):
         return {"kind": "request", "parts": [_part(item) for item in value.parts], "timestamp": (value.timestamp or datetime.now(timezone.utc)).isoformat()}
     if isinstance(value, ModelResponse):
@@ -57,11 +52,11 @@ def _message(value: ModelMessage) -> JsonValue:
     return {"kind": "unsupported", "source_type": type(value).__name__, "safe_summary": type(value).__name__}
 
 
-def encode_model_request(messages: tuple[ModelMessage, ...], settings: object, tools: object) -> JsonValue:
+def encode_model_request(messages: "tuple[ModelMessage, ...]", settings: object, tools: object) -> "JsonValue":
     return {"messages": list(encode_model_messages(messages)), "settings": normalize_json(settings), "tools": normalize_json(tools)}
 
 
-def encode_model_response(response: ModelResponse) -> JsonValue:
+def encode_model_response(response: ModelResponse) -> "JsonValue":
     return _message(response)
 
 

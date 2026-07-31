@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Storage topology assembly: per-layer metadata, merge, read, write.
 
 ``StorageComposition`` is the unified base for every domain store. It wires a
@@ -8,24 +11,21 @@ metadata-miss rule, preload via ``contains_many``, and write post-processing.
 
 Layers are ordered fallbacks; earlier readers win."""
 
-from __future__ import annotations
 
 import asyncio
 import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
-
 from ..errors import StorageFeatureSupportError
-from .cache import ContentCache, ContentCacheKey, contains_many, read_cache, write_cache
+from .cache import ContentCache, contains_many, read_cache, write_cache
 from .multi import StorageReader, batch_get
-from .revision import (
-    LayerMetadataView,
-    LayerRefreshPolicy,
-    MetadataState,
-    StorageInitializer,
-    StorageMetadataBackend,
-)
+from .revision import LayerMetadataView, LayerRefreshPolicy, MetadataState, StorageInitializer, StorageMetadataBackend
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .cache import ContentCacheKey
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
@@ -42,7 +42,7 @@ class StorageAdapter(Protocol[KeyT, ValueT, InfoT]):
 
 @runtime_checkable
 class StorageCacheAdapter(Protocol[KeyT, ValueT, InfoT]):
-    def cache_key(self, key: KeyT, info: InfoT) -> ContentCacheKey: ...
+    def cache_key(self, key: KeyT, info: InfoT) -> "ContentCacheKey": ...
 
     def cache_content(self, value: ValueT) -> bytes: ...
 
@@ -54,9 +54,9 @@ class StorageLayer(Generic[KeyT, ValueT, InfoT]):
     """One read-only layer behind the primary. ``backend`` is a
     :class:`StorageReader`; ``refresh`` selects how its metadata is loaded."""
 
-    backend: StorageReader[KeyT, ValueT, InfoT]
+    backend: "StorageReader[KeyT, ValueT, InfoT]"
     refresh: LayerRefreshPolicy = LayerRefreshPolicy.STATIC
-    initializer: StorageInitializer | None = None
+    initializer: "StorageInitializer | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +65,9 @@ class EffectiveMetadataState(Generic[KeyT, InfoT]):
     each key to the index of the layer (0 = primary) that won it, so a read
     goes straight to that backend instead of probing each layer in order."""
 
-    revision: int | str
-    entries: Mapping[KeyT, InfoT]
-    owners: Mapping[KeyT, int]
+    revision: "int | str"
+    entries: "Mapping[KeyT, InfoT]"
+    owners: "Mapping[KeyT, int]"
 
 
 def _primary_policy(primary: object) -> LayerRefreshPolicy:
@@ -85,13 +85,13 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
 
     def __init__(
         self,
-        primary: StorageReader[KeyT, ValueT, InfoT],
+        primary: "StorageReader[KeyT, ValueT, InfoT]",
         *,
-        writer: WriterT | None = None,
-        layers: tuple[StorageLayer[KeyT, ValueT, InfoT], ...] = (),
-        adapter: StorageAdapter[KeyT, ValueT, InfoT] | None = None,
-        cache: ContentCache | None = None,
-        cache_adapter: StorageCacheAdapter[KeyT, ValueT, InfoT] | None = None,
+        writer: "WriterT | None" = None,
+        layers: "tuple[StorageLayer[KeyT, ValueT, InfoT], ...]" = (),
+        adapter: "StorageAdapter[KeyT, ValueT, InfoT] | None" = None,
+        cache: "ContentCache | None" = None,
+        cache_adapter: "StorageCacheAdapter[KeyT, ValueT, InfoT] | None" = None,
         cache_concurrency: int = 16,
         preload_batch_size: int = 100,
         preload_concurrency: int = 8,
@@ -116,7 +116,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self.preload_concurrency = preload_concurrency
         self.cache_concurrency = cache_concurrency
         info_key = adapter.info_key if adapter is not None else lambda info: getattr(info, "path", info)
-        self._views: tuple[LayerMetadataView, ...] = (
+        self._views: "tuple[LayerMetadataView, ...]" = (
             LayerMetadataView(
                 primary,
                 _primary_policy(primary),
@@ -133,14 +133,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             ),
         )
         # Marker per key of the cache identity already preloaded into the cache.
-        self._preloaded: dict[KeyT, ContentCacheKey] = {}
+        self._preloaded: "dict[KeyT, ContentCacheKey]" = {}
 
     @property
     def primary_view(self) -> LayerMetadataView:
         return self._views[0]
 
     async def initialize(self, *args: object) -> None:
-        seen: set[int] = set()
+        seen: "set[int]" = set()
         for view in self._views:
             backend = view.backend
             if id(backend) in seen:
@@ -153,21 +153,18 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             raise StorageFeatureSupportError("storage is read-only")
         return self.writer
 
-    def _require_adapter(self) -> tuple[
-        StorageAdapter[KeyT, ValueT, InfoT],
-        StorageCacheAdapter[KeyT, ValueT, InfoT] | None,
-    ]:
+    def _require_adapter(self) -> "tuple[StorageAdapter[KeyT, ValueT, InfoT], StorageCacheAdapter[KeyT, ValueT, InfoT] | None]":
         if self.adapter is None:
             raise StorageFeatureSupportError("storage composition has no adapter")
         return self.adapter, self.cache_adapter
 
-    async def refresh(self) -> EffectiveMetadataState[KeyT, InfoT] | None:
+    async def refresh(self) -> "EffectiveMetadataState[KeyT, InfoT] | None":
         adapter, _ = self._require_adapter()
         states = await asyncio.gather(*(view.refresh() for view in self._views))
         if all(state is None for state in states):
             return None
-        entries: dict[KeyT, InfoT] = {}
-        owners: dict[KeyT, int] = {}
+        entries: "dict[KeyT, InfoT]" = {}
+        owners: "dict[KeyT, int]" = {}
         for index, state in enumerate(states):
             if state is None:
                 continue
@@ -186,7 +183,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
     def _effective_revision(
         self,
         revisions: "tuple[Any, ...]",
-    ) -> int | str:
+    ) -> "int | str":
         # Single primary: its revision directly. Multiple layers: a canonical
         # hash over every loaded layer's revision so any change in any layer
         # changes the effective revision. ALWAYS layers use a local generation,
@@ -197,7 +194,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         payload = "|".join(str(revision) for revision in loaded)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    async def current_revision(self) -> int | str:
+    async def current_revision(self) -> "int | str":
         # Cheap path: probe each layer's head revision without loading any
         # entry/change data (the point at which an external revision cache is
         # validated). A layer with no cheap probe (ALWAYS) forces a full refresh.
@@ -207,10 +204,10 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             return 0 if state is None else state.revision
         return self._effective_revision(heads)
 
-    async def get(self, key: KeyT) -> ValueT | None:
+    async def get(self, key: KeyT) -> "ValueT | None":
         return await self._get_with_retry(key, retried=False)
 
-    async def _get_with_retry(self, key: KeyT, *, retried: bool) -> ValueT | None:
+    async def _get_with_retry(self, key: KeyT, *, retried: bool) -> "ValueT | None":
         adapter, cache_adapter = self._require_adapter()
         state = await self.refresh()
         if state is None or key not in state.entries:
@@ -240,12 +237,12 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             await write_cache(self.cache, cache_key, cache_adapter.cache_content(value))
         return value
 
-    async def get_many(self, keys: tuple[KeyT, ...]) -> dict[KeyT, ValueT]:
+    async def get_many(self, keys: "tuple[KeyT, ...]") -> "dict[KeyT, ValueT]":
         if not keys:
             return {}
         adapter, cache_adapter = self._require_adapter()
         state = await self.refresh()
-        result: dict[KeyT, ValueT] = {}
+        result: "dict[KeyT, ValueT]" = {}
         if state is None:
             return result
         wanted = tuple(dict.fromkeys(k for k in keys if k in state.entries))
@@ -253,12 +250,12 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             return result
         if self.cache is not None and cache_adapter is not None:
 
-            async def _read_one(key: KeyT) -> tuple[KeyT, bytes | None]:
+            async def _read_one(key: KeyT) -> "tuple[KeyT, bytes | None]":
                 return key, await read_cache(
                     self.cache, cache_adapter.cache_key(key, state.entries[key])
                 )
 
-            miss: list[KeyT] = []
+            miss: "list[KeyT]" = []
             for key, cached in await asyncio.gather(*(_read_one(k) for k in wanted)):
                 if cached is not None:
                     result[key] = cache_adapter.from_cache(state.entries[key], cached)
@@ -286,30 +283,30 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
 
     def _group_by_owner(
         self,
-        keys: tuple[KeyT, ...],
-        state: EffectiveMetadataState[KeyT, InfoT],
-    ) -> dict[int, tuple[KeyT, ...]]:
-        groups: dict[int, list[KeyT]] = {}
+        keys: "tuple[KeyT, ...]",
+        state: "EffectiveMetadataState[KeyT, InfoT]",
+    ) -> "dict[int, tuple[KeyT, ...]]":
+        groups: "dict[int, list[KeyT]]" = {}
         for key in keys:
             groups.setdefault(state.owners[key], []).append(key)
         return {owner: tuple(keys) for owner, keys in groups.items()}
 
     async def _load_by_owner(
         self,
-        keys: tuple[KeyT, ...],
-        state: EffectiveMetadataState[KeyT, InfoT],
+        keys: "tuple[KeyT, ...]",
+        state: "EffectiveMetadataState[KeyT, InfoT]",
         *,
-        batch_size: int | None = None,
-    ) -> dict[KeyT, ValueT]:
+        batch_size: "int | None" = None,
+    ) -> "dict[KeyT, ValueT]":
         # Load every key in ``keys`` from its owning layer's backend, grouping by
         # owner and running the owner groups (and their sub-batches) in parallel.
         # Shared by get_many and preload. ``batch_size`` splits each owner's
         # group into bounded chunks (preload uses it to cap SQL IN-clause size);
         # None reads a whole group in one batch_get.
-        loaded: dict[KeyT, ValueT] = {}
+        loaded: "dict[KeyT, ValueT]" = {}
         by_owner = self._group_by_owner(keys, state)
 
-        async def _owner_load(owner: int, group: tuple[KeyT, ...]) -> None:
+        async def _owner_load(owner: int, group: "tuple[KeyT, ...]") -> None:
             loaded.update(
                 await batch_get(
                     self._views[owner].backend,
@@ -330,7 +327,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         await asyncio.gather(*(_owner_load(owner, batch) for owner, batch in batches))
         return loaded
 
-    async def list_info(self, *, preload: bool = False) -> tuple[InfoT, ...]:
+    async def list_info(self, *, preload: bool = False) -> "tuple[InfoT, ...]":
         state = await self.refresh()
         if state is None:
             return ()
@@ -341,7 +338,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             for key in sorted(state.entries, key=lambda value: str(value))
         )
 
-    async def _preload(self, state: EffectiveMetadataState[KeyT, InfoT]) -> None:
+    async def _preload(self, state: "EffectiveMetadataState[KeyT, InfoT]") -> None:
         adapter, cache_adapter = self._require_adapter()
         if self.cache is None or cache_adapter is None:
             return
@@ -362,7 +359,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         )
         # Bounded concurrent cache puts.
         semaphore = asyncio.Semaphore(self.cache_concurrency)
-        verified: set[KeyT] = set()
+        verified: "set[KeyT]" = set()
 
         async def _cache(key: KeyT) -> None:
             async with semaphore:
@@ -381,7 +378,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             if key in verified:
                 self._preloaded[key] = identities[key]
 
-    def _batches(self, keys: tuple[KeyT, ...]) -> Iterable[tuple[KeyT, ...]]:
+    def _batches(self, keys: "tuple[KeyT, ...]") -> "Iterable[tuple[KeyT, ...]]":
         size = self.preload_batch_size
         for offset in range(0, len(keys), size):
             yield keys[offset : offset + size]
@@ -400,12 +397,12 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         await writer.delete(key)
         self._after_delete(key)
 
-    async def reset(self, values: tuple[ValueT, ...]) -> None:
+    async def reset(self, values: "tuple[ValueT, ...]") -> None:
         writer = self.require_writer()
         await writer.reset(values)
         self._after_reset()
 
-    def _after_put(self, value: ValueT, adapter: StorageAdapter[KeyT, ValueT, InfoT]) -> None:
+    def _after_put(self, value: ValueT, adapter: "StorageAdapter[KeyT, ValueT, InfoT]") -> None:
         # Clear the preloaded marker for the written key so a later preload
         # re-reads it. A revisioned primary keeps its old state so the next
         # refresh fetches the patch from the prior revision; an unversioned

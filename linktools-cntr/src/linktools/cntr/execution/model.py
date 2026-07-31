@@ -12,14 +12,15 @@ default -- only ``--report`` renders the full list via ``render_report``,
 but a failure's phase/container/command (redacted)/duration/error summary
 is always logged immediately regardless of ``--report``.
 """
+from typing import TYPE_CHECKING
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
-
 from ..runtime.structured import redact_command as _redact_command
 
 if TYPE_CHECKING:
+    import logging
+    from collections.abc import Iterator
     from ..context import EventContext
 
 
@@ -106,7 +107,7 @@ def _format_failure(record: "ExecutionRecord") -> str:
 
 @contextmanager
 def record_phase(context: "EventContext", phase: str, command: "tuple[str, ...] | None" = None,
-                 container: "str | None" = None, logger=None):
+                 container: "str | None" = None, logger: "logging.Logger | None" = None) -> "Iterator[None]":
     """Time one phase of a real apply and append an ExecutionRecord,
     whether it succeeds or raises. Re-raises whatever the body raised.
 
@@ -135,7 +136,7 @@ def record_phase(context: "EventContext", phase: str, command: "tuple[str, ...] 
         ))
 
 
-def render_report(logger, records: "list[ExecutionRecord]") -> None:
+def render_report(logger: "logging.Logger", records: "list[ExecutionRecord]") -> None:
     """Render the full report -- only ever called when --report was
     explicitly requested; a failure's own diagnostic (phase/container/
     command/duration/message) is shown by the caller regardless."""

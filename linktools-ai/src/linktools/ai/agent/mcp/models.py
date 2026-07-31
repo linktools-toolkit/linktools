@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Dependency-free MCP connection and discovery value types."""
 
 from dataclasses import dataclass, field
@@ -11,7 +14,7 @@ from ...json import freeze_value
 @dataclass(frozen=True, slots=True)
 class MCPRuntimePolicy:
     allow_wildcard: bool = False
-    discovery_mode: Literal["strict", "best_effort"] = "strict"
+    discovery_mode: "Literal['strict', 'best_effort']" = "strict"
     max_tools_per_server: int = 16
 
     def __post_init__(self) -> None:
@@ -34,10 +37,10 @@ class MCPExposedTool:
     server_id: str
     raw_name: str
     exposed_name: str
-    parameters_json_schema: Mapping[str, Any] = field(default_factory=dict)
-    description: str | None = None
-    read_only: bool | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    parameters_json_schema: "Mapping[str, Any]" = field(default_factory=dict)
+    description: "str | None" = None
+    read_only: "bool | None" = None
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -51,10 +54,10 @@ class MCPExposedTool:
 @dataclass(frozen=True)
 class MCPToolInfo:
     name: str
-    parameters_json_schema: Mapping[str, Any] = field(default_factory=dict)
-    description: str | None = None
-    read_only: bool | None = None
-    metadata: Mapping[str, Any] = field(default_factory=dict)
+    parameters_json_schema: "Mapping[str, Any]" = field(default_factory=dict)
+    description: "str | None" = None
+    read_only: "bool | None" = None
+    metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
@@ -69,10 +72,10 @@ class MCPToolInfo:
 
 @dataclass(frozen=True)
 class MCPDiscoveryResult:
-    tools: tuple[MCPToolInfo, ...] = ()
+    tools: "tuple[MCPToolInfo, ...]" = ()
     verified: bool = False
-    error: BaseException | None = None
-    connection_ref: MCPConnectionRef | None = None
+    error: "BaseException | None" = None
+    connection_ref: "MCPConnectionRef | None" = None
 
 
 __all__ = [

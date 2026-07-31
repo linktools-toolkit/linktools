@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """Read-only context threaded through one execution."""
 
+
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .domain import RunnableType
+from typing import TYPE_CHECKING
 
+if TYPE_CHECKING:
+    from .domain import RunnableType
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
@@ -15,10 +18,10 @@ class RunContext:
     parent_execution_id: "str | None"
     session_id: str
     runnable_id: str
-    runnable_type: RunnableType
+    runnable_type: "RunnableType"
     user_id: "str | None"
     tenant_id: "str | None"
-    workspace: object | None
+    workspace: "object | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:

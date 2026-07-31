@@ -95,7 +95,7 @@ class CommandParser(ArgumentParser):
         """
         return self._command
 
-    def parse_known_args(self, args=None, namespace=None):
+    def parse_known_args(self, args: "list[str] | None" = None, namespace: "Namespace | None" = None) -> "tuple[Namespace, list[str]]":
         """Parse args and resolve deferred config actions.
 
         Args:
@@ -234,7 +234,7 @@ def iter_entry_point_commands(group: str, *, onerror: "ERROR_HANDLER" = "error")
             yield from iter_module_commands(obj, onerror=onerror)
 
 
-def iter_entry_points_capabilities(group: str, *, onerror: "ERROR_HANDLER" = "error"):
+def iter_entry_points_capabilities(group: str, *, onerror: "ERROR_HANDLER" = "error") -> "Generator[BaseCapability, Any, Any]":
     """Yield capability objects discovered from entry points.
 
     Args:
@@ -262,7 +262,7 @@ class _SubCommandActionInfo:
         self.no_param = no_param
 
     @property
-    def dest(self):
+    def dest(self) -> str:
         return self.action.dest
 
     def __repr__(self):
@@ -286,7 +286,7 @@ class _SubCommandMethodInfo:
         self.func: "Callable[..., int | None] | None" = None
         self.arguments: "list[_SubCommandMethodArgumentInfo]" = []
 
-    def set_args(self, name: str, **kwargs: "Any"):
+    def set_args(self, name: str, **kwargs: "Any") -> "_SubCommandMethodInfo":
         self.name = name
         self.kwargs = _filter_kwargs(kwargs)
         return self
@@ -302,7 +302,7 @@ class _SubCommandMethodArgumentInfo:
         self.kwargs: "dict[str, Any] | None" = None
         self.action: "str | type[Action] | None" = None
 
-    def set_args(self, *args: str, **kwargs: "Any"):
+    def set_args(self, *args: str, **kwargs: "Any") -> "_SubCommandMethodArgumentInfo":
         self.args = args
         self.kwargs = _filter_kwargs(kwargs)
         return self
@@ -326,7 +326,7 @@ def subcommand(
         add_help: bool = MISSING,
         allow_abbrev: bool = MISSING,
         pass_args: bool = False,
-        order: str = None):
+        order: str = None) -> "Callable[[Callable[..., int | None]], Callable[..., int | None]]":
     """Subcommand.
 
     Args:
@@ -355,7 +355,7 @@ def subcommand(
         Exception: Propagates errors raised while completing the operation.
     """
 
-    def decorator(func):
+    def decorator(func: "Callable[..., int | None]") -> "Callable[..., int | None]":
         if not hasattr(func, "__subcommand_info__"):
             setattr(func, "__subcommand_info__", _SubCommandMethodInfo())
 
@@ -415,7 +415,7 @@ def subcommand_argument(
         nargs: "int | str" = MISSING,
         required: bool = MISSING,
         type: "type[int | float | str] | Callable[[str], T] | FileType" = MISSING,
-        **kwargs: "Any"):
+        **kwargs: "Any") -> "Callable[[Callable[..., int | None]], Callable[..., int | None]]":
     """Subcommand argument.
 
     Args:
@@ -438,7 +438,7 @@ def subcommand_argument(
         Any: The operation result.
     """
 
-    def decorator(func):
+    def decorator(func: "Callable[..., int | None]") -> "Callable[..., int | None]":
         subcommand_argument_info = _SubCommandMethodArgumentInfo()
         subcommand_argument_info.set_args(
             *[name_or_flag, *name_or_flags],
@@ -496,7 +496,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         self.order = order or self.name
 
     @property
-    def has_parent(self):
+    def has_parent(self) -> bool:
         """Has parent.
 
         Returns:
@@ -505,7 +505,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         return self.parent_id != self.ROOT_ID
 
     @property
-    def is_group(self):
+    def is_group(self) -> bool:
         """Return whether group is true.
 
         Returns:
@@ -525,7 +525,7 @@ class SubCommand(metaclass=abc.ABCMeta):
         return type(self.name, help=self.description)
 
     @abc.abstractmethod
-    def run(self, args: "Namespace"):
+    def run(self, args: "Namespace") -> None:
         """Run.
 
         Args:
@@ -541,7 +541,7 @@ class SubCommandGroup(SubCommand):
     """Subcommand placeholder that groups child commands."""
 
     @property
-    def is_group(self):
+    def is_group(self) -> bool:
         """Return whether group is true.
 
         Returns:
@@ -562,7 +562,7 @@ class SubCommandGroup(SubCommand):
         parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
         return parser
 
-    def run(self, args: "Namespace"):
+    def run(self, args: "Namespace") -> None:
         """Print help for this subcommand group.
 
         Args:
@@ -829,7 +829,7 @@ class _SubCommandMethod(SubCommand):
 
         return parser
 
-    def run(self, args: "Namespace"):
+    def run(self, args: "Namespace") -> "int | None":
         method = getattr(self.target, self.info.func.__name__)
 
         attr_name = f"__subcommand_actions_{id(self):x}__"
@@ -881,7 +881,7 @@ class SubCommandWrapper(SubCommand):
         """
         return self.command.create_parser(self.name, help=self.description, type=type)
 
-    def run(self, args: "Namespace"):
+    def run(self, args: "Namespace") -> int:
         """Run the wrapped command.
 
         Args:
@@ -1322,7 +1322,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             *args: "Any",
             type: "Callable[..., CommandParser]" = CommandParser,
             formatter_class: "type[HelpFormatter]" = RawDescriptionHelpFormatter,
-            conflict_handler="resolve",
+            conflict_handler: str = "resolve",
             **kwargs: "Any"
     ) -> "CommandParser":
         """Create a command parser.
@@ -1548,7 +1548,7 @@ class CommandMain:
         """
         return self._command
 
-    def init_logging(self):
+    def init_logging(self) -> None:
         """Initialize logging for command execution."""
         init_logging(
             level=logging.INFO,

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """Immutable values shared by feature providers and the assembler."""
 
 from dataclasses import dataclass, field
@@ -16,7 +19,7 @@ class AgentFeatureRef:
 
     kind: str
     name: str
-    config: Mapping[str, JsonValue] = field(default_factory=dict)
+    config: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.kind.strip():
@@ -48,8 +51,8 @@ class AgentFeatureRef:
 class AgentContribution:
     """The prompt and tools contributed by one feature provider."""
 
-    prompt_sections: Mapping[str, str] = field(default_factory=dict)
-    tools: tuple[ToolDefinition, ...] = ()
+    prompt_sections: "Mapping[str, str]" = field(default_factory=dict)
+    tools: "tuple[ToolDefinition, ...]" = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -69,9 +72,9 @@ class AgentContribution:
 class AgentAssembly:
     """The final prompt and tool surface for one execution."""
 
-    prompt_sections: Mapping[str, str]
-    tools: tuple[ToolDefinition, ...]
-    feature_owners: Mapping[str, AgentFeatureRef]
+    prompt_sections: "Mapping[str, str]"
+    tools: "tuple[ToolDefinition, ...]"
+    feature_owners: "Mapping[str, AgentFeatureRef]"
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -88,13 +91,13 @@ class AgentAssembly:
 
 def parse_agent_feature_refs(
     items: object,
-) -> tuple[AgentFeatureRef, ...]:
+) -> "tuple[AgentFeatureRef, ...]":
     """Parse the shared feature declaration shape."""
     if items is None:
         return ()
     if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
         raise TypeError("features must be a sequence")
-    refs: list[AgentFeatureRef] = []
+    refs: "list[AgentFeatureRef]" = []
     for item in items:
         if not isinstance(item, Mapping):
             raise TypeError("feature declarations must be mappings")
