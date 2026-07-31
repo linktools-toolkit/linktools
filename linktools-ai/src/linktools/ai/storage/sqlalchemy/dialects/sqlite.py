@@ -82,6 +82,27 @@ class SqliteDialect:
         result = await session.execute(stmt)
         return result.scalar()
 
+    async def upsert(
+        self,
+        session: Any,
+        *,
+        model: type,
+        values: "Mapping[str, Any]",
+        set_values: "Mapping[str, Any]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.sqlite import insert
+
+        stmt = (
+            insert(model)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=dict(set_values),
+            )
+        )
+        await session.execute(stmt)
+
     def classify_integrity_error(
         self, error: BaseException
     ) -> "IntegrityViolationKind":

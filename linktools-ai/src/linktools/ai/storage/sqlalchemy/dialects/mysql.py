@@ -114,6 +114,25 @@ class MySQLDialect:
         # spec-compliant MySQL driver.
         return await session.scalar(select(col_attr).where(pk_column == pk))
 
+    async def upsert(
+        self,
+        session: Any,
+        *,
+        model: type,
+        values: "Mapping[str, Any]",
+        set_values: "Mapping[str, Any]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.mysql import insert
+
+        # MySQL's ON DUPLICATE KEY UPDATE fires on a conflict against ANY unique
+        # key on the table, not just the named columns -- but every model this
+        # dialect targets has exactly one non-surrogate unique constraint
+        # (same assumption insert_ignore_conflict relies on), so the update
+        # target is unambiguous.
+        stmt = insert(model).values(**values).on_duplicate_key_update(**set_values)
+        await session.execute(stmt)
+
     def classify_integrity_error(
         self, error: BaseException
     ) -> IntegrityViolationKind:

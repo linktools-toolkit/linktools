@@ -10,9 +10,9 @@ project the ``content`` column; only ``get``/``get_many`` read content."""
 
 
 from typing import TYPE_CHECKING
-from sqlalchemy import Boolean, Integer, LargeBinary, String, delete, select, true, update
+from sqlalchemy import Boolean, Integer, LargeBinary, String, delete, select, true
 from sqlalchemy.orm import Mapped, mapped_column
-from ...errors import SpecConflictError, StorageConflictError, StorageCorruptionError
+from ...errors import SpecConflictError, StorageCorruptionError
 from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.blob import put_blob, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
@@ -256,39 +256,28 @@ class SqlAlchemySpecBackend(
     async def put(self, entry: SpecDocument) -> SpecDocument:
         entry.validate_etag()
         values = _entry_values(entry)
-        # Lock-free insert-or-update: try an atomic conflict-aware INSERT first
-        # (the same insert_ignore_conflict primitive put_blob/_next_revision use);
-        # only fall back to an UPDATE when a row already exists. The retry loop
-        # covers the narrow window where a concurrent delete removes the row
-        # between our failed insert attempt and the fallback UPDATE (that UPDATE
-        # then matches zero rows -- retry the whole insert-or-update from scratch).
-        for _ in range(3):
-            async with self.session_factory() as session:
-                async with session.begin():
-                    dialect = await self._dialect_for(session)
-                    revision = await self._next_revision(session)
-                    object_id = await put_blob(session, dialect, SpecBlobRow, entry.content)
-                    result = await dialect.insert_ignore_conflict(
-                        session,
-                        model=EntryRow,
-                        values={"path": entry.info.path, **values},
-                        index_elements=("path",),
-                    )
-                    if not result.inserted:
-                        updated = await session.execute(
-                            update(EntryRow)
-                            .where(EntryRow.path == entry.info.path)
-                            .values(**values)
-                        )
-                        if updated.rowcount == 0:
-                            continue
-                    session.add(
-                        _change_row(revision, entry.info, deleted=False, object_id=object_id)
-                    )
-            return entry
-        raise StorageConflictError(
-            f"spec put for {entry.info.path!r} did not converge after retries"
-        )
+        # One transaction, one EntryRow statement: a dialect upsert
+        # (INSERT ... ON CONFLICT(path) DO UPDATE / ON DUPLICATE KEY UPDATE)
+        # inserts a new row or overwrites an existing one keyed by path, with no
+        # separate read and no retry loop. revision bump, content-addressed
+        # blob, and the version-history row land in the same transaction, so a
+        # put is atomic -- all four writes commit together or none do.
+        async with self.session_factory() as session:
+            async with session.begin():
+                dialect = await self._dialect_for(session)
+                revision = await self._next_revision(session)
+                object_id = await put_blob(session, dialect, SpecBlobRow, entry.content)
+                await dialect.upsert(
+                    session,
+                    model=EntryRow,
+                    values={"path": entry.info.path, **values},
+                    set_values=values,
+                    index_elements=("path",),
+                )
+                session.add(
+                    _change_row(revision, entry.info, deleted=False, object_id=object_id)
+                )
+        return entry
 
     async def delete(self, path: str) -> None:
         async with self.session_factory() as session:

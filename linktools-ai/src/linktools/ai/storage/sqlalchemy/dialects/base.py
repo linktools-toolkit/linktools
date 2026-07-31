@@ -121,6 +121,33 @@ class SqlAlchemyDialect(Protocol):
         database under row locking, so concurrent callers never lose an update."""
         ...
 
+    async def upsert(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        values: "Mapping[str, Any]",
+        set_values: "Mapping[str, Any]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        """Insert ``values`` into ``model``'s table, or on a conflict against
+        the unique constraint covering ``index_elements`` update the conflicting
+        row with ``set_values``. One statement, no separate read: the
+        race-free way to do insert-or-update-by-business-key (e.g. a spec put
+        keyed on ``path``).
+
+        ``values`` seeds the INSERT; ``set_values`` is the UPDATE payload on the
+        conflict branch (typically a subset of ``values`` minus the key
+        columns). Both are column-name -> value mappings; ``set_values`` never
+        references the conflicting key columns (they are the match target, not
+        update targets). SQLite/PostgreSQL fold this into
+        ``INSERT ... ON CONFLICT (...) DO UPDATE SET ...``; MySQL uses
+        ``INSERT ... ON DUPLICATE KEY UPDATE ...``. Unlike
+        :meth:`insert_ignore_conflict`, the conflict branch is a real update,
+        not a no-op, so a row that already exists is mutated, not left
+        unchanged."""
+        ...
+
     def classify_integrity_error(
         self,
         error: BaseException,
