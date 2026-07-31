@@ -87,10 +87,12 @@ class SqlAlchemyTaskBackend:
         )
         if result.rowcount != 1:
             raise StorageConflictError("task claim changed concurrently")
-        updated = await SqlAlchemyTaskBackend._execution_row(
-            session, row.execution_id
-        )
-        return updated
+        # The CAS matched exactly one row at the held state, so the UPDATE's
+        # values are now the row's true state -- reflect them onto the loaded
+        # ORM object and build the record from it, skipping a re-SELECT.
+        for key, value in values.items():
+            setattr(row, key, value)
+        return row
 
     async def save_plan(self, plan: TaskPlan) -> None:
         payload = {"nodes": [asdict(node) for node in plan.nodes]}
@@ -169,8 +171,15 @@ class SqlAlchemyTaskBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("task claim conflict")
-                claimed = await self._execution_row(session, execution_id)
-                return self._execution(claimed)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = TaskStatus.CLAIMED.value
+                row.owner = lease.owner
+                row.fence = lease.fence
+                row.lease_expires_at = lease.expires_at
+                row.attempt = row.attempt + 1
+                row.updated_at = now
+                return self._execution(row)
 
     async def renew(self, execution_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
         async with self.session_factory() as session:

@@ -4,6 +4,7 @@
 """SQLAlchemy execution persistence with transactional lifecycle commands."""
 
 
+import asyncio
 from typing import TYPE_CHECKING
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -144,6 +145,11 @@ def _approval(data: "dict[str, JsonValue]") -> RunApproval:
         if data.get("decided_at")
         else None,
     )
+
+
+async def _none() -> None:
+    """Async ``None`` placeholder for optional branches of a ``gather``."""
+    return None
 
 
 def _record(row: ExecutionRow) -> RunRecord:
@@ -347,10 +353,17 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run claim conflict")
-                claimed = await self._run_row(session, command.run_id)
-                session.add(EventRow(execution_id=claimed.execution_id, sequence=event_sequence, type="run.claimed", payload={}, created_at=command.now))
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = RunStatus.RUNNING.value
+                row.owner = lease.owner
+                row.fence = lease.fence
+                row.lease_expires_at = lease.expires_at
+                row.updated_at = command.now
+                row.event_sequence = event_sequence
+                session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.claimed", payload={}, created_at=command.now))
                 await session.flush()
-                return _record(claimed)
+                return _record(row)
 
     async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         async with self.session_factory() as session:
@@ -371,8 +384,11 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run lease changed concurrently")
-                updated = await self._run_row(session, command.run_id)
-                return _record(updated)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.lease_expires_at = lease.expires_at
+                row.updated_at = command.now
+                return _record(row)
 
     async def request_cancel(self, command: "RequestCancellation") -> RunRecord:
         async with self.session_factory() as session:
@@ -404,13 +420,20 @@ class SqlAlchemyExecutionBackend:
                     )
                     if result.rowcount != 1:
                         raise StorageConflictError("run lifecycle changed concurrently")
-                    cancelled = await self._run_row(session, command.run_id)
+                    # CAS matched at the held state: reflect the UPDATE's values
+                    # onto the loaded row and build the record without a re-SELECT.
+                    row.status = RunStatus.CANCELLED.value
+                    row.owner = None
+                    row.lease_expires_at = None
+                    row.cancel_requested_at = now
+                    row.updated_at = now
+                    row.event_sequence = event_sequence
                     session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.cancelled", payload={}, created_at=now))
-                    if cancelled.session_turn_sequence is not None:
-                        turn = await self._turn_row(session, cancelled.session_id, cancelled.session_turn_sequence)
+                    if row.session_turn_sequence is not None:
+                        turn = await self._turn_row(session, row.session_id, row.session_turn_sequence)
                         if turn is not None:
                             turn.status, turn.completed_at = RunStatus.CANCELLED.value, now
-                    return _record(cancelled)
+                    return _record(row)
                 assert_owner(record, command.owner, command.fence, command.requested_at)
                 assert_transition(record.status, RunStatus.CANCELLING)
                 event_sequence = row.event_sequence + 1
@@ -432,9 +455,14 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run lifecycle changed concurrently")
-                cancelling = await self._run_row(session, command.run_id)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = RunStatus.CANCELLING.value
+                row.cancel_requested_at = command.requested_at
+                row.updated_at = command.requested_at
+                row.event_sequence = event_sequence
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.cancelling", payload={}, created_at=command.requested_at))
-                return _record(cancelling)
+                return _record(row)
 
     async def decide_approval(self, command: "DecideApproval") -> RunRecord:
         async with self.session_factory() as session:
@@ -482,8 +510,13 @@ class SqlAlchemyExecutionBackend:
                     )
                     if result.rowcount != 1:
                         raise StorageConflictError("approval changed concurrently")
+                    # CAS matched at the held state: reflect the UPDATE's values
+                    # onto the loaded row and build the record without a re-SELECT.
+                    row.data = {**(row.data or {}), "approval": new_approval}
+                    row.event_sequence = event_sequence
+                    row.updated_at = decided_at
                     session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload=new_approval, created_at=decided_at))
-                    return _record(await self._run_row(session, command.run_id))
+                    return _record(row)
                 # DENY: terminal -- execution -> CANCELLED, lease released, turn -> CANCELLED.
                 result = await session.execute(
                     update(ExecutionRow)
@@ -503,13 +536,21 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("approval changed concurrently")
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = RunStatus.CANCELLED.value
+                row.data = {**(row.data or {}), "approval": new_approval}
+                row.owner = None
+                row.lease_expires_at = None
+                row.event_sequence = event_sequence
+                row.updated_at = decided_at
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload=new_approval, created_at=decided_at))
                 if record.session_turn_sequence is not None:
                     turn = await self._turn_row(session, record.session_id, record.session_turn_sequence)
                     if turn is not None:
                         turn.status = RunStatus.CANCELLED.value
                         turn.completed_at = decided_at
-                return _record(await self._run_row(session, command.run_id))
+                return _record(row)
 
     async def resume_run(self, command: "ResumeExecution") -> RunRecord:
         async with self.session_factory() as session:
@@ -538,9 +579,13 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run lifecycle changed concurrently")
-                resumed = await self._run_row(session, command.run_id)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = RunStatus.PENDING.value
+                row.updated_at = resumed_at
+                row.event_sequence = event_sequence
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.resumed", payload={}, created_at=resumed_at))
-                return _record(resumed)
+                return _record(row)
 
     async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: "tuple[NewRunTraceStep, ...]") -> int:
         async with self.session_factory() as session:
@@ -622,28 +667,43 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run lifecycle changed concurrently")
-                finished = await self._run_row(session, run_id)
-                current = await self._snapshot_row(session, run_id)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row -- no re-SELECT. ``row`` now carries the finished
+                # state (status, data, owner, snapshot_revision, trace_sequence,
+                # event_sequence, updated_at) and the unchanged business columns
+                # (session_id, session_turn_sequence, ...) the sub-updates below
+                # and the final _record() need.
+                row.status = status.value
+                row.data = merged_data
+                row.owner = None
+                row.lease_expires_at = None
+                row.snapshot_revision = new_revision
+                row.trace_sequence = snapshot.trace_end_sequence
+                row.updated_at = now
+                row.event_sequence = event_sequence
+                # The snapshot, turn, and session-owner lookups are mutually
+                # independent (each keys off columns already on ``row``); run them
+                # concurrently so the round trips overlap under a multi-connection
+                # pool (under SQLite single-connection they serialize transparently).
+                needs_turn = row.session_turn_sequence is not None
+                needs_owner = needs_turn and status is RunStatus.COMPLETED
+                current, turn, owner_row = await asyncio.gather(
+                    self._snapshot_row(session, run_id),
+                    self._turn_row(session, row.session_id, row.session_turn_sequence) if needs_turn else _none(),
+                    self._session_row(session, row.session_id) if needs_owner else _none(),
+                )
                 if current is None:
                     session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=list(snapshot.resume_messages), outcome={"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status=status.value, trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
                 else:
                     current.revision, current.resume_messages, current.outcome, current.status, current.trace_end_sequence, current.updated_at = new_revision, list(snapshot.resume_messages), {"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status.value, snapshot.trace_end_sequence, now
                 session.add(EventRow(execution_id=run_id, sequence=event_sequence, type=f"run.{status.value}", payload={}, created_at=now))
-                if finished.session_turn_sequence is not None:
-                    turn = await self._turn_row(
-                        session,
-                        finished.session_id,
-                        finished.session_turn_sequence,
-                    )
-                    if turn is not None:
-                        turn.status, turn.assistant_summary = status.value, snapshot.final_output
-                        turn.completed_at = now if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
-                    if status is RunStatus.COMPLETED:
-                        owner_row = await self._session_row(session, finished.session_id)
-                        if owner_row is not None:
-                            owner_row.latest_completed_run_id = run_id
+                if turn is not None:
+                    turn.status, turn.assistant_summary = status.value, snapshot.final_output
+                    turn.completed_at = now if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
+                if owner_row is not None:
+                    owner_row.latest_completed_run_id = run_id
                 await session.flush()
-                return _record(finished)
+                return _record(row)
 
     async def pause_run(self, command: "PauseExecution") -> RunRecord:
         return await self._finish(command.run_id, command.owner, command.fence, command.snapshot, RunStatus.PAUSED, command.pending_approval)
@@ -692,14 +752,22 @@ class SqlAlchemyExecutionBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("run lifecycle changed concurrently")
-                aborted = await self._run_row(session, command.run_id)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = RunStatus.FAILED.value
+                row.data = {**(row.data or {}), "error": asdict(command.error)}
+                row.owner = None
+                row.lease_expires_at = None
+                row.trace_sequence = command.trace_end_sequence
+                row.updated_at = now
+                row.event_sequence = event_sequence
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.aborted", payload={}, created_at=now))
-                if aborted.session_turn_sequence is not None:
-                    turn = await self._turn_row(session, aborted.session_id, aborted.session_turn_sequence)
+                if row.session_turn_sequence is not None:
+                    turn = await self._turn_row(session, row.session_id, row.session_turn_sequence)
                     if turn is not None:
                         turn.status, turn.completed_at = RunStatus.FAILED.value, now
                 await session.flush()
-                return _record(aborted)
+                return _record(row)
 
     async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> "Page[RunEvent]":
         async with self.session_factory() as session:

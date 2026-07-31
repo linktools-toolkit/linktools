@@ -91,8 +91,12 @@ class SqlAlchemyToolStateBackend:
         )
         if result.rowcount != 1:
             raise StorageConflictError("tool operation claim changed concurrently")
-        updated = await SqlAlchemyToolStateBackend._row(session, row.operation_id)
-        return updated
+        # The CAS matched exactly one row at the held state, so the UPDATE's
+        # values are now the row's true state -- reflect them onto the loaded
+        # ORM object and return it, skipping a re-SELECT.
+        for key, value in values.items():
+            setattr(row, key, value)
+        return row
 
     async def prepare(self, operation: ToolOperation) -> ToolOperation:
         try:
@@ -175,10 +179,11 @@ class SqlAlchemyToolStateBackend:
                     # No pessimistic lock guards this read, so CAS the mark on
                     # every column we read: if a concurrent renew/reclaim/complete
                     # already moved the row past this exact state, this update
-                    # matches zero rows and does nothing -- either way, the
-                    # re-read below reflects the true current state rather than
-                    # ever clobbering a fresh claim back to INDETERMINATE.
-                    await session.execute(
+                    # matches zero rows. On a match (rowcount==1) the new state is
+                    # fully known -- reflect it onto the row and skip a re-SELECT;
+                    # on a no-match a concurrent writer won, so re-read to surface
+                    # its committed state rather than our stale view.
+                    marked = await session.execute(
                         update(OperationRow)
                         .where(
                             OperationRow.operation_id == operation_id,
@@ -192,6 +197,10 @@ class SqlAlchemyToolStateBackend:
                             updated_at=now,
                         )
                     )
+                    if marked.rowcount == 1:
+                        row.status = ToolOperationStatus.INDETERMINATE.value
+                        row.updated_at = now
+                        return self._operation(row)
                     return self._operation(await self._row(session, operation_id))
                 lease = claim(
                     Lease(row.owner, row.fence, row.lease_expires_at),
@@ -216,8 +225,14 @@ class SqlAlchemyToolStateBackend:
                 )
                 if result.rowcount != 1:
                     raise StorageConflictError("tool operation claim conflict")
-                claimed = await self._row(session, operation_id)
-                return self._operation(claimed)
+                # CAS matched at the held state: reflect the UPDATE's values onto
+                # the loaded row and build the record without a re-SELECT.
+                row.status = ToolOperationStatus.CLAIMED.value
+                row.owner = lease.owner
+                row.fence = lease.fence
+                row.lease_expires_at = lease.expires_at
+                row.updated_at = now
+                return self._operation(row)
 
     async def renew(self, operation_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
         async with self.session_factory() as session:
