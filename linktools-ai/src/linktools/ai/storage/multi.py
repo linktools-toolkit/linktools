@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Reader protocols and bounded batch fallback.
+"""Reader/writer protocols and bounded batch fallback.
 
 The layer topology (primary-first ordered fallback) is owned by
-``StorageComposition``; this module owns only the generic reader/writer
-Protocols and the per-backend batch fallback that fans single ``get`` calls
-out under bounded concurrency when a backend does not implement
-``get_many``."""
+``StorageComposition``; this module owns the generic reader/writer Protocols
+and the per-backend batch fallback that fans single ``get`` calls out under
+bounded concurrency when a backend does not implement ``get_many``."""
 
 
 import asyncio

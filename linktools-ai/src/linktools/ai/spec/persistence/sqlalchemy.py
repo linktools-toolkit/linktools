@@ -17,9 +17,9 @@ from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.blob import put_blob, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ...storage.sqlalchemy.dialects import resolve_dialect
-from ...storage.versioning import VersionSummary
-from ..document import SpecDocument, SpecDocumentInfo
+from ...storage.versioning import VersionedStorage, VersionSummary
 from ...storage.revision import MetadataLoad, MetadataLoadMode, StorageChange, StorageMetadataBackend
+from ..document import SpecDocument, SpecDocumentInfo
 
 if TYPE_CHECKING:
     from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
@@ -70,7 +70,10 @@ def _info(row: "EntryRow | ChangeRow") -> SpecDocumentInfo:
     return SpecDocumentInfo(row.path, row.kind, row.version, row.etag, row.active)
 
 
-class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
+class SqlAlchemySpecBackend(
+    StorageMetadataBackend[int, str, SpecDocumentInfo],
+    VersionedStorage[int, str, SpecDocument],
+):
     def __init__(self, session_factory, *, dialect: "SqlAlchemyDialect | None" = None) -> None:
         self.session_factory = session_factory
         self._dialect = dialect

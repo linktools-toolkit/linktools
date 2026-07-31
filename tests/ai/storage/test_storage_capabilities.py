@@ -264,14 +264,15 @@ async def test_get_reloads_after_invalidate_until_reprimed():
 
 
 class _RecordingRevisionSource:
-    """RevisionSource double: current() returns a held revision (or None);
-    revision_bumped records every call so a test asserts post-write notification."""
+    """RevisionSource double: head_revision() returns a held revision (or
+    None); revision_bumped records every call so a test asserts post-write
+    notification."""
 
     def __init__(self, revision=None):
         self.held = revision
         self.bumps = []
 
-    async def current(self):
+    async def head_revision(self):
         return self.held
 
     async def revision_bumped(self, revision):
@@ -388,10 +389,10 @@ async def test_get_retry_invalidates_on_content_info_mismatch():
 
     class StaleSource:
         """A revision source that is stuck at revision 1 (stale cache): its
-        current() returns 1 even after the backend bumped to 2. This forces
-        the refresh() short-circuit to serve the stale v1 state."""
+        head_revision() returns 1 even after the backend bumped to 2. This
+        forces the refresh() short-circuit to serve the stale v1 state."""
 
-        async def current(self):
+        async def head_revision(self):
             return 1
 
         async def revision_bumped(self, revision):

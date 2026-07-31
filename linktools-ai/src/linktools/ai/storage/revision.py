@@ -64,21 +64,6 @@ class MetadataState(Generic[RevisionT, KeyT, InfoT]):
 
 
 @runtime_checkable
-class StorageReader(Protocol[KeyT, ValueT, InfoT]):
-    async def get(self, key: KeyT) -> "ValueT | None": ...
-
-    async def list_info(self) -> "tuple[InfoT, ...]": ...
-
-
-@runtime_checkable
-class BatchStorageReader(Protocol[KeyT, ValueT]):
-    async def get_many(
-        self,
-        keys: "tuple[KeyT, ...]",
-    ) -> "Mapping[KeyT, ValueT]": ...
-
-
-@runtime_checkable
 class StorageMetadataBackend(Protocol[RevisionT, KeyT, InfoT]):
     async def load_metadata(
         self,
@@ -108,8 +93,12 @@ StorageInitializer = Callable[..., Awaitable[None]]
 
 @runtime_checkable
 class RevisionSource(Protocol):
-    async def current(self) -> "int | str | None":
+    async def head_revision(self) -> "int | str | None":
         """The current revision, or ``None`` when unknown/stale.
+
+        Named to match :meth:`StorageMetadataBackend.head_revision` and
+        :meth:`LayerMetadataView.head_revision` -- all three answer "what's
+        the current revision" for their respective layer, cheaply.
 
         A view consults this before paying for ``load_metadata``: when the
         returned revision equals its held state's revision, the held state is
@@ -122,15 +111,19 @@ class RevisionSource(Protocol):
         ...
 
     async def revision_bumped(self, revision: "int | str") -> None:
-        """Called by the composition AFTER a write commits and the revision
-        advanced to ``revision``.
+        """Called with the backend's authoritative current revision, in two cases:
+
+        AFTER a write commits and the revision advanced to ``revision`` (the
+        composition probes head post-commit), AND when the view detects the
+        source has run ahead of the true head (rolled-back publish / operator
+        error) and corrects it down to ``revision``.
 
         A caching source uses this to refresh/publish its held revision (e.g.
         redis SET + PUBLISH so cross-machine subscribers invalidate within ms
-        rather than waiting on a TTL). The default source no-ops: it reads
-        ``head_revision`` live and never caches, so it is never stale. ``None``
-        is never passed -- the composition probes head once post-commit to get
-        the concrete new revision before calling this."""
+        rather than waiting on a TTL). A well-behaved source treats this as the
+        authoritative value whether it is higher or lower than its cached one.
+        The default source no-ops: it reads ``head_revision`` live and never
+        caches, so it is never stale. ``None`` is never passed."""
         ...
 
 
@@ -145,14 +138,14 @@ class _BackendHeadRevisionSource:
     def __init__(self, backend: Any) -> None:
         self._backend = backend
 
-    async def current(self) -> "int | str | None":
+    async def head_revision(self) -> "int | str | None":
         if isinstance(self._backend, StorageMetadataBackend):
             return await self._backend.head_revision()
         return None
 
     async def revision_bumped(self, revision: "int | str") -> None:
-        # No-op: this source reads head_revision live on every current() call,
-        # so it is never stale and needs no post-write notification.
+        # No-op: this source reads head_revision live on every head_revision()
+        # call, so it is never stale and needs no post-write notification.
         return None
 
 
@@ -246,10 +239,26 @@ class LayerMetadataView:
             # Cheap short-circuit: ask the source whether the held state's
             # revision is still current. When it is, reuse the held state and
             # skip load_metadata entirely (this is the path that intercepts a
-            # hot get() loop). None/changed -> fall through to a real load.
-            current = await self.revision_source.current()
-            if current is not None and current == self._state.revision:
-                return self._state
+            # hot get() loop). None -> fall through to a real load.
+            current = await self.revision_source.head_revision()
+            if current is not None:
+                if current == self._state.revision:
+                    return self._state
+                # The source disagrees. Before paying for the full change-set
+                # load, probe the backend's authoritative head once: if it still
+                # equals the held revision, the source ran ahead (rolled-back
+                # publish / operator error / conflicting sources) and nothing
+                # actually changed. Reuse the held state AND correct the source
+                # so the next read short-circuits -- this stops a runaway source
+                # from forcing a load_metadata on every read. Stays correct: a
+                # real write advances head, so the probe sees the new head here
+                # and falls through to load the diff.
+                head = await self.backend.head_revision()
+                if head == self._state.revision:
+                    await self.revision_source.revision_bumped(head)
+                    return self._state
+                # head genuinely advanced -> a real change happened; fall through
+                # to load_metadata below.
         if isinstance(self.backend, StorageMetadataBackend):
             # REVISIONED patches against the held revision; STATIC loads a full
             # snapshot once (refresh()'s early return serves it thereafter).
@@ -294,15 +303,14 @@ class LayerMetadataView:
 
 
 __all__ = [
-    "BatchStorageReader",
     "LayerMetadataView",
     "LayerRefreshPolicy",
     "MetadataLoad",
     "MetadataLoadMode",
     "MetadataState",
+    "RevisionSource",
     "StorageChange",
     "StorageInitializer",
     "StorageMetadataBackend",
-    "StorageReader",
     "apply_metadata_load",
 ]

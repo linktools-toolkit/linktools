@@ -22,7 +22,6 @@ from .multi import StorageReader, batch_get
 from .revision import (
     LayerMetadataView,
     LayerRefreshPolicy,
-    MetadataState,
     RevisionSource,
     StorageInitializer,
     StorageMetadataBackend,

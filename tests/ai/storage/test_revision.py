@@ -184,13 +184,19 @@ async def test_always_view_head_revision_returns_none():
 
 class _FakeRevisionSource:
     """A controllable RevisionSource for tests: returns whatever revision is set
-    (or None to simulate an unknown/missed cache)."""
+    (or None to simulate an unknown/missed cache). Records revision_bumped
+    calls so a test can assert source correction."""
 
     def __init__(self, revision=None):
         self.revision = revision
+        self.bumps = []
 
-    async def current(self):
+    async def head_revision(self):
         return self.revision
+
+    async def revision_bumped(self, revision):
+        self.bumps.append(revision)
+        self.revision = revision
 
 
 @pytest.mark.asyncio
@@ -250,15 +256,19 @@ async def test_revision_source_reload_when_revision_changes():
             return self.revision
 
     source = _FakeRevisionSource(revision=3)
+    backend = Backend()
     view = LayerMetadataView(
-        Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        backend, LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
         revision_source=source,
     )
     await view.refresh()
     assert loads == 1
-    source.revision = 4  # source now reports a changed revision
+    # A REAL change: both the backend head and the source advance to 4. The head
+    # probe sees head(4) != held(3) and falls through to load the diff.
+    backend.revision = 4
+    source.revision = 4
     await view.refresh()
-    assert loads == 2, "changed revision must trigger a reload"
+    assert loads == 2, "changed revision (head advanced) must trigger a reload"
 
 
 @pytest.mark.asyncio
@@ -303,10 +313,93 @@ async def test_default_backend_head_source_delegates_to_head_revision():
             return 9
 
     src = _BackendHeadRevisionSource(MetadataBackend())
-    assert await src.current() == 9
+    assert await src.head_revision() == 9
 
     class PlainReader:
         async def list_info(self): ...
 
     src2 = _BackendHeadRevisionSource(PlainReader())
-    assert await src2.current() is None
+    assert await src2.head_revision() is None
+
+
+@pytest.mark.asyncio
+async def test_source_ahead_of_head_does_not_hammer_load_and_corrects_source():
+    # A source whose cached revision runs ahead of the true head (rolled-back
+    # publish / operator error) must NOT force a load_metadata on every read.
+    # The view probes the authoritative head, sees it equals the held revision,
+    # reuses the held state, and corrects the source via revision_bumped so the
+    # next read short-circuits.
+    loads = 0
+
+    class Backend:
+        revision = 5  # true head stays at 5
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            if after_revision == self.revision:
+                return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
+            return MetadataLoad(
+                self.revision, MetadataLoadMode.REPLACE, (_change("a", "A"),)
+            )
+
+        async def head_revision(self):
+            return self.revision
+
+    source = _FakeRevisionSource(revision=5)
+    view = LayerMetadataView(
+        Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        revision_source=source,
+    )
+    await view.refresh()  # REPLACE -> loads == 1, holds revision 5
+    assert loads == 1
+    # The source now claims 6 (ahead of the true head 5).
+    source.revision = 6
+    await view.refresh()
+    # No load_metadata: the head probe saw head(5) == held(5) and short-circuited.
+    assert loads == 1, "runaway source must not force a reload"
+    # The source was corrected down to the true head.
+    assert source.bumps == [5]
+    # A subsequent read short-circuits cleanly (source now says 5 == held 5).
+    await view.refresh()
+    assert loads == 1
+
+
+@pytest.mark.asyncio
+async def test_source_ahead_still_sees_a_real_write():
+    # Correctness: even while the source is ahead, a REAL write that advances
+    # head must be observed. The head probe sees head advance and falls through
+    # to load_metadata, which returns the diff.
+    loads = 0
+
+    class Backend:
+        revision = 5
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            if after_revision == self.revision:
+                return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
+            return MetadataLoad(
+                self.revision, MetadataLoadMode.REPLACE, (_change("a", "A2"),)
+            )
+
+        async def head_revision(self):
+            return self.revision
+
+    backend = Backend()
+    source = _FakeRevisionSource(revision=5)
+    view = LayerMetadataView(
+        backend, LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        revision_source=source,
+    )
+    await view.refresh()
+    assert loads == 1
+    # Source runs ahead to 6, but a real write also advances head to 6.
+    source.revision = 6
+    backend.revision = 6
+    state = await view.refresh()
+    # The head probe saw head(6) != held(5) -> fell through to load the diff.
+    assert loads == 2, "a real write (head advanced) must trigger a reload"
+    assert state.revision == 6
+    assert "a" in state.entries
