@@ -19,6 +19,8 @@ import hashlib
 from sqlalchemy import select
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .dialects import SqlAlchemyDialect
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import DeclarativeBase
@@ -43,6 +45,36 @@ async def put_blob(
     return sha256
 
 
+async def put_blobs(
+    session: "AsyncSession",
+    dialect: "SqlAlchemyDialect",
+    model: "type[DeclarativeBase]",
+    contents: "Sequence[bytes]",
+) -> "list[str]":
+    """Batch insert-ignore ``contents`` into ``model``'s table keyed by each
+    content's sha256 hex; return the list of hexes (the ``object_id`` for each
+    content, in input order). Identical content shares one row (dedup). One
+    multi-row statement regardless of how many distinct contents are passed.
+    Empty input returns ``[]`` with no SQL."""
+    if not contents:
+        return []
+    object_ids = [hashlib.sha256(content).hexdigest() for content in contents]
+    # Dedup by sha256 so a batch with repeated content writes each distinct
+    # blob once; the unique constraint would no-op the dup anyway, but sending
+    # only distinct rows keeps the statement smaller.
+    distinct = {sha: content for sha, content in zip(object_ids, contents)}
+    await dialect.insert_ignore_conflict_many(
+        session,
+        model=model,
+        rows=[
+            {"sha256": sha, "content": content}
+            for sha, content in distinct.items()
+        ],
+        index_elements=("sha256",),
+    )
+    return object_ids
+
+
 async def read_blob(
     session: "AsyncSession",
     model: "type[DeclarativeBase]",
@@ -55,4 +87,4 @@ async def read_blob(
     return None if row is None else row.content
 
 
-__all__ = ["put_blob", "read_blob"]
+__all__ = ["put_blob", "put_blobs", "read_blob"]

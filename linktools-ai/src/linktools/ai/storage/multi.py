@@ -42,6 +42,15 @@ class StorageWriter(Protocol[KeyT, ValueT]):
     async def reset(self, values: "tuple[ValueT, ...]") -> None: ...
 
 
+@runtime_checkable
+class BatchStorageWriter(Protocol[KeyT, ValueT]):
+    async def apply_batch(
+        self,
+        puts: "tuple[ValueT, ...]",
+        deletes: "tuple[KeyT, ...]",
+    ) -> None: ...
+
+
 async def batch_get(
     reader: object,
     keys: "tuple[KeyT, ...]",
@@ -80,6 +89,7 @@ async def batch_get(
 
 __all__ = [
     "BatchStorageReader",
+    "BatchStorageWriter",
     "StorageReader",
     "StorageWriter",
     "batch_get",

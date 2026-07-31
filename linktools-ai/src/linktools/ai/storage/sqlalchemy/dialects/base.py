@@ -95,6 +95,22 @@ class SqlAlchemyDialect(Protocol):
         targeted unique-key case is absorbed."""
         ...
 
+    async def insert_ignore_conflict_many(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        """Batch insert-ignore: INSERT all ``rows`` into ``model``'s table in
+        one statement, skipping any row that conflicts on ``index_elements``
+        (no exception). The batch analog of :meth:`insert_ignore_conflict`;
+        returns nothing because a batch caller (content-addressed blob dedup)
+        does not need per-row insert flags. A non-unique IntegrityError must
+        propagate unchanged."""
+        ...
+
     async def upsert_increment(
         self,
         session: "AsyncSession",
@@ -146,6 +162,30 @@ class SqlAlchemyDialect(Protocol):
         :meth:`insert_ignore_conflict`, the conflict branch is a real update,
         not a no-op, so a row that already exists is mutated, not left
         unchanged."""
+        ...
+
+    async def upsert_many(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        set_columns: "Sequence[str]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        """Batch upsert: insert all ``rows`` into ``model``'s table in one
+        statement, or on a conflict against ``index_elements`` update the
+        conflicting row's ``set_columns`` to the PROPOSED value for that row
+        (not a shared literal). Each row in ``rows`` may carry different values,
+        and each gets its own per-row update on conflict (``excluded.col`` on
+        SQLite/PostgreSQL, ``inserted.col`` / ``VALUES(col)`` on MySQL).
+
+        This is the batch analog of :meth:`upsert`: one statement covers N
+        insert-or-update-by-business-key operations, each with its own update
+        payload. ``set_columns`` names the columns whose conflict-branch value
+        is the row's own proposed value for that column. ``rows`` must each
+        contain every column in ``set_columns`` plus the ``index_elements``
+        columns."""
         ...
 
     def classify_integrity_error(

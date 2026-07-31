@@ -55,6 +55,23 @@ class SqliteDialect:
             row_id=row[0] if row is not None else None,
         )
 
+    async def insert_ignore_conflict_many(
+        self,
+        session: Any,
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.sqlite import insert
+
+        stmt = (
+            insert(model)
+            .values(list(rows))
+            .on_conflict_do_nothing(index_elements=list(index_elements))
+        )
+        await session.execute(stmt)
+
     async def upsert_increment(
         self,
         session: Any,
@@ -100,6 +117,24 @@ class SqliteDialect:
                 index_elements=list(index_elements),
                 set_=dict(set_values),
             )
+        )
+        await session.execute(stmt)
+
+    async def upsert_many(
+        self,
+        session: Any,
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        set_columns: "Sequence[str]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.sqlite import insert
+
+        stmt = insert(model).values(list(rows))
+        stmt = stmt.on_conflict_do_update(
+            index_elements=list(index_elements),
+            set_={col: stmt.excluded[col] for col in set_columns},
         )
         await session.execute(stmt)
 

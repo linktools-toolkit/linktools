@@ -14,7 +14,7 @@ from sqlalchemy import Boolean, Integer, LargeBinary, String, delete, select, tr
 from sqlalchemy.orm import Mapped, mapped_column
 from ...errors import SpecConflictError, StorageCorruptionError
 from ...storage.sqlalchemy.base import Base
-from ...storage.sqlalchemy.blob import put_blob, read_blob
+from ...storage.sqlalchemy.blob import put_blob, put_blobs, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ...storage.sqlalchemy.dialects import resolve_dialect
 from ...storage.versioning import VersionedStorage, VersionSummary
@@ -180,12 +180,21 @@ class SqlAlchemySpecBackend(
             return await self._load_after(session, after_revision)
 
     async def _load_snapshot(
-        self, session
+        self, session, *, head: "int | None" = None
     ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
-        # One SQL: RevisionRow LEFT JOIN Entry metadata. Every entry row joins
-        # onto the single revision row, so each result row carries head + one
-        # entry's metadata. An empty Entry table still yields one row (head +
-        # NULL entry) via the LEFT JOIN, so head is returned with no documents.
+        # When ``head`` is already known (the _load_after fallback already read it
+        # in its own JOIN), skip the RevisionRow join and read EntryRow metadata
+        # directly -- avoids re-reading the singleton the caller already has.
+        # Otherwise (the top-level after_revision=None path) join RevisionRow to
+        # fetch head alongside the entry set in one statement.
+        if head is not None:
+            rows = (await session.execute(_metadata_query().order_by(EntryRow.path))).all()
+            changes = tuple(
+                StorageChange(row.path, _metadata_info(row))
+                for row in rows
+                if row.path is not None
+            )
+            return MetadataLoad(head, MetadataLoadMode.REPLACE, changes)
         query = (
             select(RevisionRow.revision, *_metadata_expr(EntryRow))
             .select_from(RevisionRow)
@@ -228,7 +237,7 @@ class SqlAlchemySpecBackend(
         # patch; fall back to a full snapshot. (after < minimum means the change
         # history before `minimum` was compacted by a reset.)
         if after > head or after < minimum:
-            return await self._load_snapshot(session)
+            return await self._load_snapshot(session, head=head)
         changes = tuple(
             StorageChange(
                 change.path,
@@ -320,14 +329,15 @@ class SqlAlchemySpecBackend(
                     elif doc is not None and before != doc.info:
                         object_id = await put_blob(session, dialect, SpecBlobRow, doc.content)
                         values = _entry_values(doc)
-                        existing = await session.scalar(
-                            select(EntryRow).where(EntryRow.path == path)
+                        # Lock-free insert-or-update, same shape as put(): one
+                        # dialect upsert keyed on path, no SELECT existence check.
+                        await dialect.upsert(
+                            session,
+                            model=EntryRow,
+                            values={"path": path, **values},
+                            set_values=values,
+                            index_elements=("path",),
                         )
-                        if existing is None:
-                            session.add(EntryRow(path=path, **values))
-                        else:
-                            for key, value in values.items():
-                                setattr(existing, key, value)
                         session.add(
                             _change_row(revision, doc.info, deleted=False, object_id=object_id)
                         )
@@ -343,6 +353,82 @@ class SqlAlchemySpecBackend(
                     .where(RevisionRow.id == 1)
                     .values(minimum_delta_revision=revision)
                 )
+
+    async def apply_batch(
+        self,
+        puts: "tuple[SpecDocument, ...]",
+        deletes: "tuple[str, ...]",
+    ) -> None:
+        """Apply a mixed set of puts and deletes atomically: one transaction,
+        one shared revision, other documents untouched. Distinct from
+        :meth:`reset` (full replacement, which deletes every unlisted path).
+
+        For N puts + M deletes: one multi-row blob insert-ignore (puts), one
+        multi-row upsert (puts), one bulk metadata read + one bulk DELETE
+        (deletes), and the ChangeRows flushed once -- ~4 statements regardless
+        of N+M, vs N×4 + M×4 if each op went through ``put``/``delete``
+        separately. History appends (``minimum_delta_revision`` is not touched,
+        matching single put/delete).
+
+        The revision is bumped ONLY when something actually changed: puts
+        always change; a delete changes only when the path existed. A batch
+        whose every op is a no-op (empty inputs, or deletes of nonexistent
+        paths) advances no revision and writes no ChangeRows -- matching single
+        ``delete``'s no-op behavior."""
+        for entry in puts:
+            entry.validate_etag()
+        put_paths = [entry.info.path for entry in puts]
+        if len(set(put_paths)) != len(put_paths):
+            raise SpecConflictError("apply_batch received duplicate put paths")
+        delete_paths = [p for p in deletes if p not in set(put_paths)]
+        async with self.session_factory() as session:
+            async with session.begin():
+                dialect = await self._dialect_for(session)
+                # Puts: write blobs + upsert entries (no revision needed yet).
+                object_ids: "list[str]" = []
+                if puts:
+                    object_ids = await put_blobs(
+                        session, dialect, SpecBlobRow,
+                        [entry.content for entry in puts],
+                    )
+                    await dialect.upsert_many(
+                        session,
+                        model=EntryRow,
+                        rows=[
+                            {"path": entry.info.path, **_entry_values(entry)}
+                            for entry in puts
+                        ],
+                        set_columns=["kind", "version", "etag", "active", "content"],
+                        index_elements=("path",),
+                    )
+                # Deletes: read tombstones for existing rows, then bulk delete.
+                tombstones: "dict[str, SpecDocumentInfo]" = {}
+                if delete_paths:
+                    tombstone_rows = (
+                        await session.execute(
+                            _metadata_query().where(EntryRow.path.in_(delete_paths))
+                        )
+                    ).all()
+                    tombstones = {row.path: _metadata_info(row) for row in tombstone_rows}
+                    if tombstones:
+                        await session.execute(
+                            delete(EntryRow).where(EntryRow.path.in_(list(tombstones)))
+                        )
+                # Bump the revision ONLY when something actually changed: puts
+                # always do; a delete does only when the path existed.
+                if not puts and not tombstones:
+                    return
+                revision = await self._next_revision(session)
+                change_rows: "list[ChangeRow]" = [
+                    _change_row(revision, entry.info, deleted=False, object_id=oid)
+                    for entry, oid in zip(puts, object_ids)
+                ]
+                change_rows.extend(
+                    _change_row(revision, tombstones[path], deleted=True, object_id=None)
+                    for path in delete_paths
+                    if path in tombstones
+                )
+                session.add_all(change_rows)
 
     async def _next_revision(self, session) -> int:
         dialect = await self._dialect_for(session)

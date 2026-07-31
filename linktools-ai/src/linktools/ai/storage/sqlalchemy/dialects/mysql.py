@@ -66,6 +66,27 @@ class MySQLDialect:
             return InsertResult(inserted=True, row_id=lastrowid or None)
         return InsertResult(inserted=False)
 
+    async def insert_ignore_conflict_many(
+        self,
+        session: Any,
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.mysql import insert
+
+        # ON DUPLICATE KEY UPDATE with a no-op (col = col) mirrors the
+        # single-row insert_ignore_conflict; fires on ANY unique key, same
+        # single-unique-key assumption. rowcount is not inspected (batch caller
+        # does not need per-row insert flags).
+        no_op_column = index_elements[0]
+        stmt = insert(model).values(list(rows))
+        stmt = stmt.on_duplicate_key_update(
+            **{no_op_column: getattr(stmt.inserted, no_op_column)}
+        )
+        await session.execute(stmt)
+
     async def upsert_increment(
         self,
         session: Any,
@@ -131,6 +152,26 @@ class MySQLDialect:
         # (same assumption insert_ignore_conflict relies on), so the update
         # target is unambiguous.
         stmt = insert(model).values(**values).on_duplicate_key_update(**set_values)
+        await session.execute(stmt)
+
+    async def upsert_many(
+        self,
+        session: Any,
+        *,
+        model: type,
+        rows: "Sequence[Mapping[str, Any]]",
+        set_columns: "Sequence[str]",
+        index_elements: "Sequence[str]",
+    ) -> None:
+        from sqlalchemy.dialects.mysql import insert
+
+        # ON DUPLICATE KEY UPDATE with inserted.col references: each row's
+        # conflict-branch update uses that row's own proposed value (VALUES(col)
+        # idiom under MySQL). Same single-unique-key assumption as upsert.
+        stmt = insert(model).values(list(rows))
+        stmt = stmt.on_duplicate_key_update(
+            **{col: stmt.inserted[col] for col in set_columns}
+        )
         await session.execute(stmt)
 
     def classify_integrity_error(

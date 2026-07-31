@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 from ..errors import StorageFeatureSupportError
 from .cache import ContentCache, contains_many, read_cache, write_cache
-from .multi import StorageReader, batch_get
+from .multi import BatchStorageWriter, StorageReader, batch_get
 from .revision import (
     LayerMetadataView,
     LayerRefreshPolicy,
@@ -441,6 +441,31 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         await writer.reset(values)
         await self._after_reset()
 
+    async def apply_batch(
+        self,
+        puts: "tuple[ValueT, ...]",
+        deletes: "tuple[KeyT, ...]",
+    ) -> None:
+        # When the writer declares the BatchStorageWriter capability, delegate to
+        # its atomic apply_batch (one transaction, one revision) and run the
+        # _after_batch hook once. Otherwise fall back to per-op put/delete
+        # through this composition's own put()/delete() -- each carries its own
+        # _after_* hook, so preloaded markers and revision-source notification
+        # stay correct, at the cost of N separate transactions/round trips.
+        writer = self.require_writer()
+        if isinstance(writer, BatchStorageWriter):
+            await writer.apply_batch(puts, deletes)
+            adapter, _ = self._require_adapter()
+            put_keys = tuple(
+                adapter.info_key(adapter.value_info(value)) for value in puts
+            )
+            await self._after_batch(put_keys, deletes)
+            return
+        for value in puts:
+            await self.put(value)
+        for key in deletes:
+            await self.delete(key)
+
     async def _after_put(self, value: ValueT, adapter: "StorageAdapter[KeyT, ValueT, InfoT]") -> None:
         # Clear the preloaded marker for the written key so a later preload
         # re-reads it. A revisioned primary keeps its old state so the next
@@ -460,6 +485,23 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
 
     async def _after_reset(self) -> None:
         self._preloaded.clear()
+        if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
+            self.primary_view.invalidate()
+        await self._notify_revision_source()
+
+    async def _after_batch(
+        self,
+        put_keys: "tuple[KeyT, ...]",
+        delete_keys: "tuple[KeyT, ...]",
+    ) -> None:
+        # Clear preloaded markers for every touched key (puts + deletes) so a
+        # later preload re-reads them; a revisioned primary keeps its old state
+        # so the next refresh fetches the patch, an unversioned primary
+        # invalidates fully. One revision-source notification per batch.
+        for key in put_keys:
+            self._preloaded.pop(key, None)
+        for key in delete_keys:
+            self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
         await self._notify_revision_source()

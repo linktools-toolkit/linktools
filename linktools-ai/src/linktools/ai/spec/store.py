@@ -104,5 +104,12 @@ class SpecStore:
     async def reset(self, documents: "tuple[SpecDocument, ...]") -> None:
         await self._storage.reset(documents)
 
+    async def apply_batch(
+        self,
+        puts: "tuple[SpecDocument, ...]",
+        deletes: "tuple[str, ...]",
+    ) -> None:
+        await self._storage.apply_batch(puts, deletes)
+
 
 __all__ = ["SpecStore"]

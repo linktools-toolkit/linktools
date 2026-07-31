@@ -316,3 +316,135 @@ async def test_sql_get_at_revision_missing_blob_raises_corruption(tmp_path):
     with pytest.raises(StorageCorruptionError, match="missing"):
         await backend.get_at_revision("a", r1)
     await engine.dispose()
+
+
+# ---- apply_batch: atomic incremental batch (puts + deletes) ----------------
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_mixed_puts_and_deletes_one_revision(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("keep", b"keep"))
+    await backend.put(doc("del", b"del"))
+    before = (await backend.load_metadata(None)).revision
+    # One batch: put two new/update docs + delete one existing doc.
+    await backend.apply_batch(
+        (doc("a", b"new-a"), doc("keep", b"keep2", version=2)),
+        ("del",),
+    )
+    after = (await backend.load_metadata(None)).revision
+    assert after == before + 1, "batch must advance the revision exactly once"
+    assert (await backend.get("a")).content == b"new-a"
+    assert (await backend.get("keep")).content == b"keep2"
+    assert await backend.get("del") is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_insert_and_update_in_same_batch(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-iu.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("existing", b"old"))
+    # 'existing' is an update, 'fresh' is an insert -- both in one upsert_many.
+    await backend.apply_batch(
+        (doc("existing", b"new", version=2), doc("fresh", b"brand-new")),
+        (),
+    )
+    assert (await backend.get("existing")).content == b"new"
+    assert (await backend.get("existing")).info.version == 2
+    assert (await backend.get("fresh")).content == b"brand-new"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_delete_nonexistent_is_noop(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-noop.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    before = (await backend.load_metadata(None)).revision
+    # Deleting a path that was never stored must not error and must not advance
+    # the revision (no ChangeRow written for a no-op delete).
+    await backend.apply_batch((), ("ghost",))
+    after = (await backend.load_metadata(None)).revision
+    assert after == before, "deleting a nonexistent path must not advance revision"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_leaves_untouched_documents_alone(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-untouched.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("outside", b"untouched", version=5))
+    await backend.apply_batch((doc("inside", b"changed"),), ())
+    # A document not mentioned in the batch is unchanged (unlike reset, which
+    # would delete it).
+    outside = await backend.get("outside")
+    assert outside is not None
+    assert outside.content == b"untouched"
+    assert outside.info.version == 5
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_put_overrides_delete_for_same_path(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-override.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("x", b"v1"))
+    # Same path in both puts and deletes: the put wins (put filters its own path
+    # out of the delete set), so x survives with the new content.
+    await backend.apply_batch((doc("x", b"v2", version=2),), ("x",))
+    result = await backend.get("x")
+    assert result is not None
+    assert result.content == b"v2"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_rejects_duplicate_put_paths(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-dup.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    with pytest.raises(SpecConflictError, match="duplicate"):
+        await backend.apply_batch(
+            (doc("a", b"1"), doc("a", b"2")),
+            (),
+        )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_empty_inputs_is_noop(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-empty.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    before = (await backend.load_metadata(None)).revision
+    await backend.apply_batch((), ())
+    after = (await backend.load_metadata(None)).revision
+    assert after == before, "empty batch must not advance revision"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_records_change_history(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-history.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("old", b"v1"))
+    before = (await backend.load_metadata(None)).revision
+    await backend.apply_batch(
+        (doc("new", b"v1"),),
+        ("old",),
+    )
+    # Probe the change log via a PATCH load (load_metadata(None) returns a
+    # REPLACE snapshot of current entries only -- the 'old' tombstone is gone
+    # from the current set, so query the delta since the pre-batch revision).
+    load = await backend.load_metadata(before)
+    changed_paths = {change.key for change in load.changes}
+    assert "new" in changed_paths
+    assert "old" in changed_paths
+    await engine.dispose()

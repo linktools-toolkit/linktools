@@ -12,6 +12,7 @@ import pytest
 
 from linktools.ai.errors import StorageFeatureSupportError
 from linktools.ai.storage.composition import StorageComposition, StorageLayer
+from linktools.ai.storage.multi import BatchStorageWriter
 from linktools.ai.storage.revision import (
     LayerRefreshPolicy,
     MetadataLoad,
@@ -605,3 +606,27 @@ async def test_get_many_invalidates_owner_on_content_race():
     assert composition.primary_view._state is None, (
         "owner view was not invalidated after a content/metadata race in get_many"
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_falls_back_to_per_op_when_writer_lacks_capability():
+    # A writer that implements put/delete/reset but NOT apply_batch is not a
+    # BatchStorageWriter, so apply_batch must fall back to per-op put/delete --
+    # each carrying its own _after_* hook -- rather than raising.
+    primary = MetadataBackend((_doc("a"), _doc("c"), _doc("del")))
+    composition = StorageComposition(
+        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+    )
+    assert not isinstance(primary, BatchStorageWriter), (
+        "test premise: MetadataBackend must not be a BatchStorageWriter"
+    )
+    # Batch: put two (one update of 'a', one new 'b'), delete one ('del').
+    await composition.apply_batch((_doc("a", b"a2"), _doc("b", b"new")), ("del",))
+    # Each op applied; revision advanced by 3 (2 puts + 1 delete).
+    state = await composition.refresh()
+    assert "a" in state.entries and "b" in state.entries and "del" not in state.entries
+    # The fallback issued N separate transactions (each bumps the revision);
+    # assert the content is correct via the composition's own get.
+    assert (await composition.get("a")).content == b"a2"
+    assert (await composition.get("b")).content == b"new"
+    assert await composition.get("del") is None
