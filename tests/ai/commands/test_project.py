@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from linktools.ai_cli.project import (
+from linktools.ai.cli.project import (
     ProjectConfigError,
     find_project_root,
     load_project,

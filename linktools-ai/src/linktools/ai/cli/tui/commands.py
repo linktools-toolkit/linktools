@@ -41,7 +41,7 @@ def handle_slash_command(screen: "ChatScreen", line: str) -> bool:
     Unknown commands print a hint rather than sending the text to the agent."""
     from textual.widgets import RichLog
 
-    from ..client import validate_session_id  # ai_cli.client
+    from ..client import validate_session_id  # ai.cli.client
 
     parts = line.split(maxsplit=1)
     cmd = parts[0].lower()

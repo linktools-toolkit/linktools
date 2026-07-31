@@ -6,7 +6,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from linktools.ai_cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from linktools.ai.cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from linktools.cli import BaseCommand
 from linktools.cli.argparse import ConfigAction
 
@@ -29,7 +29,7 @@ class Command(BaseCommand):
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.tui import run_tui
+        from linktools.ai.cli.tui import run_tui
 
         return run_tui(
             project=args.project,

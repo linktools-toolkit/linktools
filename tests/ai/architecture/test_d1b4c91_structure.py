@@ -46,6 +46,7 @@ FORBIDDEN_TOP_LEVEL_PACKAGES = (
 EXPECTED_TOP_LEVEL_PACKAGES = {
     "agent",
     "artifact",
+    "cli",
     "evaluation",
     "execution",
     "governance",

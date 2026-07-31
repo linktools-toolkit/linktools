@@ -4,7 +4,7 @@
 """`lt ai init`: initialize a `.linktools` project.
 
 Thin shell -- delegates to
-:func:`linktools.ai_cli.console.init_project.initialize_project`."""
+:func:`linktools.ai.cli.console.init_project.initialize_project`."""
 
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -30,7 +30,7 @@ class Command(BaseCommand):
         )
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.console.init_project import initialize_project
+        from linktools.ai.cli.console.init_project import initialize_project
 
         return initialize_project(args.path)
 

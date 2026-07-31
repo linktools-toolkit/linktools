@@ -13,7 +13,7 @@ from linktools.ai.agent.subagent.skill_resolver import (
     SkillSubagentProvider,
     UnifiedSubagentResolver,
 )
-from linktools.ai_cli.skill_index import SkillInfo
+from linktools.ai.cli.skill_index import SkillInfo
 
 
 def _skill_info(skill_root: Path, revision: str = "r1") -> SkillInfo:

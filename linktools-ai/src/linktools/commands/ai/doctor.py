@@ -4,7 +4,7 @@
 """`lt ai doctor`: validate project + Runtime configuration.
 
 Thin shell -- delegates to
-:func:`linktools.ai_cli.console.doctor.run_doctor`, which renders the
+:func:`linktools.ai.cli.console.doctor.run_doctor`, which renders the
 ``DoctorReport`` produced by :meth:`LocalRuntimeClient.doctor`."""
 
 from pathlib import Path
@@ -31,7 +31,7 @@ class Command(BaseCommand):
         )
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.console.doctor import run_doctor
+        from linktools.ai.cli.console.doctor import run_doctor
 
         return run_doctor(
             project=args.project,

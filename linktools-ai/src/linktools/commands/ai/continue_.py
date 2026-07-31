@@ -5,12 +5,12 @@
 
 from typing import TYPE_CHECKING
 
-from linktools.ai_cli.errors import (
+from linktools.ai.cli.errors import (
     InvalidRunTransitionError,
     RunConflictError,
     RunNotFoundError,
 )
-from linktools.ai_cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from linktools.ai.cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from linktools.cli import BaseCommand
 from linktools.cli.argparse import ConfigAction
 
@@ -46,7 +46,7 @@ class Command(BaseCommand):
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.console.continue_run import continue_run
+        from linktools.ai.cli.console.continue_run import continue_run
 
         return continue_run(
             run_id=args.run_id,

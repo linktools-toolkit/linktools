@@ -6,7 +6,7 @@
 All project configuration lives under ``<root>/.linktools/``; run state lives
 under ``<data_root>/projects/<project_hash>/`` so two projects never share
 state. This module is pure path/config plumbing -- it loads nothing into the
-runtime (that is :mod:`linktools.ai_cli.runtime`'s job)."""
+runtime (that is :mod:`linktools.ai.cli.runtime`'s job)."""
 
 from dataclasses import dataclass
 from hashlib import sha256

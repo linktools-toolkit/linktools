@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
 
-from ..ai.runtime import RuntimeStorage
+from ..runtime import RuntimeStorage
 from linktools.cli import CommandError
 from linktools.system import get_user
 
@@ -291,8 +291,8 @@ class LocalRuntimeClient:
     async def doctor(self) -> DoctorReport:
         """Run every project/Runtime check against the bundle and return the
         structured verdict; the console/TUI only renders it."""
-        from ..ai.tool.mcp.env import expand_env_mapping
-        from ..ai.agent.skill.private import resolve_skill_agent_path
+        from ..agent.mcp.env import expand_env_mapping
+        from ..agent.skill.private import resolve_skill_agent_path
 
         bundle = self._bundle
         project = bundle.project
@@ -507,8 +507,8 @@ def build_runtime_client(
     start: "Path | None" = Path(project) if project else None
     cli_project = load_project(data_root=environ.get_data_path("ai"), start=start)
     if with_model:
-        from ..ai.model.registry import RuntimeModelConfig, model_registry
-        from ..ai.model.resolver import ModelResolver
+        from ..model.registry import RuntimeModelConfig, model_registry
+        from ..model.resolver import ModelResolver
 
         config = RuntimeModelConfig(
             model_type="standard",

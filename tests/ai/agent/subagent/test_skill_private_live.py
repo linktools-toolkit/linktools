@@ -29,7 +29,7 @@ from linktools.ai.agent.subagent.skill_resolver import (
     UnifiedSubagentResolver,
 )
 from linktools.ai.agent.subagent.toolset import build_subagent_toolset
-from linktools.ai_cli.skill_index import DirectorySkillIndex
+from linktools.ai.cli.skill_index import DirectorySkillIndex
 
 
 def _make_skill(tmp, name="skill-creator") -> Path:

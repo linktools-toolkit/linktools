@@ -11,16 +11,16 @@ can be minted and later validated.
 
 The flat ``SkillSpecIndex`` reads ``{id}.md`` files and cannot represent a skill
 directory or its ``agents/`` tree; this index is the directory-aware complement
-used by :func:`linktools.ai_cli.runtime.build_cli_runtime` to back the
+used by :func:`linktools.ai.cli.runtime.build_cli_runtime` to back the
 skill-private subagent provider."""
 
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
-from ..ai.spec.parsing import parse_markdown_text
-from ..ai.agent.skill.codec import parse_skill_spec
-from ..ai.agent.skill.spec import SkillSpec
+from ..spec.parsing import parse_markdown_text
+from ..agent.skill.codec import parse_skill_spec
+from ..agent.skill.spec import SkillSpec
 
 
 @dataclass(frozen=True, slots=True)

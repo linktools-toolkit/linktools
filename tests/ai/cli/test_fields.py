@@ -16,8 +16,8 @@ from pathlib import Path
 from linktools.core._config_store import ConfigStore
 from linktools.rich import set_no_input
 
-from linktools.ai_cli import fields
-from linktools.ai_cli.errors import MissingConfigError
+from linktools.ai.cli import fields
+from linktools.ai.cli.errors import MissingConfigError
 
 _ENV_KEYS = (
     "OPENAI_BASE_URL",

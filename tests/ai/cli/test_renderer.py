@@ -13,7 +13,7 @@ import io
 import json
 import unittest
 
-from linktools.ai_cli.console.renderer import announce_paused, print_event
+from linktools.ai.cli.console.renderer import announce_paused, print_event
 
 
 class _FakeApprovalRequest:

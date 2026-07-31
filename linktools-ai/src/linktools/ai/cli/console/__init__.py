@@ -5,5 +5,5 @@
 
 Each ``console/*.py`` module exposes one function the thin ``commands/ai``
 shells call. They talk to the backend only through
-:class:`linktools.ai_cli.client.RuntimeClient` and render to stdout/_logger --
+:class:`linktools.ai.cli.client.RuntimeClient` and render to stdout/_logger --
 Textual is never imported here."""

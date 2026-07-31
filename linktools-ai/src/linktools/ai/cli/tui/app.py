@@ -6,7 +6,7 @@
 Holds the ``RuntimeClient`` and mounts the :class:`ChatScreen`. Global
 keybindings open the Catalog/Runs/Doctor screens over the chat; each of those
 screens binds Esc to pop back. ``run_tui`` is the function the thin ``lt ai
-tui`` shell reaches through :mod:`linktools.ai_cli.tui` (which translates a
+tui`` shell reaches through :mod:`linktools.ai.cli.tui` (which translates a
 missing Textual install)."""
 
 from typing import TYPE_CHECKING
@@ -17,7 +17,7 @@ from textual.binding import Binding
 from .commands import AiCommandProvider
 from .screens.chat import ChatScreen
 from .screens.doctor import DoctorScreen
-from .screens.index import CatalogScreen
+from .screens.catalog import CatalogScreen
 from .screens.runs import RunsScreen
 
 if TYPE_CHECKING:

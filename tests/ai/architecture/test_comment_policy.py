@@ -33,7 +33,6 @@ _SHIPPED_SRC = _REPO_ROOT / "linktools-ai" / "src" / "linktools"
 
 _SCAN_TREES = (
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "ai",
-    _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "ai_cli",
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "capabilities",
     _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "commands",
     _REPO_ROOT / "tests",
@@ -111,12 +110,13 @@ REPO_WIDE_PATTERNS: "tuple[str, ...]" = (
     r"\bpending\s+(?:closure|migration|convergence)\b",
 )
 
-# §11.5 additions scoped to linktools-ai only (src/linktools/ai + ai_cli +
-# tests/ai). Other sub-packages (cntr, core, mobile) carry their own review /
-# task codes from their own processes; this plan's comment policy does not
-# govern them. The ``review`` forms target review-PROCESS refs (numbered
-# review rounds, current-/final-review) -- NOT legit project feature names
-# like "code-review skill" or "reviewer agent", which this scanner must spare.
+# §11.5 additions scoped to linktools-ai only (src/linktools/ai, which now also
+# contains the cli business layer at ai/cli + tests/ai). Other sub-packages
+# (cntr, core, mobile) carry their own review / task codes from their own
+# processes; this plan's comment policy does not govern them. The ``review``
+# forms target review-PROCESS refs (numbered review rounds, current-/final-review)
+# -- NOT legit project feature names like "code-review skill" or "reviewer
+# agent", which this scanner must spare.
 AI_SCOPED_PATTERNS: "tuple[str, ...]" = (
     r"\bP[0-9]+-[0-9]+\b",
     r"\bG[0-9]+\b",
@@ -133,7 +133,6 @@ AI_SCOPED_PATTERNS: "tuple[str, ...]" = (
 
 _AI_SCOPED_TREES = (
     _AI_SRC,
-    _REPO_ROOT / "linktools-ai" / "src" / "linktools" / "ai_cli",
     _REPO_ROOT / "tests" / "ai",
 )
 

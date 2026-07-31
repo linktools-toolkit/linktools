@@ -2,15 +2,15 @@
 
 from dataclasses import dataclass
 
-from ..ai.agent.index import AgentSpecIndex
-from ..ai.agent.spec import AgentSpec, PromptSpec
-from ..ai.spec.parsing import SpecLoader
-from ..ai.execution.persistence.local import LocalExecutionBackend
-from ..ai.execution.store import ExecutionStore
-from ..ai.tool.mcp.index import MCPServerSpecIndex
-from ..ai.model.policy import ModelPolicy
-from ..ai.runtime import Runtime, RuntimeStorage, build_runtime
-from ..ai.agent.skill.index import SkillSpecIndex
+from ..agent.index import AgentSpecIndex
+from ..agent.spec import AgentSpec, PromptSpec
+from ..spec.parsing import SpecLoader
+from ..execution.persistence.local import LocalExecutionBackend
+from ..execution.store import ExecutionStore
+from ..agent.mcp.index import MCPServerSpecIndex
+from ..model.policy import ModelPolicy
+from ..runtime import Runtime, RuntimeStorage, build_runtime
+from ..agent.skill.index import SkillSpecIndex
 
 from .project import CliProject
 from .skill_index import DirectorySkillIndex

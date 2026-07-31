@@ -5,7 +5,7 @@
 
 from typing import TYPE_CHECKING
 
-from linktools.ai_cli.errors import (
+from linktools.ai.cli.errors import (
     InvalidRunTransitionError,
     ModelClientUnavailable,
     ModelOutputError,
@@ -13,7 +13,7 @@ from linktools.ai_cli.errors import (
     RunConflictError,
     RunNotFoundError,
 )
-from linktools.ai_cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from linktools.ai.cli.fields import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
 from linktools.cli import BaseCommand
 from linktools.cli.argparse import ConfigAction
 
@@ -53,7 +53,7 @@ class Command(BaseCommand):
         )
 
     def run(self, args: "Namespace") -> "int | None":
-        from linktools.ai_cli.console.run_once import run_once
+        from linktools.ai.cli.console.run_once import run_once
 
         return run_once(
             prompt=args.prompt,

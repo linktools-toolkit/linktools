@@ -19,7 +19,7 @@ the run id is needed. A second pause while resuming again exits 4."""
 
 import asyncio
 
-from ...ai.execution.domain import RunStatus
+from ...execution.domain import RunStatus
 from linktools.cli import CommandError
 from linktools.core import environ
 

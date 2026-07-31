@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Error surface for ``linktools.ai_cli``.
+"""Error surface for ``linktools.ai.cli``.
 
-The thin ``commands/ai`` shells import only ``linktools.ai_cli.*``, so the
+The thin ``commands/ai`` shells import only ``linktools.ai.cli.*``, so the
 exception classes they declare in ``known_errors`` (for exit-code mapping) are
 re-exported here instead of pulled from ``linktools.ai`` directly.
 ``MissingConfigError`` is this layer's own signal that a required configuration
 value could not be resolved."""
 
-from ..ai.errors import (  # noqa: F401  (re-exported for command known_errors)
+from ..errors import (  # noqa: F401  (re-exported for command known_errors)
     InvalidRunTransitionError,
     RunConflictError,
     RunNotFoundError,
 )
-from ..ai.model.registry import (  # noqa: F401  (re-exported for command known_errors)
+from ..model.registry import (  # noqa: F401  (re-exported for command known_errors)
     ModelClientUnavailable,
     ModelOutputError,
     ModelTurnLimitExceeded,
