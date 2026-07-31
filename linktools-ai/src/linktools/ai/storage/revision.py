@@ -84,6 +84,16 @@ class StorageMetadataBackend(Protocol[RevisionT, KeyT, InfoT]):
     ) -> MetadataLoad[RevisionT, KeyT, InfoT]:
         ...
 
+    async def head_revision(self) -> RevisionT:
+        """The current revision without loading any entry/change data.
+
+        A cheap probe a caller uses to decide whether a held state is still
+        current (e.g. against a cached revision) before paying for a
+        ``load_metadata`` diff. Distinct from ``load_metadata``: it returns a
+        single scalar, never touches the change set, and is the point at which
+        an external revision cache (file/redis, downstream) is validated."""
+        ...
+
 
 class LayerRefreshPolicy(StrEnum):
     STATIC = "static"
@@ -195,6 +205,19 @@ class LayerMetadataView:
         self._state = state
         self._epoch += 1
         return state
+
+    async def head_revision(self) -> Any:
+        """The backend's current revision with no entry/change data loaded.
+
+        REVISIONED/STATIC backends are ``StorageMetadataBackend`` instances with
+        a cheap head probe; a STATIC backend's head is immutable and always
+        matches the held state, so a fresh probe is both correct and cheap.
+        ALWAYS layers (plain ``StorageReader``) have no such probe, so this
+        returns ``None`` and the composition falls back to a full refresh for
+        accuracy."""
+        if isinstance(self.backend, StorageMetadataBackend):
+            return await self.backend.head_revision()
+        return None
 
     def invalidate(self) -> None:
         """Drop the cached state so the next refresh reloads from the backend.

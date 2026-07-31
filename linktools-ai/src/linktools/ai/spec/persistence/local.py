@@ -117,6 +117,12 @@ class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
         )
         return MetadataLoad(head, MetadataLoadMode.REPLACE, changes)
 
+    async def head_revision(self) -> int:
+        # No change log to scan: the manifest's revision field is the head. A
+        # cheap probe matching the value ``load_metadata`` would return.
+        await self._ensure_loaded()
+        return self._manifest["revision"]
+
     # ---- writer --------------------------------------------------------
 
     async def put(self, entry: SpecDocument) -> SpecDocument:

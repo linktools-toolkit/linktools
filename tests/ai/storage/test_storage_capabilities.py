@@ -64,6 +64,9 @@ class MetadataBackend:
         )
         return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, changes)
 
+    async def head_revision(self):
+        return self.revision
+
     async def get(self, path):
         return self.docs.get(path)
 
@@ -174,3 +177,53 @@ async def test_revisioned_layer_keeps_independent_patch_from_primary():
     await composition.refresh()
     assert captured, "layer was not consulted at all"
     assert all(mode is not MetadataLoadMode.REPLACE for mode in captured), captured
+
+
+@pytest.mark.asyncio
+async def test_current_revision_probes_head_without_loading_entries():
+    # current_revision() must use the cheap head probe, not a full load_metadata:
+    # it returns the revision with zero backend loads.
+    primary = MetadataBackend((_doc("a"),), revision=9)
+    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    rev = await composition.current_revision()
+    assert rev == 9
+    assert primary.loads == 0, "current_revision triggered a full metadata load"
+
+
+@pytest.mark.asyncio
+async def test_current_revision_multi_layer_probes_each_head():
+    primary = MetadataBackend((_doc("a"),), revision=3)
+    layer = MetadataBackend((_doc("b"),), revision=5)
+    composition = StorageComposition(
+        primary,
+        layers=(StorageLayer(backend=layer, refresh=LayerRefreshPolicy.REVISIONED),),
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+    )
+    rev = await composition.current_revision()
+    # Hashed across both heads; neither backend was fully loaded.
+    assert isinstance(rev, str)
+    assert primary.loads == 0
+    assert layer.loads == 0
+
+
+@pytest.mark.asyncio
+async def test_current_revision_falls_back_to_refresh_for_always_layer():
+    # An ALWAYS layer has no cheap head probe (head_revision -> None); the
+    # composition must fall back to a full refresh for an accurate revision.
+    primary = MetadataBackend((_doc("a"),), revision=2)
+
+    class AlwaysBackend:
+        async def list_info(self):
+            return (_doc("b").info,)
+
+    composition = StorageComposition(
+        primary,
+        layers=(StorageLayer(backend=AlwaysBackend()),),
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+    )
+    # Falls back: a full refresh runs, so primary is loaded once.
+    rev = await composition.current_revision()
+    assert rev != 0  # something was loaded
+    assert primary.loads >= 1

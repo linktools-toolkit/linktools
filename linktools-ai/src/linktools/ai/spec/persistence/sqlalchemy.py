@@ -245,6 +245,16 @@ class SqlAlchemySpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
         )
         return MetadataLoad(head, MetadataLoadMode.PATCH, changes)
 
+    async def head_revision(self) -> int:
+        # One SQL: the singleton RevisionRow's head only (no JOIN, no change
+        # set). 0 when the counter row is not yet seeded (matches the empty
+        # table branch of ``_load_snapshot``); never touches EntryRow/ChangeRow.
+        async with self.session_factory() as session:
+            row = await session.scalar(
+                select(RevisionRow.revision).where(RevisionRow.id == 1)
+            )
+            return 0 if row is None else row
+
     # ---- writer --------------------------------------------------------
 
     async def put(self, entry: SpecDocument) -> SpecDocument:

@@ -40,6 +40,9 @@ class Backend:
         )
         return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, changes)
 
+    async def head_revision(self):
+        return self.revision
+
     async def get(self, path):
         self.get_calls += 1
         return self.documents.get(path)
@@ -201,3 +204,14 @@ async def test_preload_warms_cache_without_per_item_exists_read():
     # After preload, all content is cached; emptying the backend still serves.
     backend.documents.clear()
     assert (await store.get("agent/a")).content == b"a"
+
+
+@pytest.mark.asyncio
+async def test_current_revision_does_not_force_full_metadata_load():
+    # current_revision() probes the cheap head path; it must not trigger a
+    # full load_metadata round trip.
+    backend = Backend((document("a", b"x"),))
+    store = make_store(backend)
+    rev = await store.current_revision()
+    assert rev == backend.revision
+    assert backend.load_calls == 0, "current_revision triggered a full metadata load"

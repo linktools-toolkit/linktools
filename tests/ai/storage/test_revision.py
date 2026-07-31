@@ -75,6 +75,9 @@ async def test_revisioned_view_single_flight_collapses_concurrent_loads():
                 (),
             )
 
+        async def head_revision(self):
+            return self.revision
+
     view = LayerMetadataView(Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i)
     results = await asyncio.gather(*(view.refresh() for _ in range(100)))
     assert all(result is results[0] for result in results)
@@ -131,7 +134,49 @@ async def test_revisioned_view_empty_patch_at_same_revision_serves_cached():
                 self.revision, MetadataLoadMode.REPLACE, (_change("a", "A"),)
             )
 
+        async def head_revision(self):
+            return self.revision
+
     view = LayerMetadataView(Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i)
     await view.refresh()  # REPLACE
     await view.refresh()  # empty PATCH at same rev -> legal, still 1 more load
     assert loads == 2
+
+
+@pytest.mark.asyncio
+async def test_revisioned_view_head_revision_probes_without_loading_entries():
+    loads = 0
+    head_calls = 0
+
+    class Backend:
+        revision = 7
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, (_change("a", "A"),))
+
+        async def head_revision(self):
+            nonlocal head_calls
+            head_calls += 1
+            return self.revision
+
+    view = LayerMetadataView(Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i)
+    head = await view.head_revision()
+    assert head == 7
+    # The cheap probe must not trigger a load_metadata round trip.
+    assert loads == 0
+    assert head_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_always_view_head_revision_returns_none():
+    # ALWAYS layers are plain StorageReader (no StorageMetadataBackend): there is
+    # no cheap head probe, so head_revision returns None to signal the caller
+    # must fall back to a full refresh.
+    class Backend:
+        async def list_info(self):
+            return ("a",)
+
+    view = LayerMetadataView(Backend(), LayerRefreshPolicy.ALWAYS, info_key=lambda i: i)
+    assert await view.head_revision() is None

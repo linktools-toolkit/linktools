@@ -176,29 +176,36 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
                     entries[key] = info
                     owners[key] = index
         return EffectiveMetadataState(
-            self._effective_revision(states),
+            self._effective_revision(
+                tuple(state.revision if state is not None else None for state in states)
+            ),
             entries,
             owners,
         )
 
     def _effective_revision(
         self,
-        states: tuple[MetadataState[Any, Any, Any] | None, ...],
+        revisions: "tuple[Any, ...]",
     ) -> int | str:
         # Single primary: its revision directly. Multiple layers: a canonical
         # hash over every loaded layer's revision so any change in any layer
         # changes the effective revision. ALWAYS layers use a local generation,
         # so they always change the effective revision.
-        loaded = tuple(state.revision for state in states if state is not None)
+        loaded = tuple(revision for revision in revisions if revision is not None)
         if len(loaded) <= 1:
             return loaded[0] if loaded else 0
         payload = "|".join(str(revision) for revision in loaded)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     async def current_revision(self) -> int | str:
-        # Reuses refresh() (no separate backend revision query).
-        state = await self.refresh()
-        return 0 if state is None else state.revision
+        # Cheap path: probe each layer's head revision without loading any
+        # entry/change data (the point at which an external revision cache is
+        # validated). A layer with no cheap probe (ALWAYS) forces a full refresh.
+        heads = await asyncio.gather(*(view.head_revision() for view in self._views))
+        if any(head is None for head in heads):
+            state = await self.refresh()
+            return 0 if state is None else state.revision
+        return self._effective_revision(heads)
 
     async def get(self, key: KeyT) -> ValueT | None:
         return await self._get_with_retry(key, retried=False)

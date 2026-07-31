@@ -52,6 +52,22 @@ async def test_sql_load_metadata_replace_then_patch_then_tombstone(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sql_head_revision_matches_load_metadata_head(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    # Empty store: head is 0 (the singleton counter row is not yet seeded).
+    assert await backend.head_revision() == 0
+    await backend.put(doc("a", b"one"))
+    # After writes, the cheap head probe matches what load_metadata would return.
+    assert await backend.head_revision() == (await backend.load_metadata(None)).revision
+    await backend.put(doc("b", b"two"))
+    await backend.delete("a")
+    assert await backend.head_revision() == (await backend.load_metadata(None)).revision
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sql_metadata_query_does_not_read_content(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
     backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
