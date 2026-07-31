@@ -51,13 +51,10 @@ class SqlAlchemyToolStateBackend:
             await connection.run_sync(Base.metadata.create_all)
 
     @staticmethod
-    async def _row(session, operation_id: str, *, for_update: bool = False):
-        query = select(OperationRow).where(
-            OperationRow.operation_id == operation_id
+    async def _row(session, operation_id: str):
+        return await session.scalar(
+            select(OperationRow).where(OperationRow.operation_id == operation_id)
         )
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
 
     @staticmethod
     def _operation(row: OperationRow) -> ToolOperation:
@@ -101,7 +98,7 @@ class SqlAlchemyToolStateBackend:
         try:
             async with self.session_factory() as session:
                 async with session.begin():
-                    row = await self._row(session, operation.id, for_update=True)
+                    row = await self._row(session, operation.id)
                     if row is not None:
                         return self._replay(row, operation)
                     session.add(OperationRow(
@@ -159,7 +156,7 @@ class SqlAlchemyToolStateBackend:
     async def claim(self, operation_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._row(session, operation_id, for_update=True)
+                row = await self._row(session, operation_id)
                 if row is None:
                     raise KeyError(operation_id)
                 if row.status == ToolOperationStatus.COMPLETED.value:
@@ -175,10 +172,27 @@ class SqlAlchemyToolStateBackend:
                     and as_utc(row.lease_expires_at) <= now
                     and not row.replay_safe
                 ):
-                    row.status = ToolOperationStatus.INDETERMINATE.value
-                    row.updated_at = now
-                    await session.flush()
-                    return self._operation(row)
+                    # No pessimistic lock guards this read, so CAS the mark on
+                    # every column we read: if a concurrent renew/reclaim/complete
+                    # already moved the row past this exact state, this update
+                    # matches zero rows and does nothing -- either way, the
+                    # re-read below reflects the true current state rather than
+                    # ever clobbering a fresh claim back to INDETERMINATE.
+                    await session.execute(
+                        update(OperationRow)
+                        .where(
+                            OperationRow.operation_id == operation_id,
+                            OperationRow.status == row.status,
+                            OperationRow.owner == row.owner,
+                            OperationRow.fence == row.fence,
+                            OperationRow.lease_expires_at == row.lease_expires_at,
+                        )
+                        .values(
+                            status=ToolOperationStatus.INDETERMINATE.value,
+                            updated_at=now,
+                        )
+                    )
+                    return self._operation(await self._row(session, operation_id))
                 lease = claim(
                     Lease(row.owner, row.fence, row.lease_expires_at),
                     owner=owner,
@@ -208,7 +222,7 @@ class SqlAlchemyToolStateBackend:
     async def renew(self, operation_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._row(session, operation_id, for_update=True)
+                row = await self._row(session, operation_id)
                 if row is None:
                     raise KeyError(operation_id)
                 now = datetime.now(timezone.utc)
@@ -230,7 +244,7 @@ class SqlAlchemyToolStateBackend:
     async def complete(self, operation_id: str, *, owner: str, fence: int, result: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._row(session, operation_id, for_update=True)
+                row = await self._row(session, operation_id)
                 if row is None:
                     raise KeyError(operation_id)
                 now = datetime.now(timezone.utc)
@@ -252,7 +266,7 @@ class SqlAlchemyToolStateBackend:
     async def fail(self, operation_id: str, *, owner: str, fence: int, error: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._row(session, operation_id, for_update=True)
+                row = await self._row(session, operation_id)
                 if row is None:
                     raise KeyError(operation_id)
                 now = datetime.now(timezone.utc)
@@ -274,7 +288,7 @@ class SqlAlchemyToolStateBackend:
     async def mark_indeterminate(self, operation_id: str, *, owner: str, fence: int, error: "JsonValue") -> ToolOperation:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._row(session, operation_id, for_update=True)
+                row = await self._row(session, operation_id)
                 if row is None:
                     raise KeyError(operation_id)
                 now = datetime.now(timezone.utc)

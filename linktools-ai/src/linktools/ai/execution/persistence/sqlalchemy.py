@@ -185,41 +185,31 @@ class SqlAlchemyExecutionBackend:
             await connection.run_sync(Base.metadata.create_all)
 
     @staticmethod
-    async def _session_row(session, session_id: str, *, for_update: bool = False):
-        query = select(SessionRow).where(SessionRow.session_id == session_id)
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
-
-    @staticmethod
-    async def _run_row(session, run_id: str, *, for_update: bool = False):
-        query = select(ExecutionRow).where(ExecutionRow.execution_id == run_id)
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
-
-    @staticmethod
-    async def _snapshot_row(session, run_id: str, *, for_update: bool = False):
-        query = select(SnapshotRow).where(SnapshotRow.execution_id == run_id)
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
-
-    @staticmethod
-    async def _turn_row(
-        session,
-        session_id: str,
-        sequence: int,
-        *,
-        for_update: bool = False,
-    ):
-        query = select(TurnRow).where(
-            TurnRow.session_id == session_id,
-            TurnRow.sequence == sequence,
+    async def _session_row(session, session_id: str):
+        return await session.scalar(
+            select(SessionRow).where(SessionRow.session_id == session_id)
         )
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
+
+    @staticmethod
+    async def _run_row(session, run_id: str):
+        return await session.scalar(
+            select(ExecutionRow).where(ExecutionRow.execution_id == run_id)
+        )
+
+    @staticmethod
+    async def _snapshot_row(session, run_id: str):
+        return await session.scalar(
+            select(SnapshotRow).where(SnapshotRow.execution_id == run_id)
+        )
+
+    @staticmethod
+    async def _turn_row(session, session_id: str, sequence: int):
+        return await session.scalar(
+            select(TurnRow).where(
+                TurnRow.session_id == session_id,
+                TurnRow.sequence == sequence,
+            )
+        )
 
     async def create_session(self, *, session_id: str, user_id: "str | None", tenant_id: "str | None") -> SessionRecord:
         try:
@@ -228,7 +218,6 @@ class SqlAlchemyExecutionBackend:
                     existing = await self._session_row(
                         session,
                         session_id,
-                        for_update=True,
                     )
                     if existing is not None:
                         return self._owned_session(
@@ -300,7 +289,7 @@ class SqlAlchemyExecutionBackend:
     async def start_run(self, command: "StartExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                owner = await self._session_row(session, command.session_id, for_update=True)
+                owner = await self._session_row(session, command.session_id)
                 if owner is None:
                     raise StorageError("unknown session")
                 if await self._run_row(session, command.run_id) is not None:
@@ -333,7 +322,7 @@ class SqlAlchemyExecutionBackend:
     async def claim_run(self, command: "ClaimExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
@@ -366,7 +355,7 @@ class SqlAlchemyExecutionBackend:
     async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 lease = renew(Lease(row.owner, row.fence, row.lease_expires_at), owner=command.owner, fence=command.fence, now=command.now, duration=command.duration)
@@ -388,7 +377,7 @@ class SqlAlchemyExecutionBackend:
     async def request_cancel(self, command: "RequestCancellation") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
@@ -418,7 +407,7 @@ class SqlAlchemyExecutionBackend:
                     cancelled = await self._run_row(session, command.run_id)
                     session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.cancelled", payload={}, created_at=now))
                     if cancelled.session_turn_sequence is not None:
-                        turn = await self._turn_row(session, cancelled.session_id, cancelled.session_turn_sequence, for_update=True)
+                        turn = await self._turn_row(session, cancelled.session_id, cancelled.session_turn_sequence)
                         if turn is not None:
                             turn.status, turn.completed_at = RunStatus.CANCELLED.value, now
                     return _record(cancelled)
@@ -450,7 +439,7 @@ class SqlAlchemyExecutionBackend:
     async def decide_approval(self, command: "DecideApproval") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 record = None if row is None else _record(row)
                 if record is None or record.approval is None or record.approval.approval_id != command.approval_id:
                     raise StorageError("run has no pending approval")
@@ -516,7 +505,7 @@ class SqlAlchemyExecutionBackend:
                     raise StorageConflictError("approval changed concurrently")
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.approval_decided", payload=new_approval, created_at=decided_at))
                 if record.session_turn_sequence is not None:
-                    turn = await self._turn_row(session, record.session_id, record.session_turn_sequence, for_update=True)
+                    turn = await self._turn_row(session, record.session_id, record.session_turn_sequence)
                     if turn is not None:
                         turn.status = RunStatus.CANCELLED.value
                         turn.completed_at = decided_at
@@ -525,7 +514,7 @@ class SqlAlchemyExecutionBackend:
     async def resume_run(self, command: "ResumeExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
@@ -556,7 +545,7 @@ class SqlAlchemyExecutionBackend:
     async def append_trace_steps(self, run_id: str, *, expected_sequence: int, steps: "tuple[NewRunTraceStep, ...]") -> int:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, run_id, for_update=True)
+                row = await self._run_row(session, run_id)
                 if row is None or row.trace_sequence != expected_sequence:
                     raise StorageConflictError("trace sequence conflict")
                 next_sequence = expected_sequence + len(steps)
@@ -593,7 +582,7 @@ class SqlAlchemyExecutionBackend:
     async def _finish(self, run_id: str, owner: str, fence: int, snapshot: "AgentSnapshotData", status: RunStatus, pending_approval: "RunApproval | None" = None, error: "RunError | None" = None) -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, run_id, for_update=True)
+                row = await self._run_row(session, run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
@@ -634,7 +623,7 @@ class SqlAlchemyExecutionBackend:
                 if result.rowcount != 1:
                     raise StorageConflictError("run lifecycle changed concurrently")
                 finished = await self._run_row(session, run_id)
-                current = await self._snapshot_row(session, run_id, for_update=True)
+                current = await self._snapshot_row(session, run_id)
                 if current is None:
                     session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=list(snapshot.resume_messages), outcome={"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status=status.value, trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
                 else:
@@ -645,13 +634,12 @@ class SqlAlchemyExecutionBackend:
                         session,
                         finished.session_id,
                         finished.session_turn_sequence,
-                        for_update=True,
                     )
                     if turn is not None:
                         turn.status, turn.assistant_summary = status.value, snapshot.final_output
                         turn.completed_at = now if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
                     if status is RunStatus.COMPLETED:
-                        owner_row = await self._session_row(session, finished.session_id, for_update=True)
+                        owner_row = await self._session_row(session, finished.session_id)
                         if owner_row is not None:
                             owner_row.latest_completed_run_id = run_id
                 await session.flush()
@@ -675,7 +663,7 @@ class SqlAlchemyExecutionBackend:
         # the engine ever produced a coherent outcome to snapshot.
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id, for_update=True)
+                row = await self._run_row(session, command.run_id)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
@@ -707,7 +695,7 @@ class SqlAlchemyExecutionBackend:
                 aborted = await self._run_row(session, command.run_id)
                 session.add(EventRow(execution_id=row.execution_id, sequence=event_sequence, type="run.aborted", payload={}, created_at=now))
                 if aborted.session_turn_sequence is not None:
-                    turn = await self._turn_row(session, aborted.session_id, aborted.session_turn_sequence, for_update=True)
+                    turn = await self._turn_row(session, aborted.session_id, aborted.session_turn_sequence)
                     if turn is not None:
                         turn.status, turn.completed_at = RunStatus.FAILED.value, now
                 await session.flush()

@@ -59,18 +59,10 @@ class SqlAlchemyTaskBackend:
         )
 
     @staticmethod
-    async def _execution_row(
-        session,
-        execution_id: str,
-        *,
-        for_update: bool = False,
-    ):
-        query = select(ExecutionRow).where(
-            ExecutionRow.execution_id == execution_id
+    async def _execution_row(session, execution_id: str):
+        return await session.scalar(
+            select(ExecutionRow).where(ExecutionRow.execution_id == execution_id)
         )
-        if for_update:
-            query = query.with_for_update()
-        return await session.scalar(query)
 
     @staticmethod
     def _plan(row: PlanRow) -> TaskPlan:
@@ -145,7 +137,7 @@ class SqlAlchemyTaskBackend:
     async def claim(self, execution_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id, for_update=True)
+                row = await self._execution_row(session, execution_id)
                 if row is None:
                     raise KeyError(execution_id)
                 if row.status == TaskStatus.COMPLETED.value:
@@ -183,7 +175,7 @@ class SqlAlchemyTaskBackend:
     async def renew(self, execution_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id, for_update=True)
+                row = await self._execution_row(session, execution_id)
                 if row is None:
                     raise KeyError(execution_id)
                 now = datetime.now(timezone.utc)
@@ -205,7 +197,7 @@ class SqlAlchemyTaskBackend:
     async def complete(self, execution_id: str, *, owner: str, fence: int, result: object) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id, for_update=True)
+                row = await self._execution_row(session, execution_id)
                 if row is None:
                     raise KeyError(execution_id)
                 now = datetime.now(timezone.utc)
@@ -235,7 +227,7 @@ class SqlAlchemyTaskBackend:
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id, for_update=True)
+                row = await self._execution_row(session, execution_id)
                 if row is None:
                     raise KeyError(execution_id)
                 now = datetime.now(timezone.utc)

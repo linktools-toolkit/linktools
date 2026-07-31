@@ -1,6 +1,7 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import pytest
@@ -9,7 +10,7 @@ from linktools.ai.errors import StorageConflictError
 from linktools.ai.tasks.models import TaskExecution, TaskPlan
 from linktools.ai.tasks.persistence.sqlalchemy import SqlAlchemyTaskBackend
 from linktools.ai.tasks.store import TaskStore
-from linktools.ai.agent.tool.persistence.sqlalchemy import SqlAlchemyToolStateBackend
+from linktools.ai.agent.tool.persistence.sqlalchemy import OperationRow, SqlAlchemyToolStateBackend
 from linktools.ai.agent.tool.models import ToolOperation, ToolOperationStatus
 from linktools.ai.agent.tool.store import ToolStateStore
 
@@ -169,4 +170,48 @@ async def test_sql_tool_store_reclaims_expired_lease_and_rejects_stale_fence(tmp
     assert current.fence == stale.fence + 1
     with pytest.raises(StorageConflictError):
         await store.complete("o", owner="worker-a", fence=stale.fence, result=None)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_tool_store_stale_non_replay_safe_claim_marks_indeterminate(tmp_path):
+    # claim()'s stale-lease branch surfaces an expired, non-replay-safe CLAIMED
+    # lease as INDETERMINATE (the replay-safe reclaim case is covered by the test
+    # above; this one exercises the other branch). Covers the post-lock-removal
+    # path end-to-end so a regression that dropped the mark would surface here.
+    #
+    # Note on the CAS the branch uses: without a pessimistic lock, the
+    # INDETERMINATE mark is a conditional UPDATE keyed on the exact row state
+    # the branch read (status/owner/fence/lease_expires_at), so a concurrently
+    # committed change to those columns makes the mark match zero rows and the
+    # fresh state is returned instead. That property holds under the
+    # READ-COMMITTED isolation of MySQL/PostgreSQL (production); SQLite
+    # serializes a transaction's snapshot, so a same-transaction race window
+    # cannot be exercised here and the CAS is verified structurally in code
+    # review plus a standalone cross-session repro rather than by this test.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-indeterminate.db'}")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    store = SqlAlchemyToolStateBackend(factory)
+    await store.initialize_storage(engine)
+    operation = ToolOperation("o", None, "r", "c", "key", "tool", "hash", "binding", ToolOperationStatus.PREPARED)
+    await store.prepare(operation)
+    # Establish a CLAIMED lease, then force its expiry timestamp into the past
+    # directly (a real expiry would require sleeping past the lease window).
+    await store.claim("o", owner="worker-a", duration=timedelta(minutes=1))
+    expired_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    async with factory() as expire_session:
+        async with expire_session.begin():
+            await expire_session.execute(
+                update(OperationRow)
+                .where(OperationRow.operation_id == "o")
+                .values(lease_expires_at=expired_at)
+            )
+    # A fresh claim by a different owner reads status=CLAIMED with an expired
+    # lease, and (non-replay-safe) marks it INDETERMINATE instead of reclaiming.
+    stale = await store.claim("o", owner="worker-b")
+    assert stale.status == ToolOperationStatus.INDETERMINATE
+    # The stale claim is terminal-ish: a fresh claim observes INDETERMINATE and
+    # short-circuits (never re-claims), surfacing the staleness to the caller.
+    again = await store.claim("o", owner="worker-c")
+    assert again.status == ToolOperationStatus.INDETERMINATE
     await engine.dispose()
