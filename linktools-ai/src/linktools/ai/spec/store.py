@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from ..storage.cache import ContentCacheKey
     from ..storage.cache import ContentCache
     from ..storage.multi import StorageReader, StorageWriter
+    from ..storage.revision import RevisionSource
 
 
 class SpecStorageAdapter(
@@ -45,6 +46,7 @@ class SpecStore:
         writer: "StorageWriter[str, SpecDocument] | None" = None,
         layers: "tuple[StorageLayer[str, SpecDocument, SpecDocumentInfo], ...]" = (),
         cache: "ContentCache | None" = None,
+        revision_source: "RevisionSource | None" = None,
     ) -> None:
         adapter = SpecStorageAdapter()
         self._storage = StorageComposition(
@@ -54,6 +56,7 @@ class SpecStore:
             cache=cache,
             adapter=adapter,
             cache_adapter=adapter,
+            revision_source=revision_source,
         )
 
     @property

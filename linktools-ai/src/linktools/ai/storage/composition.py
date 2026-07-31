@@ -14,17 +14,24 @@ Layers are ordered fallbacks; earlier readers win."""
 
 import asyncio
 import hashlib
-from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 from ..errors import StorageFeatureSupportError
 from .cache import ContentCache, contains_many, read_cache, write_cache
 from .multi import StorageReader, batch_get
-from .revision import LayerMetadataView, LayerRefreshPolicy, MetadataState, StorageInitializer, StorageMetadataBackend
-
-from typing import TYPE_CHECKING
+from .revision import (
+    LayerMetadataView,
+    LayerRefreshPolicy,
+    MetadataState,
+    RevisionSource,
+    StorageInitializer,
+    StorageMetadataBackend,
+    _BackendHeadRevisionSource,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from .cache import ContentCacheKey
 
 KeyT = TypeVar("KeyT")
@@ -90,6 +97,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         writer: "WriterT | None" = None,
         layers: "tuple[StorageLayer[KeyT, ValueT, InfoT], ...]" = (),
         adapter: "StorageAdapter[KeyT, ValueT, InfoT] | None" = None,
+        revision_source: "RevisionSource | None" = None,
         cache: "ContentCache | None" = None,
         cache_adapter: "StorageCacheAdapter[KeyT, ValueT, InfoT] | None" = None,
         cache_concurrency: int = 16,
@@ -116,11 +124,17 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self.preload_concurrency = preload_concurrency
         self.cache_concurrency = cache_concurrency
         info_key = adapter.info_key if adapter is not None else lambda info: getattr(info, "path", info)
+        # Auto-wire the default revision source (cheap head_revision probe)
+        # when none is injected: a plain SpecStore(backend) then short-circuits
+        # unchanged-revision refreshes for free. Layers do not get a source --
+        # the primary carries the revisioned patch load that benefits.
+        primary_source = revision_source or _BackendHeadRevisionSource(primary)
         self._views: "tuple[LayerMetadataView, ...]" = (
             LayerMetadataView(
                 primary,
                 _primary_policy(primary),
                 info_key=info_key,
+                revision_source=primary_source,
             ),
             *(
                 LayerMetadataView(
@@ -227,10 +241,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         if value is None:
             return None
         if adapter.value_info(value) != info:
-            # Content raced (metadata is stale). Refresh once; if still a
-            # mismatch, treat as absent rather than serving a wrong version.
+            # Content raced (metadata is stale). Invalidate the owner view so
+            # the recursive _get_with_retry's refresh() loads fresh metadata
+            # instead of being short-circuited by a revision source that still
+            # holds the stale revision. Retry once; a second mismatch means the
+            # state is genuinely inconsistent -- treat as absent rather than
+            # serving a wrong version.
             if not retried:
-                await self._views[owner].refresh()
+                self._views[owner].invalidate()
                 return await self._get_with_retry(key, retried=True)
             return None
         if self.cache is not None and cache_adapter is not None:
@@ -266,11 +284,19 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         if not miss:
             return result
         loaded = await self._load_by_owner(tuple(miss), state)
+        # Track owners whose content raced the held metadata (stale). After the
+        # loop, invalidate each once so the next read loads fresh metadata
+        # instead of re-serving the stale state. The mismatched keys are omitted
+        # from this batch's result (the caller sees them as absent and re-reads);
+        # this mirrors _get_with_retry's contract without a per-key recursive
+        # reload, which would defeat the batch path's purpose.
+        raced_owners: "set[int]" = set()
         for key in miss:
             value = loaded.get(key)
             if value is None or key not in state.entries:
                 continue
             if adapter.value_info(value) != state.entries[key]:
+                raced_owners.add(state.owners[key])
                 continue
             result[key] = value
             if self.cache is not None and cache_adapter is not None:
@@ -279,6 +305,8 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
                     cache_adapter.cache_key(key, state.entries[key]),
                     cache_adapter.cache_content(value),
                 )
+        for owner in raced_owners:
+            self._views[owner].invalidate()
         return result
 
     def _group_by_owner(
@@ -374,8 +402,20 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
                     verified.add(key)
 
         await asyncio.gather(*(_cache(key) for key in missing))
+        # Verify the cache actually holds each written identity before marking
+        # it preloaded: a cache ``put`` may silently drop an oversized blob
+        # (returns without raising, so write_cache reports True) yet store
+        # nothing. Without this re-check such a key would be permanently marked
+        # preloaded and never re-attempted, silently degrading to a per-read
+        # origin fetch forever.
+        if verified:
+            actually_present = await contains_many(
+                self.cache, tuple(identities[key] for key in missing if key in verified)
+            )
+        else:
+            actually_present = frozenset()
         for key in missing:
-            if key in verified:
+            if key in verified and identities[key] in actually_present:
                 self._preloaded[key] = identities[key]
 
     def _batches(self, keys: "tuple[KeyT, ...]") -> "Iterable[tuple[KeyT, ...]]":
@@ -389,20 +429,20 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         writer = self.require_writer()
         result = await writer.put(value)
         adapter, _ = self._require_adapter()
-        self._after_put(result, adapter)
+        await self._after_put(result, adapter)
         return result
 
     async def delete(self, key: KeyT) -> None:
         writer = self.require_writer()
         await writer.delete(key)
-        self._after_delete(key)
+        await self._after_delete(key)
 
     async def reset(self, values: "tuple[ValueT, ...]") -> None:
         writer = self.require_writer()
         await writer.reset(values)
-        self._after_reset()
+        await self._after_reset()
 
-    def _after_put(self, value: ValueT, adapter: "StorageAdapter[KeyT, ValueT, InfoT]") -> None:
+    async def _after_put(self, value: ValueT, adapter: "StorageAdapter[KeyT, ValueT, InfoT]") -> None:
         # Clear the preloaded marker for the written key so a later preload
         # re-reads it. A revisioned primary keeps its old state so the next
         # refresh fetches the patch from the prior revision; an unversioned
@@ -411,16 +451,33 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
+        await self._notify_revision_source()
 
-    def _after_delete(self, key: KeyT) -> None:
+    async def _after_delete(self, key: KeyT) -> None:
         self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
+        await self._notify_revision_source()
 
-    def _after_reset(self) -> None:
+    async def _after_reset(self) -> None:
         self._preloaded.clear()
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
+        await self._notify_revision_source()
+
+    async def _notify_revision_source(self) -> None:
+        # Post-commit (the writer's transaction has committed by the time the
+        # _after_* hook runs): probe the new head revision once and tell the
+        # source, so a caching source (redis/file) can refresh + publish to
+        # cross-machine subscribers within ms rather than waiting on a TTL.
+        # Skipped when no source is wired or the backend has no cheap head
+        # probe; the default source no-ops here (it reads head live).
+        source = self.primary_view.revision_source
+        if source is None:
+            return
+        head = await self.primary_view.head_revision()
+        if head is not None:
+            await source.revision_bumped(head)
 
 
 __all__ = [

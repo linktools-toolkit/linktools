@@ -48,20 +48,29 @@ async def batch_get(
     keys: "tuple[KeyT, ...]",
     *,
     concurrency: int = 8,
+    timeout: "float | None" = None,
 ) -> "dict[KeyT, ValueT]":
     """Resolve ``keys`` from one reader. Uses ``get_many`` when the reader
     supports it; otherwise runs single ``get`` calls under a bounded semaphore.
-    ``None`` results are dropped (a miss). ``concurrency`` must be positive."""
+    ``None`` results are dropped (a miss). ``concurrency`` must be positive.
+
+    ``timeout`` bounds each backend call (the whole ``get_many`` call, or each
+    individual ``get`` in the fallback). ``None`` (default) waits forever, matching
+    the prior behavior; a positive number raises ``TimeoutError`` if a call exceeds
+    it, so a stuck backend cannot hold all semaphore permits indefinitely."""
     if concurrency < 1:
         raise ValueError("concurrency must be positive")
+    if not keys:
+        return {}
     if isinstance(reader, BatchStorageReader):
-        loaded = await reader.get_many(keys)
+        loaded = await asyncio.wait_for(reader.get_many(keys), timeout=timeout)
         return {key: value for key, value in loaded.items() if value is not None}
     semaphore = asyncio.Semaphore(concurrency)
 
     async def load(key: KeyT) -> "tuple[KeyT, ValueT | None]":
         async with semaphore:
-            return key, await reader.get(key)  # type: ignore[attr-defined]
+            value = await asyncio.wait_for(reader.get(key), timeout=timeout)  # type: ignore[attr-defined]
+            return key, value
 
     return {
         key: value

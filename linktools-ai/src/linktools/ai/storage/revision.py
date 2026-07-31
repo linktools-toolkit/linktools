@@ -106,6 +106,56 @@ class LayerRefreshPolicy(StrEnum):
 StorageInitializer = Callable[..., Awaitable[None]]
 
 
+@runtime_checkable
+class RevisionSource(Protocol):
+    async def current(self) -> "int | str | None":
+        """The current revision, or ``None`` when unknown/stale.
+
+        A view consults this before paying for ``load_metadata``: when the
+        returned revision equals its held state's revision, the held state is
+        reused and no metadata load is issued. ``None`` means "I don't know"
+        (a cache miss on an external source) -- the caller must then load.
+
+        The default implementation probes the backend's ``head_revision``; a
+        downstream system injects a redis/file-backed source so multiple
+        processes share one revision signal (cheap, cross-process)."""
+        ...
+
+    async def revision_bumped(self, revision: "int | str") -> None:
+        """Called by the composition AFTER a write commits and the revision
+        advanced to ``revision``.
+
+        A caching source uses this to refresh/publish its held revision (e.g.
+        redis SET + PUBLISH so cross-machine subscribers invalidate within ms
+        rather than waiting on a TTL). The default source no-ops: it reads
+        ``head_revision`` live and never caches, so it is never stale. ``None``
+        is never passed -- the composition probes head once post-commit to get
+        the concrete new revision before calling this."""
+        ...
+
+
+class _BackendHeadRevisionSource:
+    """Default :class:`RevisionSource`: probes the backend's ``head_revision``.
+
+    Always live (no cache), so it is always correct for single-process use; it
+    merely replaces the heavier ``load_metadata`` JOIN with a single-row head
+    read when the revision has not changed. Returns ``None`` for a backend that
+    is not a :class:`StorageMetadataBackend` (no head to probe)."""
+
+    def __init__(self, backend: Any) -> None:
+        self._backend = backend
+
+    async def current(self) -> "int | str | None":
+        if isinstance(self._backend, StorageMetadataBackend):
+            return await self._backend.head_revision()
+        return None
+
+    async def revision_bumped(self, revision: "int | str") -> None:
+        # No-op: this source reads head_revision live on every current() call,
+        # so it is never stale and needs no post-write notification.
+        return None
+
+
 def apply_metadata_load(
     current: "MetadataState[RevisionT, KeyT, InfoT] | None",
     load: "MetadataLoad[RevisionT, KeyT, InfoT]",
@@ -156,6 +206,7 @@ class LayerMetadataView:
         *,
         info_key: "Callable[[Any], Any]",
         initializer: "StorageInitializer | None" = None,
+        revision_source: "RevisionSource | None" = None,
     ) -> None:
         if policy is LayerRefreshPolicy.REVISIONED and not isinstance(
             backend, StorageMetadataBackend
@@ -167,6 +218,7 @@ class LayerMetadataView:
         self.policy = policy
         self.info_key = info_key
         self.initializer = initializer
+        self.revision_source = revision_source
         self._state: "MetadataState[Any, Any, Any] | None" = None
         self._lock = asyncio.Lock()
         self._epoch = 0
@@ -186,6 +238,18 @@ class LayerMetadataView:
             return await self._refresh_locked()
 
     async def _refresh_locked(self) -> "MetadataState[Any, Any, Any] | None":
+        if (
+            self.revision_source is not None
+            and self._state is not None
+            and isinstance(self.backend, StorageMetadataBackend)
+        ):
+            # Cheap short-circuit: ask the source whether the held state's
+            # revision is still current. When it is, reuse the held state and
+            # skip load_metadata entirely (this is the path that intercepts a
+            # hot get() loop). None/changed -> fall through to a real load.
+            current = await self.revision_source.current()
+            if current is not None and current == self._state.revision:
+                return self._state
         if isinstance(self.backend, StorageMetadataBackend):
             # REVISIONED patches against the held revision; STATIC loads a full
             # snapshot once (refresh()'s early return serves it thereafter).

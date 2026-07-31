@@ -62,3 +62,46 @@ async def test_batch_get_rejects_non_positive_concurrency():
 def test_batch_protocol_detects_get_many():
     assert isinstance(BatchBackend({}), BatchStorageReader)
     assert not isinstance(SingleBackend({}), BatchStorageReader)
+
+
+@pytest.mark.asyncio
+async def test_batch_get_timeout_raises_on_slow_backend():
+    # A backend.get that hangs past the timeout must raise TimeoutError instead
+    # of holding a semaphore permit forever (which would deadlock the batch).
+
+    class SlowBackend:
+        async def get(self, key):
+            await asyncio.sleep(10)
+            return "never"
+
+    with pytest.raises(asyncio.TimeoutError):
+        await batch_get(SlowBackend(), ("a",), concurrency=2, timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_batch_get_timeout_get_many_branch():
+    # The timeout also bounds the get_many branch (single backend call).
+
+    class SlowBatch:
+        async def get_many(self, keys):
+            await asyncio.sleep(10)
+            return {}
+
+    with pytest.raises(asyncio.TimeoutError):
+        await batch_get(SlowBatch(), ("a",), timeout=0.05)
+
+
+@pytest.mark.asyncio
+async def test_batch_get_empty_keys_returns_empty():
+    # Empty keys short-circuits to {} without touching the backend.
+    class Spy:
+        def __init__(self):
+            self.called = False
+
+        async def get(self, key):
+            self.called = True
+            return key
+
+    spy = Spy()
+    assert await batch_get(spy, ()) == {}
+    assert spy.called is False

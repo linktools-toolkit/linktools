@@ -60,9 +60,15 @@ def test_domain_stores_bind_a_backend_directly_without_composition():
 def test_sqlalchemy_adapters_share_one_declarative_base():
     base = (ROOT / "storage/sqlalchemy/base.py").read_text(encoding="utf-8")
     assert "class Base(DeclarativeBase)" in base
-    assert "id: Mapped[int]" in base
-    assert "created_at: Mapped[datetime]" in base
-    assert "updated_at: Mapped[datetime]" in base
+    # The mapped columns may be quoted ("Mapped[int]") or bare under the
+    # project's quoted-annotation convention; accept either form.
+    assert ('id: "Mapped[int]"' in base) or ("id: Mapped[int]" in base)
+    assert ('created_at: "Mapped[datetime]"' in base) or (
+        "created_at: Mapped[datetime]" in base
+    )
+    assert ('updated_at: "Mapped[datetime]"' in base) or (
+        "updated_at: Mapped[datetime]" in base
+    )
     for relative in (
         "spec/persistence/sqlalchemy.py",
         "execution/persistence/sqlalchemy.py",

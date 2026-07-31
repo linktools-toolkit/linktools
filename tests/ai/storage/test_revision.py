@@ -180,3 +180,133 @@ async def test_always_view_head_revision_returns_none():
 
     view = LayerMetadataView(Backend(), LayerRefreshPolicy.ALWAYS, info_key=lambda i: i)
     assert await view.head_revision() is None
+
+
+class _FakeRevisionSource:
+    """A controllable RevisionSource for tests: returns whatever revision is set
+    (or None to simulate an unknown/missed cache)."""
+
+    def __init__(self, revision=None):
+        self.revision = revision
+
+    async def current(self):
+        return self.revision
+
+
+@pytest.mark.asyncio
+async def test_revision_source_short_circuits_unchanged_refresh():
+    # When a revision_source is wired and reports the same revision the view
+    # already holds, a second refresh() reuses the held state and issues ZERO
+    # load_metadata calls.
+    loads = 0
+
+    class Backend:
+        revision = 3
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            if after_revision == self.revision:
+                return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
+            return MetadataLoad(
+                self.revision, MetadataLoadMode.REPLACE, (_change("a", "A"),)
+            )
+
+        async def head_revision(self):
+            return self.revision
+
+    source = _FakeRevisionSource(revision=3)
+    view = LayerMetadataView(
+        Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        revision_source=source,
+    )
+    first = await view.refresh()  # REPLACE -> loads == 1, holds revision 3
+    assert first.revision == 3
+    assert loads == 1
+    second = await view.refresh()  # source says unchanged -> short-circuit
+    assert second is first
+    assert loads == 1, f"short-circuit should add no load, got {loads}"
+
+
+@pytest.mark.asyncio
+async def test_revision_source_reload_when_revision_changes():
+    # When the source reports a NEW revision, the view must reload (not serve
+    # the stale held state).
+    loads = 0
+
+    class Backend:
+        revision = 3
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            if after_revision == self.revision:
+                return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
+            return MetadataLoad(
+                self.revision, MetadataLoadMode.REPLACE, (_change("a", "A"),)
+            )
+
+        async def head_revision(self):
+            return self.revision
+
+    source = _FakeRevisionSource(revision=3)
+    view = LayerMetadataView(
+        Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        revision_source=source,
+    )
+    await view.refresh()
+    assert loads == 1
+    source.revision = 4  # source now reports a changed revision
+    await view.refresh()
+    assert loads == 2, "changed revision must trigger a reload"
+
+
+@pytest.mark.asyncio
+async def test_revision_source_none_falls_back_to_load():
+    # When the source returns None (cache miss / unknown), the view must not
+    # short-circuit -- it falls back to a real load_metadata for correctness.
+    loads = 0
+
+    class Backend:
+        revision = 3
+
+        async def load_metadata(self, after_revision):
+            nonlocal loads
+            loads += 1
+            return MetadataLoad(
+                self.revision, MetadataLoadMode.PATCH, ()
+            )
+
+        async def head_revision(self):
+            return self.revision
+
+    source = _FakeRevisionSource(revision=None)  # unknown
+    view = LayerMetadataView(
+        Backend(), LayerRefreshPolicy.REVISIONED, info_key=lambda i: i,
+        revision_source=source,
+    )
+    await view.refresh()
+    assert loads == 1
+    await view.refresh()  # source says None -> must reload
+    assert loads == 2, "None source must fall back to a load"
+
+
+@pytest.mark.asyncio
+async def test_default_backend_head_source_delegates_to_head_revision():
+    # The default _BackendHeadRevisionSource probes head_revision on a
+    # StorageMetadataBackend, and returns None for a non-metadata backend.
+    from linktools.ai.storage.revision import _BackendHeadRevisionSource
+
+    class MetadataBackend:
+        async def load_metadata(self, after_revision): ...
+        async def head_revision(self):
+            return 9
+
+    src = _BackendHeadRevisionSource(MetadataBackend())
+    assert await src.current() == 9
+
+    class PlainReader:
+        async def list_info(self): ...
+
+    src2 = _BackendHeadRevisionSource(PlainReader())
+    assert await src2.current() is None
