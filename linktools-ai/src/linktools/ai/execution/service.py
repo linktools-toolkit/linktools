@@ -323,12 +323,13 @@ class ExecutionService:
                     )
                     latest = await self._required(record.id)
                 if latest.status is RunStatus.CANCELLING:
+                    trace_end = await collector.flush()
                     await self._store.acknowledge_cancel(
                         AcknowledgeCancellation(
                             record.id,
                             owner,
                             record.lease.fence,
-                            AgentSnapshotData((), None, RunUsage(), collector.next_sequence),
+                            AgentSnapshotData((), None, RunUsage(), trace_end),
                         )
                     )
             except Exception as cleanup_error:
@@ -354,8 +355,8 @@ class ExecutionService:
             # exception. A failure here is secondary -- the original error is
             # what the caller must see.
             try:
-                await collector.flush()
-                await self._store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), collector.next_sequence))
+                trace_end = await collector.flush()
+                await self._store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), trace_end))
             except Exception:
                 pass
             raise

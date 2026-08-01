@@ -4,6 +4,7 @@
 """Single-process TaskStore with shared lease semantics."""
 
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from ...storage.coordination.lease import Lease, assert_active, claim, renew
@@ -25,6 +26,13 @@ class LocalTaskBackend:
     def __init__(self) -> None:
         self._plans: "dict[str, TaskPlan]" = {}
         self._executions: "dict[str, TaskExecution]" = {}
+        # Serializes read-modify-write over executions. The lease helpers are
+        # pure and the bodies below hold no interior await, so the state is
+        # safe in single-threaded asyncio today; the lock keeps that invariant
+        # load-bearing rather than incidental, so a later refactor that adds
+        # an await (e.g. an audit hook) cannot widen claim/complete/fail into
+        # a real race.
+        self._lock = asyncio.Lock()
 
     async def save_plan(self, plan: "TaskPlan") -> None:
         self._plans[plan.id] = plan
@@ -41,35 +49,44 @@ class LocalTaskBackend:
     create_execution = add_execution
 
     async def claim(self, execution_id: str, *, owner: str, duration: timedelta = timedelta(minutes=5)) -> "TaskExecution":
-        current = self._executions[execution_id]
-        now = datetime.now(timezone.utc)
-        if current.status is TaskStatus.COMPLETED:
-            return current
-        lease = claim(current.lease, owner=owner, now=now, duration=duration)
-        updated = replace(current, status=TaskStatus.CLAIMED, lease=lease, attempt=current.attempt + 1, updated_at=now)
-        self._executions[execution_id] = updated
-        return updated
+        async with self._lock:
+            current = self._executions[execution_id]
+            now = datetime.now(timezone.utc)
+            if current.status is TaskStatus.COMPLETED:
+                return current
+            lease = claim(current.lease, owner=owner, now=now, duration=duration)
+            updated = replace(current, status=TaskStatus.CLAIMED, lease=lease, attempt=current.attempt + 1, updated_at=now)
+            self._executions[execution_id] = updated
+            return updated
 
     async def renew(self, execution_id: str, *, owner: str, fence: int, duration: timedelta = timedelta(minutes=5)) -> "TaskExecution":
-        current = self._executions[execution_id]
-        now = datetime.now(timezone.utc)
-        updated = replace(current, lease=renew(current.lease, owner=owner, fence=fence, now=now, duration=duration), updated_at=now)
-        self._executions[execution_id] = updated
-        return updated
+        async with self._lock:
+            current = self._executions[execution_id]
+            now = datetime.now(timezone.utc)
+            updated = replace(current, lease=renew(current.lease, owner=owner, fence=fence, now=now, duration=duration), updated_at=now)
+            self._executions[execution_id] = updated
+            return updated
 
     async def complete(self, execution_id: str, *, owner: str, fence: int, result: object) -> "TaskExecution":
-        current = await self.renew(execution_id, owner=owner, fence=fence)
-        now = datetime.now(timezone.utc)
-        updated = replace(current, status=TaskStatus.COMPLETED, result=result, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
-        self._executions[execution_id] = updated
-        return updated
+        # renew + terminal transition run as one atomic read-modify-write so a
+        # concurrent claim/fail cannot observe (or clobber) the half-renewed
+        # state between the two writes.
+        async with self._lock:
+            current = self._executions[execution_id]
+            now = datetime.now(timezone.utc)
+            renew(current.lease, owner=owner, fence=fence, now=now, duration=timedelta(minutes=5))
+            updated = replace(current, status=TaskStatus.COMPLETED, result=result, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
+            self._executions[execution_id] = updated
+            return updated
 
     async def fail(self, execution_id: str, *, owner: str, fence: int, retry: bool = False, error: object = None) -> "TaskExecution":
-        current = await self.renew(execution_id, owner=owner, fence=fence)
-        now = datetime.now(timezone.utc)
-        updated = replace(current, status=TaskStatus.READY if retry else TaskStatus.FAILED, error=error, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
-        self._executions[execution_id] = updated
-        return updated
+        async with self._lock:
+            current = self._executions[execution_id]
+            now = datetime.now(timezone.utc)
+            renew(current.lease, owner=owner, fence=fence, now=now, duration=timedelta(minutes=5))
+            updated = replace(current, status=TaskStatus.READY if retry else TaskStatus.FAILED, error=error, lease=Lease(current.lease.owner, current.lease.fence, None), updated_at=now)
+            self._executions[execution_id] = updated
+            return updated
 
 
 __all__ = ["LocalTaskBackend"]

@@ -47,6 +47,7 @@ class SpecObjectCache(Generic[T]):
         self._source_name = source_name or type(store).__name__
         self._cache: "dict[tuple[str, int, str], T]" = {}
         self._inflight: "dict[tuple[str, int, str], 'asyncio.Future[T]']" = {}
+        self._lock = asyncio.Lock()
         self._ids: "tuple[str, ...] | None" = None
 
     @property
@@ -70,31 +71,53 @@ class SpecObjectCache(Generic[T]):
         return tuple(sorted(dict.fromkeys(ids)))
 
     async def get(self, item_id: str) -> T:
+        # Coalesce concurrent reads of the same document identity under a lock:
+        # the first caller registers a future, reads the store, and decodes;
+        # later callers arrive while that future is pending and share the one
+        # decode without paying for a second store read. The store read is
+        # deliberately INSIDE the lock's critical section: without it, two
+        # callers could both miss the inflight entry, both read the store, and
+        # both decode, defeating the coalescing.
         path = self._full_path(item_id)
-        document = await self._store.get(path)
-        if document is None:
-            raise KeyError(item_id)
-        version = document.info.version
-        etag = document.info.etag
-        key = (item_id, version, etag)
-        cached = self._cache.get(key)
-        if cached is not None:
-            return cached
-        future = self._inflight.get(key)
-        if future is None:
-            future = asyncio.get_running_loop().create_future()
-            self._inflight[key] = future
-            try:
-                value = self._codec.decode(
-                    item_id, document.content.decode("utf-8")
-                )
-                self._cache[key] = value
-                future.set_result(value)
-            except BaseException as exc:
-                future.set_exception(exc)
-            finally:
-                self._inflight.pop(key, None)
+        async with self._lock:
+            document = await self._store.get(path)
+            if document is None:
+                raise KeyError(item_id)
+            version = document.info.version
+            etag = document.info.etag
+            key = (item_id, version, etag)
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+            future = self._inflight.get(key)
+            if future is None:
+                future = asyncio.get_running_loop().create_future()
+                self._inflight[key] = future
+                # Run the decode on a fresh task so the lock is released while
+                # it runs; concurrent callers re-enter, find the inflight
+                # future, and await it instead of starting a second decode.
+                asyncio.ensure_future(self._decode(item_id, key, document, future))
         return await future
+
+    async def _decode(
+        self,
+        item_id: str,
+        key: "tuple[str, int, str]",
+        document: Any,
+        future: "asyncio.Future[T]",
+    ) -> None:
+        try:
+            value = self._codec.decode(item_id, document.content.decode("utf-8"))
+            async with self._lock:
+                self._cache[key] = value
+            future.set_result(value)
+        except BaseException as exc:
+            async with self._lock:
+                self._inflight.pop(key, None)
+            future.set_exception(exc)
+            return
+        async with self._lock:
+            self._inflight.pop(key, None)
 
 
 __all__ = ["SpecCacheCodec", "SpecCacheStore", "SpecObjectCache"]
