@@ -9,16 +9,18 @@ requires-python: ">=3.10"
 # driver and injects a distributed coordinator; the core stays backend-neutral.
 dependencies:
   - pydantic-ai-slim[mcp,openai]>=1.107,<2
-  - linktools>=0.9.0
   - jsonschema>=4,<5
 
 dev-dependencies:
+  - linktools
+  - textual
   - pytest-asyncio
   - sqlalchemy[asyncio]>=2.0,<3
   - aiosqlite>=0.20,<1
   - lupa>=2,<3
 
-release-dependencies: []
+release-dependencies:
+  - linktools>=0.9.0
 
 optional-dependencies:
   sqlalchemy:
@@ -28,10 +30,3 @@ optional-dependencies:
     - aiosqlite>=0.20,<1
   tui:
     - textual
-  # test extra: install the built core wheel with pytest and pytest-asyncio.
-  test:
-    - pytest
-    - pytest-asyncio
-  all:
-    - sqlalchemy[asyncio]>=2.0,<3
-    - aiosqlite>=0.20,<1

@@ -4,16 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Monorepo Structure
 
-This is a Python monorepo for mobile security research tools, split into four independent sub-packages:
+This is a Python monorepo for mobile security research tools, split into five independent sub-packages:
 
-| Package | Description | Command Prefix |
-|---------|-------------|----------------|
-| `linktools/` | Core framework: CLI infrastructure, environ, config, tool management | (base) |
-| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools` | `ct-` |
-| `linktools-mobile/` | Android (`at-*`) and iOS (`it-*`) device tools | `at-`, `it-` |
-| `linktools-cntr/` | Docker/Podman container management (`ct-cntr`) | `ct-cntr` |
+| Package | Description | Command Prefix | Architecture doc |
+|---------|-------------|----------------|------------------|
+| `linktools/` | Core framework: CLI infrastructure, environ, config, tool management | (base) | [CLAUDE.md](linktools/CLAUDE.md) |
+| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools` | `ct-` | [CLAUDE.md](linktools-common/CLAUDE.md) |
+| `linktools-mobile/` | Android (`at-*`) and iOS (`it-*`) device tools | `at-`, `it-` | [CLAUDE.md](linktools-mobile/CLAUDE.md) |
+| `linktools-cntr/` | Docker/Podman container management (`ct-cntr`) | `ct-cntr` | [CLAUDE.md](linktools-cntr/CLAUDE.md) |
+| `linktools-ai/` | AI agent runtime: session/execution/swarm on pydantic-ai | — | [CLAUDE.md](linktools-ai/CLAUDE.md) |
 
-Each sub-package lives under `{name}/src/linktools/` and extends the core framework through Python entry points.
+Each sub-package lives under `{name}/src/linktools/` and extends the core framework through Python entry points. Each has its own `CLAUDE.md` covering its architecture; this file covers the shared concerns below.
 
 ## Development Commands
 
@@ -44,19 +45,6 @@ python manage.py clean
 python manage.py clean linktools-mobile
 ```
 
-### Build Frida scripts (TypeScript → JS)
-```bash
-cd linktools-mobile/agents/frida
-npm install
-npm run build
-```
-
-### Build Android APK (android-tools.apk)
-```bash
-cd linktools-mobile/agents/android
-./gradlew --no-daemon :tools:buildTools
-```
-
 ### Run a command after install
 ```bash
 # Unified entry point (shows all installed commands)
@@ -67,45 +55,7 @@ at-frida --help
 ct-tools apktool -h
 ```
 
-## Architecture
-
-### Core Framework (`linktools/src/linktools/`)
-
-- **`core/`** — Four main subsystems:
-  - `_environ.py` (`environ` singleton) — manages data/temp directories, logging, config access
-  - `_config.py` (`Config`) — multi-layer config system with `Property`, `Alias`, `Prompt`, `Confirm`, `Lazy`, `Error` descriptors chained via `|` operator
-  - `_tools.py` (`Tools`, `Tool`) — declarative tool definitions from `assets/tools.json`; handles download, extraction, and execution
-  - `_capability.py` (`BaseCapability`) — sub-package self-registration with version and path info
-- **`cli/`** — CLI framework: `BaseCommand`, `BaseCommandGroup`, `CommandParser` (enhanced `ArgumentParser`). All commands in all sub-packages inherit from these.
-- **`types.py`** — `Stoppable` (context manager pattern), `Timeout`, shared TypeVars/sentinels (`T`, `PathType`, `MISSING`)
-- **`errors.py`** — error hierarchy (`Error → ConfigError → ToolError → ToolNotFound/ToolNotSupport/ToolExecError`)
-- **`platform.py`** — OS/user/network helpers (`get_system`, `get_user`, `get_uid`/`get_gid`, `get_lan_ip`, `wait_process`, etc.)
-- **`runtime/`** — `Process`/`popen` (subprocess wrapper), `Reactor` (event loop), `Proxy`/`IterProxy` (lazy proxies), `EventHandlerMixin` (event dispatch mixin)
-- **`decorator.py`** — `@singleton`, `@cached_property`, `@try_except`, `@timeoutable`
-- **`rich.py`** — terminal UI: logging, progress bars, `prompt`/`confirm`/`choose`
-
-### Sub-package Layout
-
-Each sub-package follows the same pattern under `{pkg}/src/linktools/`:
-```
-commands/        — CLI command implementations (one file per command)
-capabilities/    — registers the sub-package with the core framework (auto-generated via jinja2)
-assets/          — static assets: config templates, built JS/APK artifacts
-```
-
-### Mobile Sub-package (`linktools-mobile/src/linktools/mobile/`)
-
-- **`android/`** — `adb.py` (ADB wrapper with multi-device selection), `types.py` (Android-specific types)
-- **`ios/`** — `ios.py` (go-ios wrapper), `ipa.py` (IPA parser), `sib.py`, `types.py`
-- **`frida/`** — Frida integration: `app.py` (`FridaApplication`, `FridaSession`, `FridaScript`, `FridaReactor`), `server.py` (`FridaServer`, `FridaAndroidServer`, `FridaIOSServer`), `script.py` (`FridaUserScript`, `FridaEvalCode`, `FridaScriptFile`)
-
-### Frida TypeScript Agents (`linktools-mobile/agents/frida/`)
-
-TypeScript source for the built-in Frida scripts. The compiled output (`frida.js`, `frida-*.js`) is committed to `linktools-mobile/src/linktools/assets/` as a build artifact. Key library in `lib/java.ts` provides `JavaHelper` with `hookMethod`, `hookMethods`, `hookAllMethods`, `bypassSslPinning`, etc.
-
-### Android APK Agent (`linktools-mobile/agents/android/`)
-
-Gradle/Android project that builds `android-tools.apk`. The built APK is committed to `linktools-mobile/src/linktools/assets/android-tools.*` as a build artifact.
+Sub-package-specific build steps (Frida TypeScript, Android APK) are documented in each sub-package's `CLAUDE.md`.
 
 ### `manage.py` (Monorepo Management Script)
 

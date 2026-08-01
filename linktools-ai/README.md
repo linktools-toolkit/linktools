@@ -1,9 +1,10 @@
 # linktools-ai
 
 Agent / session / execution runtime built on
-[pydantic-ai](https://ai.pydantic.dev/). Library only — no CLI commands, no
-domain-specific business logic. Consumers declare an `AgentSpec`, wire a
-storage backend + a `ModelResolver`, and call `Runtime.run`.
+[pydantic-ai](https://ai.pydantic.dev/). Consumers declare an `AgentSpec`,
+wire a storage backend + a `ModelResolver`, and call `Runtime.run`. An optional
+CLI (`linktools.ai.cli`) and TUI (`linktools.ai.cli.tui`) are included for
+local runs and inspection.
 
 ## Quick start
 
@@ -52,6 +53,48 @@ multi-worker deployment must use the SQL-first storage. Tools, tasks, memory,
 and artifacts are optional capabilities (`storage.tools`, `.tasks`, `.memory`,
 `.artifacts`); `RuntimeRequirements` declares which ones a given deployment
 needs so a missing store fails at composition time, not mid-run.
+
+### Storage composition
+
+Every domain store (spec, execution, task, tool, artifact) is a
+`StorageComposition`: a primary reader + optional ordered fallback layers + a
+writer + an optional content cache. The composition owns parallel per-layer
+metadata refresh, owner-aware entry merge, effective revision, and
+owner-directed `get` / `get_many` with the metadata-miss rule.
+
+Metadata loading uses a single-load REPLACE-or-PATCH protocol
+(`StorageMetadataBackend.load_metadata`): one call returns the head revision
+plus either the full entry set (REPLACE) or only the diff since the caller's
+held revision (PATCH). An injectable `RevisionSource` lets a downstream system
+share one revision signal across processes (redis/file cache) so a hot read
+loop short-circuits without hitting the database.
+
+### SQL concurrency model
+
+The SQL backends use **optimistic CAS, no pessimistic locks**. Every mutation
+is `UPDATE ... WHERE <all previously-read columns still match> ...` with a
+`rowcount != 1` conflict check. Monotonic columns (`fence`, `event_sequence`,
+`snapshot_revision`) on every CAS WHERE clause prevent ABA. A writer declaring
+the `BatchStorageWriter` capability gets atomic `apply_batch(puts, deletes)`
+(one transaction, one shared revision); otherwise the composition falls back
+to per-op `put` / `delete`.
+
+The `SqlAlchemyDialect` Protocol (`sqlite` / `mysql` / `postgresql`) provides
+vendor-neutral `upsert`, `upsert_many`, and `insert_ignore_conflict` primitives
+so no store hardcodes vendor SQL.
+
+### Installation extras
+
+The core wheel carries **no** environment-specific DB driver. Install the SQL
+kernel on demand:
+
+```bash
+pip install linktools-ai[sqlite]      # SQLAlchemy + aiosqlite (dev/test)
+pip install linktools-ai[sqlalchemy]  # SQLAlchemy only (bring your own driver)
+```
+
+A production deployment using MySQL or PostgreSQL brings its own async driver
+(`asyncmy`, `asyncpg`, …) — the core stays backend-neutral.
 
 ## Architecture
 

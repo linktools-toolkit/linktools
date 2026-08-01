@@ -10,6 +10,7 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 | [linktools-common](linktools-common/) | 通用工具：`ct-env`、`ct-grep`、`ct-tools` | [README](linktools-common/README.md) |
 | [linktools-mobile](linktools-mobile/) | 移动设备：Android（`at-*`）和 iOS（`it-*`）工具 | [README](linktools-mobile/README.md) |
 | [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Podman 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
+| [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai（纯库，无 CLI） | [README](linktools-ai/README.md) |
 
 ## 快速开始
 
@@ -27,13 +28,15 @@ python3 -m pip install -U "linktools[all]"
 python3 -m pip install -U "linktools-common[all]"
 python3 -m pip install -U "linktools-mobile[all]"
 python3 -m pip install -U "linktools-cntr"
+python3 -m pip install -U "linktools-ai[sqlite]"
 
 # 安装方式三：安装 GitHub 最新开发版
 python3 -m pip install --ignore-installed \
   "linktools@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools" \
   "linktools-common@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-common" \
   "linktools-mobile@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-mobile" \
-  "linktools-cntr@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-cntr"
+  "linktools-cntr@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-cntr" \
+  "linktools-ai@ git+https://github.com/linktools-toolkit/linktools.git@master#subdirectory=linktools-ai"
 ```
 
 ### 配置 alias（推荐）

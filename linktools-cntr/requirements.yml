@@ -7,7 +7,8 @@ dependencies:
   - packaging<22; python_version < '3.8'
   - packaging; python_version >= '3.8'
 
-dev-dependencies: []
+dev-dependencies:
+  - linktools[cli,git]
 
 release-dependencies:
   - linktools[cli,git]>=0.9.1

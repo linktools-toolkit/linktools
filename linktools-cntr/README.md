@@ -2,25 +2,6 @@
 
 Docker 容器部署和管理工具，为 homelab 及服务器环境提供统一的容器生命周期管理（命令前缀 `ct-cntr`）。
 
-## 重大变更（迁移说明）
-
-- `ct-cntr` 根命令及 `config`/`repo` 子命令的帮助顺序现在是显式、固定的契约（见下方“常用命令”顺序），不再依赖代码声明顺序。
-- `ct-cntr lock`/`ct-cntr diff` 命令、部署锁定（Deployment Lock）功能整体删除，`container.lock.json` 不再被读取或写入；已有的该文件不受影响，也不再有任何命令读取它，可自行删除。
-- 裸 `ct-cntr config`（不带子命令）现在只显示帮助，不再转发到 Compose 输出，也不再有 deprecation 提示。
-- `linktools.cntr.__main__` 只导出 `Command`/`command`；此前的 `manager`/`RepoCommand`/`ConfigCommand`/`ExecCommand` 等内部重导出全部删除，需要这些类的代码应改为从各自的 `linktools.cntr.commands.*` 模块导入。
-- `.linktools.json` 从 cntr 专属仓库清单升级为通用 Linktools 项目清单：
-  - `kind` 由 `linktools-cntr-repository` 改为 `linktools-project`，旧值不再被接受，无兼容解析或自动转换；
-  - cntr 专属的 requirement 从顶层 `requires`（`linktools-cntr`/`docker-engine`/`docker-compose`）迁移到 `components.cntr.requires`（`package:linktools-cntr`/`runtime:docker-engine`/`runtime:docker-compose`）；
-  - 清单存在但没有 `components.cntr` 块时，该项目视为未声明 cntr 能力，不会被扫描（不再当作遗留仓库处理）；
-  - `requires` 中此前未被识别的 key（如自定义工具名）现在会导致 `repo add`/`repo update`/仓库加载直接失败，而不是仅作为 `doctor` 的 INFO 提示——清单声明了当前 cntr 版本无法校验的要求时，不能假定其兼容。
-- `ct-cntr compose` 不再是命令组，`compose up/restart/down/status/config/validate` 全部删除，无兼容 alias：
-  - `ct-cntr compose up/restart/down/status` → `ct-cntr up/restart/down/status`
-  - `ct-cntr compose config` → `ct-cntr compose`
-  - `ct-cntr compose validate` → `ct-cntr compose --check`
-- Compose 中用户自己写的相对路径（`build`/`build.context`/`env_file`/`volumes` 短语法）不再被自动改写为绝对路径；仓库作者需要绝对路径时应在模板中显式使用 `{{ SOURCE_PATH }}`/`{{ APP_DATA_PATH }}` 等变量。
-- `ct-cntr status` 改为基于 `docker compose ... ps --quiet` + `docker inspect` 获取真实状态，不再依赖 `docker compose ps --format json` 的输出。
-- `.linktools.json` 中声明的 `runtime:docker-engine`/`runtime:docker-compose` 版本要求会实际阻断 `up`/`restart`/`compose`（`down`/`status`/`doctor` 不受影响）。
-
 ## 开始使用
 
 以基于 Debian 的系统为例，先安装运行环境：
