@@ -4,6 +4,7 @@
 """Semantic trace collection with persisted sequence continuity."""
 
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from ..json import normalize_json
@@ -23,6 +24,7 @@ class SemanticTraceCollector:
     trace_port: "ExecutionStore"
     next_sequence: int = 0
     _pending: "list[NewRunTraceStep]" = field(default_factory=list)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def _add(self, kind: str, payload: "JsonValue") -> None:
         self._pending.append(
@@ -34,18 +36,21 @@ class SemanticTraceCollector:
         )
 
     async def model_request_succeeded(self, payload: "JsonValue") -> None:
-        self._add("model_interaction", payload)
-        await self.flush()
+        async with self._lock:
+            self._add("model_interaction", payload)
+            await self._flush_locked()
 
     async def model_request_failed(self, payload: "JsonValue") -> None:
-        self._add("model_interaction", payload)
-        await self.flush()
+        async with self._lock:
+            self._add("model_interaction", payload)
+            await self._flush_locked()
 
     async def tool_result(self, payload: "JsonValue") -> None:
-        self._add("tool_result", payload)
-        await self.flush()
+        async with self._lock:
+            self._add("tool_result", payload)
+            await self._flush_locked()
 
-    async def flush(self) -> int:
+    async def _flush_locked(self) -> int:
         if not self._pending:
             return self.next_sequence
         steps = tuple(self._pending)
@@ -54,6 +59,10 @@ class SemanticTraceCollector:
         )
         self._pending.clear()
         return self.next_sequence
+
+    async def flush(self) -> int:
+        async with self._lock:
+            return await self._flush_locked()
 
     async def build_snapshot(self, *, resume_messages: "tuple[JsonValue, ...]", final_output: "JsonValue | str | None", status: "RunStatus", usage: "RunUsage") -> AgentSnapshotData:
         await self.flush()
