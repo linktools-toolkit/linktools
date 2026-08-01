@@ -128,6 +128,25 @@ async def test_layer_merge_records_owner_and_earlier_wins():
 
 
 @pytest.mark.asyncio
+async def test_list_info_with_owners_exposes_provenance():
+    # list_info_with_owners pairs each entry with its owning layer index, so a
+    # caller can separate primary-managed (0) from layer-provided (>0) entries.
+    primary = MetadataBackend((_doc("db-only"), _doc("overridden")))
+    layer = MetadataBackend((_doc("builtin-only"), _doc("overridden")))
+    composition = StorageComposition(
+        primary,
+        layers=(StorageLayer(backend=layer),),
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+    )
+    paired = await composition.list_info_with_owners()
+    owners = {info.path: owner for info, owner in paired}
+    assert owners["db-only"] == 0       # primary-only -> DB-managed
+    assert owners["overridden"] == 0    # primary wins the conflict -> DB-managed
+    assert owners["builtin-only"] == 1  # layer-only -> builtin default
+
+
+@pytest.mark.asyncio
 async def test_effective_revision_single_primary_is_primary_revision():
     primary = MetadataBackend((_doc("a"),), revision=7)
     composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())

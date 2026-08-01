@@ -365,6 +365,24 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             for key in sorted(state.entries, key=lambda value: str(value))
         )
 
+    async def list_info_with_owners(
+        self, *, preload: bool = False
+    ) -> "tuple[tuple[InfoT, int], ...]":
+        """Same entries as :meth:`list_info`, each paired with its owning layer
+        index (0 = primary, >0 = a fallback layer). A caller that needs to tell
+        primary-managed entries apart from layer-provided ones (e.g. DB-customized
+        vs builtin-default, when a filesystem layer supplies read-through
+        defaults) uses this instead of :meth:`list_info`."""
+        state = await self.refresh()
+        if state is None:
+            return ()
+        if preload:
+            await self._preload(state)
+        return tuple(
+            (state.entries[key], state.owners.get(key, 0))
+            for key in sorted(state.entries, key=lambda value: str(value))
+        )
+
     async def _preload(self, state: "EffectiveMetadataState[KeyT, InfoT]") -> None:
         adapter, cache_adapter = self._require_adapter()
         if self.cache is None or cache_adapter is None:

@@ -86,6 +86,14 @@ class SpecStore:
     async def list_info(self, *, preload: bool = False) -> "tuple[SpecDocumentInfo, ...]":
         return await self._storage.list_info(preload=preload)
 
+    async def list_info_with_owners(
+        self, *, preload: bool = False
+    ) -> "tuple[tuple[SpecDocumentInfo, int], ...]":
+        """list_info paired with each entry's owning layer index (0 = primary,
+        >0 = a fallback layer). Use this to separate primary-managed entries
+        from layer-provided ones (e.g. DB-customized vs builtin-default)."""
+        return await self._storage.list_info_with_owners(preload=preload)
+
     async def current_revision(self) -> "int | str":
         return await self._storage.current_revision()
 
