@@ -59,7 +59,7 @@ def _workspace_id_from(context: "RunContext") -> "str | None":
     if ws is not None:
         return str(ws)
     if context.workspace is not None:
-        return getattr(context.workspace, "id", None)
+        return context.workspace.id
     return None
 
 

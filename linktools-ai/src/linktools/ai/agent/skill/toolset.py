@@ -21,11 +21,11 @@ SkillEmitter = "Callable[[Any], Awaitable[None]]"
 
 
 def summary_from_spec(skill_id: str, spec: "SkillSpec", *, authorized: bool = True) -> SkillSummary:
-    meta = dict(getattr(spec, "metadata", {}) or {})
+    meta = dict(spec.metadata or {})
     return SkillSummary(
         id=skill_id,
-        name=getattr(spec, "name", skill_id),
-        description=getattr(spec, "description", None) or None,
+        name=spec.name,
+        description=spec.description or None,
         tags=list(meta.get("tags", []) or []),
         extension_id=meta.get("extension_id"),
         metadata=meta,
@@ -78,12 +78,12 @@ def build_skill_toolset(
             # Do not leak whether the skill exists.
             raise SkillNotFoundError(f"skill not available: {skill_id}")
         spec = await skill_provider.get(skill_id)
-        meta = dict(getattr(spec, "metadata", {}) or {})
+        meta = dict(spec.metadata or {})
         content = SkillContent(
             id=skill_id,
-            name=getattr(spec, "name", skill_id),
-            description=getattr(spec, "description", None) or None,
-            content=getattr(spec, "instructions", ""),
+            name=spec.name,
+            description=spec.description or None,
+            content=spec.instructions,
             extension_id=meta.get("extension_id"),
             metadata=meta,
         )

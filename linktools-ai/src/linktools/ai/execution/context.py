@@ -9,6 +9,7 @@ from typing import Any, Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ..agent.sandbox.workspace import WorkspaceRef
     from .domain import RunnableType
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +22,7 @@ class RunContext:
     runnable_type: "RunnableType"
     user_id: "str | None"
     tenant_id: "str | None"
-    workspace: "object | None"
+    workspace: "WorkspaceRef | None"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:

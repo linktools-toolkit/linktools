@@ -113,7 +113,7 @@ class _BufferedStreamedResponse(StreamedResponse):
     _timestamp: "datetime" = field(default_factory=lambda: datetime.now(timezone.utc))
 
     async def _get_event_iterator(self):  # type: ignore[override]
-        for index, part in enumerate(getattr(self._response, "parts", None) or ()):
+        for index, part in enumerate(self._response.parts):
             yield self._parts_manager.handle_part(vendor_part_id=index, part=part)
 
     async def close_stream(self) -> None:

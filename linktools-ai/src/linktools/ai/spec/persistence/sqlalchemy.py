@@ -458,9 +458,9 @@ def _entry_values_by_info(info: SpecDocumentInfo) -> "dict[str, object]":
     }
 
 
-def _metadata_expr(model):
+def _metadata_expr(model: "type[EntryRow]"):
     # Project only metadata columns; never the LargeBinary content.
-    return (getattr(model, "path"), getattr(model, "kind"), getattr(model, "version"), getattr(model, "etag"), getattr(model, "active"))
+    return (model.path, model.kind, model.version, model.etag, model.active)
 
 
 def _metadata_query(*, kind: "str | None" = None):

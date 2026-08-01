@@ -339,7 +339,7 @@ class LocalRuntimeClient:
         for mcp_id in await bundle.mcp.list_ids():
             try:
                 spec = await bundle.mcp.get(mcp_id)
-                expand_env_mapping(getattr(spec, "env", None))
+                expand_env_mapping(spec.env)
                 ok(f"MCP: {mcp_id}")
             except Exception as exc:
                 fail(f"MCP: {mcp_id}", str(exc))

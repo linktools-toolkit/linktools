@@ -33,7 +33,7 @@ class KnowledgeContext:
             return ""
         lines = ["## Knowledge"]
         for doc in self.documents:
-            if getattr(doc, "trust_level", None) == "untrusted" and doc.source == "memory":
+            if doc.trust_level == "untrusted" and doc.source == "memory":
                 lines.append(format_untrusted_context(doc.content, source=doc.source or doc.id))
             else:
                 lines.append(f"- {doc.content}")
