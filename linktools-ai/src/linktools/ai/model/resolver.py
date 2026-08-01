@@ -46,6 +46,11 @@ class ResolvedModel:
     model: "Model"
     revision: str
     usage_limits: "UsageLimits"
+    # Agent-layer structured-output retry count, sourced from the PRIMARY
+    # candidate's bundle (fallbacks are not consulted, mirroring how
+    # usage_limits is taken from bundles[0] only). Default 1 so direct
+    # constructions that omit it (e.g. test stubs) keep pydantic-ai's default.
+    output_retries: int = 1
 
 
 class ModelResolver:
@@ -73,11 +78,12 @@ class ModelResolver:
         models = [_candidate_model(b, policy.request_retries) for b in bundles]
         revision = _resolved_revision(bundles, policy.request_retries)
         usage_limits = bundles[0].usage_limits
+        output_retries = bundles[0].output_retries
         if len(models) == 1:
-            return ResolvedModel(models[0], revision, usage_limits)
+            return ResolvedModel(models[0], revision, usage_limits, output_retries)
         from pydantic_ai.models.fallback import FallbackModel
 
-        return ResolvedModel(FallbackModel(*models), revision, usage_limits)
+        return ResolvedModel(FallbackModel(*models), revision, usage_limits, output_retries)
 
 
 def effective_request_retries(

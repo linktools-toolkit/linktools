@@ -52,6 +52,22 @@ def _config(model_type: str, *, base_url: str, api_key: str) -> RuntimeModelConf
     )
 
 
+def _config_with_raw(
+    model_type: str, *, base_url: str, api_key: str, raw: "dict[str, Any]"
+) -> RuntimeModelConfig:
+    cfg = _config(model_type, base_url=base_url, api_key=api_key)
+    return RuntimeModelConfig(
+        model_type=cfg.model_type,
+        protocol=cfg.protocol,
+        model=cfg.model,
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        auth_token=cfg.auth_token,
+        timeout_seconds=cfg.timeout_seconds,
+        raw=raw,
+    )
+
+
 def test_single_registered_candidate_used_directly():
     registry = _prebuilt_registry("only")
     resolved = ModelResolver(registry=registry).resolve(ModelPolicy(primary="only"))
@@ -272,4 +288,70 @@ def test_model_bundle_model_field_accepts_generic_model():
     registry.register("m", model=FunctionModel(_fn("y")))
     resolved = ModelResolver(registry=registry).resolve(ModelPolicy(primary="m"))
     assert isinstance(resolved.model, FunctionModel)
+
+
+# ---- output_retries (Agent-layer structured-output retry) ------------------
+# Distinct from request_retries (HTTP-client): wired into Agent(retries=...),
+# read from raw["max_retries"], NOT part of revision (it is a runtime tuning
+# knob, not model identity).
+
+
+def test_from_config_reads_output_retries_from_raw():
+    # raw["max_retries"] is read as the Agent-layer output retry count.
+    bundle = ModelBundle.from_config(
+        _config_with_raw("m", base_url="http://x", api_key="k", raw={"max_retries": 5}),
+        request_retries=0,
+    )
+    assert bundle.output_retries == 5
+
+
+def test_from_config_defaults_output_retries_to_one():
+    bundle = ModelBundle.from_config(
+        _config("m", base_url="http://x", api_key="k"), request_retries=0
+    )
+    assert bundle.output_retries == 1
+
+
+def test_from_instance_accepts_output_retries():
+    bundle = ModelBundle.from_instance("p", FunctionModel(_fn("x")), output_retries=4)
+    assert bundle.output_retries == 4
+
+
+def test_from_instance_defaults_output_retries_to_one():
+    assert ModelBundle.from_instance("p", FunctionModel(_fn("x"))).output_retries == 1
+
+
+def test_register_prebuilt_thread_output_retries():
+    registry = ModelRegistry()
+    registry.register("p", model=FunctionModel(_fn("x")), output_retries=6)
+    assert registry.get("p").output_retries == 6
+
+
+def test_resolve_output_retries_from_primary_candidate():
+    # resolve() surfaces the PRIMARY candidate's output_retries; fallbacks are
+    # not consulted (mirrors how usage_limits is taken from bundles[0] only).
+    registry = _prebuilt_registry("primary", "fb")
+    registry.register("primary", model=FunctionModel(_fn("0")), output_retries=3)
+    registry.register("fb", model=FunctionModel(_fn("1")), output_retries=9)
+    resolved = ModelResolver(registry=registry).resolve(
+        ModelPolicy(primary="primary", fallbacks=("fb",))
+    )
+    assert resolved.output_retries == 3
+
+
+def test_output_retries_not_part_of_revision():
+    # output_retries is a runtime tuning knob, not model identity: changing it
+    # must NOT invalidate the revision (so an in-flight resumable run never
+    # mis-detects provider drift when the retry count is adjusted).
+    registry_a = ModelRegistry()
+    cfg_a = _config_with_raw("m", base_url="http://x", api_key="k", raw={"max_retries": 1})
+    registry_a.register("m", config=cfg_a)
+    rev_one = ModelResolver(registry=registry_a).resolve(ModelPolicy(primary="m")).revision
+
+    registry_b = ModelRegistry()
+    cfg_b = _config_with_raw("m", base_url="http://x", api_key="k", raw={"max_retries": 8})
+    registry_b.register("m", config=cfg_b)
+    rev_eight = ModelResolver(registry=registry_b).resolve(ModelPolicy(primary="m")).revision
+
+    assert rev_one == rev_eight
 

@@ -64,6 +64,7 @@ class AgentCompiler:
             capabilities=capabilities,
             deps_type=AgentDependencies,
             instructions=spec.instructions.instructions,
+            retries=resolved.output_retries,
         )
         return CompiledAgent(
             spec=spec,

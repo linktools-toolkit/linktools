@@ -99,6 +99,13 @@ class ModelBundle:
     model: "Model"
     settings: ModelSettings
     usage_limits: UsageLimits
+    # pydantic-ai Agent-layer retries: how many times the Agent re-asks the
+    # model after a structured-output / tool-call validation failure. Unrelated
+    # to ``request_retries`` (the provider HTTP client's own retry of transient
+    # HTTP failures); wired into ``Agent(retries=...)`` by the compiler. Not
+    # part of ``revision`` -- it is a runtime tuning knob, not model identity,
+    # so changing it must not invalidate in-flight resumable runs.
+    output_retries: int = 1
 
     @property
     def revision(self) -> str:
@@ -158,7 +165,19 @@ class ModelBundle:
         )
         max_turns = int(raw.get("max_turns", 10))
         usage_limits = UsageLimits(request_limit=max(1, max_turns))
-        return cls(config=config, model=model, settings=settings, usage_limits=usage_limits)
+        # Interpret the raw "max_retries" as the AGENT-layer structured-output
+        # retry count (wired into Agent(retries=...)), NOT the HTTP-client retry
+        # (that is request_retries, resolved separately). Default 1 matches
+        # pydantic-ai's own Agent default, so callers that never set this field
+        # see no behavior change.
+        output_retries = max(1, int(raw.get("max_retries", 1)))
+        return cls(
+            config=config,
+            model=model,
+            settings=settings,
+            usage_limits=usage_limits,
+            output_retries=output_retries,
+        )
 
     @classmethod
     def from_instance(
@@ -169,12 +188,15 @@ class ModelBundle:
         request_retries: "int | None" = None,
         settings: "ModelSettings | None" = None,
         usage_limits: "UsageLimits | None" = None,
+        output_retries: int = 1,
     ) -> "ModelBundle":
         """Wrap an already-constructed (prebuilt) Model. A prebuilt model owns its
         own HTTP client and retry behavior, so the framework cannot configure
         ``max_retries`` on it: ``request_retries`` MUST be None (the signal that
         the prebuilt model manages its own retries). A non-None value is a
-        configuration error -- rejected explicitly, never silently ignored."""
+        configuration error -- rejected explicitly, never silently ignored.
+        ``output_retries`` (the Agent-layer structured-output retry count) is
+        independent of the HTTP client and MAY be set on a prebuilt model."""
         from ..errors import ModelRetryConfigurationError
 
         if request_retries is not None:
@@ -198,6 +220,7 @@ class ModelBundle:
             settings=settings
             or ModelSettings(max_tokens=4096, timeout=300.0, parallel_tool_calls=True),
             usage_limits=usage_limits or UsageLimits(request_limit=10),
+            output_retries=max(1, output_retries),
         )
 
 
@@ -219,12 +242,15 @@ class ModelRegistry:
         model: "Model | None" = None,
         settings: "ModelSettings | None" = None,
         usage_limits: "UsageLimits | None" = None,
+        output_retries: int = 1,
     ) -> None:
         if (config is None) == (model is None):
             raise ValueError("register() requires exactly one of `config` or `model`")
         if config is not None:
             # Config-backed: registered with request_retries=0 (the framework
             # default); the resolver applies the policy's value at resolve time.
+            # output_retries is read from config.raw["max_retries"] inside
+            # from_config, so it is NOT passed here.
             bundle = ModelBundle.from_config(config, request_retries=0)
         else:
             # Prebuilt: no framework retry configuration (None).
@@ -233,6 +259,7 @@ class ModelRegistry:
                 model,
                 settings=settings,
                 usage_limits=usage_limits,
+                output_retries=output_retries,
             )
         self._bundles[model_type] = bundle
 
