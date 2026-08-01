@@ -88,3 +88,12 @@ On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels
 - **Public API is annotated**: every public method/function (not `_`-prefixed) has parameter and return annotations, inferred from body/call sites. Use `Any` only for genuinely untyped values.
 - **Quoting**: quote annotations containing `|` or `[...]` (`"float | None"`, `"list[str]"`); bare primitives (`str`, `int`, `bool`, `Any`, …) and bare class names stay unquoted — unless the name is imported under `TYPE_CHECKING`, in which case it must be quoted.
 - **`TYPE_CHECKING`**: annotation-only imports go under `if TYPE_CHECKING:`; runtime imports stay at module scope. Never move names in `__all__` or referenced by runtime-resolved annotations (SQLAlchemy `Mapped[...]`, Pydantic fields).
+
+## Comments — minimal
+
+- Explain only what naming and structure cannot: intent, constraints, protocols, counter-intuitive behavior.
+- No external references (plan sections, review items, issue/PR links, process narrative).
+- No restating the code; no history, decision debates, or reviewer-facing prose; no boilerplate.
+- Prefer a rename or restructure over a comment.
+- If deleting the comment leaves the code clear, delete it.
+- Don't clean up unrelated old comments, but fix any a current edit makes stale or false.
