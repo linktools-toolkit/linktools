@@ -1,232 +1,169 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Single-process spec persistence over a manifest + immutable content objects.
+"""Plain filesystem-directory spec backend.
 
-Layout::
+A spec at path ``agent/writer.md`` is stored as the file ``<root>/agent/writer.md``
+whose body is the spec content. The layout mirrors the directory tree directly --
+no manifest, no object store, no revision counter.
 
-    <root>/
-    ├── manifest.json      # { revision, entries: { path: { info, object_id } } }
-    └── objects/<uuid>.bin # immutable content, named by object_id
+Metadata is derived from the file at read time:
 
-The manifest is the single publication point: a mutation writes its new/changed
-content object(s) first, then atomically replaces the manifest, then updates
-in-memory state and best-effort cleans up unreferenced objects. A crash can
-leave only orphan objects -- the manifest never references an unfinished object.
+- ``path``  -- the file's path relative to ``<root>`` (POSIX-formatted),
+- ``etag``  -- ``sha256(content)``,
+- ``kind``  -- the first ``/``-delimited segment of the path (``agent/writer.md`` →
+  ``agent``); a path with no ``/`` defaults to ``"spec"``,
+- ``version`` -- always 1 (the directory layout carries no version history),
+- ``active`` -- always True.
 
-Metadata reloads read one manifest; content reads read one object. Single
-process only: one ``asyncio.Lock`` serializes every mutation."""
+Because the backend does not implement :class:`StorageMetadataBackend`,
+:class:`StorageComposition` selects the ``ALWAYS`` refresh policy: every refresh
+calls :meth:`list_info`, which walks the tree. There is no incremental PATCH.
+"""
 
 
 import asyncio
-from dataclasses import asdict
 from pathlib import Path
 
-from ...errors import StorageCorruptionError
-from ...storage.local.files import atomic_write_bytes, atomic_write_json, read_bytes, read_json
-from ...storage.revision import (
-    MetadataLoad,
-    MetadataLoadMode,
-    StorageChange,
-    StorageMetadataBackend,
-)
-from ..document import SpecDocument, SpecDocumentInfo
+from ...errors import SpecConflictError
+from ...storage.local.files import atomic_write_bytes, read_bytes
+from ..document import SpecDocument, SpecDocumentInfo, compute_spec_etag
 
 
-class LocalSpecBackend(StorageMetadataBackend[int, str, SpecDocumentInfo]):
+class LocalSpecBackend:
+    """Spec persistence over a plain directory tree."""
+
     def __init__(self, root: "str | Path" = ".linktools") -> None:
         self.root = Path(root)
-        self._lock = asyncio.Lock()
-        self._manifest: "dict | None" = None
 
-    @property
-    def _manifest_path(self) -> Path:
-        return self.root / "manifest.json"
+    # ---- path safety ---------------------------------------------------
 
-    @property
-    def _objects_dir(self) -> Path:
-        return self.root / "objects"
+    def _resolve(self, path: str) -> Path:
+        """Map a spec path to its filesystem path under ``<root>``, rejecting
+        any path that escapes ``<root>`` (absolute or ``..`` traversal)."""
+        target = (self.root / path).resolve()
+        root = self.root.resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise SpecConflictError(f"spec path escapes root: {path!r}") from exc
+        return target
 
-    def _object_path(self, object_id: str) -> Path:
-        return self._objects_dir / f"{object_id}.bin"
+    # ---- lifecycle -----------------------------------------------------
 
     async def initialize_storage(self) -> None:
-        async with self._lock:
-            await asyncio.to_thread(self._manifest_path.parent.mkdir, parents=True, exist_ok=True)
-            await asyncio.to_thread(self._objects_dir.mkdir, parents=True, exist_ok=True)
-            if self._manifest is None:
-                if await asyncio.to_thread(self._manifest_path.exists):
-                    self._manifest = await asyncio.to_thread(read_json, self._manifest_path)
-                else:
-                    self._manifest = self._empty_manifest()
-                    await self._write_manifest()
-
-    def _empty_manifest(self) -> dict:
-        return {"revision": 0, "entries": {}}
+        await asyncio.to_thread(self.root.mkdir, parents=True, exist_ok=True)
 
     # ---- reader --------------------------------------------------------
 
     async def get(self, path: str) -> "SpecDocument | None":
-        await self._ensure_loaded()
-        entry = self._manifest["entries"].get(path)
-        if entry is None:
+        target = self._resolve(path)
+        try:
+            content = await asyncio.to_thread(read_bytes, target)
+        except FileNotFoundError:
             return None
-        return SpecDocument(
-            _info(entry["info"]),
-            await self._read_object(entry["object_id"]),
-        )
+        return SpecDocument(_info(path, content), content)
 
     async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, SpecDocument]":
-        await self._ensure_loaded()
         result: "dict[str, SpecDocument]" = {}
         for path in paths:
-            entry = self._manifest["entries"].get(path)
-            if entry is not None:
-                result[path] = SpecDocument(
-                    _info(entry["info"]),
-                    await self._read_object(entry["object_id"]),
-                )
+            doc = await self.get(path)
+            if doc is not None:
+                result[path] = doc
         return result
 
     async def stat(self, path: str) -> "SpecDocumentInfo | None":
-        await self._ensure_loaded()
-        entry = self._manifest["entries"].get(path)
-        return None if entry is None else _info(entry["info"])
+        target = self._resolve(path)
+        try:
+            content = await asyncio.to_thread(read_bytes, target)
+        except FileNotFoundError:
+            return None
+        return _info(path, content)
 
     async def list_info(self, *, kind: "str | None" = None) -> "tuple[SpecDocumentInfo, ...]":
-        await self._ensure_loaded()
-        infos = [_info(entry["info"]) for entry in self._manifest["entries"].values()]
-        if kind is not None:
-            infos = [info for info in infos if info.kind == kind]
-        return tuple(sorted(infos, key=lambda item: item.path))
+        """Walk the tree and derive info for every file under ``<root>``. The
+        path is the file's path relative to ``<root>`` (POSIX-formatted).
+        ``kind`` optionally filters by the first path segment."""
+        root = self.root.resolve()
 
-    # ---- metadata backend ---------------------------------------------
+        def _scan() -> "tuple[tuple[str, bytes], ...]":
+            if not root.exists():
+                return ()
+            found: "list[tuple[str, bytes]]" = []
+            for file in root.rglob("*"):
+                if not file.is_file():
+                    continue
+                rel = file.relative_to(root)
+                spec_path = rel.as_posix()
+                if kind is not None and _kind_of(spec_path) != kind:
+                    continue
+                found.append((spec_path, file.read_bytes()))
+            return tuple(found)
 
-    async def load_metadata(
-        self,
-        after_revision: "int | None",
-    ) -> "MetadataLoad[int, str, SpecDocumentInfo]":
-        await self._ensure_loaded()
-        head = self._manifest["revision"]
-        # Local keeps no change log: any request that is not exactly at head
-        # is a full REPLACE. An empty PATCH at the same revision is legal and
-        # lets a caller confirm "nothing changed" with zero content reads.
-        if after_revision == head:
-            return MetadataLoad(head, MetadataLoadMode.PATCH, ())
-        changes = tuple(
-            StorageChange(path, _info(entry["info"]))
-            for path, entry in sorted(self._manifest["entries"].items())
-        )
-        return MetadataLoad(head, MetadataLoadMode.REPLACE, changes)
-
-    async def head_revision(self) -> int:
-        # No change log to scan: the manifest's revision field is the head. A
-        # cheap probe matching the value ``load_metadata`` would return.
-        await self._ensure_loaded()
-        return self._manifest["revision"]
+        scanned = await asyncio.to_thread(_scan)
+        return tuple(_info(p, c) for p, c in sorted(scanned, key=lambda item: item[0]))
 
     # ---- writer --------------------------------------------------------
 
     async def put(self, entry: SpecDocument) -> SpecDocument:
         entry.validate_etag()
-        async with self._lock:
-            await self._ensure_loaded()
-            object_id = _object_id_for(entry.info)
-            await self._write_object(object_id, entry.content)
-            entries = dict(self._manifest["entries"])
-            entries[entry.info.path] = {"info": asdict(entry.info), "object_id": object_id}
-            await self._publish(entries)
+        target = self._resolve(entry.info.path)
+        await asyncio.to_thread(atomic_write_bytes, target, entry.content)
         return entry
 
     async def delete(self, path: str) -> None:
-        async with self._lock:
-            await self._ensure_loaded()
-            entries = dict(self._manifest["entries"])
-            if path not in entries:
-                return
-            entries.pop(path)
-            await self._publish(entries)
+        target = self._resolve(path)
+        await asyncio.to_thread(_unlink_if_exists, target)
 
     async def reset(self, entries: "tuple[SpecDocument, ...]") -> None:
         for entry in entries:
             entry.validate_etag()
-        async with self._lock:
-            await self._ensure_loaded()
-            new: "dict[str, dict]" = {}
-            for entry in entries:
-                object_id = _object_id_for(entry.info)
-                # _write_object is a no-op when the object already exists, so
-                # unchanged content (same etag -> same object_id) reuses it for free.
-                await self._write_object(object_id, entry.content)
-                new[entry.info.path] = {"info": asdict(entry.info), "object_id": object_id}
-            await self._publish(new)
+        # Full replacement: delete every existing file whose path is not in the
+        # new set, then write the new set.
+        keep = {entry.info.path for entry in entries}
+        existing = {info.path for info in await self.list_info()}
+        for path in existing - keep:
+            await asyncio.to_thread(_unlink_if_exists, self._resolve(path))
+        for entry in entries:
+            target = self._resolve(entry.info.path)
+            await asyncio.to_thread(atomic_write_bytes, target, entry.content)
 
-    # ---- internals -----------------------------------------------------
-
-    async def _ensure_loaded(self) -> None:
-        if self._manifest is None:
-            if await asyncio.to_thread(self._manifest_path.exists):
-                self._manifest = await asyncio.to_thread(read_json, self._manifest_path)
-            else:
-                self._manifest = self._empty_manifest()
-
-    async def _publish(self, entries: dict) -> None:
-        previous_revision = self._manifest["revision"]
-        previous_object_ids = {
-            entry["object_id"] for entry in self._manifest["entries"].values()
-        }
-        manifest = {"revision": previous_revision + 1, "entries": entries}
-        await self._write_manifest_with(manifest)
-        self._manifest = manifest
-        # Best-effort cleanup of objects no longer referenced after this publish.
-        await self._cleanup_orphans(previous_object_ids, entries)
-
-    async def _cleanup_orphans(self, previous_ids: "set[str]", entries: dict) -> None:
-        kept = {entry["object_id"] for entry in entries.values()}
-        orphan_paths = [self._object_path(oid) for oid in previous_ids - kept]
-
-        def _unlink_all() -> None:
-            for path in orphan_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-
-        if orphan_paths:
-            await asyncio.to_thread(_unlink_all)
-
-    async def _write_object(self, object_id: str, content: bytes) -> None:
-        path = self._object_path(object_id)
-        if await asyncio.to_thread(path.exists):
-            return
-        await asyncio.to_thread(atomic_write_bytes, path, content)
-
-    async def _read_object(self, object_id: str) -> bytes:
-        path = self._object_path(object_id)
-        try:
-            return await asyncio.to_thread(read_bytes, path)
-        except FileNotFoundError as exc:
-            raise StorageCorruptionError(
-                f"spec object {object_id} referenced by manifest is missing"
-            ) from exc
-
-    async def _write_manifest(self) -> None:
-        await self._write_manifest_with(self._manifest)
-
-    async def _write_manifest_with(self, manifest: dict) -> None:
-        await asyncio.to_thread(atomic_write_json, self._manifest_path, manifest)
+    async def apply_batch(
+        self,
+        puts: "tuple[SpecDocument, ...]",
+        deletes: "tuple[str, ...]",
+    ) -> None:
+        for entry in puts:
+            entry.validate_etag()
+        put_paths = {entry.info.path for entry in puts}
+        for entry in puts:
+            target = self._resolve(entry.info.path)
+            await asyncio.to_thread(atomic_write_bytes, target, entry.content)
+        for path in deletes:
+            if path in put_paths:
+                continue
+            await asyncio.to_thread(_unlink_if_exists, self._resolve(path))
 
 
-def _info(raw: dict) -> SpecDocumentInfo:
+def _info(path: str, content: bytes) -> SpecDocumentInfo:
     return SpecDocumentInfo(
-        raw["path"], raw["kind"], raw["version"], raw["etag"], raw.get("active", True)
+        path=path,
+        kind=_kind_of(path),
+        version=1,
+        etag=compute_spec_etag(content),
+        active=True,
     )
 
 
-def _object_id_for(info: SpecDocumentInfo) -> str:
-    # The etag is sha256(content); content-addressing the object by it makes
-    # identical content share one object and lets reset reuse it.
-    return info.etag
+def _kind_of(path: str) -> str:
+    return path.split("/", 1)[0] if "/" in path else "spec"
+
+
+def _unlink_if_exists(target: Path) -> None:
+    try:
+        target.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 __all__ = ["LocalSpecBackend"]
