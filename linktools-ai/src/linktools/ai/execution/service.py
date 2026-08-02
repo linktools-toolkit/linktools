@@ -25,7 +25,7 @@ from ..errors import PrincipalAccessDeniedError, RunDefinitionError, RunDefiniti
 from ..json import canonical_json_bytes
 from ..observability.events.payloads import SecurityDegraded
 from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
-from .domain import RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage
+from .domain import MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage
 from .context import RunContext
 from .cancellation import CancellationToken
 from .controller import ExecutionControllerRegistry
@@ -185,11 +185,10 @@ class ExecutionService:
         await self._store.resume_run(ResumeExecution(run_id))
         # Claiming the now-PENDING run and loading its own snapshot don't
         # depend on each other -- run concurrently.
-        claimed, snapshot = await asyncio.gather(
+        claimed, messages = await asyncio.gather(
             self._store.claim_run(ClaimExecution(run_id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
-            self._store.get_snapshot(run_id),
+            self._store.load_resume_messages(run_id),
         )
-        messages = snapshot.resume_messages if snapshot is not None else ()
         return await self._execute(
             spec,
             "",
@@ -329,7 +328,13 @@ class ExecutionService:
                             record.id,
                             owner,
                             record.lease.fence,
-                            AgentSnapshotData((), None, RunUsage(), trace_end),
+                            AgentSnapshotData(
+                                delta_messages=(),
+                                final_output=None,
+                                usage=RunUsage(),
+                                trace_end_sequence=trace_end,
+                                capture_state=MessageCaptureState.PARTIAL,
+                            ),
                         )
                     )
             except Exception as cleanup_error:

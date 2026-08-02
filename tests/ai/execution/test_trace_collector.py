@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import pytest
 
 from linktools.ai.execution.trace_collector import SemanticTraceCollector
-from linktools.ai.execution.domain import RunStatus, RunUsage
+from linktools.ai.execution.domain import MessageCaptureState, RunStatus, RunUsage
 
 
 class FakeTraceStore:
@@ -24,5 +24,5 @@ async def test_collector_flushes_each_completed_step_and_keeps_bounded_state():
     await collector.tool_result({"call_id": "c1", "result": {"ok": True}})
     assert collector._pending == []
     assert len(store.steps) == 2
-    snapshot = await collector.build_snapshot(resume_messages=(), final_output={"ok": True}, status=RunStatus.COMPLETED, usage=RunUsage())
+    snapshot = await collector.build_snapshot(delta_messages=(), checkpoint_messages=(), final_output={"ok": True}, status=RunStatus.COMPLETED, usage=RunUsage(), capture_state=MessageCaptureState.COMPLETE)
     assert snapshot.trace_end_sequence == 2

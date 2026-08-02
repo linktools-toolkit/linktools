@@ -42,6 +42,16 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class MessageCaptureState(StrEnum):
+    # The turn's TURN_DELTA is a complete record of what the run produced.
+    COMPLETE = "complete"
+    # The run was interrupted mid-flight (streaming/tool/cancel-before-commit);
+    # the delta holds whatever complete ModelMessages could be salvaged.
+    PARTIAL = "partial"
+    # No trustworthy delta exists (e.g. engine pre-stage failure, legacy turn).
+    UNAVAILABLE = "unavailable"
+
+
 class RunnableType(StrEnum):
     AGENT = "agent"
     TASK = "task"
@@ -135,6 +145,7 @@ ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
 __all__ = [
     "ALLOWED_RUN_TRANSITIONS",
     "ApprovalDecision",
+    "MessageCaptureState",
     "Page",
     "RunApproval",
     "RunDefinition",

@@ -178,28 +178,8 @@ async def test_sqlalchemy_run_allows_only_one_concurrent_claim(tmp_path):
 async def test_sqlalchemy_run_commits_terminal_snapshot_exactly_once(tmp_path):
     engine, store, claimed = await _claimed_store(tmp_path, "run-result")
     now = datetime.now(timezone.utc)
-    first = RunSnapshot(
-        "run-snapshot.v1",
-        "r",
-        1,
-        (),
-        "first",
-        RunStatus.COMPLETED,
-        RunUsage(),
-        0,
-        now,
-    )
-    second = RunSnapshot(
-        "run-snapshot.v1",
-        "r",
-        1,
-        (),
-        "second",
-        RunStatus.COMPLETED,
-        RunUsage(),
-        0,
-        now,
-    )
+    first = AgentSnapshotData(delta_messages=(), final_output="first", usage=RunUsage(), trace_end_sequence=0)
+    second = AgentSnapshotData(delta_messages=(), final_output="second", usage=RunUsage(), trace_end_sequence=0)
     results = await asyncio.gather(
         store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, first)),
         store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, second)),

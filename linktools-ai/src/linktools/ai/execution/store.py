@@ -13,6 +13,7 @@ from .trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ..json import JsonValue
     from ..storage.database import CoordinationScope
     from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
     from .domain import RunRecord
@@ -90,7 +91,26 @@ class ExecutionStore(Protocol):
 
     async def load_session_context(
         self, session_id: str
-    ) -> "tuple[object, ...]": ...
+    ) -> "tuple[JsonValue, ...]": ...
+    # Session Context: COMPLETED turns' TURN_DELTA concatenated in sequence
+    # order. NOT a resume source -- PAUSED/CANCELLED/FAILED deltas are excluded.
+
+    async def load_resume_messages(
+        self, execution_id: str
+    ) -> "tuple[JsonValue, ...]": ...
+    # Resume Context: the PAUSED run's RESUME_CHECKPOINT (all_messages() at the
+    # pause point). Empty for a non-PAUSED run or one with no checkpoint.
+
+    async def get_session_messages(
+        self, session_id: str
+    ) -> "tuple[SessionTurn, ...]": ...
+    # Audit History: every turn's TURN_DELTA + status + capture_state, in
+    # sequence order. NOT grouped/filtered -- the query layer shapes it.
+
+    async def get_turn(
+        self, session_id: str, sequence: int
+    ) -> "SessionTurn | None": ...
+    # O(1) single-turn read by (session_id, sequence).
 
     async def list_run_events(
         self, run_id: str, *, after_sequence: int = 0, limit: int = 100

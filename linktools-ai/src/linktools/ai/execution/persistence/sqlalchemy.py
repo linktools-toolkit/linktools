@@ -16,7 +16,7 @@ from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageError
 from ...json import JsonValue, normalize_json
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
-from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
+from ..domain import ApprovalDecision, MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunnableType, RunUsage
 from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
@@ -53,8 +53,12 @@ class TurnRow(Base):
     sequence: "Mapped[int]" = mapped_column(Integer)
     execution_id: "Mapped[str]" = mapped_column(String(255), unique=True, index=True)
     input: "Mapped[JsonValue]" = mapped_column(JSON)
-    assistant_summary: "Mapped[JsonValue | None]" = mapped_column(JSON, nullable=True)
+    # TURN_DELTA: this turn's net-new messages (new_messages()), accumulated
+    # across PAUSED/resume. Window-policy immune.
+    delta_messages: "Mapped[list[JsonValue]]" = mapped_column(JSON, default=list)
     status: "Mapped[str]" = mapped_column(String(32), index=True)
+    # Honesty marker: complete / partial / unavailable (MessageCaptureState).
+    capture_state: "Mapped[str]" = mapped_column(String(32), default="complete")
     completed_at: "Mapped[datetime | None]" = mapped_column(DateTime(timezone=True))
 
 
@@ -91,7 +95,10 @@ class SnapshotRow(Base):
     __tablename__ = f"{TABLE_PREFIX}execution_snapshots"
     execution_id: "Mapped[str]" = mapped_column(String(255), unique=True)
     revision: "Mapped[int]" = mapped_column(Integer)
-    resume_messages: "Mapped[list[JsonValue]]" = mapped_column(JSON)
+    # RESUME_CHECKPOINT (column name retained): non-empty ONLY for PAUSED --
+    # holds all_messages() at the pause point. _finish clears it on every
+    # terminal state so no cumulative history is retained (O(N^2) eliminated).
+    resume_messages: "Mapped[list[JsonValue]]" = mapped_column(JSON, default=list)
     # final_output + usage packed into one JSON column (DBA large-field limit).
     outcome: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
     status: "Mapped[str]" = mapped_column(String(32))
@@ -282,15 +289,48 @@ class SqlAlchemyExecutionBackend:
             if before_sequence is not None:
                 query = query.where(TurnRow.sequence < before_sequence)
             rows = (await session.scalars(query.order_by(desc(TurnRow.sequence)).limit(limit + 1))).all()
-        values = tuple(reversed(tuple(SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, row.assistant_summary, RunStatus(row.status), row.created_at, row.completed_at) for row in rows[:limit])))
+        values = tuple(reversed(tuple(SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, tuple(row.delta_messages or ()), RunStatus(row.status), MessageCaptureState(row.capture_state), row.created_at, row.completed_at) for row in rows[:limit])))
         return Page(values, len(rows) > limit, rows[limit - 1].sequence if len(rows) > limit else None)
 
     async def load_session_context(self, session_id: str) -> "tuple[JsonValue, ...]":
-        session = await self.get_session(session_id)
-        if session is None or session.latest_completed_run_id is None:
-            return ()
-        snapshot = await self.get_snapshot(session.latest_completed_run_id)
+        # Session Context: COMPLETED turns' TURN_DELTA concatenated in sequence
+        # order. 1 query. PAUSED/CANCELLED/FAILED deltas are excluded so a
+        # paused-then-cancelled turn never pollutes the next turn's context.
+        async with self.session_factory() as session:
+            rows = (await session.scalars(
+                select(TurnRow.delta_messages)
+                .where(TurnRow.session_id == session_id, TurnRow.status == RunStatus.COMPLETED.value)
+                .order_by(TurnRow.sequence)
+            )).all()
+        return tuple(msg for delta in rows for msg in (delta or ()))
+
+    async def load_resume_messages(self, execution_id: str) -> "tuple[JsonValue, ...]":
+        # Resume Context: the PAUSED run's RESUME_CHECKPOINT only.
+        snapshot = await self.get_snapshot(execution_id)
         return () if snapshot is None else snapshot.resume_messages
+
+    async def get_session_messages(self, session_id: str) -> "tuple[SessionTurn, ...]":
+        # Audit History: every turn (any status) with its TURN_DELTA + status +
+        # capture_state, in sequence order. The query layer shapes/groups it.
+        async with self.session_factory() as session:
+            rows = (await session.scalars(
+                select(TurnRow)
+                .where(TurnRow.session_id == session_id)
+                .order_by(TurnRow.sequence)
+            )).all()
+        return tuple(
+            SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, tuple(row.delta_messages or ()), RunStatus(row.status), MessageCaptureState(row.capture_state), row.created_at, row.completed_at)
+            for row in rows
+        )
+
+    async def get_turn(self, session_id: str, sequence: int) -> "SessionTurn | None":
+        # O(1) single-turn read by (session_id, sequence); avoids pulling the
+        # whole session when only one turn's delta is needed.
+        async with self.session_factory() as session:
+            row = await self._turn_row(session, session_id, sequence)
+        if row is None:
+            return None
+        return SessionTurn(row.session_id, row.sequence, row.execution_id, row.input, tuple(row.delta_messages or ()), RunStatus(row.status), MessageCaptureState(row.capture_state), row.created_at, row.completed_at)
 
     async def start_run(self, command: "StartExecution") -> RunRecord:
         async with self.session_factory() as session:
@@ -316,7 +356,7 @@ class SqlAlchemyExecutionBackend:
                     )
                     if sequence_result.rowcount != 1:
                         raise StorageConflictError("session turn sequence conflict")
-                    session.add(TurnRow(session_id=owner.session_id, sequence=sequence, execution_id=command.run_id, input=command.input, assistant_summary=None, status=RunStatus.PENDING.value, created_at=now, updated_at=now, completed_at=None))
+                    session.add(TurnRow(session_id=owner.session_id, sequence=sequence, execution_id=command.run_id, input=command.input, delta_messages=[], status=RunStatus.PENDING.value, capture_state=MessageCaptureState.COMPLETE.value, created_at=now, updated_at=now, completed_at=None))
                 await session.flush()
                 return _record(row)
 
@@ -432,7 +472,18 @@ class SqlAlchemyExecutionBackend:
                     if row.session_turn_sequence is not None:
                         turn = await self._turn_row(session, row.session_id, row.session_turn_sequence)
                         if turn is not None:
-                            turn.status, turn.completed_at = RunStatus.CANCELLED.value, now
+                            # PENDING->CANCELLED: no TURN_DELTA produced (AgentRun
+                            # never started) -> COMPLETE. PAUSED->CANCELLED: the
+                            # paused delta is already committed and retained ->
+                            # COMPLETE. Either way the checkpoint must be cleared
+                            # (no longer resumable) inside this same transaction.
+                            turn.status = RunStatus.CANCELLED.value
+                            turn.capture_state = MessageCaptureState.COMPLETE.value
+                            turn.completed_at = now
+                            snapshot_row = await self._snapshot_row(session, row.execution_id)
+                            if snapshot_row is not None:
+                                snapshot_row.resume_messages = []
+                                snapshot_row.status = RunStatus.CANCELLED.value
                     return _record(row)
                 assert_owner(record, command.owner, command.fence, command.requested_at)
                 assert_transition(record.status, RunStatus.CANCELLING)
@@ -548,8 +599,16 @@ class SqlAlchemyExecutionBackend:
                 if record.session_turn_sequence is not None:
                     turn = await self._turn_row(session, record.session_id, record.session_turn_sequence)
                     if turn is not None:
+                        # PAUSED->DENY->CANCELLED: same rule as PAUSED->CANCELLED --
+                        # the paused delta is already committed (COMPLETE); clear
+                        # the checkpoint (no longer resumable) in this transaction.
                         turn.status = RunStatus.CANCELLED.value
+                        turn.capture_state = MessageCaptureState.COMPLETE.value
                         turn.completed_at = decided_at
+                        snapshot_row = await self._snapshot_row(session, row.execution_id)
+                        if snapshot_row is not None:
+                            snapshot_row.resume_messages = []
+                            snapshot_row.status = RunStatus.CANCELLED.value
                 return _record(row)
 
     async def resume_run(self, command: "ResumeExecution") -> RunRecord:
@@ -692,13 +751,24 @@ class SqlAlchemyExecutionBackend:
                     self._turn_row(session, row.session_id, row.session_turn_sequence) if needs_turn else _none(),
                     self._session_row(session, row.session_id) if needs_owner else _none(),
                 )
+                # RESUME_CHECKPOINT: non-empty ONLY for PAUSED. Every terminal
+                # state clears it so steady-state snapshots hold no cumulative
+                # history (O(N^2) eliminated).
+                checkpoint = list(snapshot.checkpoint_messages) if status is RunStatus.PAUSED else []
                 if current is None:
-                    session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=list(snapshot.resume_messages), outcome={"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status=status.value, trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
+                    session.add(SnapshotRow(execution_id=run_id, revision=new_revision, resume_messages=checkpoint, outcome={"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status=status.value, trace_end_sequence=snapshot.trace_end_sequence, created_at=now, updated_at=now))
                 else:
-                    current.revision, current.resume_messages, current.outcome, current.status, current.trace_end_sequence, current.updated_at = new_revision, list(snapshot.resume_messages), {"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status.value, snapshot.trace_end_sequence, now
+                    current.revision, current.resume_messages, current.outcome, current.status, current.trace_end_sequence, current.updated_at = new_revision, checkpoint, {"final_output": snapshot.final_output, "usage": asdict(snapshot.usage)}, status.value, snapshot.trace_end_sequence, now
                 session.add(EventRow(execution_id=run_id, sequence=event_sequence, type=f"run.{status.value}", payload={}, created_at=now))
                 if turn is not None:
-                    turn.status, turn.assistant_summary = status.value, snapshot.final_output
+                    # TURN_DELTA: append this run's new_messages() onto whatever
+                    # the turn already holds. A fresh COMPLETED turn starts empty
+                    # (append == set); a resumed turn already holds the paused
+                    # m_partial and appends m_resume, so the audit delta is the
+                    # full turn contribution, appearing exactly once.
+                    turn.delta_messages = list(turn.delta_messages or []) + list(snapshot.delta_messages)
+                    turn.status = status.value
+                    turn.capture_state = snapshot.capture_state.value
                     turn.completed_at = now if status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED} else None
                 if owner_row is not None:
                     owner_row.latest_completed_run_id = run_id
@@ -765,7 +835,13 @@ class SqlAlchemyExecutionBackend:
                 if row.session_turn_sequence is not None:
                     turn = await self._turn_row(session, row.session_id, row.session_turn_sequence)
                     if turn is not None:
-                        turn.status, turn.completed_at = RunStatus.FAILED.value, now
+                        # abort_run fires before the engine produced a snapshot,
+                        # so this turn has no trustworthy delta -> UNAVAILABLE
+                        # (distinct from fail_run, whose PARTIAL delta the
+                        # engine salvaged via _finish).
+                        turn.status = RunStatus.FAILED.value
+                        turn.capture_state = MessageCaptureState.UNAVAILABLE.value
+                        turn.completed_at = now
                 await session.flush()
                 return _record(row)
 

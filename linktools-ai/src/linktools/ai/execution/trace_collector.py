@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from ..json import normalize_json
+from .domain import MessageCaptureState
 from .snapshots import AgentSnapshotData
 from .trace_models import NewRunTraceStep
 
@@ -64,11 +65,22 @@ class SemanticTraceCollector:
         async with self._lock:
             return await self._flush_locked()
 
-    async def build_snapshot(self, *, resume_messages: "tuple[JsonValue, ...]", final_output: "JsonValue | str | None", status: "RunStatus", usage: "RunUsage") -> AgentSnapshotData:
+    async def build_snapshot(
+        self,
+        *,
+        delta_messages: "tuple[JsonValue, ...]",
+        checkpoint_messages: "tuple[JsonValue, ...]",
+        final_output: "JsonValue | str | None",
+        status: "RunStatus",
+        usage: "RunUsage",
+        capture_state: "MessageCaptureState",
+    ) -> AgentSnapshotData:
         await self.flush()
         return AgentSnapshotData(
-            tuple(normalize_json(message) for message in resume_messages),
+            tuple(normalize_json(message) for message in delta_messages),
             normalize_json(final_output) if final_output is not None else None,
             usage,
             self.next_sequence,
+            capture_state,
+            tuple(normalize_json(message) for message in checkpoint_messages),
         )

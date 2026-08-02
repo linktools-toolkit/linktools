@@ -7,7 +7,7 @@
 from dataclasses import dataclass
 from ..errors import PrincipalAccessDeniedError, StorageCorruptionError
 from ..governance.authorization import AuthorizationPolicy, ExecutionAction, OwnershipAuthorizationPolicy
-from .domain import Page, RunUsage
+from .domain import MessageCaptureState, Page, RunUsage
 
 from typing import TYPE_CHECKING
 
@@ -23,8 +23,21 @@ class SessionTurnView:
     sequence: int
     run_id: str
     input: "JsonValue"
-    assistant_summary: "JsonValue | None"
     status: "RunStatus"
+    capture_state: MessageCaptureState
+
+
+@dataclass(frozen=True, slots=True)
+class RunMessagesView:
+    # Audit-history DTO: one turn's TURN_DELTA + status + capture_state. Not a
+    # flatten target -- callers must respect capture_state (PARTIAL/UNAVAILABLE
+    # deltas may be incomplete) and not treat every view as resumable context.
+    run_id: str
+    session_id: str
+    turn_sequence: int
+    status: "RunStatus"
+    capture_state: MessageCaptureState
+    messages: "tuple[JsonValue, ...]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +103,7 @@ class ExecutionQueryService:
             action=ExecutionAction.INSPECT,
         )
         page = await self._store.list_session_turns(session_id, before_sequence=before_sequence, limit=limit)
-        return Page(tuple(SessionTurnView(item.session_id, item.sequence, item.run_id, item.input, item.assistant_summary, item.status) for item in page.items), page.has_more, page.next_cursor)
+        return Page(tuple(SessionTurnView(item.session_id, item.sequence, item.run_id, item.input, item.status, item.capture_state) for item in page.items), page.has_more, page.next_cursor)
 
     async def get_run_detail(self, *, run_id: str, principal: "PrincipalContext") -> ExecutionDetailView:
         run = await self._store.get_run(run_id)
@@ -151,5 +164,40 @@ class ExecutionQueryService:
                 calls[call_id] = ToolCallView(previous.call_id, previous.tool_name, previous.arguments, payload.get("result"), status)
         return ExecutionDetailView(run.id, run.session_id, run.status, run.input, tuple(interactions), tuple(calls.values()), snapshot.final_output if snapshot else None, snapshot.usage if snapshot else None)
 
+    async def get_run_messages(
+        self, *, run_id: str, principal: "PrincipalContext"
+    ) -> "tuple[JsonValue, ...]":
+        # TURN_DELTA for the run's turn (new_messages(), window-policy immune).
+        # A run with no session_turn_sequence (non-USER_TURN) has no turn delta.
+        run = await self._store.get_run(run_id)
+        if run is None:
+            raise PrincipalAccessDeniedError("run is not visible to this principal")
+        self._authorize(run, principal)
+        if run.session_turn_sequence is None:
+            return ()
+        turn = await self._store.get_turn(run.session_id, run.session_turn_sequence)
+        return () if turn is None else turn.delta_messages
 
-__all__ = ["ExecutionQueryService", "ModelInteractionView", "ExecutionDetailView", "ExecutionResultView", "SessionTurnView", "ToolCallView"]
+    async def get_session_messages(
+        self, *, session_id: str, principal: "PrincipalContext"
+    ) -> "tuple[RunMessagesView, ...]":
+        # Audit History: every turn (any status) grouped per turn, with status
+        # + capture_state. NOT flattened -- a PARTIAL/UNAVAILABLE view must not
+        # be mistaken for resumable context.
+        session = await self._store.get_session(session_id)
+        if session is None:
+            raise PrincipalAccessDeniedError("session is not visible to this principal")
+        self._authorization.assert_execution_access(
+            principal=principal,
+            tenant_id=session.tenant_id,
+            user_id=session.user_id,
+            action=ExecutionAction.INSPECT,
+        )
+        turns = await self._store.get_session_messages(session_id)
+        return tuple(
+            RunMessagesView(t.run_id, t.session_id, t.sequence, t.status, t.capture_state, t.delta_messages)
+            for t in turns
+        )
+
+
+__all__ = ["ExecutionQueryService", "ModelInteractionView", "ExecutionDetailView", "ExecutionResultView", "RunMessagesView", "SessionTurnView", "ToolCallView"]

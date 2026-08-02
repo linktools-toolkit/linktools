@@ -11,7 +11,7 @@ from linktools.ai.execution.persistence import local as local_module
 from linktools.ai.errors import StorageConflictError
 from linktools.ai.execution.store import ExecutionStore
 from linktools.ai.execution.commands import AbortExecution, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, PauseExecution, ResumeExecution, StartExecution
-from linktools.ai.execution.domain import RunDefinition, RunKind, RunStatus, RunUsage, RunnableType
+from linktools.ai.execution.domain import MessageCaptureState, RunDefinition, RunKind, RunStatus, RunUsage, RunnableType
 
 
 def definition(name: str) -> RunDefinition:
@@ -72,7 +72,8 @@ async def test_local_constructor_is_lazy_and_session_context_uses_snapshot(tmp_p
     now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData(({"role": "user", "content": "hello"},), {"ok": True}, RunUsage(), 0)
     await store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, snapshot))
-    assert await store.load_session_context("s") == snapshot.resume_messages
+    # load_session_context returns the COMPLETED turn's delta_messages.
+    assert await store.load_session_context("s") == snapshot.delta_messages
 
 
 @pytest.mark.asyncio
@@ -152,6 +153,12 @@ async def test_abort_run_persists_error_without_a_snapshot(tmp_path):
     assert aborted.lease.owner is None
     assert aborted.trace_sequence == 3
     assert await store.get_snapshot("r") is None
+    # abort fires before the engine produced a snapshot, so the turn has no
+    # trustworthy delta -> capture_state UNAVAILABLE (not the default COMPLETE).
+    turn = await store.get_turn("s", 1)
+    assert turn is not None
+    assert turn.capture_state is MessageCaptureState.UNAVAILABLE
+    assert turn.delta_messages == ()
 
 
 def _fail_after_publication(monkeypatch, write_point: int) -> None:

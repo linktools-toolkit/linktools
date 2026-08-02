@@ -17,8 +17,9 @@ if TYPE_CHECKING:
     from ..agent.spec import AgentSpec
     from ..agent.assembly.assembler import AgentAssembler
     from ..execution.domain import ApprovalDecision, RunRecord
-    from ..execution.query import ExecutionQueryService, ExecutionDetailView
+    from ..execution.query import ExecutionQueryService, ExecutionDetailView, RunMessagesView
     from ..execution.service import ExecutionService
+    from ..json import JsonValue
 
 @dataclass(frozen=True, slots=True)
 class Runtime:
@@ -80,6 +81,16 @@ class Runtime:
 
     async def inspect(self, *, run_id: str, principal: PrincipalContext) -> "ExecutionDetailView":
         return await self.query.get_run_detail(run_id=run_id, principal=principal)
+
+    async def get_messages(
+        self, *, run_id: str, principal: PrincipalContext
+    ) -> "tuple[JsonValue, ...]":
+        return await self.query.get_run_messages(run_id=run_id, principal=principal)
+
+    async def get_session_messages(
+        self, *, session_id: str, principal: PrincipalContext
+    ) -> "tuple[RunMessagesView, ...]":
+        return await self.query.get_session_messages(session_id=session_id, principal=principal)
 
     async def aclose(self) -> None:
         if self.mcp_connections is not None:

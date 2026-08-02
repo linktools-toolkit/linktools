@@ -56,6 +56,7 @@ from ..execution.domain import RunErrorInfo
 from .models import RunResult
 from ..model.recording import SemanticRecordingModel
 from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
+from ..execution.domain import MessageCaptureState
 from .dependencies import AgentDependencies
 from .models import AgentCancelled, AgentCompleted, AgentFailed, model_supports_streaming, AgentPaused, AgentUsage, PauseRequest
 
@@ -227,28 +228,46 @@ class AgentEngine:
 
         current_run = None
 
-        def resume_messages() -> "tuple[Any, ...]":
+        def _encoded(messages: "tuple[Any, ...]") -> "tuple[Any, ...]":
+            return self._trace_codec.encode_model_messages(messages)
+
+        def all_messages_encoded() -> "tuple[Any, ...]":
+            # RESUME_CHECKPOINT source: the exact post-window-policy pause
+            # context (all_messages()). Empty when the run never reached
+            # agent.iter (current_run unset).
             current = current_run
             if current is None:
                 return ()
-            return self._trace_codec.encode_model_messages(
-                tuple(current.all_messages())
-            )
+            return _encoded(tuple(current.all_messages()))
+
+        def delta_messages_encoded() -> "tuple[Any, ...]":
+            # TURN_DELTA source: this run's new_messages() -- window-policy
+            # immune (only messages produced this run). Empty when current_run
+            # is unset; best-effort otherwise.
+            current = current_run
+            if current is None:
+                return ()
+            return _encoded(tuple(current.new_messages()))
 
         async def _snapshot(
             status: ExecutionRunStatus,
             *,
-            messages: "tuple[Any, ...]",
             final_output: Any = None,
             usage: "ExecutionRunUsage | None" = None,
+            capture_state: MessageCaptureState = MessageCaptureState.COMPLETE,
         ) -> Any:
             if trace_collector is None:
                 return None
+            # checkpoint (all_messages) is non-empty ONLY for PAUSED; the store
+            # clears it on every terminal state so no cumulative history is kept.
+            checkpoint = all_messages_encoded() if status is ExecutionRunStatus.PAUSED else ()
             return await trace_collector.build_snapshot(
-                resume_messages=messages,
+                delta_messages=delta_messages_encoded(),
+                checkpoint_messages=checkpoint,
                 final_output=final_output,
                 status=status,
                 usage=usage or ExecutionRunUsage(),
+                capture_state=capture_state,
             )
 
         try:
@@ -553,7 +572,6 @@ class AgentEngine:
                                 if trace_collector is not None:
                                     snapshot = await _snapshot(
                                         ExecutionRunStatus.PAUSED,
-                                        messages=self._trace_codec.encode_model_messages(tuple(run.all_messages())),
                                     )
                                 # The engine does NOT publish a "paused" state
                                 # event: per the state-event split, state events
@@ -656,7 +674,6 @@ class AgentEngine:
                 if trace_collector is not None:
                     snapshot = await _snapshot(
                         ExecutionRunStatus.COMPLETED,
-                        messages=self._trace_codec.encode_model_messages(tuple(run.all_messages())),
                         final_output=output,
                         usage=ExecutionRunUsage(
                             input_tokens=usage.input_tokens if usage else 0,
@@ -696,7 +713,7 @@ class AgentEngine:
                 if trace_collector is not None:
                     snapshot = await _snapshot(
                         ExecutionRunStatus.CANCELLED,
-                        messages=resume_messages(),
+                        capture_state=MessageCaptureState.PARTIAL,
                     )
                 return AgentCancelled(reason=None, usage=AgentUsage(), snapshot=snapshot)
             raise
@@ -724,7 +741,7 @@ class AgentEngine:
             if trace_collector is not None:
                 snapshot = await _snapshot(
                     ExecutionRunStatus.FAILED,
-                    messages=resume_messages(),
+                    capture_state=MessageCaptureState.PARTIAL,
                 )
             return AgentFailed(
                 error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),

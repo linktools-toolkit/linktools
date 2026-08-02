@@ -17,7 +17,7 @@ from ...storage.local.files import atomic_write_bytes, atomic_write_json, read_b
 from ...storage.local.locks import KeyedLocks
 from ...storage.local.paths import StorageId, safe_child
 from ..lifecycle import assert_approval_decided, assert_claimable, assert_owner, assert_resumable, assert_transition
-from ..domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
+from ..domain import ApprovalDecision, MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
 from ..domain import Page
 from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
     from ..snapshots import AgentSnapshotData
+    from ...json import JsonValue
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -68,6 +69,8 @@ def _session(raw: dict) -> SessionRecord:
 
 def _turn(raw: dict) -> SessionTurn:
     raw["status"] = RunStatus(raw["status"])
+    raw["delta_messages"] = tuple(raw.get("delta_messages") or ())
+    raw["capture_state"] = MessageCaptureState(raw.get("capture_state", "complete"))
     raw["created_at"] = _dt(raw["created_at"])
     raw["completed_at"] = _dt(raw.get("completed_at"))
     return SessionTurn(**raw)
@@ -426,7 +429,7 @@ class LocalExecutionBackend:
                 ),
             ]
             if sequence is not None:
-                turn = SessionTurn(command.session_id, sequence, command.run_id, command.input, None, RunStatus.PENDING, now, None)
+                turn = SessionTurn(command.session_id, sequence, command.run_id, command.input, (), RunStatus.PENDING, MessageCaptureState.COMPLETE, now, None)
                 writes.append(
                     (self._turn_path(command.session_id, sequence), asdict(turn), False)
                 )
@@ -511,11 +514,22 @@ class LocalExecutionBackend:
                                 replace(
                                     turn,
                                     status=RunStatus.CANCELLED,
+                                    capture_state=MessageCaptureState.COMPLETE,
                                     completed_at=now,
                                 )
                             ),
                         ),
                     )
+                    # Clear the resume checkpoint (no longer resumable) in the
+                    # same logical transaction. Read the raw snapshot file
+                    # directly -- get_snapshot() would re-acquire the run lock
+                    # we already hold (deadlock).
+                    snapshot_path = self._snapshot_path(command.run_id)
+                    if await self._exists(snapshot_path):
+                        raw = dict(await asyncio.to_thread(read_json, snapshot_path))
+                        raw["resume_messages"] = []
+                        raw["status"] = RunStatus.CANCELLED.value
+                        additional = additional + ((snapshot_path, raw),)
                 await self._write_run_event(
                     updated,
                     "run.cancelled",
@@ -594,11 +608,20 @@ class LocalExecutionBackend:
                             replace(
                                 turn,
                                 status=RunStatus.CANCELLED,
+                                capture_state=MessageCaptureState.COMPLETE,
                                 completed_at=now,
                             )
                         ),
                     ),
                 )
+                # PAUSED->DENY->CANCELLED: clear the resume checkpoint (same rule
+                # as PAUSED->CANCELLED). Read raw to avoid re-acquiring the lock.
+                snapshot_path = self._snapshot_path(command.run_id)
+                if await self._exists(snapshot_path):
+                    raw = dict(await asyncio.to_thread(read_json, snapshot_path))
+                    raw["resume_messages"] = []
+                    raw["status"] = RunStatus.CANCELLED.value
+                    additional = additional + ((snapshot_path, raw),)
             await self._write_run_event(
                 updated,
                 "run.approval_decided",
@@ -635,6 +658,8 @@ class LocalExecutionBackend:
             additional = ()
             if record.session_turn_sequence is not None:
                 turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(record.session_id, record.session_turn_sequence))))
+                # abort_run fires before the engine produced a snapshot, so this
+                # turn has no trustworthy delta -> UNAVAILABLE.
                 additional = (
                     (
                         self._turn_path(
@@ -644,6 +669,7 @@ class LocalExecutionBackend:
                             replace(
                                 turn,
                                 status=RunStatus.FAILED,
+                                capture_state=MessageCaptureState.UNAVAILABLE,
                                 completed_at=now,
                             )
                         ),
@@ -670,7 +696,9 @@ class LocalExecutionBackend:
             # write lock serializes concurrent commits within this process.
             new_revision = record.snapshot_revision + 1
             now = _now()
-            stored_snapshot = RunSnapshot("run-snapshot.v1", run_id, new_revision, snapshot.resume_messages, snapshot.final_output, status, snapshot.usage, snapshot.trace_end_sequence, now)
+            # RESUME_CHECKPOINT: non-empty ONLY for PAUSED; cleared on terminal.
+            checkpoint = snapshot.checkpoint_messages if status is RunStatus.PAUSED else ()
+            stored_snapshot = RunSnapshot("run-snapshot.v1", run_id, new_revision, checkpoint, snapshot.final_output, status, snapshot.usage, snapshot.trace_end_sequence, now)
             updated = replace(
                 record,
                 status=status,
@@ -705,6 +733,8 @@ class LocalExecutionBackend:
             if record.session_turn_sequence is not None:
                 turn = _turn(dict(await asyncio.to_thread(read_json, self._turn_path(session_id, record.session_turn_sequence))))
                 completed = status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}
+                # TURN_DELTA: append this run's new_messages() onto whatever the
+                # turn already holds (fresh == empty; resumed == m_partial).
                 writes.append(
                     (
                         self._turn_path(session_id, record.session_turn_sequence),
@@ -712,7 +742,8 @@ class LocalExecutionBackend:
                             replace(
                                 turn,
                                 status=status,
-                                assistant_summary=snapshot.final_output,
+                                delta_messages=tuple(turn.delta_messages) + tuple(snapshot.delta_messages),
+                                capture_state=snapshot.capture_state,
                                 completed_at=now if completed else None,
                             )
                         ),
@@ -889,42 +920,65 @@ class LocalExecutionBackend:
         items = tuple(reversed(values[:limit]))
         return Page(items, has_more, values[limit - 1].sequence if has_more else None)
 
-    async def load_session_context(self, session_id: str) -> "tuple[object, ...]":
-        current = await self.get_session(session_id)
-        if current is None or current.latest_completed_run_id is None:
+    async def load_session_context(self, session_id: str) -> "tuple[JsonValue, ...]":
+        # Session Context: COMPLETED turns' TURN_DELTA concatenated in sequence
+        # order. PAUSED/CANCELLED/FAILED deltas are excluded.
+        session = await self.get_session(session_id)
+        if session is None:
             return ()
         journal_runs = await self._session_journal_runs(session_id)
-        run_id = current.latest_completed_run_id
         async with self._locks.acquire(
             ("session", session_id),
             *((("run", run_id) for run_id in journal_runs)),
-            ("run", run_id),
         ):
             await self._recover_session(session_id)
             session = await self._read_session(session_id)
-            if session is None or session.latest_completed_run_id is None:
+            if session is None:
                 return ()
-            run_id = session.latest_completed_run_id
-            if run_id != current.latest_completed_run_id:
-                raise StorageConflictError(
-                    "session latest run changed while loading context"
-                )
-            await self._recover_run(run_id)
-            path = self._snapshot_path(run_id)
-            record = await self._read_run(run_id)
-            exists = await self._exists(path)
-            if (
-                record is not None
-                    and record.snapshot_revision > 0
-                and not exists
-            ):
-                raise StorageCorruptionError(
-                    f"missing snapshot declared by run manifest: {path}"
-                )
-            snapshot = None if not exists else _snapshot(
-                dict(await asyncio.to_thread(read_json, path))
-            )
-            return () if snapshot is None else snapshot.resume_messages
+            messages: "list[JsonValue]" = []
+            for sequence in range(1, session.next_turn_sequence):
+                path = self._turn_path(session_id, sequence)
+                if not await self._exists(path):
+                    continue
+                turn = _turn(dict(await asyncio.to_thread(read_json, path)))
+                if turn.status is RunStatus.COMPLETED:
+                    messages.extend(turn.delta_messages)
+            return tuple(messages)
+
+    async def load_resume_messages(self, execution_id: str) -> "tuple[JsonValue, ...]":
+        # Resume Context: the PAUSED run's RESUME_CHECKPOINT only.
+        snapshot = await self.get_snapshot(run_id=execution_id)
+        return () if snapshot is None else snapshot.resume_messages
+
+    async def get_session_messages(self, session_id: str) -> "tuple[SessionTurn, ...]":
+        # Audit History: every turn (any status) with its TURN_DELTA + status +
+        # capture_state, in sequence order.
+        session = await self.get_session(session_id)
+        if session is None:
+            return ()
+        journal_runs = await self._session_journal_runs(session_id)
+        async with self._locks.acquire(
+            ("session", session_id),
+            *((("run", run_id) for run_id in journal_runs)),
+        ):
+            await self._recover_session(session_id)
+            session = await self._read_session(session_id)
+            if session is None:
+                return ()
+            values: "list[SessionTurn]" = []
+            for sequence in range(1, session.next_turn_sequence):
+                path = self._turn_path(session_id, sequence)
+                if not await self._exists(path):
+                    continue
+                values.append(_turn(dict(await asyncio.to_thread(read_json, path))))
+            return tuple(values)
+
+    async def get_turn(self, session_id: str, sequence: int) -> "SessionTurn | None":
+        # O(1) single-turn read by (session_id, sequence).
+        path = self._turn_path(session_id, sequence)
+        if not await self._exists(path):
+            return None
+        return _turn(dict(await asyncio.to_thread(read_json, path)))
 
     async def list_run_events(self, run_id: str, *, after_sequence: int = 0, limit: int = 100) -> "Page[RunEvent]":
         await self.get_run(run_id)
