@@ -656,6 +656,8 @@ class AgentEngine:
                     cost = pricing.cost(
                         input_tokens=usage.input_tokens,
                         output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
                     )
                     if cost > budget:
                         raise ModelPolicyExceededError(
@@ -679,6 +681,8 @@ class AgentEngine:
                             input_tokens=usage.input_tokens if usage else 0,
                             output_tokens=usage.output_tokens if usage else 0,
                             total_tokens=(usage.input_tokens + usage.output_tokens) if usage else 0,
+                            cache_write_tokens=usage.cache_write_tokens if usage else 0,
+                            cache_read_tokens=usage.cache_read_tokens if usage else 0,
                         ),
                     )
 

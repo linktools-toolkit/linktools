@@ -19,16 +19,38 @@ from typing import Protocol, runtime_checkable
 @dataclass(frozen=True, slots=True)
 class ModelPricing:
     """Per-token cost for one model. Decimal so fractional per-token costs
-    (e.g. 0.000001) round-trip exactly."""
+    (e.g. 0.000001) round-trip exactly.
+
+    Prompt-cache pricing is separate when the provider bills cache reads/writes
+    differently from a standard input token (Anthropic: cache_read ~0.1x,
+    cache_write ~1.25x). When a model has no cache concept, leave the cache
+    rates at their defaults (equal to the standard input rate) and pass
+    cache_*_tokens=0 -- cost() is then identical to input/output-only."""
 
     model_id: str
     input_cost_per_token: Decimal
     output_cost_per_token: Decimal
     currency: str = "USD"
+    cache_read_cost_per_token: "Decimal | None" = None
+    cache_write_cost_per_token: "Decimal | None" = None
 
-    def cost(self, *, input_tokens: int, output_tokens: int) -> Decimal:
-        return self.input_cost_per_token * Decimal(input_tokens) + (
-            self.output_cost_per_token * Decimal(output_tokens)
+    def cost(
+        self,
+        *,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> Decimal:
+        # Cache rates default to the standard input rate so an unconfigured
+        # model (no separate cache pricing) bills cache tokens as regular input.
+        read_rate = self.cache_read_cost_per_token if self.cache_read_cost_per_token is not None else self.input_cost_per_token
+        write_rate = self.cache_write_cost_per_token if self.cache_write_cost_per_token is not None else self.input_cost_per_token
+        return (
+            self.input_cost_per_token * Decimal(input_tokens)
+            + self.output_cost_per_token * Decimal(output_tokens)
+            + read_rate * Decimal(cache_read_tokens)
+            + write_rate * Decimal(cache_write_tokens)
         )
 
 

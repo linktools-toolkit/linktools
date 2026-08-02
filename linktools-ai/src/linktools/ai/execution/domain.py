@@ -87,6 +87,12 @@ class RunUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    # Prompt-cache token counts (Anthropic-style; 0 when the provider has no
+    # cache concept). Kept separate from total_tokens so existing
+    # total-based accounting is unchanged; callers that want the true
+    # consumption add these in: real_total = total + cache_write + cache_read.
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 @dataclass(frozen=True, slots=True)

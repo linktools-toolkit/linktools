@@ -48,7 +48,7 @@ def _message(value: "ModelMessage") -> "JsonValue":
         return {"kind": "request", "parts": [_part(item) for item in value.parts], "timestamp": (value.timestamp or datetime.now(timezone.utc)).isoformat()}
     if isinstance(value, ModelResponse):
         usage = value.usage
-        return {"kind": "response", "parts": [_part(item) for item in value.parts], "model_name": value.model_name, "finish_reason": value.finish_reason, "provider_response_id": value.provider_response_id, "usage": {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "total_tokens": usage.input_tokens + usage.output_tokens}}
+        return {"kind": "response", "parts": [_part(item) for item in value.parts], "model_name": value.model_name, "finish_reason": value.finish_reason, "provider_response_id": value.provider_response_id, "usage": {"input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens, "total_tokens": usage.input_tokens + usage.output_tokens, "cache_write_tokens": usage.cache_write_tokens, "cache_read_tokens": usage.cache_read_tokens}}
     return {"kind": "unsupported", "source_type": type(value).__name__, "safe_summary": type(value).__name__}
 
 
