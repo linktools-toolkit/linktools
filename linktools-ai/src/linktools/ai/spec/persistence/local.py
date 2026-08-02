@@ -25,9 +25,13 @@ calls :meth:`list_info`, which walks the tree. There is no incremental PATCH.
 import asyncio
 from pathlib import Path
 
+from linktools.core import environ
+
 from ...errors import SpecConflictError
 from ...storage.local.files import atomic_write_bytes, read_bytes
 from ..document import SpecDocument, SpecDocumentInfo, compute_spec_etag
+
+logger = environ.get_logger("ai.spec.persistence.local")
 
 
 class LocalSpecBackend:
@@ -162,8 +166,8 @@ def _kind_of(path: str) -> str:
 def _unlink_if_exists(target: Path) -> None:
     try:
         target.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except OSError as unlink_exc:
+        logger.warning("failed to delete spec file (tree state may diverge): %s: %s", target, unlink_exc)
 
 
 __all__ = ["LocalSpecBackend"]

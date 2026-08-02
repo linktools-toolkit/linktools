@@ -5,6 +5,7 @@
 
 
 from dataclasses import replace
+from linktools.core import environ
 from ..agent.assembly.assembler import AgentAssembler
 from ..agent.codec import AgentSpecCodec
 from ..agent.compiler import AgentCompiler
@@ -29,6 +30,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .storage import RuntimeStorage
+
+logger = environ.get_logger("ai.runtime.builder")
+
 
 def build_runtime(
     *,
@@ -79,6 +83,12 @@ def build_runtime(
         if provider is not None:
             registry.register(provider)
     registry.freeze()
+    if environ.debug:
+        logger.debug(
+            "runtime built: topology=%s tool_execution_ready=%s",
+            requirements.topology,
+            storage.tools is not None and dependencies.tool_policy is not None,
+        )
 
     security_events = dependencies.security_events or NoopSecurityEventSink()
     tool_execution = ToolExecutionService(

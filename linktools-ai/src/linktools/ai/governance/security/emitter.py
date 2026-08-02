@@ -3,7 +3,6 @@
 
 """Shared event emission policy for security and observability events."""
 
-import logging
 import dataclasses
 import re
 from collections.abc import Mapping
@@ -12,10 +11,12 @@ from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
 
+from linktools.core import environ
+
 from ...errors import ToolSecurityAuditError
 from .redact import redact_exception
 
-_LOGGER = logging.getLogger(__name__)
+logger = environ.get_logger("ai.governance.security.emitter")
 
 
 @runtime_checkable
@@ -166,16 +167,23 @@ class DurableSecurityEventEmitter:
     async def emit_security(self, event: Any) -> None:
         try:
             await self._append(event)
-        except ToolSecurityAuditError:
+        except ToolSecurityAuditError as exc:
             if self._failure_mode != "best_effort":
                 raise
-            _LOGGER.warning("security event emission failed in best-effort mode")
+            logger.warning(
+                "security event dropped (best-effort): type=%s: %s",
+                type(event).__name__, exc,
+            )
 
     async def emit_observability(self, event: Any) -> None:
         try:
             await self._append(event)
         except ToolSecurityAuditError:
-            _LOGGER.debug("observability event emission failed", exc_info=True)
+            if environ.debug:
+                logger.debug(
+                    "observability event dropped: type=%s",
+                    type(event).__name__,
+                )
 
 
 class CollectingSecurityEventEmitter:

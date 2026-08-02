@@ -10,9 +10,9 @@ opened lazily by pydantic-ai when a toolset is actually used inside a run."""
 import asyncio
 import hashlib
 import json
-import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
+from linktools.core import environ
 from ...errors import MCPConnectionUnavailableError
 from ...json import canonical_json_bytes
 from .models import MCPConnectionRef
@@ -20,11 +20,11 @@ from .client import MCPClient, build_mcp_server
 
 from typing import TYPE_CHECKING
 
+logger = environ.get_logger("ai.agent.mcp.connection")
+
 if TYPE_CHECKING:
     from .models import MCPDiscoveryResult
     from .spec import MCPServerSpec
-
-_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,4 +159,8 @@ class MCPConnectionPool:
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            _LOGGER.warning("MCP connection close failures: %d", len(errors))
+            logger.warning(
+                "MCP connection close failures (%d): %s",
+                len(errors),
+                ", ".join(repr(e) for e in errors),
+            )

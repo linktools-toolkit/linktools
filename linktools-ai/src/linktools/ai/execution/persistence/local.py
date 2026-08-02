@@ -10,6 +10,9 @@ from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+
+from linktools.core import environ
+
 from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
 from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageCorruptionError, StorageError
@@ -82,6 +85,9 @@ def _snapshot(raw: dict) -> RunSnapshot:
     raw["usage"] = RunUsage(**raw["usage"])
     raw["created_at"] = _dt(raw["created_at"])
     return RunSnapshot(**raw)
+
+
+logger = environ.get_logger("ai.execution.persistence.local")
 
 
 class LocalExecutionBackend:
@@ -234,7 +240,8 @@ class LocalExecutionBackend:
         for path in paths:
             try:
                 journal = dict(await asyncio.to_thread(read_json, path))
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError) as journal_exc:
+                logger.warning("run-journal read failed (lock set may be incomplete): %s: %s", path, journal_exc)
                 continue
             for entry in journal.get("entries", ()):
                 parts = Path(entry["target"]).parts
@@ -260,7 +267,8 @@ class LocalExecutionBackend:
         for path in paths:
             try:
                 journal = dict(await asyncio.to_thread(read_json, path))
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError) as journal_exc:
+                logger.warning("session-journal read failed (lock set may be incomplete): %s: %s", path, journal_exc)
                 continue
             for entry in journal.get("entries", ()):
                 parts = Path(entry["target"]).parts

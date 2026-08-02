@@ -40,25 +40,27 @@ loop in an outer ``agent.run`` span and the iter() drive in a nested
 wired, records ``counter("agent.run.completed"/"agent.run.failed")`` and
 ``histogram("agent.run.duration_ms")``. Both default to None (no-op)."""
 
-from typing import TYPE_CHECKING, Any
 import asyncio
 import contextlib
 import dataclasses
-import logging
 import time
+from typing import TYPE_CHECKING, Any
+
+from linktools.core import environ
+
 from ..errors import MCPToolError, ModelInvocationDeniedError, ModelOutputValidationError, ModelPolicyExceededError, ModelResultDeniedError, ModelRoutingError, RunPaused, RuntimeInitializationError, ToolError, ToolSchemaError
-from .middleware.pipeline import MiddlewarePipeline
-from ..observability.tracing import use_span
-from .prompt.builder import PromptBuilder
+from ..execution.domain import MessageCaptureState
+from ..execution.domain import RunErrorInfo
+from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
-from ..execution.domain import RunErrorInfo
-from .models import RunResult
 from ..model.recording import SemanticRecordingModel
-from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
-from ..execution.domain import MessageCaptureState
+from ..observability.tracing import use_span
 from .dependencies import AgentDependencies
+from .middleware.pipeline import MiddlewarePipeline
 from .models import AgentCancelled, AgentCompleted, AgentFailed, model_supports_streaming, AgentPaused, AgentUsage, PauseRequest
+from .models import RunResult
+from .prompt.builder import PromptBuilder
 
 if TYPE_CHECKING:
     from ..execution.cancellation import CancellationToken
@@ -82,7 +84,7 @@ if TYPE_CHECKING:
     from ..model.pricing import ModelPricingProvider
 
 
-_LOGGER = logging.getLogger(__name__)
+logger = environ.get_logger("ai.agent.engine")
 
 
 # Exception types that count as EXPECTED provider/model/tool failures for the
@@ -272,6 +274,8 @@ class AgentEngine:
 
         try:
             async with self._span("agent.run", attrs=run_attrs):
+                if environ.debug:
+                    logger.debug("run %s started (session=%s resuming=%s)", context.run_id, context.session_id, input.resuming)
                 await cancellation.raise_if_cancelled()
 
                 # before_run middleware fires on a NEW run only -- resume skips
@@ -366,6 +370,14 @@ class AgentEngine:
                             agent.spec,
                             feature_context,
                         )
+                        if environ.debug:
+                            logger.debug(
+                                "run %s feature assembly: agent=%s tools=%s prompt_sections=%s",
+                                context.run_id,
+                                agent.spec.id,
+                                len(assembly.tools),
+                                tuple(assembly.prompt_sections),
+                            )
                     tool_descriptors = {
                         definition.descriptor.name: definition.descriptor
                         for definition in assembly.tools
@@ -568,6 +580,11 @@ class AgentEngine:
                                         except BaseException:
                                             raise
                             except RunPaused as paused:
+                                if environ.debug:
+                                    logger.debug(
+                                        "run %s paused: tool=%s call_id=%s approval=%s reason=%s",
+                                        context.run_id, paused.tool_name, paused.tool_call_id, paused.approval_id, paused.reason,
+                                    )
                                 snapshot = None
                                 if trace_collector is not None:
                                     snapshot = await _snapshot(
@@ -614,9 +631,13 @@ class AgentEngine:
                         timed_out = True
                     else:
                         raise
-                except Exception:
+                except Exception as iter_exc:
                     if timed_out:
-                        pass
+                        if environ.debug:
+                            logger.debug(
+                                "run %s masked secondary error during timeout: %s: %s",
+                                context.run_id, type(iter_exc).__name__, iter_exc,
+                            )
                     else:
                         raise
 
@@ -699,10 +720,17 @@ class AgentEngine:
                             attributes=run_attrs,
                         )
                     except Exception:  # noqa: BLE001
-                        _LOGGER.exception(
+                        logger.exception(
                             "success metrics failed for run %s", context.run_id
                         )
 
+                if environ.debug:
+                    logger.debug(
+                        "run %s completed: input=%s output=%s",
+                        context.run_id,
+                        usage.input_tokens if usage else 0,
+                        usage.output_tokens if usage else 0,
+                    )
                 return AgentCompleted(
                     result=run_result,
                     usage=AgentUsage(
@@ -719,6 +747,8 @@ class AgentEngine:
                         ExecutionRunStatus.CANCELLED,
                         capture_state=MessageCaptureState.PARTIAL,
                     )
+                if environ.debug:
+                    logger.debug("run %s cancelled", context.run_id)
                 return AgentCancelled(reason=None, usage=AgentUsage(), snapshot=snapshot)
             raise
         except _EXPECTED_RUN_FAILURES as exc:
@@ -738,7 +768,7 @@ class AgentEngine:
                         },
                     )
                 except Exception:  # noqa: BLE001
-                    _LOGGER.exception(
+                    logger.exception(
                         "failure metrics failed for run %s", context.run_id
                     )
             snapshot = None
@@ -747,6 +777,10 @@ class AgentEngine:
                     ExecutionRunStatus.FAILED,
                     capture_state=MessageCaptureState.PARTIAL,
                 )
+            logger.warning(
+                "run %s failed: %s: %s", context.run_id, type(exc).__name__, safe_error,
+                exc_info=environ.debug,
+            )
             return AgentFailed(
                 error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),
                 retryable=False,

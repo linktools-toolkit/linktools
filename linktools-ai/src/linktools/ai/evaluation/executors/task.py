@@ -16,9 +16,12 @@ module -- the evaluation package itself never reaches into task."""
 
 
 import json
+from linktools.core import environ
 from ..models import EvalExecution, normalize_usage
 
 from typing import TYPE_CHECKING
+
+logger = environ.get_logger("ai.evaluation.executors.task")
 
 if TYPE_CHECKING:
     from ..models import EvalCase, EvalTarget
@@ -57,6 +60,8 @@ class TaskEvalExecutor:
                 wait_timeout=self._wait_timeout,
             )
         except Exception as exc:  # noqa: BLE001 - submission / drive failure
+            if environ.debug:
+                logger.debug("eval case %s task submission/drive failed", case.id)
             return EvalExecution(
                 case_id=case.id, run_id=None, output=None, error=type(exc).__name__
             )
@@ -106,12 +111,15 @@ class TaskEvalExecutor:
                 artifact_id=output_artifact_id, tenant_id=self._tenant_id
             )
         except Exception:  # noqa: BLE001 - read is best-effort
+            logger.warning("failed to read eval output artifact %s (case scored as no-output)", output_artifact_id, exc_info=environ.debug)
             return None, {}
         if not content:
             return None, {}
         try:
             envelope = json.loads(content)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as parse_exc:
+            if environ.debug:
+                logger.debug("eval output artifact %s not valid JSON: %s", output_artifact_id, parse_exc)
             return None, {}
         return envelope.get("output"), dict(envelope.get("token_usage") or {})
 
@@ -122,6 +130,8 @@ class TaskEvalExecutor:
         try:
             attempts = await self._runtime.list_attempts(task_id)
         except Exception:  # noqa: BLE001 - non-fatal: no signal if unreadable
+            if environ.debug:
+                logger.debug("could not read task %s attempts for safety-refusal signal (safety_refusal_rate may underreport)", task_id)
             return 0.0
         for attempt in attempts:
             kind = getattr(getattr(attempt, "failure_kind", None), "value", "")

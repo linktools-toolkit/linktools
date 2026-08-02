@@ -3,11 +3,15 @@
 
 """SQLAlchemy ToolStateStore with one fenced operation aggregate."""
 
-from typing import TYPE_CHECKING
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+
 from sqlalchemy import JSON, Boolean, DateTime, Integer, String, UniqueConstraint, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
+
+from linktools.core import environ
+
 from ....errors import StorageConflictError
 from ....json import JsonValue, normalize_json
 from ....storage.coordination.lease import Lease, assert_active, claim, release, renew
@@ -15,6 +19,8 @@ from ....storage.database import CoordinationScope
 from ....storage.sqlalchemy.base import Base
 from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..models import ToolOperation, ToolOperationStatus
+
+logger = environ.get_logger("ai.agent.tool.persistence.sqlalchemy")
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -198,6 +204,8 @@ class SqlAlchemyToolStateBackend:
                         )
                     )
                     if marked.rowcount == 1:
+                        if environ.debug:
+                            logger.debug("tool op %s marked INDETERMINATE (stale lease)", operation_id)
                         row.status = ToolOperationStatus.INDETERMINATE.value
                         row.updated_at = now
                         return self._operation(row)

@@ -13,11 +13,14 @@ access is a separate ``extension-asset`` feature, not auto-enabled here."""
 
 from dataclasses import dataclass
 from typing import Any, ClassVar
+from linktools.core import environ
 from ..assembly.models import AgentContribution
 from ...governance.policy.rule import RiskLevel, SideEffectKind
 from ..tool.models import ToolCategory, ToolDescriptor, ToolSource, declared_tool_definitions
 from .prompt import render_skill_catalog
 from .toolset import build_skill_toolset, summary_from_spec
+
+logger = environ.get_logger("ai.agent.skill.provider")
 
 from typing import TYPE_CHECKING
 
@@ -54,7 +57,8 @@ class SkillProvider:
         for sid in ids:
             try:
                 spec = await self.skill_provider.get(sid)
-            except (KeyError, LookupError):
+            except (KeyError, LookupError) as lookup_exc:
+                logger.warning("skill %r catalog lookup failed (dropped): %s: %s", sid, type(lookup_exc).__name__, lookup_exc)
                 continue
             summaries.append(summary_from_spec(sid, spec))
         toolset = build_skill_toolset(
@@ -67,6 +71,11 @@ class SkillProvider:
         if summaries:
             sections["skills"] = render_skill_catalog(summaries)
         tools = _skill_tools(toolset, ref)
+        if environ.debug:
+            logger.debug(
+                "skill wildcard resolved: catalog=%s summaries=%s section_injected=%s",
+                len(ids), len(summaries), bool(summaries),
+            )
         return AgentContribution(
             prompt_sections=sections,
             tools=tools,
@@ -82,6 +91,8 @@ class SkillProvider:
             emit=emit,
             active_skill_lookup=self.active_skill_lookup,
         )
+        if environ.debug:
+            logger.debug("skill single ref %s resolved (no prompt section injected)", ref.name)
         return AgentContribution(tools=_skill_tools(toolset, ref))
 
 

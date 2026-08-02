@@ -5,12 +5,15 @@
 
 
 import asyncio
-from typing import TYPE_CHECKING
 from dataclasses import asdict
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
 from sqlalchemy import JSON, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, asc, desc, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
+
+from linktools.core import environ
 from ...storage.coordination.lease import Lease, claim, renew
 from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageError
@@ -137,6 +140,9 @@ class EvaluationRow(Base):
     evaluator: "Mapped[str]" = mapped_column(String(255), index=True)
     score: "Mapped[float | None]" = mapped_column(Float)
     result: "Mapped[dict[str, JsonValue]]" = mapped_column(JSON)
+
+
+logger = environ.get_logger("ai.execution.persistence.sqlalchemy")
 
 
 def _approval(data: "dict[str, JsonValue]") -> RunApproval:
@@ -773,6 +779,11 @@ class SqlAlchemyExecutionBackend:
                 if owner_row is not None:
                     owner_row.latest_completed_run_id = run_id
                 await session.flush()
+                if environ.debug:
+                    logger.debug(
+                        "run %s finished: status=%s revision=%s checkpoint_len=%s",
+                        run_id, status.value, new_revision, len(checkpoint),
+                    )
                 return _record(row)
 
     async def pause_run(self, command: "PauseExecution") -> RunRecord:

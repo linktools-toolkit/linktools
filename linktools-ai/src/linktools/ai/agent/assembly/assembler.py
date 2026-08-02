@@ -4,9 +4,12 @@
 """The single boundary that turns feature declarations into an agent surface."""
 
 from typing import TYPE_CHECKING
+from linktools.core import environ
 from ...errors import AgentAssemblyError, AgentFeatureConflictError, AgentFeatureNotFoundError
 from .models import AgentAssembly, AgentFeatureRef
 from .provider import AgentAssemblyEventSink
+
+logger = environ.get_logger("ai.agent.assembly.assembler")
 
 if TYPE_CHECKING:
     from ..tool.exposure import ToolAssembler
@@ -89,6 +92,11 @@ class AgentAssembler:
                 )
             )
             contribution = await provider.resolve(ref, context)
+            if environ.debug:
+                logger.debug(
+                    "feature %s:%s resolved: tools=%s prompt_sections=%s",
+                    ref.kind, ref.name, len(contribution.tools), tuple(contribution.prompt_sections),
+                )
             await emit(
                 AgentFeatureResolveCompleted(
                     agent_id=spec.id,

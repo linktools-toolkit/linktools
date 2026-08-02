@@ -6,10 +6,13 @@
 
 from dataclasses import dataclass
 from typing import Any, Mapping
+from linktools.core import environ
 from ...errors import MCPAuthenticationError, MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError, MCPToolDefinitionError
 from .models import MCPDiscoveryResult, MCPToolInfo
 
 from typing import TYPE_CHECKING
+
+logger = environ.get_logger("ai.agent.mcp.client")
 
 if TYPE_CHECKING:
     from .models import MCPConnectionRef
@@ -93,10 +96,15 @@ class MCPClient:
                 connection_ref,
             )
         except Exception as error:
+            normalized = self.normalize_discovery_error(error)
+            logger.warning(
+                "MCP discovery failed (server=%s tools may be unavailable): %s: %s",
+                server_id, type(normalized).__name__, normalized,
+            )
             return MCPDiscoveryResult(
                 (),
                 False,
-                self.normalize_discovery_error(error),
+                normalized,
                 connection_ref,
             )
 

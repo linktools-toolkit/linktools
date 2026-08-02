@@ -30,6 +30,7 @@ names."""
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Iterable, Mapping
+from linktools.core import environ
 from ..assembly.models import AgentContribution
 from ...errors import AgentFeatureConflictError, AgentAssemblyError, MCPServerNotFoundError, RuntimeInitializationError
 from ...governance.policy.rule import RiskLevel, SideEffectKind
@@ -37,6 +38,8 @@ from ..tool.models import ToolCategory, ToolDefinition, ToolDescriptor, ToolSour
 from .models import MCPConnectionRef, MCPDiscoveryResult, MCPExposedTool, MCPToolInfo, MCPRuntimePolicy
 
 from typing import TYPE_CHECKING
+
+logger = environ.get_logger("ai.agent.mcp.tool_provider")
 
 if TYPE_CHECKING:
     from ..assembly.models import AgentFeatureRef
@@ -133,12 +136,22 @@ class MCPToolProvider:
             # of them.
             discovery_mode = runtime_policy.discovery_mode
             if not discovery.verified and discovery_mode == "strict":
+                if environ.debug:
+                    logger.debug(
+                        "mcp server %s strict discovery unverified: %s",
+                        server_id, discovery.error,
+                    )
                 raise AgentAssemblyError(
                     f"mcp server {server_id!r}: strict discovery mode cannot verify "
                     f"tool governance without live enumeration (list_tools "
                     f"returned no tools) -- set discovery_mode='best_effort' to opt out"
                 )
             filtered = filter_tool_names(raw, spec.enabled_tools, spec.disabled_tools)
+            if environ.debug and (spec.enabled_tools or spec.disabled_tools):
+                logger.debug(
+                    "mcp server %s tool filter: raw=%s filtered=%s",
+                    server_id, len(raw), len(filtered),
+                )
             final = tuple(
                 final_tool_name(spec.id, n, spec.tool_prefix) for n in filtered
             )

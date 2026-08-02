@@ -14,12 +14,15 @@ evaluators can see the trajectory. The Evaluation core depends on the
 import json
 import uuid
 from typing import Protocol
+from linktools.core import environ
 from ...artifact.models import ArtifactProvenance
 from ...json import normalize_json
 from ..models import EvalExecution, normalize_usage
 from ..snapshot import EvalSnapshot
 
 from typing import TYPE_CHECKING
+
+logger = environ.get_logger("ai.evaluation.executors.direct")
 
 if TYPE_CHECKING:
     from ..models import EvalCase, EvalTarget
@@ -57,6 +60,8 @@ class DirectEvalExecutor:
             spec = await self._resolver.resolve(target)
             prompt = await self._read_prompt(case)
         except Exception as exc:  # noqa: BLE001 - resolution / input read failure
+            if environ.debug:
+                logger.debug("eval case %s failed to resolve/read prompt", case.id)
             return EvalExecution(
                 case_id=case.id, run_id=None, output=None, error=type(exc).__name__
             )
@@ -75,6 +80,8 @@ class DirectEvalExecutor:
             # run -- record it as a safety refusal so the safety_refusal_rate
             # metric is populated in direct mode too. Duck-typed via the MRO so
             # no core/errors import is needed.
+            if environ.debug:
+                logger.debug("eval case %s run %s failed", case.id, run_id)
             usage = {"safety_refusal": 1.0} if _is_policy_error(exc) else {}
             return EvalExecution(
                 case_id=case.id,
@@ -126,6 +133,7 @@ class DirectEvalExecutor:
             )
             return record.ref.id
         except Exception:  # noqa: BLE001 - sealing is best-effort
+            logger.warning("failed to seal eval output artifact (replay may be impossible)", exc_info=environ.debug)
             return None
 
     async def _capture_snapshot(
@@ -167,6 +175,7 @@ class DirectEvalExecutor:
             snapshot_id = await self._seal_json(snapshot)
             return snapshot_id, (snapshot if snapshot_id is not None else None)
         except Exception:  # noqa: BLE001 - snapshot capture is best-effort
+            logger.warning("eval snapshot capture failed for run %s (case will have no replayable trajectory)", run_id, exc_info=environ.debug)
             return None, None
 
 

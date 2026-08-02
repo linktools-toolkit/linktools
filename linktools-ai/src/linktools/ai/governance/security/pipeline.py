@@ -7,8 +7,11 @@ import dataclasses
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from linktools.core import environ
 from ...json import freeze_value
 from ...errors import PipelineExecutionError
+
+logger = environ.get_logger("ai.governance.security.pipeline")
 
 
 class PipelineAction(str, Enum):
@@ -226,6 +229,10 @@ class CompositeSecurityPipeline:
             elif hook_name == "after_tool":
                 validate_tool_decision(decision, stage="after")
             if decision.action in (PipelineAction.DENY, PipelineAction.DENY_RESULT):
+                logger.warning(
+                    "security pipeline DENY: hook=%s reason=%s",
+                    hook_name, decision.reason,
+                )
                 return decision
             if decision.action == PipelineAction.REQUIRE_APPROVAL:
                 require_approval = decision

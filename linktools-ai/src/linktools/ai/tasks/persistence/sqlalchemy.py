@@ -11,12 +11,16 @@ from sqlalchemy import JSON, DateTime, Integer, String, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
+from linktools.core import environ
+
 from ...storage.sqlalchemy.base import Base
 from ...storage.database import CoordinationScope
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX
 from ...errors import StorageConflictError
 from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
 from ..models import TaskExecution, TaskNode, TaskPlan, TaskStatus
+
+logger = environ.get_logger("ai.tasks.persistence.sqlalchemy")
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -253,4 +257,6 @@ class SqlAlchemyTaskBackend:
                     error=error,
                     updated_at=now,
                 )
+                if environ.debug and retry:
+                    logger.debug("task %s failed -> READY (re-claimable)", execution_id)
                 return self._execution(updated)

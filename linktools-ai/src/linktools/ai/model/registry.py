@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pydantic_ai.models import Model
 
-logger = environ.get_logger("ai.core.model.runtime")
+logger = environ.get_logger("ai.model.registry")
 
 
 class ModelClientUnavailable(RuntimeError):

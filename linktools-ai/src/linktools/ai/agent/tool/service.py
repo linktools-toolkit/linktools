@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Protocol
 from uuid import uuid4
+
+from linktools.core import environ
+
 from ...errors import RunPaused, RuntimeInitializationError, ToolIdempotencyConflictError, ToolDeniedError, ToolResultDeniedError, ToolTimeoutError
 from ...json import canonical_json_bytes, normalize_json
 from ...execution.trace_models import ToolResultTrace
@@ -30,6 +33,9 @@ if TYPE_CHECKING:
     from .policy import EffectiveToolPolicy
     from .models import ExecuteTool
     from .retry import RetryPolicy
+
+logger = environ.get_logger("ai.agent.tool.service")
+
 
 class ToolExecutionHook(Protocol):
     async def before(self, request: "ExecuteTool") -> None: ...
@@ -242,6 +248,11 @@ class ToolExecutionService:
             )
         )
         if approval_reason is not None and not approved:
+            if environ.debug:
+                logger.debug(
+                    "tool %s paused for approval (run=%s reason=%s)",
+                    descriptor.name, request.context.execution_id, approval_reason,
+                )
             raise RunPaused(
                 request.context.execution_id,
                 uuid4().hex,
@@ -324,6 +335,10 @@ class ToolExecutionService:
                         error=normalize_tool_error(asyncio.CancelledError()),
                     )
                 else:
+                    logger.warning(
+                        "tool %s marked INDETERMINATE (run=%s op=%s): mutating tool outcome unknowable after cancellation",
+                        descriptor.name, request.context.execution_id, op_id,
+                    )
                     await self.state.mark_indeterminate(
                         op_id,
                         owner=owner,
@@ -373,6 +388,10 @@ class ToolExecutionService:
                     error=error,
                 )
             else:
+                logger.warning(
+                    "tool %s marked INDETERMINATE (run=%s op=%s): mutating tool outcome unknowable after error",
+                    descriptor.name, request.context.execution_id, op_id,
+                )
                 await self.state.mark_indeterminate(
                     op_id,
                     owner=owner,

@@ -12,16 +12,19 @@ tools, middleware, output type -- round-trips across pause/resume.
 
 
 import asyncio
+import hmac
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-import hmac
 from uuid import uuid4
+
+from linktools.core import environ
+
 from ..agent.assembly.provider import AgentFeatureContext
 from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
 from ..agent.sandbox.protocols import Sandbox
-from ..governance.identity import PrincipalContext
-from ..governance.authorization import ExecutionAction
 from ..errors import PrincipalAccessDeniedError, RunDefinitionError, RunDefinitionIntegrityError, RuntimeInitializationError, StorageError
+from ..governance.authorization import ExecutionAction
+from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
 from ..observability.events.payloads import SecurityDegraded
 from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
@@ -48,6 +51,9 @@ if TYPE_CHECKING:
     from .domain import ApprovalDecision, RunRecord
     from .live_events import RunLiveEventSink, SecurityEventSink
     from .store import ExecutionStore
+
+logger = environ.get_logger("ai.execution.service")
+
 
 def _definition(spec: "AgentSpec", codec: "AgentSpecCodec") -> RunDefinition:
     value = codec.encode(spec)
@@ -155,6 +161,11 @@ class ExecutionService:
             self._store.claim_run(ClaimExecution(record.id, "runtime", datetime.now(timezone.utc), _LEASE_DURATION)),
             self._store.load_session_context(session_id),
         )
+        if environ.debug:
+            logger.debug(
+                "run %s claimed (session=%s owner=%s fence=%s history=%s)",
+                claimed.id, session_id, claimed.lease.owner, claimed.lease.fence, len(messages),
+            )
         return await self._execute(
             spec,
             prompt,
@@ -269,6 +280,8 @@ class ExecutionService:
             await asyncio.sleep(_HEARTBEAT_INTERVAL.total_seconds())
             updated = await self._store.heartbeat_run(HeartbeatExecution(run_id, owner, fence, datetime.now(timezone.utc), _LEASE_DURATION))
             if updated.status is RunStatus.CANCELLING:
+                if environ.debug:
+                    logger.debug("run %s heartbeat detected CANCELLING", run_id)
                 await self._controller.cancel(run_id)
                 return
 
@@ -307,8 +320,12 @@ class ExecutionService:
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+                except (asyncio.CancelledError, Exception) as task_exc:
+                    if environ.debug:
+                        logger.debug(
+                            "run %s cancelled-task cleanup swallowed: %s: %s",
+                            record.id, type(task_exc).__name__, task_exc,
+                        )
             try:
                 latest = await self._required(record.id)
                 if latest.status is RunStatus.RUNNING:
@@ -349,8 +366,12 @@ class ExecutionService:
                             )
                         )
                     )
-                except Exception:
-                    pass
+                except Exception as emit_exc:
+                    if environ.debug:
+                        logger.debug(
+                            "run %s SecurityDegraded emit failed: %s: %s",
+                            record.id, type(emit_exc).__name__, emit_exc,
+                        )
             raise
         except Exception as exc:
             # A programming/config/protocol error (as opposed to a modeled
@@ -362,8 +383,12 @@ class ExecutionService:
             try:
                 trace_end = await collector.flush()
                 await self._store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), trace_end))
-            except Exception:
-                pass
+            except Exception as abort_exc:
+                logger.warning(
+                    "run %s abort/flush failed (run may strand in RUNNING): %s: %s",
+                    record.id, type(abort_exc).__name__, abort_exc,
+                    exc_info=environ.debug,
+                )
             raise
         finally:
             heartbeat.cancel()

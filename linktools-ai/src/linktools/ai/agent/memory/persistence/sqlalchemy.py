@@ -14,15 +14,21 @@ semantics as FilesystemMemoryBackend)."""
 import json
 from datetime import datetime, timezone
 from typing import Callable
+
 from sqlalchemy import DECIMAL, Index, Integer, String, Text, UniqueConstraint, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
+
+from linktools.core import environ
+
 from ....errors import MemoryConflictError, MemoryNotFoundError
 from ....storage.sqlalchemy.base import Base
 from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ..models import MemoryMatch, MemoryRecord
 from ..scope import LEGACY_TENANT_ID, is_legacy_tenant
 from ..store import UNSET
+
+logger = environ.get_logger("ai.agent.memory.persistence.sqlalchemy")
 
 from typing import TYPE_CHECKING
 
@@ -271,6 +277,11 @@ class SqlAlchemyMemoryBackend:
         )
         if actual is None:
             raise MemoryNotFoundError(f"memory not found: {memory_id}")
+        if environ.debug:
+            logger.debug(
+                "memory write conflict: id=%s expected=%s actual=%s",
+                memory_id, expected_version, actual,
+            )
         raise MemoryConflictError(
             f"expected version {expected_version}, found {actual}"
         )

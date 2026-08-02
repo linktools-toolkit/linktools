@@ -6,8 +6,11 @@ referenced artifact must exist and hash to its id, so a tampered or truncated
 snapshot is refused."""
 
 from typing import TYPE_CHECKING
+from linktools.core import environ
 from ..artifact import ArtifactIntegrityError
 from .models import EvalCase
+
+logger = environ.get_logger("ai.evaluation.replay")
 
 if TYPE_CHECKING:
     from .models import EvalExecution, EvalTarget
@@ -64,6 +67,8 @@ async def replay(
     reconstructed from the snapshot's input. The executor mints a fresh run, so
     history is never modified -- replay always creates a new execution."""
     await validate_snapshot(snapshot, artifact_store, tenant_id=tenant_id)
+    if environ.debug:
+        logger.debug("replay started: original run %s", snapshot.run_id)
     case = EvalCase(
         id=f"replay-{snapshot.run_id}",
         input_artifact_id=snapshot.input_artifact_id,

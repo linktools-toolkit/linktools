@@ -17,7 +17,11 @@ never be served against changed content."""
 import asyncio
 from typing import Any, Generic, Protocol, TypeVar
 
+from linktools.core import environ
+
 T = TypeVar("T")
+
+logger = environ.get_logger("ai.spec.cache")
 
 
 class SpecCacheStore(Protocol):
@@ -88,11 +92,15 @@ class SpecObjectCache(Generic[T]):
             key = (item_id, version, etag)
             cached = self._cache.get(key)
             if cached is not None:
+                if environ.debug:
+                    logger.debug("spec cache hit: item=%s", item_id)
                 return cached
             future = self._inflight.get(key)
             if future is None:
                 future = asyncio.get_running_loop().create_future()
                 self._inflight[key] = future
+                if environ.debug:
+                    logger.debug("spec cache miss + decode: item=%s", item_id)
                 # Run the decode on a fresh task so the lock is released while
                 # it runs; concurrent callers re-enter, find the inflight
                 # future, and await it instead of starting a second decode.
