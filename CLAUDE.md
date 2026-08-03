@@ -88,6 +88,8 @@ On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels
 - **Public API is annotated**: every public method/function (not `_`-prefixed) has parameter and return annotations, inferred from body/call sites. Use `Any` only for genuinely untyped values.
 - **Quoting**: quote annotations containing `|` or `[...]` (`"float | None"`, `"list[str]"`); bare primitives (`str`, `int`, `bool`, `Any`, …) and bare class names stay unquoted — unless the name is imported under `TYPE_CHECKING`, in which case it must be quoted.
 - **`TYPE_CHECKING`**: annotation-only imports go under `if TYPE_CHECKING:`; runtime imports stay at module scope. Never move names in `__all__` or referenced by runtime-resolved annotations (SQLAlchemy `Mapped[...]`, Pydantic fields).
+- **Respect interface boundaries**: reach an object's data only through its public API, never by reflection (`getattr(x, "_field")`, `x.__dict__`, name-mangled attrs) or by reaching across layers into another module's privates. If the public surface doesn't expose what you need, add a public method (and implement it on each backend/protocol implementer) rather than tunneling past it. Privates (`_`-prefixed) are implementation details that can change without notice.
+
 
 ## Comments — minimal
 
