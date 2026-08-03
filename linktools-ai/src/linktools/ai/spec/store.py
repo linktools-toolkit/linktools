@@ -10,6 +10,7 @@ from ..storage.composition import (
     StorageComposition,
     StorageLayer,
 )
+from ..storage.versioning import VersionedStorage, VersionSummary
 from .document import SpecDocument, SpecDocumentInfo
 
 if TYPE_CHECKING:
@@ -125,6 +126,41 @@ class SpecStore:
         deletes: "tuple[str, ...]",
     ) -> None:
         await self._storage.apply_batch(puts, deletes)
+
+    # ---- version history (optional backend capability) -----------------
+
+    @property
+    def _versioned_primary(
+        self,
+    ) -> "VersionedStorage[object, str, SpecDocument] | None":
+        primary = self._storage.primary
+        return primary if isinstance(primary, VersionedStorage) else None
+
+    async def list_versions(self, path: str) -> "tuple[VersionSummary, ...]":
+        """A path's history, newest first. Empty when the primary backend
+        keeps no change log (e.g. a local directory backend)."""
+        primary = self._versioned_primary
+        return () if primary is None else await primary.list_versions(path)
+
+    async def get_at_revision(
+        self, path: str, revision: object
+    ) -> "SpecDocument | None":
+        """The version of ``path`` in effect at ``revision``. None when the
+        primary backend keeps no change log, or the path had no content at
+        that revision."""
+        primary = self._versioned_primary
+        return (
+            None if primary is None else await primary.get_at_revision(path, revision)
+        )
+
+    async def get_at_version(self, path: str, version: int) -> "SpecDocument | None":
+        """The record of ``path`` carrying the given declared ``version``
+        number (e.g. ``SpecDocumentInfo.version``), not a history ordinal.
+        None when the primary backend keeps no change log, no record of
+        ``path`` carries that version, or the matching record is a
+        deletion."""
+        primary = self._versioned_primary
+        return None if primary is None else await primary.get_at_version(path, version)
 
 
 __all__ = ["SpecStore"]

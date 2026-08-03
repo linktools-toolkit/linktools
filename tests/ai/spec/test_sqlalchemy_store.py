@@ -262,8 +262,8 @@ async def test_sql_list_versions(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
     backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
     await backend.initialize_storage(engine)
-    await backend.put(doc("a", b"v1"))
-    await backend.put(doc("a", b"v2"))
+    await backend.put(doc("a", b"v1", version=1))
+    await backend.put(doc("a", b"v2", version=2))
     await backend.delete("a")
     versions = await backend.list_versions("a")
     assert len(versions) == 3
@@ -276,6 +276,46 @@ async def test_sql_list_versions(tmp_path):
     assert versions[1].deleted is False and versions[1].object_id is not None
     assert versions[2].deleted is False and versions[2].object_id is not None
     assert versions[1].object_id != versions[2].object_id  # different content
+    # version mirrors the document's own declared version field -- the
+    # tombstone reuses the deleted entry's version (2), not a new ordinal.
+    assert [v.version for v in versions] == [2, 2, 1]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_get_at_version(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("a", b"v1", version=1))
+    await backend.put(doc("a", b"v2", version=2))
+    assert (await backend.get_at_version("a", 1)).content == b"v1"
+    assert (await backend.get_at_version("a", 2)).content == b"v2"
+    # No record ever carried this version number.
+    assert await backend.get_at_version("a", 3) is None
+    await backend.delete("a")
+    # version=2's most recent record is now the tombstone -- no content.
+    assert await backend.get_at_version("a", 2) is None
+    # version=1's record is untouched and still resolves.
+    assert (await backend.get_at_version("a", 1)).content == b"v1"
+    # A path that never existed has no versions at all.
+    assert await backend.get_at_version("nope", 1) is None
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_get_at_version_missing_blob_raises_corruption(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    await backend.put(doc("a", b"v1", version=1))
+    async with backend.session_factory() as session:
+        async with session.begin():
+            from sqlalchemy import delete as sa_delete
+
+            await session.execute(sa_delete(SpecBlobRow))
+    with pytest.raises(StorageCorruptionError, match="missing"):
+        await backend.get_at_version("a", 1)
     await engine.dispose()
 
 

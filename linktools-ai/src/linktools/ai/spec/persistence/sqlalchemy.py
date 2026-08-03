@@ -138,12 +138,37 @@ class SqlAlchemySpecBackend(
             return tuple(
                 VersionSummary(
                     revision=row.revision,
+                    version=row.version,
                     etag=row.etag,
                     object_id=row.object_id,
                     created_at=as_utc(row.created_at),
                     deleted=row.deleted,
                 )
                 for row in rows
+            )
+
+    async def get_at_version(self, path: str, version: int) -> "SpecDocument | None":
+        # The declared version number is not unique to one history row (e.g.
+        # a tombstone reuses the deleted entry's version), so pick the most
+        # recent match. No content at that point (deleted, or no such
+        # version at all) -> None, same as get_at_revision.
+        async with self.session_factory() as session:
+            row = await session.scalar(
+                select(ChangeRow)
+                .where(ChangeRow.path == path, ChangeRow.version == version)
+                .order_by(ChangeRow.revision.desc(), ChangeRow.id.desc())
+                .limit(1)
+            )
+            if row is None or row.deleted or row.object_id is None:
+                return None
+            content = await read_blob(session, SpecBlobRow, row.object_id)
+            if content is None:
+                raise StorageCorruptionError(
+                    f"spec blob {row.object_id} for {path!r}@version={version} is missing"
+                )
+            return SpecDocument(
+                SpecDocumentInfo(row.path, row.kind, row.version, row.etag, row.active),
+                content,
             )
 
     async def get_at_revision(self, path: str, revision: int) -> "SpecDocument | None":
