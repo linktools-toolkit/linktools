@@ -48,17 +48,39 @@ from typing import TYPE_CHECKING, Any
 
 from linktools.core import environ
 
-from ..errors import MCPToolError, ModelInvocationDeniedError, ModelOutputValidationError, ModelPolicyExceededError, ModelResultDeniedError, ModelRoutingError, RunPaused, RuntimeInitializationError, ToolError, ToolSchemaError
+from ..errors import (
+    MCPToolError,
+    ModelInvocationDeniedError,
+    ModelOutputValidationError,
+    ModelPolicyExceededError,
+    ModelResultDeniedError,
+    ModelRoutingError,
+    RunPaused,
+    RuntimeInitializationError,
+    ToolError,
+    ToolSchemaError,
+)
 from ..execution.domain import MessageCaptureState
 from ..execution.domain import RunErrorInfo
-from ..execution.domain import RunStatus as ExecutionRunStatus, RunUsage as ExecutionRunUsage
+from ..execution.domain import (
+    RunStatus as ExecutionRunStatus,
+    RunUsage as ExecutionRunUsage,
+)
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..model.recording import SemanticRecordingModel
 from ..observability.tracing import use_span
 from .dependencies import AgentDependencies
 from .middleware.pipeline import MiddlewarePipeline
-from .models import AgentCancelled, AgentCompleted, AgentFailed, model_supports_streaming, AgentPaused, AgentUsage, PauseRequest
+from .models import (
+    AgentCancelled,
+    AgentCompleted,
+    AgentFailed,
+    model_supports_streaming,
+    AgentPaused,
+    AgentUsage,
+    PauseRequest,
+)
 from .models import RunResult
 from .prompt.builder import PromptBuilder
 
@@ -107,6 +129,8 @@ _EXPECTED_RUN_FAILURES: "tuple[type[BaseException], ...]" = (
     ToolError,
     MCPToolError,
 )
+
+
 @contextlib.asynccontextmanager
 async def _noop_span():
     """Async context manager that yields ``None`` and does nothing -- the
@@ -262,7 +286,9 @@ class AgentEngine:
                 return None
             # checkpoint (all_messages) is non-empty ONLY for PAUSED; the store
             # clears it on every terminal state so no cumulative history is kept.
-            checkpoint = all_messages_encoded() if status is ExecutionRunStatus.PAUSED else ()
+            checkpoint = (
+                all_messages_encoded() if status is ExecutionRunStatus.PAUSED else ()
+            )
             return await trace_collector.build_snapshot(
                 delta_messages=delta_messages_encoded(),
                 checkpoint_messages=checkpoint,
@@ -275,7 +301,12 @@ class AgentEngine:
         try:
             async with self._span("agent.run", attrs=run_attrs):
                 if environ.debug:
-                    logger.debug("run %s started (session=%s resuming=%s)", context.run_id, context.session_id, input.resuming)
+                    logger.debug(
+                        "run %s started (session=%s resuming=%s)",
+                        context.run_id,
+                        context.session_id,
+                        input.resuming,
+                    )
                 await cancellation.raise_if_cancelled()
 
                 # before_run middleware fires on a NEW run only -- resume skips
@@ -449,20 +480,19 @@ class AgentEngine:
                         trace_collector,
                         self._trace_codec,
                     )
-                if message_history is not None:
-                    run_iter = agent.pydantic_agent.iter(
-                        message_history=message_history,
-                        deps=deps,
-                        toolsets=toolsets,
-                        model=iter_model,
-                    )
-                else:
-                    run_iter = agent.pydantic_agent.iter(
-                        effective_prompt,
-                        deps=deps,
-                        toolsets=toolsets,
-                        model=iter_model,
-                    )
+                # effective_prompt is None on the resume path (baked into the
+                # checkpointed message_history already, per AgentInput.resuming);
+                # otherwise it's the new user turn, which must be sent alongside
+                # message_history -- not replaced by it -- or a continuing
+                # session's new prompt is silently dropped and the model
+                # receives only stale history with no new question to answer.
+                run_iter = agent.pydantic_agent.iter(
+                    effective_prompt,
+                    message_history=message_history,
+                    deps=deps,
+                    toolsets=toolsets,
+                    model=iter_model,
+                )
 
                 timed_out = False
                 iter_started = time.monotonic()
@@ -510,10 +540,9 @@ class AgentEngine:
                                     # FunctionToolResultEvent) does not depend on
                                     # the model's streaming support, only on
                                     # pydantic-ai's graph iteration.
-                                    if (
-                                        not model_supports_streaming(model)
-                                        and PydanticAgent.is_model_request_node(node)
-                                    ):
+                                    if not model_supports_streaming(
+                                        model
+                                    ) and PydanticAgent.is_model_request_node(node):
                                         node = await node.run(run.ctx)
                                         continue
 
@@ -583,7 +612,11 @@ class AgentEngine:
                                 if environ.debug:
                                     logger.debug(
                                         "run %s paused: tool=%s call_id=%s approval=%s reason=%s",
-                                        context.run_id, paused.tool_name, paused.tool_call_id, paused.approval_id, paused.reason,
+                                        context.run_id,
+                                        paused.tool_name,
+                                        paused.tool_call_id,
+                                        paused.approval_id,
+                                        paused.reason,
                                     )
                                 snapshot = None
                                 if trace_collector is not None:
@@ -636,7 +669,9 @@ class AgentEngine:
                         if environ.debug:
                             logger.debug(
                                 "run %s masked secondary error during timeout: %s: %s",
-                                context.run_id, type(iter_exc).__name__, iter_exc,
+                                context.run_id,
+                                type(iter_exc).__name__,
+                                iter_exc,
                             )
                     else:
                         raise
@@ -701,7 +736,9 @@ class AgentEngine:
                         usage=ExecutionRunUsage(
                             input_tokens=usage.input_tokens if usage else 0,
                             output_tokens=usage.output_tokens if usage else 0,
-                            total_tokens=(usage.input_tokens + usage.output_tokens) if usage else 0,
+                            total_tokens=(usage.input_tokens + usage.output_tokens)
+                            if usage
+                            else 0,
                             cache_write_tokens=usage.cache_write_tokens if usage else 0,
                             cache_read_tokens=usage.cache_read_tokens if usage else 0,
                         ),
@@ -749,7 +786,9 @@ class AgentEngine:
                     )
                 if environ.debug:
                     logger.debug("run %s cancelled", context.run_id)
-                return AgentCancelled(reason=None, usage=AgentUsage(), snapshot=snapshot)
+                return AgentCancelled(
+                    reason=None, usage=AgentUsage(), snapshot=snapshot
+                )
             raise
         except _EXPECTED_RUN_FAILURES as exc:
             # A malformed tool schema is a contract/config violation, not a
@@ -778,7 +817,10 @@ class AgentEngine:
                     capture_state=MessageCaptureState.PARTIAL,
                 )
             logger.warning(
-                "run %s failed: %s: %s", context.run_id, type(exc).__name__, safe_error,
+                "run %s failed: %s: %s",
+                context.run_id,
+                type(exc).__name__,
+                safe_error,
                 exc_info=environ.debug,
             )
             return AgentFailed(

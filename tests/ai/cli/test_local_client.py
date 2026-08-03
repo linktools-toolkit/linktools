@@ -165,3 +165,50 @@ async def test_run_stream_no_sink_falls_back_to_trace_replay(tmp_path: Path) -> 
         )
     ]
     assert any(e.get("type") == "text" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_run_stream_second_turn_prompt_reaches_model(tmp_path: Path) -> None:
+    # Regression: AgentEngine once called pydantic_agent.iter(message_history=...)
+    # with no first positional user_prompt whenever message_history was
+    # non-empty, silently dropping the new turn's prompt -- a session's second
+    # (and every later) turn sent the model only stale history and no new
+    # question. Assert the model actually receives the new prompt text
+    # alongside history, not just history.
+    from pydantic_ai.messages import ModelResponse, TextPart, UserPromptPart
+    from pydantic_ai.models.function import AgentInfo, FunctionModel
+    from linktools.ai.model.registry import ModelRegistry
+    from linktools.ai.model.resolver import ModelResolver
+
+    captured: "list[list[object]]" = []
+
+    def _fn(messages, info: AgentInfo) -> ModelResponse:
+        captured.append(list(messages))
+        return ModelResponse(parts=[TextPart(content="ok")])
+
+    registry = ModelRegistry()
+    registry.register("test-model", model=FunctionModel(_fn))
+    resolver = ModelResolver(registry=registry)
+
+    client = await _bundle(tmp_path, resolver=resolver)
+    _ = [
+        e
+        async for e in client.run_stream(
+            RunRequest(prompt="first turn", session_id="s", run_id="r1")
+        )
+    ]
+    _ = [
+        e
+        async for e in client.run_stream(
+            RunRequest(prompt="second turn text", session_id="s", run_id="r2")
+        )
+    ]
+    assert len(captured) == 2
+    second_call_messages = captured[1]
+    user_texts = [
+        part.content
+        for message in second_call_messages
+        for part in getattr(message, "parts", [])
+        if isinstance(part, UserPromptPart)
+    ]
+    assert any("second turn text" in str(text) for text in user_texts)
