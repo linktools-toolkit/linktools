@@ -21,9 +21,10 @@ Because the backend does not implement :class:`StorageMetadataBackend`,
 calls :meth:`list_info`, which walks the tree. There is no incremental PATCH.
 """
 
-
 import asyncio
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from linktools.core import environ
 
@@ -31,21 +32,87 @@ from ...errors import SpecConflictError
 from ...storage.local.files import atomic_write_bytes, read_bytes
 from ..document import SpecDocument, SpecDocumentInfo, compute_spec_etag
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 logger = environ.get_logger("ai.spec.persistence.local")
 
 
-class LocalSpecBackend:
-    """Spec persistence over a plain directory tree."""
+@runtime_checkable
+class SpecPathAdapter(Protocol):
+    """Bidirectional translation between a spec path and its on-disk relative
+    path under ``<root>``. Applied by :class:`LocalSpecBackend` so a caller
+    whose on-disk layout diverges from SpecStore's ``{kind}/...`` convention
+    (e.g. the mcp source root named ``adapter`` on disk) does not need to wrap
+    the backend in a translating layer. Both functions must be pure and
+    reversible; escape from ``<root>`` is still rejected by ``_resolve``."""
 
-    def __init__(self, root: "str | Path" = ".linktools") -> None:
+    def to_disk(self, spec_path: str) -> str:
+        """Map a spec path to its relative path under ``<root>``."""
+        ...
+
+    def from_disk(self, disk_path: str) -> str:
+        """Map a relative on-disk path back to its spec path."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentitySpecPathAdapter:
+    """The no-op adapter: spec path == disk path (the default)."""
+
+    def to_disk(self, spec_path: str) -> str:
+        return spec_path
+
+    def from_disk(self, disk_path: str) -> str:
+        return disk_path
+
+
+_IDENTITY = _IdentitySpecPathAdapter()
+
+
+@dataclass(frozen=True, slots=True)
+class PrefixSpecPathAdapter:
+    """Rename a spec path's leading ``{kind}/`` segment to a different on-disk
+    directory. Covers layouts like ``mcp/...`` (spec) ↔ ``adapter/...`` (disk),
+    a capabilities-editor-era naming quirk. ``mapping`` is spec-kind →
+    disk-source-root; the reverse is derived. Kinds absent from the mapping
+    pass through unchanged."""
+
+    mapping: "Mapping[str, str]"
+
+    def to_disk(self, spec_path: str) -> str:
+        kind, sep, rest = spec_path.partition("/")
+        return f"{self.mapping.get(kind, kind)}{sep}{rest}"
+
+    def from_disk(self, disk_path: str) -> str:
+        source_root, sep, rest = disk_path.partition("/")
+        reverse = {v: k for k, v in self.mapping.items()}
+        return f"{reverse.get(source_root, source_root)}{sep}{rest}"
+
+
+class LocalSpecBackend:
+    """Spec persistence over a plain directory tree.
+
+    ``path_adapter`` (default identity) translates between spec paths and
+    on-disk relative paths, so a divergent on-disk layout needs no wrapper."""
+
+    def __init__(
+        self,
+        root: "str | Path" = ".linktools",
+        *,
+        path_adapter: "SpecPathAdapter | None" = None,
+    ) -> None:
         self.root = Path(root)
+        self._adapter: "SpecPathAdapter" = path_adapter or _IDENTITY
 
     # ---- path safety ---------------------------------------------------
 
     def _resolve(self, path: str) -> Path:
         """Map a spec path to its filesystem path under ``<root>``, rejecting
-        any path that escapes ``<root>`` (absolute or ``..`` traversal)."""
-        target = (self.root / path).resolve()
+        any path that escapes ``<root>`` (absolute or ``..`` traversal). The
+        path adapter is applied first, so an adapter that yields an escaping
+        path is still rejected here."""
+        target = (self.root / self._adapter.to_disk(path)).resolve()
         root = self.root.resolve()
         try:
             target.relative_to(root)
@@ -84,11 +151,15 @@ class LocalSpecBackend:
             return None
         return _info(path, content)
 
-    async def list_info(self, *, kind: "str | None" = None) -> "tuple[SpecDocumentInfo, ...]":
+    async def list_info(
+        self, *, kind: "str | None" = None
+    ) -> "tuple[SpecDocumentInfo, ...]":
         """Walk the tree and derive info for every file under ``<root>``. The
-        path is the file's path relative to ``<root>`` (POSIX-formatted).
-        ``kind`` optionally filters by the first path segment."""
+        returned path is the spec path (the on-disk relative path translated
+        back through the path adapter). ``kind`` optionally filters by the
+        spec path's first segment."""
         root = self.root.resolve()
+        adapter = self._adapter
 
         def _scan() -> "tuple[tuple[str, bytes], ...]":
             if not root.exists():
@@ -98,7 +169,7 @@ class LocalSpecBackend:
                 if not file.is_file():
                     continue
                 rel = file.relative_to(root)
-                spec_path = rel.as_posix()
+                spec_path = adapter.from_disk(rel.as_posix())
                 if kind is not None and _kind_of(spec_path) != kind:
                     continue
                 found.append((spec_path, file.read_bytes()))
@@ -167,7 +238,11 @@ def _unlink_if_exists(target: Path) -> None:
     try:
         target.unlink(missing_ok=True)
     except OSError as unlink_exc:
-        logger.warning("failed to delete spec file (tree state may diverge): %s: %s", target, unlink_exc)
+        logger.warning(
+            "failed to delete spec file (tree state may diverge): %s: %s",
+            target,
+            unlink_exc,
+        )
 
 
-__all__ = ["LocalSpecBackend"]
+__all__ = ["LocalSpecBackend", "SpecPathAdapter", "PrefixSpecPathAdapter"]
