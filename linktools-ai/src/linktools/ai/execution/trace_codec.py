@@ -11,7 +11,6 @@ shape for human-readable inspection but do not affect resume fidelity.
 
 
 from datetime import datetime, timezone
-from typing import Any
 from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart, ModelMessagesTypeAdapter
 from ..json import normalize_json
 

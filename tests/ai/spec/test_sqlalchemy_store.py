@@ -39,7 +39,10 @@ async def test_sql_load_metadata_replace_then_patch_then_tombstone(tmp_path):
     head = snap.revision
     # PATCH delta
     delta = await backend.load_metadata(0)
-    assert delta.mode == MetadataLoadMode.PATCH and {c.key for c in delta.changes} == {"a", "b"}
+    assert delta.mode == MetadataLoadMode.PATCH and {c.key for c in delta.changes} == {
+        "a",
+        "b",
+    }
     # empty PATCH at head
     same = await backend.load_metadata(head)
     assert same.mode == MetadataLoadMode.PATCH and same.changes == ()
@@ -198,7 +201,9 @@ async def test_sql_put_writes_blob_and_object_id(tmp_path):
         blobs = (await session.scalars(select(SpecBlobRow))).all()
         changes = (
             await session.scalars(
-                select(ChangeRow).where(ChangeRow.path == "a").order_by(ChangeRow.revision.desc())
+                select(ChangeRow)
+                .where(ChangeRow.path == "a")
+                .order_by(ChangeRow.revision.desc())
             )
         ).all()
     assert len(blobs) == 1
@@ -239,7 +244,9 @@ async def test_sql_delete_records_tombstone_with_null_object_id(tmp_path):
     async with backend.session_factory() as session:
         latest = (
             await session.scalars(
-                select(ChangeRow).where(ChangeRow.path == "a").order_by(ChangeRow.revision.desc())
+                select(ChangeRow)
+                .where(ChangeRow.path == "a")
+                .order_by(ChangeRow.revision.desc())
             )
         ).first()
         blobs = (await session.scalars(select(SpecBlobRow))).all()
@@ -375,7 +382,9 @@ async def test_apply_batch_delete_nonexistent_is_noop(tmp_path):
 
 @pytest.mark.asyncio
 async def test_apply_batch_leaves_untouched_documents_alone(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-untouched.db'}")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'batch-untouched.db'}"
+    )
     backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
     await backend.initialize_storage(engine)
     await backend.put(doc("outside", b"untouched", version=5))
@@ -391,7 +400,9 @@ async def test_apply_batch_leaves_untouched_documents_alone(tmp_path):
 
 @pytest.mark.asyncio
 async def test_apply_batch_put_overrides_delete_for_same_path(tmp_path):
-    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'batch-override.db'}")
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'batch-override.db'}"
+    )
     backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
     await backend.initialize_storage(engine)
     await backend.put(doc("x", b"v1"))

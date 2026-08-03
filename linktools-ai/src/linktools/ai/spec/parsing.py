@@ -249,7 +249,9 @@ class StrictConfigReader:
             )
         return value
 
-    def positive_number(self, name: str, default: "float | None" = None) -> "float | None":
+    def positive_number(
+        self, name: str, default: "float | None" = None
+    ) -> "float | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -315,7 +317,9 @@ class StrictConfigReader:
             return value.strip()
         raise InvalidSpecError(f"{self._context}: {name} must be a string or boolean")
 
-    def enum(self, name: str, enum_type: "type[E]", *, default: "E | None" = None) -> "E | None":
+    def enum(
+        self, name: str, enum_type: "type[E]", *, default: "E | None" = None
+    ) -> "E | None":
         present, value = self._present(name)
         if not present:
             return default
@@ -328,7 +332,9 @@ class StrictConfigReader:
                 f"{self._context}: invalid {name}: {value!r}"
             ) from exc
 
-    def string_tuple(self, name: str, *, default: "tuple[str, ...] | None" = None) -> "tuple[str, ...] | None":
+    def string_tuple(
+        self, name: str, *, default: "tuple[str, ...] | None" = None
+    ) -> "tuple[str, ...] | None":
         present, value = self._present(name)
         if not present:
             return default

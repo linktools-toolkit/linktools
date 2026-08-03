@@ -3,7 +3,6 @@
 
 """Content-addressed parsed index shared by every specification domain."""
 
-
 from typing import Generic, TypeVar
 from .contracts import SpecCodec
 from .source import SpecLoaderSource

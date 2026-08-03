@@ -4,7 +4,12 @@
 """Specification storage assembled from independent storage features."""
 
 from typing import TYPE_CHECKING
-from ..storage.composition import StorageAdapter, StorageCacheAdapter, StorageComposition, StorageLayer
+from ..storage.composition import (
+    StorageAdapter,
+    StorageCacheAdapter,
+    StorageComposition,
+    StorageLayer,
+)
 from .document import SpecDocument, SpecDocumentInfo
 
 if TYPE_CHECKING:
@@ -83,7 +88,9 @@ class SpecStore:
             if info.active and (kind is None or info.kind == kind)
         )
 
-    async def list_info(self, *, preload: bool = False) -> "tuple[SpecDocumentInfo, ...]":
+    async def list_info(
+        self, *, preload: bool = False
+    ) -> "tuple[SpecDocumentInfo, ...]":
         return await self._storage.list_info(preload=preload)
 
     async def list_info_with_owners(

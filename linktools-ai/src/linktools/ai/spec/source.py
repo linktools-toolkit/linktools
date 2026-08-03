@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Adapt a text loader to the generic specification source protocol."""
 
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .parsing import SpecLoader
+
 
 class SpecLoaderSource:
     """SpecSource adapter over a SpecLoader. ``identity`` exposes the content

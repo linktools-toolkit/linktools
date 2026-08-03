@@ -4,7 +4,6 @@
 """Explicit, trusted registry for resumable output schemas."""
 
 import hashlib
-from typing import Any
 
 from ..json import canonical_json_bytes
 from ..errors import ManifestDriftError

@@ -13,7 +13,6 @@ Inflight reads of the same key are coalesced so concurrent callers share one
 decode. The cache is keyed by content identity, so a stale cache entry can
 never be served against changed content."""
 
-
 import asyncio
 from typing import Any, Generic, Protocol, TypeVar
 
@@ -59,9 +58,7 @@ class SpecObjectCache(Generic[T]):
         return self._source_name
 
     def _full_path(self, item_id: str) -> str:
-        joined = (
-            f"{self._prefix}/{item_id}" if self._prefix else item_id
-        )
+        joined = f"{self._prefix}/{item_id}" if self._prefix else item_id
         return f"{joined}{self._suffix}"
 
     async def list_ids(self) -> "tuple[str, ...]":

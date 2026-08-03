@@ -3,7 +3,6 @@
 
 """Specification source and codec contracts."""
 
-
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..errors import SpecConflictError, SpecError, SpecNotFoundError, SpecParseError

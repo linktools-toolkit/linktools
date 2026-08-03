@@ -152,7 +152,6 @@ async def test_static_layer_with_revisioned_primary_keeps_primary_patch():
     store = make_store(primary, layers=(StorageLayer(backend=overlay),))
     state = await store._storage.refresh()
     assert state.entries.keys() == {"a", "b"}
-    primary_calls = primary.load_calls
     await store._storage.refresh()  # unchanged
     # primary serves an empty PATCH at the same revision (still one load), but
     # it must NOT be forced into a full snapshot by the layer's presence.

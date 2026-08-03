@@ -8,7 +8,6 @@ entry set (REPLACE) or the change log since the caller's revision (PATCH),
 read from a consistent snapshot in one SQL statement. Metadata queries never
 project the ``content`` column; only ``get``/``get_many`` read content."""
 
-
 from typing import TYPE_CHECKING
 from sqlalchemy import Boolean, Integer, LargeBinary, String, delete, select, true
 from sqlalchemy.orm import Mapped, mapped_column
@@ -18,7 +17,12 @@ from ...storage.sqlalchemy.blob import put_blob, put_blobs, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ...storage.sqlalchemy.dialects import resolve_dialect
 from ...storage.versioning import VersionedStorage, VersionSummary
-from ...storage.revision import MetadataLoad, MetadataLoadMode, StorageChange, StorageMetadataBackend
+from ...storage.revision import (
+    MetadataLoad,
+    MetadataLoadMode,
+    StorageChange,
+    StorageMetadataBackend,
+)
 from ..document import SpecDocument, SpecDocumentInfo
 
 if TYPE_CHECKING:
@@ -61,7 +65,9 @@ class ChangeRow(Base):
     kind: "Mapped[str | None]" = mapped_column(String(128), nullable=True)
     version: "Mapped[int | None]" = mapped_column(Integer, nullable=True)
     etag: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
-    object_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, index=True)
+    object_id: "Mapped[str | None]" = mapped_column(
+        String(128), nullable=True, index=True
+    )
     active: "Mapped[bool | None]" = mapped_column(Boolean, nullable=True)
     deleted: "Mapped[bool]" = mapped_column(Boolean, default=False)
 
@@ -74,7 +80,9 @@ class SqlAlchemySpecBackend(
     StorageMetadataBackend[int, str, SpecDocumentInfo],
     VersionedStorage[int, str, SpecDocument],
 ):
-    def __init__(self, session_factory, *, dialect: "SqlAlchemyDialect | None" = None) -> None:
+    def __init__(
+        self, session_factory, *, dialect: "SqlAlchemyDialect | None" = None
+    ) -> None:
         self.session_factory = session_factory
         self._dialect = dialect
 
@@ -103,13 +111,13 @@ class SqlAlchemySpecBackend(
     async def stat(self, path: str) -> "SpecDocumentInfo | None":
         async with self.session_factory() as session:
             row = (
-                await session.execute(
-                    _metadata_query().where(EntryRow.path == path)
-                )
+                await session.execute(_metadata_query().where(EntryRow.path == path))
             ).first()
             return None if row is None else _metadata_info(row)
 
-    async def list_info(self, *, kind: "str | None" = None) -> "tuple[SpecDocumentInfo, ...]":
+    async def list_info(
+        self, *, kind: "str | None" = None
+    ) -> "tuple[SpecDocumentInfo, ...]":
         async with self.session_factory() as session:
             rows = await session.execute(_metadata_query(kind=kind))
             return tuple(_metadata_info(row) for row in rows)
@@ -188,7 +196,9 @@ class SqlAlchemySpecBackend(
         # Otherwise (the top-level after_revision=None path) join RevisionRow to
         # fetch head alongside the entry set in one statement.
         if head is not None:
-            rows = (await session.execute(_metadata_query().order_by(EntryRow.path))).all()
+            rows = (
+                await session.execute(_metadata_query().order_by(EntryRow.path))
+            ).all()
             changes = tuple(
                 StorageChange(row.path, _metadata_info(row))
                 for row in rows
@@ -224,7 +234,8 @@ class SqlAlchemySpecBackend(
             .select_from(RevisionRow)
             .outerjoin(
                 ChangeRow,
-                (ChangeRow.revision > after) & (ChangeRow.revision <= RevisionRow.revision),
+                (ChangeRow.revision > after)
+                & (ChangeRow.revision <= RevisionRow.revision),
             )
             .order_by(ChangeRow.revision, ChangeRow.path)
         )
@@ -243,7 +254,9 @@ class SqlAlchemySpecBackend(
                 change.path,
                 None
                 if change.deleted
-                else SpecDocumentInfo(change.path, change.kind, change.version, change.etag, change.active),
+                else SpecDocumentInfo(
+                    change.path, change.kind, change.version, change.etag, change.active
+                ),
             )
             for _, _, change in rows
             if change is not None and change.path is not None
@@ -284,7 +297,9 @@ class SqlAlchemySpecBackend(
                     index_elements=("path",),
                 )
                 session.add(
-                    _change_row(revision, entry.info, deleted=False, object_id=object_id)
+                    _change_row(
+                        revision, entry.info, deleted=False, object_id=object_id
+                    )
                 )
         return entry
 
@@ -301,7 +316,9 @@ class SqlAlchemySpecBackend(
                 tombstone = _metadata_info(row)
                 revision = await self._next_revision(session)
                 await session.execute(delete(EntryRow).where(EntryRow.path == path))
-                session.add(_change_row(revision, tombstone, deleted=True, object_id=None))
+                session.add(
+                    _change_row(revision, tombstone, deleted=True, object_id=None)
+                )
 
     async def reset(self, entries: "tuple[SpecDocument, ...]") -> None:
         for entry in entries:
@@ -312,9 +329,7 @@ class SqlAlchemySpecBackend(
                 paths = [entry.info.path for entry in entries]
                 if len(set(paths)) != len(paths):
                     raise SpecConflictError("reset received duplicate spec paths")
-                old_rows = (
-                    await session.execute(_metadata_query())
-                ).all()
+                old_rows = (await session.execute(_metadata_query())).all()
                 old = {row.path: _metadata_info(row) for row in old_rows}
                 new = {entry.info.path: entry for entry in entries}
                 revision = await self._next_revision(session)
@@ -325,9 +340,13 @@ class SqlAlchemySpecBackend(
                         await session.execute(
                             delete(EntryRow).where(EntryRow.path == path)
                         )
-                        session.add(_change_row(revision, before, deleted=True, object_id=None))
+                        session.add(
+                            _change_row(revision, before, deleted=True, object_id=None)
+                        )
                     elif doc is not None and before != doc.info:
-                        object_id = await put_blob(session, dialect, SpecBlobRow, doc.content)
+                        object_id = await put_blob(
+                            session, dialect, SpecBlobRow, doc.content
+                        )
                         values = _entry_values(doc)
                         # Lock-free insert-or-update, same shape as put(): one
                         # dialect upsert keyed on path, no SELECT existence check.
@@ -339,7 +358,9 @@ class SqlAlchemySpecBackend(
                             index_elements=("path",),
                         )
                         session.add(
-                            _change_row(revision, doc.info, deleted=False, object_id=object_id)
+                            _change_row(
+                                revision, doc.info, deleted=False, object_id=object_id
+                            )
                         )
                     # unchanged: leave the row (and its content) untouched.
                 # Reset raises the incremental window's lower bound
@@ -388,7 +409,9 @@ class SqlAlchemySpecBackend(
                 object_ids: "list[str]" = []
                 if puts:
                     object_ids = await put_blobs(
-                        session, dialect, SpecBlobRow,
+                        session,
+                        dialect,
+                        SpecBlobRow,
                         [entry.content for entry in puts],
                     )
                     await dialect.upsert_many(
@@ -409,7 +432,9 @@ class SqlAlchemySpecBackend(
                             _metadata_query().where(EntryRow.path.in_(delete_paths))
                         )
                     ).all()
-                    tombstones = {row.path: _metadata_info(row) for row in tombstone_rows}
+                    tombstones = {
+                        row.path: _metadata_info(row) for row in tombstone_rows
+                    }
                     if tombstones:
                         await session.execute(
                             delete(EntryRow).where(EntryRow.path.in_(list(tombstones)))
@@ -424,7 +449,9 @@ class SqlAlchemySpecBackend(
                     for entry, oid in zip(puts, object_ids)
                 ]
                 change_rows.extend(
-                    _change_row(revision, tombstones[path], deleted=True, object_id=None)
+                    _change_row(
+                        revision, tombstones[path], deleted=True, object_id=None
+                    )
                     for path in delete_paths
                     if path in tombstones
                 )
@@ -493,4 +520,10 @@ def _change_row(
     )
 
 
-__all__ = ["EntryRow", "SpecBlobRow", "SqlAlchemySpecBackend", "ChangeRow", "RevisionRow"]
+__all__ = [
+    "EntryRow",
+    "SpecBlobRow",
+    "SqlAlchemySpecBackend",
+    "ChangeRow",
+    "RevisionRow",
+]

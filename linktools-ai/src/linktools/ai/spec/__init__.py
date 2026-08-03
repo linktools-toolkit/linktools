@@ -13,7 +13,13 @@ from .contracts import (
 )
 from .document import SpecDocument, SpecDocumentInfo, compute_spec_etag
 from .index import SpecIndex
-from .parsing import SpecLoader, StrictConfigReader, parse_json_text, parse_markdown_text, parse_yaml_text
+from .parsing import (
+    SpecLoader,
+    StrictConfigReader,
+    parse_json_text,
+    parse_markdown_text,
+    parse_yaml_text,
+)
 from .source import SpecLoaderSource
 from .store import SpecStore
 
