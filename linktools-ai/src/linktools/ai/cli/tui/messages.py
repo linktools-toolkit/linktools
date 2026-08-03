@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""UI messages posted from a Textual Worker to the ChatScreen.
+"""UI messages posted from a Textual Worker to the WorkspaceScreen.
 
 Streaming work runs inside a ``@work`` worker; the worker must not touch widgets
 directly (it can be cancelled mid-iteration). It posts these immutable messages

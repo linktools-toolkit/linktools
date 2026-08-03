@@ -3,9 +3,10 @@
 
 """Command palette + slash commands for the TUI.
 
-The command palette (Ctrl+P) is a GUI-style menu of actions; slash commands are
-typed in the composer (/help, /new, /clear, ...). Together they replace the old
-flat command surface with two lightweight interaction paths."""
+The command palette (Ctrl+P) is a GUI-style menu of actions that map to the
+app's workspace-level actions; slash commands are typed in the composer
+(/help, /new, /clear, /doctor, /catalog, /cancel, /exit). Together they give
+two lightweight interaction paths over the persistent workspace."""
 
 from typing import TYPE_CHECKING, Callable
 from rich.markup import escape
@@ -14,7 +15,8 @@ from textual.command import Hit, Provider
 
 if TYPE_CHECKING:
     from textual.command import Hits
-    from .screens.chat import ChatScreen
+
+    from .screens.workspace import WorkspaceScreen
 
 
 class AiCommandProvider(Provider):
@@ -22,11 +24,21 @@ class AiCommandProvider(Provider):
 
     async def search(self, query: str) -> "Hits":
         app = self.app
+        workspace = getattr(app, "workspace", None)
         commands: "list[tuple[str, str, Callable[[], None]]]" = [
+            (
+                "New session",
+                "Start a fresh conversation",
+                workspace.action_new_session if workspace else lambda: None,
+            ),
+            (
+                "Clear conversation",
+                "Clear the conversation area",
+                workspace.action_clear_conversation if workspace else lambda: None,
+            ),
             ("Catalog", "Open agents, skills, MCP", app.action_catalog),
-            ("Runs", "Open sessions, runs, approvals", app.action_runs),
             ("Doctor", "Validate project and Runtime", app.action_doctor),
-            ("Quit", "Exit lt ai", app.quit),
+            ("Quit", "Exit lt ai", app.exit),
         ]
         q = query.lower().strip()
         for name, help_text, action in commands:
@@ -34,43 +46,59 @@ class AiCommandProvider(Provider):
                 yield Hit(1.0, Text(name), action, text=name, help=help_text)
 
 
-def handle_slash_command(screen: "ChatScreen", line: str) -> bool:
+def handle_slash_command(screen: "WorkspaceScreen", line: str) -> bool:
     """Dispatch a ``/``-prefixed composer line.
 
     Returns True if consumed (the line was a slash command, not a prompt).
     Unknown commands print a hint rather than sending the text to the agent."""
-    from textual.widgets import RichLog
-
-    from ..client import validate_session_id  # ai.cli.client
-
     parts = line.split(maxsplit=1)
     cmd = parts[0].lower()
     arg = parts[1].strip() if len(parts) > 1 else ""
-    log = screen.query_one("#conversation", RichLog)
+    conv = screen.conversation
 
     if cmd in ("/exit", "/quit"):
         screen.app.exit()
         return True
     if cmd == "/help":
-        log.write(
-            "[dim]slash: /new <session> /session /clear /cancel /help /exit[/dim]"
+        conv.add_status(
+            "slash: /new <id> /session /clear /cancel /doctor /catalog /help /exit"
         )
+        screen.query_one("ConversationView").refresh_from()
         return True
     if cmd == "/clear":
-        log.clear()
+        screen.action_clear_conversation()
         return True
     if cmd == "/session":
-        log.write(f"[dim]session: {escape(screen.session_id)}[/dim]")
+        conv.add_status(f"session: {screen.session_id}")
+        screen.query_one("ConversationView").refresh_from()
         return True
     if cmd == "/new":
+        from ..client import validate_session_id
+
         if not arg:
-            log.write("[dim]usage: /new <session-id>[/dim]")
+            conv.add_status("usage: /new <session-id>")
+            screen.query_one("ConversationView").refresh_from()
             return True
-        screen.session_id = validate_session_id(arg)
-        log.write(f"[dim]session: {escape(screen.session_id)}[/dim]")
+        try:
+            screen.session_id = validate_session_id(arg)
+        except Exception as exc:
+            conv.add_error(f"invalid session: {exc}")
+            screen.query_one("ConversationView").refresh_from()
+            return True
+        conv.clear()
+        conv.add_status(f"session: {escape(screen.session_id)}")
+        screen.query_one("ConversationView").refresh_from()
+        screen.query_one("Sidebar").set_active_session(screen.session_id)
         return True
     if cmd == "/cancel":
         screen.action_cancel_run()
         return True
-    log.write(f"[red]unknown command: {cmd} (try /help)[/red]")
+    if cmd == "/doctor":
+        screen.app.action_doctor()
+        return True
+    if cmd == "/catalog":
+        screen.app.action_catalog()
+        return True
+    conv.add_error(f"unknown command: {cmd} (try /help)")
+    screen.query_one("ConversationView").refresh_from()
     return True

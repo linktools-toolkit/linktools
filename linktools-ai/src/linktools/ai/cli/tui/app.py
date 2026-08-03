@@ -3,11 +3,14 @@
 
 """The Textual app entry point.
 
-Holds the ``RuntimeClient`` and mounts the :class:`ChatScreen`. Global
-keybindings open the Catalog/Runs/Doctor screens over the chat; each of those
-screens binds Esc to pop back. ``run_tui`` is the function the thin ``lt ai
-tui`` shell reaches through :mod:`linktools.ai.cli.tui` (which translates a
-missing Textual install)."""
+Holds the :class:`RuntimeClient` and mounts the :class:`WorkspaceScreen` -- a
+single persistent three-pane layout (sidebar / conversation / context). The
+``lt ai tui`` shell reaches :func:`run_tui` through
+:mod:`linktools.ai.cli.tui` (which translates a missing Textual install).
+
+There are no full-screen overlays anymore: Doctor/Catalog detail open as
+modals on top of the workspace, and the approval flow is a modal pushed from
+the workspace."""
 
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -16,10 +19,9 @@ from textual.app import App
 from textual.binding import Binding
 
 from .commands import AiCommandProvider
-from .screens.chat import ChatScreen
-from .screens.doctor import DoctorScreen
-from .screens.catalog import CatalogScreen
-from .screens.runs import RunsScreen
+from .modals.catalog import CatalogModal
+from .modals.doctor import DoctorModal
+from .screens.workspace import WorkspaceScreen
 
 if TYPE_CHECKING:
     from ..client import RuntimeClient
@@ -30,20 +32,16 @@ class LinktoolsAIApp(App):
     may use."""
 
     CSS = """
-    Screen { layout: vertical; }
-    #conversation { border: round $primary; height: 1fr; }
-    #composer { dock: bottom; height: 5; }
+    Screen { layout: vertical; layers: base overlay; }
+    #workspace-body { height: 1fr; }
+    #conversation { border: round $primary; }
     """
 
     COMMANDS = {AiCommandProvider}
 
-    # Priority bindings so navigation fires even while the composer Input is
-    # focused (Textual's Input otherwise eats ctrl+d as delete-right, making
-    # Ctrl+D→Doctor unreachable on the chat screen).
     BINDINGS = [
-        Binding("ctrl+r", "catalog", "Catalog", priority=True),
-        Binding("ctrl+o", "runs", "Runs", priority=True),
         Binding("ctrl+d", "doctor", "Doctor", priority=True),
+        Binding("ctrl+k", "catalog", "Catalog", priority=True),
         Binding("ctrl+p", "command_palette", "Commands", priority=True),
         Binding("ctrl+q", "quit", "Quit", priority=True),
     ]
@@ -51,18 +49,17 @@ class LinktoolsAIApp(App):
     def __init__(self, *, client: "RuntimeClient") -> None:
         super().__init__()
         self.client = client
+        self.workspace: "WorkspaceScreen | None" = None
 
     def on_mount(self) -> None:
-        self.push_screen(ChatScreen(self.client))
-
-    def action_catalog(self) -> None:
-        self.push_screen(CatalogScreen(self.client))
-
-    def action_runs(self) -> None:
-        self.push_screen(RunsScreen(self.client))
+        self.workspace = WorkspaceScreen(self.client)
+        self.push_screen(self.workspace)
 
     def action_doctor(self) -> None:
-        self.push_screen(DoctorScreen(self.client))
+        self.push_screen(DoctorModal(self.client))
+
+    def action_catalog(self) -> None:
+        self.push_screen(CatalogModal(self.client))
 
 
 def run_tui(
