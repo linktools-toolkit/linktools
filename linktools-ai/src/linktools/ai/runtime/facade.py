@@ -3,7 +3,6 @@
 
 """Public runtime facade over execution orchestration and authorized queries."""
 
-
 from dataclasses import dataclass
 from uuid import uuid4
 from ..agent.sandbox.protocols import Sandbox
@@ -17,9 +16,14 @@ if TYPE_CHECKING:
     from ..agent.spec import AgentSpec
     from ..agent.assembly.assembler import AgentAssembler
     from ..execution.domain import ApprovalDecision, RunRecord
-    from ..execution.query import ExecutionQueryService, ExecutionDetailView, RunMessagesView
+    from ..execution.query import (
+        ExecutionQueryService,
+        ExecutionDetailView,
+        RunMessagesView,
+    )
     from ..execution.service import ExecutionService
     from ..json import JsonValue
+
 
 @dataclass(frozen=True, slots=True)
 class Runtime:
@@ -45,9 +49,7 @@ class Runtime:
         # event-subscription infrastructure yet, so the facade exposes only the
         # scalar run/resume/cancel surface.
         if not isinstance(principal, PrincipalContext):
-            raise PrincipalAccessDeniedError(
-                "a valid PrincipalContext is required"
-            )
+            raise PrincipalAccessDeniedError("a valid PrincipalContext is required")
         resolved_session_id = session_id or uuid4().hex
         resolved_execution_id = execution_id or uuid4().hex
         return await self.execution.run(
@@ -79,7 +81,9 @@ class Runtime:
             principal=principal,
         )
 
-    async def inspect(self, *, run_id: str, principal: PrincipalContext) -> "ExecutionDetailView":
+    async def inspect(
+        self, *, run_id: str, principal: PrincipalContext
+    ) -> "ExecutionDetailView":
         return await self.query.get_run_detail(run_id=run_id, principal=principal)
 
     async def get_messages(
@@ -90,7 +94,9 @@ class Runtime:
     async def get_session_messages(
         self, *, session_id: str, principal: PrincipalContext
     ) -> "tuple[RunMessagesView, ...]":
-        return await self.query.get_session_messages(session_id=session_id, principal=principal)
+        return await self.query.get_session_messages(
+            session_id=session_id, principal=principal
+        )
 
     async def aclose(self) -> None:
         if self.mcp_connections is not None:

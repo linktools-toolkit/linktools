@@ -3,7 +3,6 @@
 
 """Runtime storage composition with lazy optional stores."""
 
-
 from typing import TYPE_CHECKING
 import asyncio
 from dataclasses import dataclass
@@ -32,7 +31,15 @@ class RuntimeStorage:
 class LocalDirectoryStorage(RuntimeStorage):
     """Single-process local storage; construction does not create directories."""
 
-    def __init__(self, root: "str | Path" = ".linktools", *, tools=None, tasks=None, memory=None, artifacts=None) -> None:
+    def __init__(
+        self,
+        root: "str | Path" = ".linktools",
+        *,
+        tools=None,
+        tasks=None,
+        memory=None,
+        artifacts=None,
+    ) -> None:
         object.__setattr__(self, "root", Path(root))
         super().__init__(
             execution=LocalExecutionBackend(self.root / "execution"),
@@ -43,7 +50,9 @@ class LocalDirectoryStorage(RuntimeStorage):
         )
 
     async def initialize_storage(self) -> None:
-        await asyncio.to_thread((self.root / "execution").mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(
+            (self.root / "execution").mkdir, parents=True, exist_ok=True
+        )
         for store in (self.tools, self.tasks, self.memory, self.artifacts):
             if store is not None:
                 await store.initialize_storage()
@@ -52,8 +61,22 @@ class LocalDirectoryStorage(RuntimeStorage):
 class SqlAlchemyRuntimeStorage(RuntimeStorage):
     """SQLAlchemy composition root; schema setup is explicit."""
 
-    def __init__(self, execution: "ExecutionStore", *, tools=None, tasks=None, memory=None, artifacts=None) -> None:
-        super().__init__(execution=execution, tools=tools, tasks=tasks, memory=memory, artifacts=artifacts)
+    def __init__(
+        self,
+        execution: "ExecutionStore",
+        *,
+        tools=None,
+        tasks=None,
+        memory=None,
+        artifacts=None,
+    ) -> None:
+        super().__init__(
+            execution=execution,
+            tools=tools,
+            tasks=tasks,
+            memory=memory,
+            artifacts=artifacts,
+        )
 
     async def initialize_storage(self, engine: "AsyncEngine") -> None:
         await self.execution.initialize_storage(engine)

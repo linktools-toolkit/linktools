@@ -3,7 +3,6 @@
 
 """Typed inputs to the runtime composition root."""
 
-
 from dataclasses import dataclass, field
 from ..agent.assembly.registry import AgentFeatureRegistry
 from ..agent.codec import OutputTypeRegistry
@@ -31,6 +30,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..governance.authorization import AuthorizationPolicy
     from ..model.resolver import ModelResolver
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeDependencies:

@@ -3,7 +3,6 @@
 
 """The only runtime composition root."""
 
-
 from dataclasses import replace
 from linktools.core import environ
 from ..agent.assembly.assembler import AgentAssembler
@@ -61,7 +60,11 @@ def build_runtime(
         raise StorageFeatureSupportError(
             "tools are required but no tool state store was configured"
         )
-    if requirements.tools and dependencies is not None and dependencies.tool_policy is None:
+    if (
+        requirements.tools
+        and dependencies is not None
+        and dependencies.tool_policy is None
+    ):
         raise RuntimeInitializationError(
             "tools are required but no ToolPolicyResolver was configured"
         )
@@ -135,8 +138,7 @@ def build_runtime(
         engine=engine,
         assembler=assembler,
         tool_execution_ready=(
-            storage.tools is not None
-            and dependencies.tool_policy is not None
+            storage.tools is not None and dependencies.tool_policy is not None
         ),
         sandbox=dependencies.sandbox,
         spec_codec=codec,
@@ -152,8 +154,7 @@ def build_runtime(
         ),
         assembler=assembler,
         tool_execution_ready=(
-            storage.tools is not None
-            and dependencies.tool_policy is not None
+            storage.tools is not None and dependencies.tool_policy is not None
         ),
         sandbox=dependencies.sandbox,
         mcp_connections=(

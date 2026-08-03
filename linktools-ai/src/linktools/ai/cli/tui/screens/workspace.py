@@ -145,9 +145,7 @@ class WorkspaceScreen(Screen):
     async def refresh_context(self) -> None:
         panel = self.query_one(ContextPanel)
         client = self.client
-        inspection = await self._safe(
-            lambda: client.inspect(None), default=None
-        )
+        inspection = await self._safe(lambda: client.inspect(None), default=None)
         panel.render_inspection(inspection, agent_id=None)
         # Doctor summary: cheap local checks, run once per refresh so the panel
         # reflects the current state (a failed check is visible immediately,
