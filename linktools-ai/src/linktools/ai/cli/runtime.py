@@ -3,16 +3,13 @@
 
 """Composition helpers for the v4 CLI client."""
 
-
 from dataclasses import dataclass
 from ..agent.index import AgentSpecIndex
 from ..agent.spec import AgentSpec, PromptSpec
 from ..spec.parsing import SpecLoader
-from ..execution.persistence.local import LocalExecutionBackend
-from ..execution.store import ExecutionStore
 from ..agent.mcp.index import MCPServerSpecIndex
 from ..model.policy import ModelPolicy
-from ..runtime import RuntimeStorage, build_runtime
+from ..runtime import LocalDirectoryStorage, build_runtime
 from ..agent.skill.index import SkillSpecIndex
 from .skill_index import DirectorySkillIndex
 
@@ -20,14 +17,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..model.resolver import ModelResolver
-    from ..runtime import Runtime
+    from ..runtime import Runtime, RuntimeStorage
     from .project import CliProject
+
 
 @dataclass(frozen=True, slots=True)
 class CliRuntimeBundle:
     project: "CliProject"
     runtime: "Runtime"
-    storage: RuntimeStorage
+    storage: "RuntimeStorage"
     agents: AgentSpecIndex
     skills: SkillSpecIndex
     mcp: MCPServerSpecIndex
@@ -42,12 +40,20 @@ _BUILTIN_DEFAULT = AgentSpec(
 )
 
 
-def build_cli_runtime(*, project: "CliProject", model_resolver: "ModelResolver | None") -> CliRuntimeBundle:
+def build_cli_runtime(
+    *, project: "CliProject", model_resolver: "ModelResolver | None"
+) -> CliRuntimeBundle:
     """Build the CLI bundle with the v4 runtime storage composition."""
-    agents = AgentSpecIndex.from_specloader(SpecLoader.from_filesystem(project.agents_root))
-    skills = SkillSpecIndex.from_specloader(SpecLoader.from_filesystem(project.skills_root), suffix="")
-    mcp = MCPServerSpecIndex.from_specloader(SpecLoader.from_filesystem(project.mcp_root))
-    storage = RuntimeStorage(execution=ExecutionStore(LocalExecutionBackend(project.state_root / "execution")))
+    agents = AgentSpecIndex.from_specloader(
+        SpecLoader.from_filesystem(project.agents_root)
+    )
+    skills = SkillSpecIndex.from_specloader(
+        SpecLoader.from_filesystem(project.skills_root), suffix=""
+    )
+    mcp = MCPServerSpecIndex.from_specloader(
+        SpecLoader.from_filesystem(project.mcp_root)
+    )
+    storage = LocalDirectoryStorage(project.state_root)
     runtime = build_runtime(storage=storage, model_resolver=model_resolver)
     return CliRuntimeBundle(
         project=project,
@@ -60,7 +66,9 @@ def build_cli_runtime(*, project: "CliProject", model_resolver: "ModelResolver |
     )
 
 
-async def load_agent_spec(bundle: CliRuntimeBundle, agent_id: "str | None") -> AgentSpec:
+async def load_agent_spec(
+    bundle: CliRuntimeBundle, agent_id: "str | None"
+) -> AgentSpec:
     target = agent_id or bundle.project.default_agent
     try:
         return await bundle.agents.get(target)

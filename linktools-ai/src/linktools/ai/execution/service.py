@@ -22,7 +22,7 @@ from linktools.core import environ
 from ..agent.assembly.provider import AgentFeatureContext
 from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
 from ..agent.sandbox.protocols import Sandbox
-from ..errors import PrincipalAccessDeniedError, RunDefinitionError, RunDefinitionIntegrityError, RuntimeInitializationError, StorageError
+from ..errors import RunDefinitionError, RunDefinitionIntegrityError, RuntimeInitializationError, StorageError
 from ..governance.authorization import ExecutionAction
 from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
@@ -33,7 +33,6 @@ from .context import RunContext
 from .cancellation import CancellationToken
 from .controller import ExecutionControllerRegistry
 from .query import ExecutionResultView
-from .session import SessionRecord
 from .snapshots import AgentSnapshotData
 from . import trace_codec
 from .trace_collector import SemanticTraceCollector

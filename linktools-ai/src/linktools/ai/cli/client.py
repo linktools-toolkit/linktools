@@ -6,9 +6,16 @@
 Both the thin console commands and the Textual TUI operate the Runtime + Storage
 exclusively through :class:`RuntimeClient`. :class:`LocalRuntimeClient` is the
 in-process implementation that owns the project bundle (Runtime + Storage +
-registries) and translates Runtime dict-events into the protocol surface; the
-TUI never touches persistence implementations or registries directly.
-:class:`FakeRuntimeClient` is the shared double both console and TUI tests drive.
+registries) and translates the scalar Runtime result into the streamed event
+contract the consumers render; the TUI never touches persistence
+implementations or registries directly. :class:`FakeRuntimeClient` is the
+shared double both console and TUI tests drive.
+
+There is no live event-subscription infrastructure yet (the runtime exposes
+only scalar ``run``/``resume``/``cancel``). To still give the console/TUI a
+faithful transcript, :meth:`LocalRuntimeClient.run_stream` performs the scalar
+run then reads the run's trace back through ``Runtime.get_run_detail`` and
+re-emits it as ``text``/``tool``/``paused``/``failed``/``cancelled`` events.
 
 Local vs. Remote share the same interface; a remote (HTTP) client is not wired
 up in this build and ``build_runtime_client(remote=...)`` fails explicitly
@@ -20,15 +27,79 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from linktools.cli import CommandError
-from linktools.system import get_user
 from .runtime import build_cli_runtime, load_agent_spec
 
 if TYPE_CHECKING:
-    from ..runtime import RuntimeStorage
+    from ..execution.query import ExecutionDetailView
+    from ..governance.identity import PrincipalContext
+    from ..runtime import Runtime, RuntimeStorage
     from .runtime import CliRuntimeBundle
     from ..execution.domain import RunRecord
     from ..execution.session import SessionRecord
     from collections.abc import AsyncIterator
+
+
+def trusted_local_principal(*, tenant_id: str = "local") -> "PrincipalContext":
+    """Build the principal a local CLI/TUI acts as. Imported lazily so this
+    module imports cleanly without the governance package at collection time."""
+    from ..governance.identity import trusted_local_principal as _principal
+
+    return _principal(tenant_id=tenant_id)
+
+
+@dataclass(slots=True)
+class _SessionSummary:
+    """A lightweight session record for the sidebar (the store has no
+    enumeration API, so the client tracks what it created)."""
+
+    id: str
+    tenant_id: "str | None" = None
+
+    @property
+    def status(self) -> "_Status":
+        return _Status()
+
+
+@dataclass(slots=True)
+class _RunSummary:
+    """A lightweight run record for the sidebar."""
+
+    id: str
+    session_id: str
+    tenant_id: "str | None" = None
+    status: str = "completed"
+
+
+@dataclass(slots=True)
+class _Status:
+    value: str = "active"
+
+
+@dataclass(slots=True)
+class _ApprovalView:
+    """Approval-request detail rendered by the approval modal."""
+
+    approval_id: str
+    run_id: str
+    tool_name: str
+    arguments: "Mapping[str, Any]"
+    reason: "str | None"
+
+
+@dataclass(slots=True)
+class _InspectionView:
+    """Agent-feature summary rendered by the context panel."""
+
+    id: str
+    tools: "tuple[str, ...]"
+    skills: "tuple[str, ...]"
+    mcp_servers: "tuple[str, ...]"
+    extensions: "tuple[str, ...]"
+    features: "tuple[str, ...]"
+
+
+def _truncate(text: str, limit: int = 120) -> str:
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 __all__ = [
@@ -125,37 +196,49 @@ async def ensure_session(storage: "RuntimeStorage", session_id: str) -> None:
     branch exactly by creating the ``SessionRecord`` up-front when the id is
     unseen."""
     if await storage.execution.get_session(session_id) is None:
-        await storage.execution.create_session(session_id=session_id, user_id=None, tenant_id=None)
+        await storage.execution.create_session(
+            session_id=session_id, user_id=None, tenant_id=None
+        )
 
 
 async def resolve_approval(
-    storage: "RuntimeStorage",
+    runtime: "Runtime",
+    execution_id: str,
     approval_id: str,
     *,
     approved: bool,
-    reason: "str | None",
-) -> "int | None":
-    """Resolve a pending approval request.
+    principal: "PrincipalContext",
+) -> "RunRecord":
+    """Resolve a pending approval through the Runtime facade.
 
-    Not yet implemented against the v4 runtime storage: approvals are not
-    configured, so this always raises ``CommandError``. The ``approved`` /
-    ``reason`` parameters carry the intended resolve intent for the future
-    implementation."""
-    raise CommandError("approvals are not configured in the v4 runtime storage")
+    ``ALLOW`` leaves the run PAUSED (resumable via ``resume_stream``); ``DENY``
+    is terminal. The facade's ``decide_approval`` owns the state transition."""
+    from ..execution.domain import ApprovalDecision
+
+    decision = ApprovalDecision.ALLOW if approved else ApprovalDecision.DENY
+    return await runtime.decide_approval(
+        execution_id,
+        approval_id=approval_id,
+        decision=decision,
+        principal=principal,
+    )
 
 
-async def list_sessions(storage: "RuntimeStorage") -> list:
-    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+async def list_sessions(_storage: "RuntimeStorage") -> list:
+    """The execution store exposes no session-enumeration API; the client
+    tracks the sessions it created in-process (see LocalRuntimeClient)."""
     return []
 
 
-async def list_runs(storage: "RuntimeStorage") -> list:
-    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+async def list_runs(_storage: "RuntimeStorage") -> list:
+    """The execution store exposes no run-enumeration API; the client tracks
+    the runs it started in-process (see LocalRuntimeClient)."""
     return []
 
 
-async def list_pending_approvals(storage: "RuntimeStorage") -> list:
-    """Not yet implemented against the v4 runtime storage; returns ``[]``."""
+async def list_pending_approvals(_storage: "RuntimeStorage") -> list:
+    """No enumeration of pending approvals on the store; the client surfaces
+    approvals via the streamed pause event instead."""
     return []
 
 
@@ -186,9 +269,17 @@ class RuntimeClient(Protocol):
 
     async def get_session(self, session_id: str) -> "SessionRecord | None": ...
 
+    async def get_session_messages(
+        self, session_id: str
+    ) -> "tuple[tuple[Any, ...], ...]": ...
+
+    async def list_session_turns(self, session_id: str) -> list: ...
+
     async def list_runs(self) -> list: ...
 
     async def get_run(self, run_id: str) -> "RunRecord | None": ...
+
+    async def get_run_detail(self, run_id: str) -> Any: ...
 
     async def list_approvals(self) -> list: ...
 
@@ -214,63 +305,229 @@ class LocalRuntimeClient:
     """In-process ``RuntimeClient`` over a project bundle.
 
     Owns the Runtime + Storage + registries so neither the console nor the TUI
-    has to know how ``build_runtime`` is wired."""
+    has to know how ``build_runtime`` is wired. Operates the backend as the
+    local user principal. The console/TUI see the same event contract a future
+    remote client would stream; ``run_stream`` produces that contract by
+    running the scalar ``Runtime.run`` then re-emitting the run's recorded
+    trace as ``text``/``tool`` events."""
 
     def __init__(self, bundle: "CliRuntimeBundle") -> None:
         self._bundle = bundle
+        self._principal = trusted_local_principal()
+        # Sessions/runs the client itself started this process. The execution
+        # store exposes no enumeration API, so the sidebar reflects only what
+        # this CLI session produced (a remote/shared store would list more).
+        self._known_sessions: "dict[str, SessionRecord]" = {}
+        self._known_runs: "dict[str, RunRecord]" = {}
+        self._pending_approvals: "dict[str, tuple[str, str]]" = {}
 
     @property
     def bundle(self) -> "CliRuntimeBundle":
         return self._bundle
+
+    @property
+    def principal(self) -> "PrincipalContext":
+        return self._principal
 
     async def run_stream(
         self, request: "RunRequest"
     ) -> "AsyncIterator[Mapping[str, Any]]":
         spec = await load_agent_spec(self._bundle, request.agent_id)
         session_id = validate_session_id(request.session_id)
-        await ensure_session(self._bundle.storage, session_id)
         run_id = request.run_id or new_run_id()
-        output = await self._bundle.runtime.run(
-            spec, request.prompt, session_id=session_id, run_id=run_id
-        )
-        yield {"type": "run.completed", "output": output}
+        self._remember_session(session_id)
+        runtime = self._bundle.runtime
+        try:
+            result = await runtime.run(
+                spec,
+                request.prompt,
+                principal=self._principal,
+                session_id=session_id,
+                execution_id=run_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failed event
+            self._remember_run(run_id, session_id)
+            yield {
+                "type": "failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            return
+        self._remember_run(run_id, session_id)
+        # result is an ExecutionResultView for COMPLETED, or None for PAUSED/
+        # CANCELLED. Re-emit the recorded trace so the consumer renders the
+        # model text + tool calls that actually happened.
+        if result is None:
+            detail = await self.get_run_detail(run_id)
+            if detail is not None and detail.status == "paused":
+                yield self._paused_event(run_id, detail)
+            else:
+                yield {"type": "cancelled", "run_id": run_id}
+            return
+        async for event in self._trace_events(run_id):
+            yield event
 
     async def resume_stream(self, run_id: str) -> "AsyncIterator[Mapping[str, Any]]":
-        output = await self._bundle.runtime.resume(run_id)
-        yield {"type": "run.completed", "output": output}
+        runtime = self._bundle.runtime
+        try:
+            result = await runtime.resume(run_id, principal=self._principal)
+        except Exception as exc:  # noqa: BLE001 - surfaced as a failed event
+            yield {
+                "type": "failed",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            return
+        if result is None:
+            detail = await self.get_run_detail(run_id)
+            if detail is not None and detail.status == "paused":
+                yield self._paused_event(run_id, detail)
+            else:
+                yield {"type": "cancelled", "run_id": run_id}
+            return
+        yield {"type": "resumed", "run_id": run_id}
+        async for event in self._trace_events(run_id):
+            yield event
 
     async def cancel(self, run_id: str) -> None:
-        await self._bundle.runtime.cancel(run_id)
+        await self._bundle.runtime.cancel(run_id, principal=self._principal)
+        self._pending_approvals.pop(run_id, None)
 
     async def approve(self, approval_id: str) -> None:
+        run_id = self._run_id_for_approval(approval_id)
+        if run_id is None:
+            raise CommandError(f"unknown approval {approval_id}")
         await resolve_approval(
-            self._bundle.storage, approval_id, approved=True, reason=None
+            self._bundle.runtime,
+            run_id,
+            approval_id,
+            approved=True,
+            principal=self._principal,
         )
+        self._pending_approvals.pop(run_id, None)
 
     async def reject(self, approval_id: str, reason: "str | None" = None) -> None:
+        run_id = self._run_id_for_approval(approval_id)
+        if run_id is None:
+            raise CommandError(f"unknown approval {approval_id}")
         await resolve_approval(
-            self._bundle.storage, approval_id, approved=False, reason=reason
+            self._bundle.runtime,
+            run_id,
+            approval_id,
+            approved=False,
+            principal=self._principal,
         )
+        await self._bundle.runtime.cancel(run_id, principal=self._principal)
+        self._pending_approvals.pop(run_id, None)
 
     async def list_sessions(self) -> list:
-        return await list_sessions(self._bundle.storage)
+        # Combine sessions created this process with every persisted session
+        # the store knows about (the store's public list_all_sessions).
+        records = list(self._known_sessions.values())
+        seen = {getattr(r, "id", None) for r in records}
+        try:
+            for record in await self._bundle.storage.execution.list_all_sessions():
+                if record.id not in seen:
+                    records.append(record)
+                    seen.add(record.id)
+        except Exception:
+            pass
+        return records
 
     async def get_session(self, session_id: str) -> "SessionRecord | None":
-        return await self._bundle.storage.execution.get_session(validate_session_id(session_id))
+        sid = validate_session_id(session_id)
+        cached = self._known_sessions.get(sid)
+        if cached is not None:
+            return cached
+        record = await self._bundle.storage.execution.get_session(sid)
+        if record is not None:
+            self._known_sessions[sid] = record
+        return record
+
+    async def get_session_messages(
+        self, session_id: str
+    ) -> "tuple[tuple[Any, ...], ...]":
+        """Per-turn message deltas for a session (audit history), as returned
+        by ``Runtime.get_session_messages``. Each inner tuple is one turn's
+        recorded model messages; the caller decides how to fold them into the
+        conversation. Empty list when the session is unknown or has no turns."""
+        sid = validate_session_id(session_id)
+        try:
+            views = await self._bundle.runtime.get_session_messages(
+                session_id=sid, principal=self._principal
+            )
+        except Exception:
+            return ()
+        return tuple(tuple(view.messages) for view in views)
 
     async def list_runs(self) -> list:
-        return await list_runs(self._bundle.storage)
+        # Combine runs created this process with every persisted run the store
+        # knows about (the store's public list_all_runs).
+        records = list(self._known_runs.values())
+        seen = {getattr(r, "id", None) for r in records}
+        try:
+            for record in await self._bundle.storage.execution.list_all_runs():
+                if record.id not in seen:
+                    records.append(record)
+                    seen.add(record.id)
+        except Exception:
+            pass
+        return records
+
+    async def list_session_turns(self, session_id: str) -> list:
+        """Persisted turns for a session (input, status, run_id, sequence) via
+        the store's ``list_session_turns``. Empty when the session is unknown."""
+        sid = validate_session_id(session_id)
+        try:
+            page = await self._bundle.storage.execution.list_session_turns(sid)
+        except Exception:
+            return []
+        return list(page.items)
 
     async def get_run(self, run_id: str) -> "RunRecord | None":
-        return await self._bundle.storage.execution.get_run(run_id)
+        cached = self._known_runs.get(run_id)
+        if cached is not None:
+            return cached
+        record = await self._bundle.storage.execution.get_run(run_id)
+        if record is not None:
+            self._known_runs[run_id] = record
+        return record
 
     async def list_approvals(self) -> list:
-        return await list_pending_approvals(self._bundle.storage)
+        # Materialize lightweight view objects for the pending approvals this
+        # client surfaced via pause events.
+        from ..execution.domain import RunApproval
 
-    async def get_approval(self, approval_id: str) -> None:
+        views = []
+        for approval_id, (run_id, _tool) in self._pending_approvals.items():
+            views.append(
+                RunApproval(
+                    approval_id=approval_id,
+                    run_id=run_id,
+                    tool_name="",
+                    tool_call_id="",
+                    binding_fingerprint="",
+                )
+            )
+        return views
+
+    async def get_approval(self, approval_id: str) -> Any:
         """One approval request by id -- the only way the console/TUI reads
         approval detail (no direct run approval access)."""
-        return None
+        run_id = self._run_id_for_approval(approval_id)
+        if run_id is None:
+            return None
+        detail = await self.get_run_detail(run_id)
+        if detail is None:
+            return None
+        tool = detail.tool_calls[-1] if detail.tool_calls else None
+        return _ApprovalView(
+            approval_id=approval_id,
+            run_id=run_id,
+            tool_name=tool.tool_name if tool else "",
+            arguments=tool.arguments if tool else {},
+            reason=None,
+        )
 
     async def list_agents(self) -> "tuple[str, ...]":
         return await self._bundle.agents.list_ids()
@@ -283,7 +540,36 @@ class LocalRuntimeClient:
 
     async def inspect(self, agent_id: "str | None") -> Any:
         spec = await load_agent_spec(self._bundle, agent_id)
-        return await self._bundle.runtime.inspect(spec)
+        # inspect() is a no-side-effect resolution: assemble the spec's
+        # features without executing, returning the summary the context panel
+        # renders. The facade's inspect() keys on a persisted run_id (which
+        # does not exist for a bare agent lookup), so resolve features here.
+        try:
+            from ..agent.assembly.provider import AgentFeatureContext
+
+            context = AgentFeatureContext(
+                agent_id=spec.id,
+                execution_id="inspect",
+                root_execution_id="inspect",
+                parent_execution_id=None,
+                session_id="inspect",
+                tenant_id=self._principal.tenant_id,
+                user_id=self._principal.user_id,
+                workspace=None,
+                sandbox=self._bundle.runtime.sandbox,
+                events=None,
+            )
+            assembly = await self._bundle.runtime.assembler.assemble(spec, context)
+        except Exception:
+            return None
+        return _InspectionView(
+            id=spec.id,
+            tools=tuple(t.descriptor.name for t in assembly.tools),
+            skills=tuple(),
+            mcp_servers=tuple(),
+            extensions=tuple(),
+            features=tuple(assembly.feature_owners.keys()),
+        )
 
     async def doctor(self) -> DoctorReport:
         """Run every project/Runtime check against the bundle and return the
@@ -344,10 +630,11 @@ class LocalRuntimeClient:
             except Exception as exc:
                 fail(f"MCP: {mcp_id}", str(exc))
 
-        # Runtime inspects cleanly for the default agent.
+        # Runtime inspects cleanly for the default agent (feature validation;
+        # the facade's inspect() now keys on a run_id, not a bare spec).
         try:
             default_spec = await bundle.agents.get(project.default_agent)
-            await bundle.runtime.inspect(default_spec)
+            await bundle.assembler.validate_features(default_spec)
             ok("runtime inspect")
         except Exception as exc:
             fail("runtime inspect", str(exc))
@@ -362,6 +649,116 @@ class LocalRuntimeClient:
             fail("storage writable", str(exc))
 
         return report
+
+    # -- run detail (public) --------------------------------------------- #
+
+    async def get_run_detail(self, run_id: str) -> "ExecutionDetailView | None":
+        """The recorded detail for one run (status, interactions, tool calls,
+        final output, usage) via the Runtime facade. None when the run is not
+        visible to this principal or does not exist."""
+        from ..execution.query import ExecutionDetailView
+
+        try:
+            detail = await self._bundle.runtime.inspect(
+                run_id=run_id, principal=self._principal
+            )
+        except Exception:
+            return None
+        return detail if isinstance(detail, ExecutionDetailView) else None
+
+    # -- internals -------------------------------------------------------- #
+
+    async def _trace_events(self, run_id: str) -> "AsyncIterator[Mapping[str, Any]]":
+        """Re-emit a completed run's recorded trace as stream events.
+
+        Walks the model interactions in sequence order, yielding a ``text``
+        event per model text part and a ``tool`` event (start+end) per tool
+        call, so the consumer renders the real trajectory rather than only the
+        final scalar output. ``final_output`` is emitted only as a fallback
+        when no interaction carried a text part -- otherwise the model's text
+        is already rendered and re-emitting the scalar output would duplicate
+        it."""
+        detail = await self.get_run_detail(run_id)
+        if detail is None:
+            return
+        emitted_calls: "set[str]" = set()
+        emitted_text = False
+        for interaction in detail.interactions:
+            response = interaction.response or {}
+            for part in response.get("parts", ()):
+                if not isinstance(part, Mapping):
+                    continue
+                ptype = part.get("type")
+                if ptype == "text":
+                    content = part.get("content") or part.get("text") or ""
+                    if content:
+                        emitted_text = True
+                        yield {"type": "text", "text": str(content)}
+                elif ptype == "tool_call":
+                    call_id = str(part.get("call_id") or "")
+                    name = str(part.get("tool_name") or "?")
+                    if call_id and call_id not in emitted_calls:
+                        emitted_calls.add(call_id)
+                        yield {
+                            "type": "tool",
+                            "id": call_id,
+                            "tool_call_id": call_id,
+                            "name": name,
+                            "phase": "start",
+                        }
+        # Tool results (end phase + ok/detail) come from the tool_calls view.
+        for call in detail.tool_calls:
+            ok = call.status in {"ok", "success", "completed"}
+            yield {
+                "type": "tool",
+                "id": call.call_id,
+                "tool_call_id": call.call_id,
+                "name": call.tool_name,
+                "phase": "end",
+                "ok": ok,
+                "detail": _truncate(str(call.result))
+                if call.result is not None
+                else None,
+            }
+        if (
+            not emitted_text
+            and detail.final_output is not None
+            and str(detail.final_output).strip()
+        ):
+            yield {"type": "text", "text": str(detail.final_output)}
+
+    def _paused_event(
+        self, run_id: str, detail: "ExecutionDetailView"
+    ) -> "Mapping[str, Any]":
+        tool = detail.tool_calls[-1] if detail.tool_calls else None
+        approval_id = f"{run_id}-approval"
+        self._pending_approvals[approval_id] = (run_id, tool.tool_name if tool else "")
+        return {
+            "type": "paused",
+            "run_id": run_id,
+            "approval_id": approval_id,
+            "tool_name": tool.tool_name if tool else "",
+        }
+
+    def _run_id_for_approval(self, approval_id: "str | None") -> "str | None":
+        if not approval_id:
+            return None
+        entry = self._pending_approvals.get(approval_id)
+        return entry[0] if entry else None
+
+    def _remember_session(self, session_id: str) -> None:
+        if session_id not in self._known_sessions:
+            self._known_sessions[session_id] = _SessionSummary(
+                id=session_id, tenant_id=self._principal.tenant_id
+            )
+
+    def _remember_run(self, run_id: str, session_id: str) -> None:
+        self._known_runs[run_id] = _RunSummary(
+            id=run_id,
+            session_id=session_id,
+            tenant_id=self._principal.tenant_id,
+            status="running",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -389,7 +786,10 @@ class FakeRuntimeClient:
         inspection: Any = None,
         doctor_report: "DoctorReport | None" = None,
         run_record: Any = None,
+        run_detail: Any = None,
         session_record: Any = None,
+        session_messages: "tuple[tuple[Any, ...], ...] | None" = None,
+        session_turns: "list | None" = None,
         approval: Any = None,
     ) -> None:
         self._stream_events = list(stream_events or [])
@@ -405,7 +805,10 @@ class FakeRuntimeClient:
         self._inspection = inspection
         self._doctor_report = doctor_report or DoctorReport()
         self._run_record = run_record
+        self._run_detail = run_detail
         self._session_record = session_record
+        self._session_messages = session_messages or ()
+        self._session_turns = session_turns or []
         # Call recordings.
         self.cancel_calls: "list[str]" = []
         self.approve_calls: "list[str]" = []
@@ -444,11 +847,22 @@ class FakeRuntimeClient:
     async def get_session(self, session_id: str) -> Any:
         return self._session_record
 
+    async def get_session_messages(
+        self, session_id: str
+    ) -> "tuple[tuple[Any, ...], ...]":
+        return self._session_messages
+
+    async def list_session_turns(self, session_id: str) -> list:
+        return list(self._session_turns)
+
     async def list_runs(self) -> list:
         return list(self._runs)
 
     async def get_run(self, run_id: str) -> Any:
         return self._run_record
+
+    async def get_run_detail(self, run_id: str) -> Any:
+        return self._run_detail
 
     async def list_approvals(self) -> list:
         return list(self._approvals)

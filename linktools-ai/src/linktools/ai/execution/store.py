@@ -81,6 +81,10 @@ class ExecutionStore(Protocol):
 
     async def get_snapshot(self, run_id: str) -> "RunSnapshot | None": ...
 
+    async def list_all_sessions(self) -> "tuple[SessionRecord, ...]": ...
+
+    async def list_all_runs(self) -> "tuple[RunRecord, ...]": ...
+
     async def list_session_turns(
         self,
         session_id: str,

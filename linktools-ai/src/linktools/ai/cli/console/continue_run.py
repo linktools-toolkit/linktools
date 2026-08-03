@@ -6,13 +6,13 @@
 One entry point that absorbs the former ``approve``/``reject``/``resume``
 commands. It inspects the run's status and dispatches:
 
-* ``WAITING_APPROVAL`` + ``--approve``  -> approve the pending request, resume
-* ``WAITING_APPROVAL`` + ``--reject``   -> reject the pending request, cancel
-* ``WAITING_APPROVAL`` + ``--resume``   -> resume (already approved)
-* ``WAITING_APPROVAL`` + (no flag)      -> interactive approve/reject/later
-* ``RUNNING``                           -> report still running
-* terminal                              -> show status, do not re-execute
-* anything else                         -> resume
+* ``PAUSED`` + ``--approve``  -> approve the pending request, resume
+* ``PAUSED`` + ``--reject``   -> reject the pending request, cancel
+* ``PAUSED`` + ``--resume``   -> resume (already approved)
+* ``PAUSED`` + (no flag)      -> interactive approve/reject/later
+* ``RUNNING``                 -> report still running
+* terminal                    -> show status, do not re-execute
+* anything else               -> resume
 
 Resume re-drives the original agent spec from the persisted snapshot, so only
 the run id is needed. A second pause while resuming again exits 4."""
@@ -31,7 +31,7 @@ _REJECT = "reject"
 _LATER = "later"
 
 _TERMINAL = (
-    RunStatus.SUCCEEDED,
+    RunStatus.COMPLETED,
     RunStatus.FAILED,
     RunStatus.CANCELLED,
     RunStatus.CANCELLING,
@@ -91,7 +91,7 @@ async def _continue_async(
         raise CommandError(f"run not found: {run_id}")
     status = record.status
 
-    if status == RunStatus.WAITING_APPROVAL:
+    if status == RunStatus.PAUSED:
         if approve:
             return await _approve_and_resume(client, run_id, logger)
         if reject:
