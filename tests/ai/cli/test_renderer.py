@@ -78,14 +78,27 @@ class TestPrintEvent(unittest.TestCase):
             )
         self.assertEqual(buf.getvalue(), "chunk")
 
-    def test_tool_event_logs_collapsed(self):
-        logger = _RecordingLogger()
-        print_event(
-            {"type": "tool", "name": "read_file", "phase": "end", "ok": True},
-            json_output=False,
-            logger=logger,
-        )
-        self.assertIn("[tool: read_file end ok]", logger.lines)
+    def test_tool_event_prints_to_stderr(self):
+        # Tool activity is status, not answer content, so it goes to stderr --
+        # keeping stdout clean for the model's answer text.
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            print_event(
+                {"type": "tool", "name": "read_file", "phase": "end", "ok": True},
+                json_output=False,
+                logger=_RecordingLogger(),
+            )
+        self.assertIn("[tool: read_file end ok]", buf.getvalue())
+
+    def test_thinking_event_prints_to_stderr(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            print_event(
+                {"type": "thinking", "text": "reasoning here"},
+                json_output=False,
+                logger=_RecordingLogger(),
+            )
+        self.assertIn("[thinking] reasoning here", buf.getvalue())
 
     def test_json_mode_emits_one_json_line(self):
         buf = io.StringIO()

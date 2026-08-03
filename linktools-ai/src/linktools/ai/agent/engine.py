@@ -193,6 +193,330 @@ class AgentEngine:
             return DefaultRetrievalPolicy(self._retriever)
         return None
 
+    async def _forward_model_stream(
+        self,
+        node: object,
+        run_ctx: object,
+        *,
+        cancellation: "CancellationToken",
+        live_events: "RunLiveEventSink",
+    ) -> str:
+        """Stream one model-request node, publishing text/thinking chunks to
+        ``live_events`` as they arrive. Returns the concatenated text delta so
+        the caller can fold it into its running accumulator. ``node.stream`` is
+        the pydantic-ai per-node async stream yielding PartStartEvent /
+        PartDeltaEvent; only TextPart/ThinkingPart (and their delta kinds) are
+        forwarded, all other part kinds are ignored here."""
+        from pydantic_ai.messages import (
+            PartDeltaEvent,
+            PartStartEvent,
+            TextPart,
+            TextPartDelta,
+            ThinkingPart,
+            ThinkingPartDelta,
+        )
+
+        accumulated = ""
+        async with node.stream(run_ctx) as request_stream:
+            async for ev in request_stream:
+                chunk = None
+                kind = None
+                if isinstance(ev, PartStartEvent) and isinstance(ev.part, TextPart):
+                    chunk = ev.part.content
+                    kind = "text"
+                elif isinstance(ev, PartDeltaEvent) and isinstance(
+                    ev.delta, TextPartDelta
+                ):
+                    chunk = ev.delta.content_delta
+                    kind = "text"
+                elif isinstance(ev, PartStartEvent) and isinstance(
+                    ev.part, ThinkingPart
+                ):
+                    chunk = ev.part.content
+                    kind = "thinking"
+                elif isinstance(ev, PartDeltaEvent) and isinstance(
+                    ev.delta, ThinkingPartDelta
+                ):
+                    chunk = ev.delta.content_delta
+                    kind = "thinking"
+                if chunk:
+                    if kind == "text":
+                        accumulated += chunk
+                    await live_events.publish({"type": kind, "text": chunk})
+                    await cancellation.raise_if_cancelled()
+        return accumulated
+
+    async def _forward_tool_stream(
+        self,
+        node: object,
+        run_ctx: object,
+        *,
+        cancellation: "CancellationToken",
+        live_events: "RunLiveEventSink",
+    ) -> None:
+        """Stream one call-tools node, publishing tool start/end events to
+        ``live_events`` as each tool call begins and returns."""
+        from pydantic_ai.messages import (
+            FunctionToolCallEvent,
+            FunctionToolResultEvent,
+            ToolReturnPart,
+        )
+
+        async with node.stream(run_ctx) as tool_stream:
+            async for ev in tool_stream:
+                tool_event = None
+                if isinstance(ev, FunctionToolCallEvent):
+                    tool_event = {
+                        "type": "tool",
+                        "name": ev.part.tool_name,
+                        "phase": "start",
+                        "ok": None,
+                    }
+                elif isinstance(ev, FunctionToolResultEvent):
+                    tool_event = {
+                        "type": "tool",
+                        "name": ev.part.tool_name,
+                        "phase": "end",
+                        "ok": isinstance(ev.part, ToolReturnPart),
+                    }
+                if tool_event is not None:
+                    await live_events.publish(tool_event)
+                    await cancellation.raise_if_cancelled()
+
+    async def _apply_window_policy(
+        self,
+        message_history: "tuple[Any, ...] | None",
+        model: Any,
+        *,
+        security_events: "SecurityEventSink",
+    ) -> "tuple[Any, ...] | None":
+        """Trim ``message_history`` per the wired session-window policy (if any)
+        and emit a ``PromptWindowApplied`` security event recording the before/
+        after counts. The policy runs even when history is empty so the wiring
+        is observable and a length-based policy can still record its decision.
+        Returns the trimmed history (or the original when no policy is wired)."""
+        window_policy = self._session_window
+        if window_policy is None:
+            return message_history
+        before_count = len(message_history or ())
+        trimmed = await window_policy.select_messages(message_history or (), model)
+        from ..observability.events.payloads import PromptWindowApplied
+
+        await security_events.emit(
+            PromptWindowApplied(
+                policy=type(window_policy).__name__,
+                before=before_count,
+                after=len(trimmed),
+            )
+        )
+        return tuple(trimmed) or None
+
+    async def _build_turn_prompt(
+        self,
+        context: "RunContext",
+        user_prompt: "str | None",
+    ) -> "str | None":
+        """Build the base prompt for a NEW turn: memory section (from the wired
+        memory policy) + knowledge section (from the wired retrieval policy) +
+        the user's prompt, combined by PromptBuilder. Returns None on the resume
+        path (the prompt is already baked into the checkpointed history)."""
+        memory_section = ""
+        memory_policy = self._effective_memory_policy()
+        if memory_policy is not None:
+            memories = await memory_policy.select_memories(context, user_prompt)
+            memory_section = self._prompt_formatter().format_memory(memories) or ""
+        knowledge_section = ""
+        retrieval_policy = self._effective_retrieval_policy()
+        if retrieval_policy is not None:
+            items = await retrieval_policy.retrieve(context, user_prompt)
+            knowledge_section = self._prompt_formatter().format_knowledge(items) or ""
+        return PromptBuilder.build_base_prompt(
+            user_prompt=user_prompt,
+            prior_messages=(),
+            memory_section=memory_section,
+            knowledge_section=knowledge_section,
+        )
+
+    async def _prepare_turn_inputs(
+        self,
+        agent: "CompiledAgent",
+        input: "AgentInput",
+        context: "RunContext",
+        assembly: "AgentAssembly | None",
+        *,
+        trace_collector: "SemanticTraceCollector | None",
+        security_events: "SecurityEventSink",
+    ) -> "tuple[AgentDependencies, list[AbstractToolset], AgentAssembly | None]":
+        """Build the per-turn ``deps`` and ``toolsets`` for the model drive, and
+        assemble the agent's declared features (if any) when ``assembly`` is not
+        already supplied. Emits the ToolExposureApplied / PromptCatalogInjected
+        security events for the assembled tools and prompt sections. Returns
+        ``(deps, toolsets, assembly)`` -- ``assembly`` is the (possibly
+        just-assembled) feature assembly, threaded back so the caller can fold
+        its prompt sections into the effective prompt."""
+        tool_context = ToolContext(
+            run_id=context.run_id,
+            session_id=context.session_id,
+            tool_call_id=None,
+            tenant_id=context.tenant_id,
+        )
+        deps = AgentDependencies(
+            tool_context=tool_context,
+            sandbox=self._sandbox,
+        )
+        toolsets: "list[AbstractToolset]" = []
+        if agent.spec.features and self._assembler is None:
+            raise RuntimeInitializationError(
+                "AgentEngine requires an AgentAssembler for declared features"
+            )
+        if agent.spec.features and self._tool_adapter is None:
+            raise RuntimeInitializationError(
+                "AgentEngine requires a PydanticAIToolAdapter for feature tools"
+            )
+        if agent.spec.features:
+            from .assembly.provider import AgentFeatureContext
+            from .tool.invocation import ToolExecutionContext
+
+            feature_context = AgentFeatureContext(
+                agent_id=agent.spec.id,
+                sandbox=deps.sandbox,
+                execution_id=context.run_id,
+                root_execution_id=context.root_execution_id,
+                parent_execution_id=context.parent_execution_id,
+                session_id=context.session_id,
+                user_id=context.user_id,
+                tenant_id=context.tenant_id,
+                workspace=context.workspace,
+            )
+            if assembly is None:
+                assembly = await self._assembler.assemble(
+                    agent.spec,
+                    feature_context,
+                )
+                if environ.debug:
+                    logger.debug(
+                        "run %s feature assembly: agent=%s tools=%s prompt_sections=%s",
+                        context.run_id,
+                        agent.spec.id,
+                        len(assembly.tools),
+                        tuple(assembly.prompt_sections),
+                    )
+            tool_descriptors = {
+                definition.descriptor.name: definition.descriptor
+                for definition in assembly.tools
+            }
+            if tool_descriptors:
+                deps = dataclasses.replace(deps, tool_descriptors=tool_descriptors)
+            if assembly.tools:
+                toolsets.append(
+                    self._tool_adapter.build_toolset(
+                        assembly.tools,
+                        context=ToolExecutionContext(
+                            execution_id=context.run_id,
+                            tool_call_id="",
+                            dependencies=deps,
+                            run_context=context,
+                            approved_tool_call_id=input.approved_tool_call_id,
+                            approved_binding_fingerprint=(
+                                input.approved_binding_fingerprint
+                            ),
+                            trace_sink=trace_collector,
+                        ),
+                    )
+                )
+        if assembly is not None:
+            from ..observability.events.payloads import (
+                PromptCatalogInjected,
+                ToolExposureApplied,
+            )
+
+            await security_events.emit(
+                ToolExposureApplied(
+                    agent_id=agent.spec.id, total_tools=len(assembly.tools)
+                )
+            )
+            for section in assembly.prompt_sections:
+                await security_events.emit(
+                    PromptCatalogInjected(agent_id=agent.spec.id, section=section)
+                )
+        return deps, toolsets, assembly
+
+    def _wrap_iter_model(
+        self,
+        base_model: Any,
+        context: "RunContext",
+        agent: "CompiledAgent",
+        *,
+        trace_collector: "SemanticTraceCollector | None",
+    ) -> Any:
+        """Wrap the agent's model with the wired security pipeline and trace
+        recording, in that order (security outermost so it sees the recorded
+        model's calls). Returns the wrapped model, or ``base_model`` unchanged
+        when neither is wired."""
+        wrapped = None
+        if self._security_pipeline is not None:
+            from ..governance.security.secured_model import SecuredModel
+
+            wrapped = SecuredModel(
+                base_model,
+                pipeline=self._security_pipeline,
+                run_id=context.run_id,
+                agent_id=agent.spec.id,
+            )
+        if trace_collector is not None:
+            wrapped = SemanticRecordingModel(
+                wrapped or base_model,
+                trace_collector,
+                self._trace_codec,
+            )
+        return wrapped or base_model
+
+    async def _enforce_usage_policy(
+        self,
+        model_policy: Any,
+        usage: Any,
+    ) -> None:
+        """Raise ModelPolicyExceededError when the run's token usage breaches
+        ``max_tokens`` or ``budget``. ``usage`` is the pydantic-ai RunUsage from
+        the completed run; nothing happens when it is None (no usage recorded)."""
+        if usage is None:
+            return
+        max_tokens = model_policy.max_tokens
+        if max_tokens is not None:
+            used = usage.input_tokens + usage.output_tokens
+            if used > max_tokens:
+                raise ModelPolicyExceededError(
+                    f"max_tokens exceeded: used {used} > max_tokens {max_tokens}",
+                    kind="max_tokens",
+                )
+        budget = model_policy.budget
+        if budget is None:
+            return
+        if self._pricing_provider is None:
+            raise ModelPolicyExceededError(
+                "ModelPolicy.budget is set but no ModelPricingProvider "
+                "is wired; refusing to run without a cost limit",
+                kind="budget",
+            )
+        pricing = await self._pricing_provider.get_pricing(model_policy.primary)
+        if pricing is None:
+            raise ModelPolicyExceededError(
+                f"ModelPolicy.budget set but model {model_policy.primary!r} has "
+                f"no pricing; refusing to run without a cost limit",
+                kind="budget",
+            )
+        cost = pricing.cost(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+        )
+        if cost > budget:
+            raise ModelPolicyExceededError(
+                f"cost budget exceeded: {cost} > budget {budget}",
+                kind="budget",
+            )
+
     def _prompt_formatter(self):
         from .context_policies import DefaultPromptContextFormatter
 
@@ -238,15 +562,6 @@ class AgentEngine:
         failures, not a denylist, so a new programming bug surfaces as a real
         traceback instead of being hidden inside a clean AgentFailed outcome."""
         from pydantic_ai import Agent as PydanticAgent
-        from pydantic_ai.messages import (
-            FunctionToolCallEvent,
-            FunctionToolResultEvent,
-            PartDeltaEvent,
-            PartStartEvent,
-            TextPart,
-            TextPartDelta,
-            ToolReturnPart,
-        )
 
         metrics = self._metrics
         run_attrs = {"run_id": context.run_id, "session_id": context.session_id}
@@ -315,142 +630,24 @@ class AgentEngine:
                     await cancellation.raise_if_cancelled()
                     await self._middleware_pipeline.run_before_run(context)
 
-                message_history = input.message_history or None
-                window_policy = self._session_window
-                if window_policy is not None:
-                    # The policy is invoked even when history is empty (a fresh
-                    # session) so the wiring is observable and a policy that
-                    # short-circuits on length can still record the decision.
-                    before_count = len(message_history or ())
-                    trimmed = await window_policy.select_messages(
-                        message_history or (), agent.spec.model
-                    )
-                    message_history = tuple(trimmed) or None
-                    from ..observability.events.payloads import PromptWindowApplied
+                message_history = await self._apply_window_policy(
+                    input.message_history or None,
+                    agent.spec.model,
+                    security_events=security_events,
+                )
 
-                    await security_events.emit(
-                        PromptWindowApplied(
-                            policy=type(window_policy).__name__,
-                            before=before_count,
-                            after=len(trimmed),
-                        )
-                    )
-
-                user_prompt = input.prompt
                 prompt: "str | None" = None
                 if not input.resuming:
-                    memory_section = ""
-                    memory_policy = self._effective_memory_policy()
-                    if memory_policy is not None:
-                        memories = await memory_policy.select_memories(
-                            context, user_prompt
-                        )
-                        memory_section = (
-                            self._prompt_formatter().format_memory(memories) or ""
-                        )
-                    knowledge_section = ""
-                    retrieval_policy = self._effective_retrieval_policy()
-                    if retrieval_policy is not None:
-                        items = await retrieval_policy.retrieve(context, user_prompt)
-                        knowledge_section = (
-                            self._prompt_formatter().format_knowledge(items) or ""
-                        )
-                    prompt = PromptBuilder.build_base_prompt(
-                        user_prompt=user_prompt,
-                        prior_messages=(),
-                        memory_section=memory_section,
-                        knowledge_section=knowledge_section,
-                    )
+                    prompt = await self._build_turn_prompt(context, input.prompt)
 
-                tool_context = ToolContext(
-                    run_id=context.run_id,
-                    session_id=context.session_id,
-                    tool_call_id=None,
-                    tenant_id=context.tenant_id,
+                deps, toolsets, assembly = await self._prepare_turn_inputs(
+                    agent,
+                    input,
+                    context,
+                    assembly,
+                    trace_collector=trace_collector,
+                    security_events=security_events,
                 )
-                deps = AgentDependencies(
-                    tool_context=tool_context,
-                    sandbox=self._sandbox,
-                )
-                toolsets: "list[AbstractToolset]" = []
-                if agent.spec.features and self._assembler is None:
-                    raise RuntimeInitializationError(
-                        "AgentEngine requires an AgentAssembler for declared features"
-                    )
-                if agent.spec.features and self._tool_adapter is None:
-                    raise RuntimeInitializationError(
-                        "AgentEngine requires a PydanticAIToolAdapter for feature tools"
-                    )
-                if agent.spec.features:
-                    from .assembly.provider import AgentFeatureContext
-                    from .tool.invocation import ToolExecutionContext
-
-                    feature_context = AgentFeatureContext(
-                        agent_id=agent.spec.id,
-                        sandbox=deps.sandbox,
-                        execution_id=context.run_id,
-                        root_execution_id=context.root_execution_id,
-                        parent_execution_id=context.parent_execution_id,
-                        session_id=context.session_id,
-                        user_id=context.user_id,
-                        tenant_id=context.tenant_id,
-                        workspace=context.workspace,
-                    )
-                    if assembly is None:
-                        assembly = await self._assembler.assemble(
-                            agent.spec,
-                            feature_context,
-                        )
-                        if environ.debug:
-                            logger.debug(
-                                "run %s feature assembly: agent=%s tools=%s prompt_sections=%s",
-                                context.run_id,
-                                agent.spec.id,
-                                len(assembly.tools),
-                                tuple(assembly.prompt_sections),
-                            )
-                    tool_descriptors = {
-                        definition.descriptor.name: definition.descriptor
-                        for definition in assembly.tools
-                    }
-                    if tool_descriptors:
-                        deps = dataclasses.replace(
-                            deps, tool_descriptors=tool_descriptors
-                        )
-                    if assembly.tools:
-                        toolsets.append(
-                            self._tool_adapter.build_toolset(
-                                assembly.tools,
-                                context=ToolExecutionContext(
-                                    execution_id=context.run_id,
-                                    tool_call_id="",
-                                    dependencies=deps,
-                                    run_context=context,
-                                    approved_tool_call_id=input.approved_tool_call_id,
-                                    approved_binding_fingerprint=(
-                                        input.approved_binding_fingerprint
-                                    ),
-                                    trace_sink=trace_collector,
-                                ),
-                            )
-                        )
-                if assembly is not None:
-                    from ..observability.events.payloads import (
-                        PromptCatalogInjected,
-                        ToolExposureApplied,
-                    )
-
-                    total = len(assembly.tools)
-                    await security_events.emit(
-                        ToolExposureApplied(agent_id=agent.spec.id, total_tools=total)
-                    )
-                    if assembly.prompt_sections:
-                        for section in assembly.prompt_sections:
-                            await security_events.emit(
-                                PromptCatalogInjected(
-                                    agent_id=agent.spec.id, section=section
-                                )
-                            )
 
                 timeout = agent.spec.model.timeout_seconds
                 accumulated_text = ""
@@ -464,22 +661,12 @@ class AgentEngine:
                     static_sections=agent.spec.instructions.sections,
                     resuming=input.resuming,
                 )
-                iter_model = None
-                if self._security_pipeline is not None:
-                    from ..governance.security.secured_model import SecuredModel
-
-                    iter_model = SecuredModel(
-                        agent.pydantic_agent.model,
-                        pipeline=self._security_pipeline,
-                        run_id=context.run_id,
-                        agent_id=agent.spec.id,
-                    )
-                if trace_collector is not None:
-                    iter_model = SemanticRecordingModel(
-                        iter_model or agent.pydantic_agent.model,
-                        trace_collector,
-                        self._trace_codec,
-                    )
+                iter_model = self._wrap_iter_model(
+                    agent.pydantic_agent.model,
+                    context,
+                    agent,
+                    trace_collector=trace_collector,
+                )
                 # effective_prompt is None on the resume path (baked into the
                 # checkpointed message_history already, per AgentInput.resuming);
                 # otherwise it's the new user turn, which must be sent alongside
@@ -547,67 +734,21 @@ class AgentEngine:
                                         continue
 
                                     if PydanticAgent.is_model_request_node(node):
-                                        try:
-                                            async with node.stream(
-                                                run.ctx
-                                            ) as request_stream:
-                                                async for ev in request_stream:
-                                                    text = None
-                                                    if isinstance(
-                                                        ev, PartStartEvent
-                                                    ) and isinstance(ev.part, TextPart):
-                                                        text = ev.part.content
-                                                    elif isinstance(
-                                                        ev, PartDeltaEvent
-                                                    ) and isinstance(
-                                                        ev.delta, TextPartDelta
-                                                    ):
-                                                        text = ev.delta.content_delta
-                                                    if text:
-                                                        accumulated_text += text
-                                                        await live_events.publish(
-                                                            {
-                                                                "type": "text",
-                                                                "text": text,
-                                                            }
-                                                        )
-                                                        await cancellation.raise_if_cancelled()
-                                        except BaseException:
-                                            raise
+                                        accumulated_text += (
+                                            await self._forward_model_stream(
+                                                node,
+                                                run.ctx,
+                                                cancellation=cancellation,
+                                                live_events=live_events,
+                                            )
+                                        )
                                     elif PydanticAgent.is_call_tools_node(node):
-                                        try:
-                                            async with node.stream(
-                                                run.ctx
-                                            ) as tool_stream:
-                                                async for ev in tool_stream:
-                                                    tool_event = None
-                                                    if isinstance(
-                                                        ev, FunctionToolCallEvent
-                                                    ):
-                                                        tool_event = {
-                                                            "type": "tool",
-                                                            "name": ev.part.tool_name,
-                                                            "phase": "start",
-                                                            "ok": None,
-                                                        }
-                                                    elif isinstance(
-                                                        ev, FunctionToolResultEvent
-                                                    ):
-                                                        tool_event = {
-                                                            "type": "tool",
-                                                            "name": ev.part.tool_name,
-                                                            "phase": "end",
-                                                            "ok": isinstance(
-                                                                ev.part, ToolReturnPart
-                                                            ),
-                                                        }
-                                                    if tool_event is not None:
-                                                        await live_events.publish(
-                                                            tool_event
-                                                        )
-                                                        await cancellation.raise_if_cancelled()
-                                        except BaseException:
-                                            raise
+                                        await self._forward_tool_stream(
+                                            node,
+                                            run.ctx,
+                                            cancellation=cancellation,
+                                            live_events=live_events,
+                                        )
                             except RunPaused as paused:
                                 if environ.debug:
                                     logger.debug(
@@ -683,43 +824,7 @@ class AgentEngine:
 
                 output = result.output if result is not None else accumulated_text
                 usage = result.usage if result is not None else None
-                max_tokens = agent.spec.model.max_tokens
-                if max_tokens is not None and usage is not None:
-                    used = usage.input_tokens + usage.output_tokens
-                    if used > max_tokens:
-                        raise ModelPolicyExceededError(
-                            f"max_tokens exceeded: used {used} > max_tokens {max_tokens}",
-                            kind="max_tokens",
-                        )
-                budget = agent.spec.model.budget
-                if budget is not None and usage is not None:
-                    if self._pricing_provider is None:
-                        raise ModelPolicyExceededError(
-                            "ModelPolicy.budget is set but no ModelPricingProvider "
-                            "is wired; refusing to run without a cost limit",
-                            kind="budget",
-                        )
-                    pricing = await self._pricing_provider.get_pricing(
-                        agent.spec.model.primary
-                    )
-                    if pricing is None:
-                        raise ModelPolicyExceededError(
-                            f"ModelPolicy.budget set but model "
-                            f"{agent.spec.model.primary!r} has no pricing; "
-                            f"refusing to run without a cost limit",
-                            kind="budget",
-                        )
-                    cost = pricing.cost(
-                        input_tokens=usage.input_tokens,
-                        output_tokens=usage.output_tokens,
-                        cache_read_tokens=usage.cache_read_tokens,
-                        cache_write_tokens=usage.cache_write_tokens,
-                    )
-                    if cost > budget:
-                        raise ModelPolicyExceededError(
-                            f"cost budget exceeded: {cost} > budget {budget}",
-                            kind="budget",
-                        )
+                await self._enforce_usage_policy(agent.spec.model, usage)
 
                 run_result = RunResult(
                     output=output,

@@ -10,6 +10,7 @@ renderer itself never touches Storage (the console operates the backend only
 through RuntimeClient)."""
 
 import json
+import sys
 from typing import TYPE_CHECKING, Any, Mapping
 
 if TYPE_CHECKING:
@@ -24,21 +25,30 @@ def print_event(
 ) -> None:
     """Render one non-paused stream event.
 
-    ``text`` -> stdout (streamed, no newline); ``tool`` -> _logger (collapsed);
-    ``resumed`` -> _logger. ``paused`` is handled by the caller via
-    :func:`announce_paused` (it terminates the stream). In ``--json`` mode every
-    event is emitted as one JSON line."""
+    ``text`` -> stdout (streamed, no newline); ``thinking`` / ``tool`` /
+    ``resumed`` -> stderr as status lines. Routing status to stderr keeps
+    stdout clean for the model's answer text (so ``ai-run "q" > out`` yields
+    just the answer), while still showing reasoning/tool activity on the
+    terminal. ``paused`` is handled by the caller via :func:`announce_paused`
+    (it terminates the stream). In ``--json`` mode every event is emitted as
+    one JSON line."""
     if json_output:
         print(json.dumps(event, default=str))
         return
     kind = event.get("type")
     if kind == "text":
         print(event.get("text", ""), end="", flush=True)
+    elif kind == "thinking":
+        print(f"[thinking] {event.get('text', '')}", file=sys.stderr, flush=True)
     elif kind == "tool":
         ok = " ok" if event.get("ok") else ""
-        logger.info(f"[tool: {event.get('name')} {event.get('phase')}{ok}]")
+        print(
+            f"[tool: {event.get('name')} {event.get('phase')}{ok}]",
+            file=sys.stderr,
+            flush=True,
+        )
     elif kind == "resumed":
-        logger.info(f"resumed run: {event.get('run_id')}")
+        print(f"resumed run: {event.get('run_id')}", file=sys.stderr)
 
 
 def announce_failed(event: "Mapping[str, Any]", logger: "logging.Logger") -> None:
