@@ -9,6 +9,7 @@ from ..agent.spec import AgentSpec, PromptSpec
 from ..spec.parsing import SpecLoader
 from ..agent.mcp.index import MCPServerSpecIndex
 from ..model.policy import ModelPolicy
+from ..model.resolver import ModelResolver
 from ..runtime import LocalDirectoryStorage, RuntimeDependencies, build_runtime
 from ..agent.skill.index import SkillSpecIndex
 from .skill_index import DirectorySkillIndex
@@ -17,7 +18,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..execution.live_events import RunLiveEventSink
-    from ..model.resolver import ModelResolver
     from ..runtime import Runtime, RuntimeStorage
     from .project import CliProject
 
