@@ -11,7 +11,6 @@ metadata-miss rule, preload via ``contains_many``, and write post-processing.
 
 Layers are ordered fallbacks; earlier readers win."""
 
-
 import asyncio
 import hashlib
 from dataclasses import dataclass
@@ -86,6 +85,15 @@ def _primary_policy(primary: object) -> LayerRefreshPolicy:
     )
 
 
+def _no_adapter_info_key(info: object) -> object:
+    # Placeholder for a StorageComposition built with no adapter: every method
+    # that would exercise a LayerMetadataView's refresh (and thus call this)
+    # first calls _require_adapter(), which raises before getting here. Raises
+    # rather than guessing at the info's shape, so a future change that breaks
+    # that guarantee fails loudly instead of silently mis-keying entries.
+    raise StorageFeatureSupportError("storage composition has no adapter")
+
+
 class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
     """Compose a primary reader with layers, a writer, and a content cache."""
 
@@ -122,7 +130,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self.preload_batch_size = preload_batch_size
         self.preload_concurrency = preload_concurrency
         self.cache_concurrency = cache_concurrency
-        info_key = adapter.info_key if adapter is not None else lambda info: getattr(info, "path", info)
+        info_key = adapter.info_key if adapter is not None else _no_adapter_info_key
         # Auto-wire the default revision source (cheap head_revision probe)
         # when none is injected: a plain SpecStore(backend) then short-circuits
         # unchanged-revision refreshes for free. Layers do not get a source --
@@ -166,7 +174,9 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             raise StorageFeatureSupportError("storage is read-only")
         return self.writer
 
-    def _require_adapter(self) -> "tuple[StorageAdapter[KeyT, ValueT, InfoT], StorageCacheAdapter[KeyT, ValueT, InfoT] | None]":
+    def _require_adapter(
+        self,
+    ) -> "tuple[StorageAdapter[KeyT, ValueT, InfoT], StorageCacheAdapter[KeyT, ValueT, InfoT] | None]":
         if self.adapter is None:
             raise StorageFeatureSupportError("storage composition has no adapter")
         return self.adapter, self.cache_adapter
@@ -444,20 +454,20 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
 
     async def put(self, value: ValueT) -> ValueT:
         writer = self.require_writer()
-        result = await writer.put(value)
+        result, revision = await writer.put(value)
         adapter, _ = self._require_adapter()
-        await self._after_put(result, adapter)
+        await self._after_put(result, adapter, revision)
         return result
 
     async def delete(self, key: KeyT) -> None:
         writer = self.require_writer()
-        await writer.delete(key)
-        await self._after_delete(key)
+        revision = await writer.delete(key)
+        await self._after_delete(key, revision)
 
     async def reset(self, values: "tuple[ValueT, ...]") -> None:
         writer = self.require_writer()
-        await writer.reset(values)
-        await self._after_reset()
+        revision = await writer.reset(values)
+        await self._after_reset(revision)
 
     async def apply_batch(
         self,
@@ -472,19 +482,24 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         # stay correct, at the cost of N separate transactions/round trips.
         writer = self.require_writer()
         if isinstance(writer, BatchStorageWriter):
-            await writer.apply_batch(puts, deletes)
+            revision = await writer.apply_batch(puts, deletes)
             adapter, _ = self._require_adapter()
             put_keys = tuple(
                 adapter.info_key(adapter.value_info(value)) for value in puts
             )
-            await self._after_batch(put_keys, deletes)
+            await self._after_batch(put_keys, deletes, revision)
             return
         for value in puts:
             await self.put(value)
         for key in deletes:
             await self.delete(key)
 
-    async def _after_put(self, value: ValueT, adapter: "StorageAdapter[KeyT, ValueT, InfoT]") -> None:
+    async def _after_put(
+        self,
+        value: ValueT,
+        adapter: "StorageAdapter[KeyT, ValueT, InfoT]",
+        revision: "Any | None",
+    ) -> None:
         # Clear the preloaded marker for the written key so a later preload
         # re-reads it. A revisioned primary keeps its old state so the next
         # refresh fetches the patch from the prior revision; an unversioned
@@ -493,24 +508,25 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
-        await self._notify_revision_source()
+        await self._notify_revision_source(revision)
 
-    async def _after_delete(self, key: KeyT) -> None:
+    async def _after_delete(self, key: KeyT, revision: "Any | None") -> None:
         self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
-        await self._notify_revision_source()
+        await self._notify_revision_source(revision)
 
-    async def _after_reset(self) -> None:
+    async def _after_reset(self, revision: "Any | None") -> None:
         self._preloaded.clear()
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
-        await self._notify_revision_source()
+        await self._notify_revision_source(revision)
 
     async def _after_batch(
         self,
         put_keys: "tuple[KeyT, ...]",
         delete_keys: "tuple[KeyT, ...]",
+        revision: "Any | None",
     ) -> None:
         # Clear preloaded markers for every touched key (puts + deletes) so a
         # later preload re-reads them; a revisioned primary keeps its old state
@@ -522,21 +538,16 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             self._preloaded.pop(key, None)
         if self.primary_view.policy is not LayerRefreshPolicy.REVISIONED:
             self.primary_view.invalidate()
-        await self._notify_revision_source()
+        await self._notify_revision_source(revision)
 
-    async def _notify_revision_source(self) -> None:
-        # Post-commit (the writer's transaction has committed by the time the
-        # _after_* hook runs): probe the new head revision once and tell the
-        # source, so a caching source (redis/file) can refresh + publish to
-        # cross-machine subscribers within ms rather than waiting on a TTL.
-        # Skipped when no source is wired or the backend has no cheap head
-        # probe; the default source no-ops here (it reads head live).
+    async def _notify_revision_source(self, revision: "Any | None") -> None:
+        # Skipped when no source is wired; the default source no-ops here (it
+        # reads head live).
         source = self.primary_view.revision_source
         if source is None:
             return
-        head = await self.primary_view.head_revision()
-        if head is not None:
-            await source.revision_bumped(head)
+        if revision is not None:
+            await source.revision_bumped(revision)
 
 
 __all__ = [

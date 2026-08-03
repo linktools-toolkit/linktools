@@ -54,6 +54,7 @@ class MetadataBackend:
         self.docs = {d.info.path: d for d in docs}
         self.revision = revision
         self.loads = 0
+        self.head_probes = 0
 
     async def load_metadata(self, after_revision):
         self.loads += 1
@@ -66,23 +67,33 @@ class MetadataBackend:
         return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, changes)
 
     async def head_revision(self):
+        self.head_probes += 1
         return self.revision
 
     async def get(self, path):
         return self.docs.get(path)
 
     async def put(self, doc):
+        # Report the revision the write landed at directly (as
+        # SqlAlchemySpecBackend does, computed in the same transaction),
+        # so callers never need to probe head_revision() to learn it.
         self.docs[doc.info.path] = doc
         self.revision += 1
-        return doc
+        return doc, self.revision
 
     async def delete(self, path):
-        self.docs.pop(path, None)
+        # Report None (no revision bump) for a no-op delete of an absent key,
+        # matching SqlAlchemySpecBackend's real semantics.
+        if path not in self.docs:
+            return None
+        del self.docs[path]
         self.revision += 1
+        return self.revision
 
     async def reset(self, docs):
         self.docs = {d.info.path: d for d in docs}
         self.revision += 1
+        return self.revision
 
 
 def _doc(path, body=b"b"):
@@ -91,7 +102,9 @@ def _doc(path, body=b"b"):
 
 def test_composition_records_only_explicit_features():
     primary = MetadataBackend((_doc("a"),))
-    composition = StorageComposition(primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter())
+    composition = StorageComposition(
+        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter()
+    )
     assert composition.writer is primary
     assert composition.adapter is not None
     assert composition.layers == ()
@@ -105,15 +118,27 @@ def test_composition_requires_adapter_for_features():
 
 def test_read_only_composition_requires_writer_to_write():
     primary = MetadataBackend((_doc("a"),))
-    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    composition = StorageComposition(
+        primary, adapter=Adapter(), cache_adapter=Adapter()
+    )
     with pytest.raises(StorageFeatureSupportError, match="read-only"):
         composition.require_writer()
 
 
 @pytest.mark.asyncio
 async def test_layer_merge_records_owner_and_earlier_wins():
-    primary = MetadataBackend((_doc("same", b"primary"), _doc("only-primary", b"pp"),))
-    layer = MetadataBackend((_doc("same", b"layer"), _doc("only-layer", b"ll"),))
+    primary = MetadataBackend(
+        (
+            _doc("same", b"primary"),
+            _doc("only-primary", b"pp"),
+        )
+    )
+    layer = MetadataBackend(
+        (
+            _doc("same", b"layer"),
+            _doc("only-layer", b"ll"),
+        )
+    )
     composition = StorageComposition(
         primary,
         layers=(StorageLayer(backend=layer),),
@@ -141,15 +166,17 @@ async def test_list_info_with_owners_exposes_provenance():
     )
     paired = await composition.list_info_with_owners()
     owners = {info.path: owner for info, owner in paired}
-    assert owners["db-only"] == 0       # primary-only -> DB-managed
-    assert owners["overridden"] == 0    # primary wins the conflict -> DB-managed
+    assert owners["db-only"] == 0  # primary-only -> DB-managed
+    assert owners["overridden"] == 0  # primary wins the conflict -> DB-managed
     assert owners["builtin-only"] == 1  # layer-only -> builtin default
 
 
 @pytest.mark.asyncio
 async def test_effective_revision_single_primary_is_primary_revision():
     primary = MetadataBackend((_doc("a"),), revision=7)
-    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    composition = StorageComposition(
+        primary, adapter=Adapter(), cache_adapter=Adapter()
+    )
     state = await composition.refresh()
     assert state.revision == 7
 
@@ -204,7 +231,9 @@ async def test_current_revision_probes_head_without_loading_entries():
     # current_revision() must use the cheap head probe, not a full load_metadata:
     # it returns the revision with zero backend loads.
     primary = MetadataBackend((_doc("a"),), revision=9)
-    composition = StorageComposition(primary, adapter=Adapter(), cache_adapter=Adapter())
+    composition = StorageComposition(
+        primary, adapter=Adapter(), cache_adapter=Adapter()
+    )
     rev = await composition.current_revision()
     assert rev == 9
     assert primary.loads == 0, "current_revision triggered a full metadata load"
@@ -307,7 +336,10 @@ async def test_put_notifies_revision_source_post_commit():
     primary = MetadataBackend((_doc("a", b"one"),))
     source = _RecordingRevisionSource()
     composition = StorageComposition(
-        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
         revision_source=source,
     )
     before = primary.revision
@@ -322,7 +354,10 @@ async def test_delete_and_reset_also_notify_revision_source():
     primary = MetadataBackend((_doc("a", b"one"), _doc("b", b"two")))
     source = _RecordingRevisionSource()
     composition = StorageComposition(
-        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
         revision_source=source,
     )
     await composition.delete("a")
@@ -337,10 +372,91 @@ async def test_no_source_means_no_notification_overhead():
     # default source's revision_bumped is a no-op (it reads head live).
     primary = MetadataBackend((_doc("a", b"one"),))
     composition = StorageComposition(
-        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
     )
     await composition.put(_doc("b", b"two"))  # must not raise
     assert composition.primary_view.revision_source is not None
+
+
+@pytest.mark.asyncio
+async def test_put_skips_head_probe_using_writers_reported_revision():
+    # put() reports the revision it landed at directly (computed in the same
+    # transaction as the write); the composition must use it as-is and never
+    # call the backend's head_revision() to learn it.
+    primary = MetadataBackend((_doc("a", b"one"),))
+    source = _RecordingRevisionSource()
+    composition = StorageComposition(
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+        revision_source=source,
+    )
+    probes_before = primary.head_probes
+    await composition.put(_doc("b", b"two"))
+    assert source.bumps == [primary.revision]
+    assert primary.head_probes == probes_before, (
+        "put must not probe head_revision() when the writer reports its own revision"
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_no_op_reports_none_and_skips_notification_and_probe():
+    # Deleting an absent key reports revision=None (nothing changed): no
+    # notification and no probe.
+    primary = MetadataBackend((_doc("a"),))
+    source = _RecordingRevisionSource()
+    composition = StorageComposition(
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+        revision_source=source,
+    )
+    probes_before = primary.head_probes
+    await composition.delete("does-not-exist")
+    assert source.bumps == []
+    assert primary.head_probes == probes_before
+
+
+class BatchBackend(MetadataBackend):
+    """A MetadataBackend that also declares BatchStorageWriter, reporting the
+    revision an apply_batch landed at directly (None when nothing changed)."""
+
+    async def apply_batch(self, puts, deletes):
+        changed = False
+        for doc in puts:
+            self.docs[doc.info.path] = doc
+            changed = True
+        for path in deletes:
+            if path in self.docs:
+                del self.docs[path]
+                changed = True
+        if not changed:
+            return None
+        self.revision += 1
+        return self.revision
+
+
+@pytest.mark.asyncio
+async def test_apply_batch_skips_head_probe_using_writers_reported_revision():
+    primary = BatchBackend((_doc("a"),))
+    assert isinstance(primary, BatchStorageWriter)
+    source = _RecordingRevisionSource()
+    composition = StorageComposition(
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
+        revision_source=source,
+    )
+    probes_before = primary.head_probes
+    await composition.apply_batch((_doc("b", b"new"),), ("a",))
+    assert source.bumps == [primary.revision]
+    assert primary.head_probes == probes_before
 
 
 @pytest.mark.asyncio
@@ -392,11 +508,13 @@ async def test_get_retry_invalidates_on_content_info_mismatch():
             self.loads += 1
             if not self.bumped:
                 return MetadataLoad(
-                    1, MetadataLoadMode.REPLACE,
+                    1,
+                    MetadataLoadMode.REPLACE,
                     (StorageChange("a", EtagInfo("a", "v1")),),
                 )
             return MetadataLoad(
-                2, MetadataLoadMode.REPLACE,
+                2,
+                MetadataLoadMode.REPLACE,
                 (StorageChange("a", EtagInfo("a", "v2")),),
             )
 
@@ -420,7 +538,9 @@ async def test_get_retry_invalidates_on_content_info_mismatch():
 
     primary = EtagBackend()
     composition = StorageComposition(
-        primary, adapter=EtagAdapter(), cache_adapter=EtagAdapter(),
+        primary,
+        adapter=EtagAdapter(),
+        cache_adapter=EtagAdapter(),
         revision_source=StaleSource(),
     )
     # Prime: metadata loads v1 at revision 1.
@@ -477,9 +597,15 @@ async def test_get_many_multi_owner_groups_by_layer():
             self.docs = {d.info.path: d for d in docs}
 
         async def load_metadata(self, after_revision):
-            from linktools.ai.storage.revision import MetadataLoad, MetadataLoadMode, StorageChange
+            from linktools.ai.storage.revision import (
+                MetadataLoad,
+                MetadataLoadMode,
+                StorageChange,
+            )
+
             return MetadataLoad(
-                1, MetadataLoadMode.REPLACE,
+                1,
+                MetadataLoadMode.REPLACE,
                 tuple(StorageChange(d.info.path, d.info) for d in self.docs.values()),
             )
 
@@ -510,7 +636,12 @@ async def test_reset_changes_observable_state():
 
     class Backend(MetadataBackend):
         async def load_metadata(self, after_revision):
-            from linktools.ai.storage.revision import MetadataLoad, MetadataLoadMode, StorageChange
+            from linktools.ai.storage.revision import (
+                MetadataLoad,
+                MetadataLoadMode,
+                StorageChange,
+            )
+
             self.loads += 1
             if after_revision == self.revision:
                 return MetadataLoad(self.revision, MetadataLoadMode.PATCH, ())
@@ -520,7 +651,12 @@ async def test_reset_changes_observable_state():
             )
             return MetadataLoad(self.revision, MetadataLoadMode.REPLACE, changes)
 
-    primary = Backend((_doc("a", b"one"), _doc("b", b"two"),))
+    primary = Backend(
+        (
+            _doc("a", b"one"),
+            _doc("b", b"two"),
+        )
+    )
     composition = StorageComposition(
         primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter()
     )
@@ -545,7 +681,10 @@ async def test_preload_oversized_blob_not_marked_preloaded():
     # Cache admits only 10 bytes -> put silently drops the 100-byte blob.
     cache = MemoryContentCache(max_bytes=10)
     composition = StorageComposition(
-        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
         cache=cache,
     )
     await composition.list_info(preload=True)
@@ -602,7 +741,8 @@ async def test_get_many_invalidates_owner_on_content_race():
         async def load_metadata(self, after_revision):
             self.loads += 1
             return MetadataLoad(
-                1, MetadataLoadMode.REPLACE,
+                1,
+                MetadataLoadMode.REPLACE,
                 (StorageChange("a", EtagInfo("a", "stale")),),
             )
 
@@ -634,7 +774,10 @@ async def test_apply_batch_falls_back_to_per_op_when_writer_lacks_capability():
     # each carrying its own _after_* hook -- rather than raising.
     primary = MetadataBackend((_doc("a"), _doc("c"), _doc("del")))
     composition = StorageComposition(
-        primary, writer=primary, adapter=Adapter(), cache_adapter=Adapter(),
+        primary,
+        writer=primary,
+        adapter=Adapter(),
+        cache_adapter=Adapter(),
     )
     assert not isinstance(primary, BatchStorageWriter), (
         "test premise: MetadataBackend must not be a BatchStorageWriter"

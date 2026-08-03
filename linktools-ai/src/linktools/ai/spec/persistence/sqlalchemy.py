@@ -17,6 +17,7 @@ from ...storage.sqlalchemy.blob import put_blob, put_blobs, read_blob
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
 from ...storage.sqlalchemy.dialects import resolve_dialect
 from ...storage.versioning import VersionedStorage, VersionSummary
+from ...storage.multi import BatchStorageWriter, StorageWriter
 from ...storage.revision import (
     MetadataLoad,
     MetadataLoadMode,
@@ -78,6 +79,8 @@ def _info(row: "EntryRow | ChangeRow") -> SpecDocumentInfo:
 
 class SqlAlchemySpecBackend(
     StorageMetadataBackend[int, str, SpecDocumentInfo],
+    StorageWriter[str, SpecDocument, int],
+    BatchStorageWriter[str, SpecDocument, int],
     VersionedStorage[int, str, SpecDocument],
 ):
     def __init__(
@@ -300,7 +303,7 @@ class SqlAlchemySpecBackend(
 
     # ---- writer --------------------------------------------------------
 
-    async def put(self, entry: SpecDocument) -> SpecDocument:
+    async def put(self, entry: SpecDocument) -> "tuple[SpecDocument, int]":
         entry.validate_etag()
         values = _entry_values(entry)
         # One transaction, one EntryRow statement: a dialect upsert
@@ -326,9 +329,9 @@ class SqlAlchemySpecBackend(
                         revision, entry.info, deleted=False, object_id=object_id
                     )
                 )
-        return entry
+        return entry, revision
 
-    async def delete(self, path: str) -> None:
+    async def delete(self, path: str) -> "int | None":
         async with self.session_factory() as session:
             async with session.begin():
                 row = (
@@ -337,15 +340,16 @@ class SqlAlchemySpecBackend(
                     )
                 ).first()
                 if row is None:
-                    return
+                    return None
                 tombstone = _metadata_info(row)
                 revision = await self._next_revision(session)
                 await session.execute(delete(EntryRow).where(EntryRow.path == path))
                 session.add(
                     _change_row(revision, tombstone, deleted=True, object_id=None)
                 )
+        return revision
 
-    async def reset(self, entries: "tuple[SpecDocument, ...]") -> None:
+    async def reset(self, entries: "tuple[SpecDocument, ...]") -> int:
         for entry in entries:
             entry.validate_etag()
         async with self.session_factory() as session:
@@ -399,12 +403,13 @@ class SqlAlchemySpecBackend(
                     .where(RevisionRow.id == 1)
                     .values(minimum_delta_revision=revision)
                 )
+        return revision
 
     async def apply_batch(
         self,
         puts: "tuple[SpecDocument, ...]",
         deletes: "tuple[str, ...]",
-    ) -> None:
+    ) -> "int | None":
         """Apply a mixed set of puts and deletes atomically: one transaction,
         one shared revision, other documents untouched. Distinct from
         :meth:`reset` (full replacement, which deletes every unlisted path).
@@ -467,7 +472,7 @@ class SqlAlchemySpecBackend(
                 # Bump the revision ONLY when something actually changed: puts
                 # always do; a delete does only when the path existed.
                 if not puts and not tombstones:
-                    return
+                    return None
                 revision = await self._next_revision(session)
                 change_rows: "list[ChangeRow]" = [
                     _change_row(revision, entry.info, deleted=False, object_id=oid)
@@ -481,6 +486,7 @@ class SqlAlchemySpecBackend(
                     if path in tombstones
                 )
                 session.add_all(change_rows)
+        return revision
 
     async def _next_revision(self, session) -> int:
         dialect = await self._dialect_for(session)

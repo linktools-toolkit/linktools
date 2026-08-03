@@ -180,11 +180,11 @@ class LocalSpecBackend:
 
     # ---- writer --------------------------------------------------------
 
-    async def put(self, entry: SpecDocument) -> SpecDocument:
+    async def put(self, entry: SpecDocument) -> "tuple[SpecDocument, None]":
         entry.validate_etag()
         target = self._resolve(entry.info.path)
         await asyncio.to_thread(atomic_write_bytes, target, entry.content)
-        return entry
+        return entry, None
 
     async def delete(self, path: str) -> None:
         target = self._resolve(path)

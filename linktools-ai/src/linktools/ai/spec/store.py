@@ -14,6 +14,8 @@ from ..storage.versioning import VersionedStorage, VersionSummary
 from .document import SpecDocument, SpecDocumentInfo
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from ..storage.cache import ContentCacheKey
     from ..storage.cache import ContentCache
     from ..storage.multi import StorageReader, StorageWriter
@@ -49,7 +51,7 @@ class SpecStore:
         self,
         primary: "StorageReader[str, SpecDocument, SpecDocumentInfo]",
         *,
-        writer: "StorageWriter[str, SpecDocument] | None" = None,
+        writer: "StorageWriter[str, SpecDocument, Any] | None" = None,
         layers: "tuple[StorageLayer[str, SpecDocument, SpecDocumentInfo], ...]" = (),
         cache: "ContentCache | None" = None,
         revision_source: "RevisionSource | None" = None,
@@ -66,7 +68,7 @@ class SpecStore:
         )
 
     @property
-    def writer(self) -> "StorageWriter[str, SpecDocument] | None":
+    def writer(self) -> "StorageWriter[str, SpecDocument, Any] | None":
         return self._storage.writer
 
     async def initialize_storage(self, *args: object) -> None:

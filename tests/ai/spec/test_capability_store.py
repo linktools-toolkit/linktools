@@ -50,15 +50,17 @@ class Backend:
     async def put(self, document):
         self.documents[document.info.path] = document
         self.revision += 1
-        return document
+        return document, self.revision
 
     async def delete(self, path):
         self.documents.pop(path, None)
         self.revision += 1
+        return self.revision
 
     async def reset(self, documents):
         self.documents = {item.info.path: item for item in documents}
         self.revision += 1
+        return self.revision
 
 
 class Adapter:

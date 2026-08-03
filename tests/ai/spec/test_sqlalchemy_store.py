@@ -215,6 +215,57 @@ async def test_sql_put_writes_blob_and_object_id(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sql_put_reports_revision_matching_head(tmp_path):
+    # put's returned revision is computed in the same transaction as the
+    # write, so it must equal head_revision() right after.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    entry, revision = await backend.put(doc("a", b"hello"))
+    assert entry.content == b"hello"
+    assert revision == await backend.head_revision()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_delete_reports_none_for_absent_path(tmp_path):
+    # Deleting a path that never existed is a no-op: no ChangeRow, no revision
+    # bump, and delete must report that as None, not the unchanged head.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    assert await backend.delete("nope") is None
+    await backend.put(doc("a", b"x"))
+    revision = await backend.delete("a")
+    assert revision == await backend.head_revision()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_reset_reports_revision_matching_head(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    revision = await backend.reset((doc("a", b"one"),))
+    assert revision == await backend.head_revision()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_apply_batch_reports_none_when_no_op(tmp_path):
+    # A batch whose puts are empty and whose deletes target nonexistent paths
+    # changes nothing -- apply_batch must report None, not the unchanged
+    # head, matching single delete's no-op behavior.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
+    backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))
+    await backend.initialize_storage(engine)
+    assert await backend.apply_batch((), ("nope",)) is None
+    revision = await backend.apply_batch((doc("a", b"one"), doc("b", b"two")), ())
+    assert revision == await backend.head_revision()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sql_identical_content_dedups_blob(tmp_path):
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'spec.db'}")
     backend = SqlAlchemySpecBackend(async_sessionmaker(engine, expire_on_commit=False))

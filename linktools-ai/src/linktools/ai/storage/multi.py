@@ -8,10 +8,11 @@ The layer topology (primary-first ordered fallback) is owned by
 and the per-backend batch fallback that fans single ``get`` calls out under
 bounded concurrency when a backend does not implement ``get_many``."""
 
-
 import asyncio
 from collections.abc import Mapping
 from typing import Protocol, TypeVar, runtime_checkable
+
+from .revision import RevisionT
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
@@ -34,21 +35,28 @@ class BatchStorageReader(Protocol[KeyT, ValueT]):
 
 
 @runtime_checkable
-class StorageWriter(Protocol[KeyT, ValueT]):
-    async def put(self, value: ValueT) -> ValueT: ...
+class StorageWriter(Protocol[KeyT, ValueT, RevisionT]):
+    """``put``/``delete``/``reset`` always report the revision the write
+    landed at -- computed in the same transaction as the write -- so
+    ``StorageComposition`` can use it directly instead of paying a separate
+    ``head_revision()`` probe after every write solely to learn it. A backend
+    with no revision concept (e.g. a local directory backend) reports
+    ``None``."""
 
-    async def delete(self, key: KeyT) -> None: ...
+    async def put(self, value: ValueT) -> "tuple[ValueT, RevisionT | None]": ...
 
-    async def reset(self, values: "tuple[ValueT, ...]") -> None: ...
+    async def delete(self, key: KeyT) -> "RevisionT | None": ...
+
+    async def reset(self, values: "tuple[ValueT, ...]") -> "RevisionT | None": ...
 
 
 @runtime_checkable
-class BatchStorageWriter(Protocol[KeyT, ValueT]):
+class BatchStorageWriter(Protocol[KeyT, ValueT, RevisionT]):
     async def apply_batch(
         self,
         puts: "tuple[ValueT, ...]",
         deletes: "tuple[KeyT, ...]",
-    ) -> None: ...
+    ) -> "RevisionT | None": ...
 
 
 async def batch_get(
