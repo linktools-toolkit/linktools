@@ -9,13 +9,14 @@ from ..agent.spec import AgentSpec, PromptSpec
 from ..spec.parsing import SpecLoader
 from ..agent.mcp.index import MCPServerSpecIndex
 from ..model.policy import ModelPolicy
-from ..runtime import LocalDirectoryStorage, build_runtime
+from ..runtime import LocalDirectoryStorage, RuntimeDependencies, build_runtime
 from ..agent.skill.index import SkillSpecIndex
 from .skill_index import DirectorySkillIndex
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ..execution.live_events import RunLiveEventSink
     from ..model.resolver import ModelResolver
     from ..runtime import Runtime, RuntimeStorage
     from .project import CliProject
@@ -30,6 +31,7 @@ class CliRuntimeBundle:
     skills: SkillSpecIndex
     mcp: MCPServerSpecIndex
     skill_index: DirectorySkillIndex
+    live_events: "RunLiveEventSink | None" = None
 
 
 _BUILTIN_DEFAULT = AgentSpec(
@@ -41,9 +43,17 @@ _BUILTIN_DEFAULT = AgentSpec(
 
 
 def build_cli_runtime(
-    *, project: "CliProject", model_resolver: "ModelResolver | None"
+    *,
+    project: "CliProject",
+    model_resolver: "ModelResolver | None",
+    live_events: "RunLiveEventSink | None" = None,
 ) -> CliRuntimeBundle:
-    """Build the CLI bundle with the v4 runtime storage composition."""
+    """Build the CLI bundle with the v4 runtime storage composition.
+
+    ``live_events`` (default Noop) lets a caller capture the engine's
+    streaming events; ``LocalRuntimeClient`` passes a queue-backed sink so
+    ``run_stream`` can stream model text/tools live instead of replaying
+    the trace after the run finishes."""
     agents = AgentSpecIndex.from_specloader(
         SpecLoader.from_filesystem(project.agents_root)
     )
@@ -54,7 +64,11 @@ def build_cli_runtime(
         SpecLoader.from_filesystem(project.mcp_root)
     )
     storage = LocalDirectoryStorage(project.state_root)
-    runtime = build_runtime(storage=storage, model_resolver=model_resolver)
+    dependencies = RuntimeDependencies(
+        model_resolver=model_resolver or ModelResolver(),
+        live_events=live_events,
+    )
+    runtime = build_runtime(storage=storage, dependencies=dependencies)
     return CliRuntimeBundle(
         project=project,
         runtime=runtime,
@@ -63,6 +77,7 @@ def build_cli_runtime(
         skills=skills,
         mcp=mcp,
         skill_index=DirectorySkillIndex(project.skills_root),
+        live_events=live_events,
     )
 
 

@@ -6,22 +6,24 @@
 Both the thin console commands and the Textual TUI operate the Runtime + Storage
 exclusively through :class:`RuntimeClient`. :class:`LocalRuntimeClient` is the
 in-process implementation that owns the project bundle (Runtime + Storage +
-registries) and translates the scalar Runtime result into the streamed event
-contract the consumers render; the TUI never touches persistence
-implementations or registries directly. :class:`FakeRuntimeClient` is the
-shared double both console and TUI tests drive.
+registries); the TUI never touches persistence implementations or registries
+directly. :class:`FakeRuntimeClient` is the shared double both console and TUI
+tests drive.
 
-There is no live event-subscription infrastructure yet (the runtime exposes
-only scalar ``run``/``resume``/``cancel``). To still give the console/TUI a
-faithful transcript, :meth:`LocalRuntimeClient.run_stream` performs the scalar
-run then reads the run's trace back through ``Runtime.get_run_detail`` and
-re-emits it as ``text``/``tool``/``paused``/``failed``/``cancelled`` events.
+:meth:`LocalRuntimeClient.run_stream` streams the engine's live events (model
+text deltas, tool calls) as they are produced, via a queue-backed
+:class:`StreamingRunLiveSink` wired into the Runtime by
+:func:`build_runtime_client`. For bundles built without a sink (some tests),
+it falls back to running the scalar ``Runtime.run`` then replaying the recorded
+trace. Either path yields the same ``text``/``tool``/``paused``/``failed``/
+``cancelled`` event contract the consumers render.
 
 Local vs. Remote share the same interface; a remote (HTTP) client is not wired
 up in this build and ``build_runtime_client(remote=...)`` fails explicitly
 rather than pretending to support it (no fake implementation)."""
 
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, runtime_checkable
+import asyncio
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -30,6 +32,8 @@ from linktools.cli import CommandError
 from .runtime import build_cli_runtime, load_agent_spec
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..execution.query import ExecutionDetailView
     from ..governance.identity import PrincipalContext
     from ..runtime import Runtime, RuntimeStorage
@@ -306,14 +310,20 @@ class LocalRuntimeClient:
 
     Owns the Runtime + Storage + registries so neither the console nor the TUI
     has to know how ``build_runtime`` is wired. Operates the backend as the
-    local user principal. The console/TUI see the same event contract a future
-    remote client would stream; ``run_stream`` produces that contract by
-    running the scalar ``Runtime.run`` then re-emitting the run's recorded
-    trace as ``text``/``tool`` events."""
+    local user principal. ``run_stream`` streams the engine's live events
+    (model text deltas, tool calls) as they are produced via a queue-backed
+    :class:`StreamingRunLiveSink` wired into the Runtime; the recorded trace is
+    only consulted to classify the terminal outcome (paused/cancelled/failed)
+    after the live stream ends."""
 
     def __init__(self, bundle: "CliRuntimeBundle") -> None:
         self._bundle = bundle
         self._principal = trusted_local_principal()
+        # The live-event sink the Runtime publishes into. Set when the bundle
+        # was built with one (build_runtime_client wires a StreamingRunLiveSink);
+        # None for bundles built without (e.g. tests constructing a bundle
+        # directly), in which case run_stream falls back to trace replay.
+        self._live = getattr(bundle, "live_events", None)
         # Sessions/runs the client itself started this process. The execution
         # store exposes no enumeration API, so the sidebar reflects only what
         # this CLI session produced (a remote/shared store would list more).
@@ -336,15 +346,94 @@ class LocalRuntimeClient:
         session_id = validate_session_id(request.session_id)
         run_id = request.run_id or new_run_id()
         self._remember_session(session_id)
-        runtime = self._bundle.runtime
-        try:
-            result = await runtime.run(
+
+        async def _drive() -> "object":
+            return await self._bundle.runtime.run(
                 spec,
                 request.prompt,
                 principal=self._principal,
                 session_id=session_id,
                 execution_id=run_id,
             )
+
+        async for event in self._stream_run(_drive, run_id, session_id):
+            yield event
+
+    async def resume_stream(self, run_id: str) -> "AsyncIterator[Mapping[str, Any]]":
+        async def _drive() -> "object":
+            return await self._bundle.runtime.resume(run_id, principal=self._principal)
+
+        first = True
+        async for event in self._stream_run(_drive, run_id, run_id):
+            if first:
+                # Mark the resume boundary for the consumer before the events.
+                yield {"type": "resumed", "run_id": run_id}
+                first = False
+            yield event
+
+    async def _stream_run(
+        self,
+        drive: "Callable[[], Awaitable[object]]",
+        run_id: str,
+        session_id: str,
+    ) -> "AsyncIterator[Mapping[str, Any]]":
+        """Drive one run and yield its events.
+
+        When a live sink is wired (build_runtime_client always wires one),
+        the engine publishes text/tool events as they happen; consume them
+        live from the queue while the run task runs, then classify the
+        terminal outcome. With no sink (a bundle built directly, e.g. some
+        tests), fall back to the scalar-run-then-replay-trace path so the
+        consumer still sees the same events, just not streamed live."""
+        if self._live is None:
+            async for event in self._replay_stream(drive, run_id, session_id):
+                yield event
+            return
+        sink = self._live
+        queue = sink.attach()
+        task = asyncio.ensure_future(drive())
+        run_exc: "BaseException | None" = None
+        try:
+            # Consume live events as the engine publishes them. The engine does
+            # not signal end-of-stream itself, so race each queue get against
+            # the run task: when the task finishes, drain any remaining queued
+            # events then stop.
+            while True:
+                get_task = asyncio.ensure_future(queue.get())
+                done, _pending = await asyncio.wait(
+                    {get_task, task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if get_task in done:
+                    yield get_task.result()
+                if task in done:
+                    # Run finished: drain anything the engine published after
+                    # the last event we yielded, then stop consuming.
+                    get_task.cancel()
+                    while not queue.empty():
+                        yield queue.get_nowait()
+                    break
+                # Only the get completed (event yielded) and the run is still
+                # going: loop to await the next event.
+            await task
+        except asyncio.CancelledError:
+            task.cancel()
+            run_exc = asyncio.CancelledError()
+            raise
+        except BaseException as exc:
+            run_exc = exc
+            task.cancel()
+        finally:
+            sink.detach()
+        if run_exc is not None:
+            self._remember_run(run_id, session_id)
+            yield {
+                "type": "failed",
+                "error_type": type(run_exc).__name__,
+                "message": str(run_exc),
+            }
+            return
+        try:
+            result = task.result()
         except Exception as exc:  # noqa: BLE001 - surfaced as a failed event
             self._remember_run(run_id, session_id)
             yield {
@@ -355,8 +444,8 @@ class LocalRuntimeClient:
             return
         self._remember_run(run_id, session_id)
         # result is an ExecutionResultView for COMPLETED, or None for PAUSED/
-        # CANCELLED. Re-emit the recorded trace so the consumer renders the
-        # model text + tool calls that actually happened.
+        # CANCELLED. The live stream already carried the model text/tools; we
+        # only emit the terminal classification here.
         if result is None:
             detail = await self.get_run_detail(run_id)
             if detail is not None and detail.status == "paused":
@@ -364,20 +453,26 @@ class LocalRuntimeClient:
             else:
                 yield {"type": "cancelled", "run_id": run_id}
             return
-        async for event in self._trace_events(run_id):
-            yield event
+        yield {"type": "completed", "run_id": run_id}
 
-    async def resume_stream(self, run_id: str) -> "AsyncIterator[Mapping[str, Any]]":
-        runtime = self._bundle.runtime
+    async def _replay_stream(
+        self,
+        drive: "Callable[[], Awaitable[object]]",
+        run_id: str,
+        session_id: str,
+    ) -> "AsyncIterator[Mapping[str, Any]]":
+        """No-sink fallback: run to completion, then replay the recorded trace."""
         try:
-            result = await runtime.resume(run_id, principal=self._principal)
+            result = await drive()
         except Exception as exc:  # noqa: BLE001 - surfaced as a failed event
+            self._remember_run(run_id, session_id)
             yield {
                 "type": "failed",
                 "error_type": type(exc).__name__,
                 "message": str(exc),
             }
             return
+        self._remember_run(run_id, session_id)
         if result is None:
             detail = await self.get_run_detail(run_id)
             if detail is not None and detail.status == "paused":
@@ -385,7 +480,6 @@ class LocalRuntimeClient:
             else:
                 yield {"type": "cancelled", "run_id": run_id}
             return
-        yield {"type": "resumed", "run_id": run_id}
         async for event in self._trace_events(run_id):
             yield event
 
@@ -935,5 +1029,12 @@ def build_runtime_client(
         resolver: "object | None" = ModelResolver(registry=model_registry)
     else:
         resolver = None
-    bundle = build_cli_runtime(project=cli_project, model_resolver=resolver)
+    # A queue-backed live sink so run_stream streams model text/tool events as
+    # they happen, instead of waiting for the run to finish.
+    from ..execution.live_events import StreamingRunLiveSink
+
+    live = StreamingRunLiveSink()
+    bundle = build_cli_runtime(
+        project=cli_project, model_resolver=resolver, live_events=live
+    )
     return LocalRuntimeClient(bundle)
