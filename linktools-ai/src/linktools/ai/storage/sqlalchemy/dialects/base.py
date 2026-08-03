@@ -31,12 +31,12 @@ inside the dialects package, not by the store/backend branching on the name
 itself. A downstream wanting a vendor with no built-in ships its own dialect
 implementation and passes it explicitly."""
 
-
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence, runtime_checkable
 
 if TYPE_CHECKING:
+    from sqlalchemy import ColumnExpressionArgument
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -76,8 +76,7 @@ class SqlAlchemyDialect(Protocol):
     core does not branch on it)."""
 
     @property
-    def name(self) -> str:
-        ...
+    def name(self) -> str: ...
 
     async def insert_ignore_conflict(
         self,
@@ -186,6 +185,43 @@ class SqlAlchemyDialect(Protocol):
         is the row's own proposed value for that column. ``rows`` must each
         contain every column in ``set_columns`` plus the ``index_elements``
         columns."""
+        ...
+
+    async def delete_returning(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        """DELETE every row of ``model``'s table matching ``where``, returning
+        the pre-delete values of the named ``returning`` columns for each
+        deleted row, one :class:`~sqlalchemy.engine.Row` per match (access the
+        columns by name). One statement on SQLite/PostgreSQL
+        (``DELETE ... RETURNING``); on MySQL (no portable RETURNING) the dialect
+        SELECTs the columns then DELETEs the same rows in the same caller-owned
+        transaction, so the returned data is consistent with the delete. A
+        no-op delete (no match) returns an empty tuple. ``returning`` must name
+        real column names on ``model``."""
+        ...
+
+    async def update_returning(
+        self,
+        session: "AsyncSession",
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        values: "Mapping[str, Any]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        """UPDATE every row of ``model``'s table matching ``where`` with
+        ``values``, returning the POST-update values of the named ``returning``
+        columns, one :class:`~sqlalchemy.engine.Row` per match (access the
+        columns by name). One statement on SQLite/PostgreSQL
+        (``UPDATE ... RETURNING``); on MySQL the dialect UPDATEs then SELECTs
+        the same rows in the same caller-owned transaction. Returns an empty
+        tuple when no row matched."""
         ...
 
     def classify_integrity_error(

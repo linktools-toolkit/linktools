@@ -7,10 +7,19 @@ SQLite later adopted, so this mirrors the SQLite reference dialect almost
 exactly -- the only real difference is error classification, which reads
 Postgres's SQLSTATE codes instead of SQLite's message text."""
 
-
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
+from .base import (
+    IntegrityViolationKind,
+    InsertResult,
+    classify_integrity_error_by_message,
+    primary_key_column,
+)
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy import ColumnExpressionArgument
 
 # Postgres SQLSTATE codes (asyncpg exposes these as error.sqlstate; psycopg2
 # as error.orig.pgcode; psycopg3 as error.orig.sqlstate / .diag.sqlstate_).
@@ -133,9 +142,38 @@ class PostgreSQLDialect:
         )
         await session.execute(stmt)
 
-    def classify_integrity_error(
-        self, error: BaseException
-    ) -> IntegrityViolationKind:
+    async def delete_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        from sqlalchemy import delete as sqldel
+
+        cols = [getattr(model, col) for col in returning]
+        stmt = sqldel(model).where(where).returning(*cols)
+        result = await session.execute(stmt)
+        return tuple(result)
+
+    async def update_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        values: "Mapping[str, Any]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        from sqlalchemy import update as sqlupd
+
+        cols = [getattr(model, col) for col in returning]
+        stmt = sqlupd(model).where(where).values(**values).returning(*cols)
+        result = await session.execute(stmt)
+        return tuple(result)
+
+    def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         orig = getattr(error, "orig", None)
         code = (
             getattr(orig, "sqlstate", None)

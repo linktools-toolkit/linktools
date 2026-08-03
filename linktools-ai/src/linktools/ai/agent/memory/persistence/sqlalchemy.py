@@ -10,12 +10,21 @@ Search uses ``content LIKE`` with optional ``owner_id`` / ``category`` filters
 "omit this field" from `category=None` meaning "explicitly clear" (same
 semantics as FilesystemMemoryBackend)."""
 
-
 import json
 from datetime import datetime, timezone
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from sqlalchemy import DECIMAL, Index, Integer, String, Text, UniqueConstraint, delete, or_, select, update
+from sqlalchemy import (
+    DECIMAL,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    delete,
+    or_,
+    select,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -24,17 +33,19 @@ from linktools.core import environ
 from ....errors import MemoryConflictError, MemoryNotFoundError
 from ....storage.sqlalchemy.base import Base
 from ....storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc, timestamp_indexes
+from ....storage.sqlalchemy.dialects import resolve_dialect
 from ..models import MemoryMatch, MemoryRecord
 from ..scope import LEGACY_TENANT_ID, is_legacy_tenant
 from ..store import UNSET
 
 logger = environ.get_logger("ai.agent.memory.persistence.sqlalchemy")
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from ....storage.sqlalchemy.dialects import SqlAlchemyDialect
     from ..scope import MemoryScope
+
 
 class MemoryRow(Base):
     __tablename__ = f"{TABLE_PREFIX}memories"
@@ -45,16 +56,28 @@ class MemoryRow(Base):
     )
 
     memory_id: "Mapped[str]" = mapped_column(String(128), comment="Memory id")
-    tenant_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Tenant id")
+    tenant_id: "Mapped[str | None]" = mapped_column(
+        String(128), nullable=True, comment="Tenant id"
+    )
     owner_id: "Mapped[str]" = mapped_column(String(128), comment="Owner id")
     content: "Mapped[str]" = mapped_column(Text, comment="Memory content")
-    category: "Mapped[str | None]" = mapped_column(String(64), nullable=True, comment="Category")
-    confidence: "Mapped[float | None]" = mapped_column(DECIMAL(5, 4), nullable=True, comment="Confidence [0,1]")
+    category: "Mapped[str | None]" = mapped_column(
+        String(64), nullable=True, comment="Category"
+    )
+    confidence: "Mapped[float | None]" = mapped_column(
+        DECIMAL(5, 4), nullable=True, comment="Confidence [0,1]"
+    )
     version: "Mapped[int]" = mapped_column(Integer, comment="Version (optimistic lock)")
     metadata_json: "Mapped[str]" = mapped_column(Text, comment="Metadata (JSON)")
-    user_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="User id")
-    workspace_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Workspace id")
-    session_id: "Mapped[str | None]" = mapped_column(String(128), nullable=True, comment="Session id")
+    user_id: "Mapped[str | None]" = mapped_column(
+        String(128), nullable=True, comment="User id"
+    )
+    workspace_id: "Mapped[str | None]" = mapped_column(
+        String(128), nullable=True, comment="Workspace id"
+    )
+    session_id: "Mapped[str | None]" = mapped_column(
+        String(128), nullable=True, comment="Session id"
+    )
 
 
 def _row_to_record(row: MemoryRow) -> MemoryRecord:
@@ -91,12 +114,19 @@ class SqlAlchemyMemoryBackend:
         *,
         session_factory: "Callable[[], AsyncSession]",
         session: "AsyncSession | None" = None,
+        dialect: "SqlAlchemyDialect | None" = None,
     ) -> None:
         self._session_factory = session_factory
         # UoW mode: when set, every method uses this shared session directly and
         # does NOT open its own session or call session.begin() -- the UoW owns
         # the transaction. None means normal mode (own session + transaction).
         self._session = session
+        self._dialect = dialect
+
+    async def _dialect_for(self, session: "AsyncSession") -> "SqlAlchemyDialect":
+        if self._dialect is None:
+            self._dialect = resolve_dialect(session)
+        return self._dialect
 
     async def _execute_in_session(self, fn):
         """Run ``fn(session)`` in its own transaction (normal mode) or against
@@ -235,28 +265,47 @@ class SqlAlchemyMemoryBackend:
                 values["confidence"] = confidence
             if metadata is not UNSET:
                 values["metadata_json"] = json.dumps(metadata)
-            result = await session.execute(
-                update(MemoryRow)
-                .where(
-                    MemoryRow.memory_id == memory_id,
-                    MemoryRow.version == expected_version,
-                )
-                .values(**values)
+            # UPDATE ... RETURNING folds the write and the read-back into one
+            # statement (UPDATE-then-SELECT on MySQL). Returning every column
+            # the record needs avoids a second SELECT round trip.
+            dialect = await self._dialect_for(session)
+            columns = (
+                "memory_id",
+                "tenant_id",
+                "owner_id",
+                "content",
+                "category",
+                "confidence",
+                "version",
+                "metadata_json",
+                "created_at",
+                "updated_at",
+                "user_id",
+                "workspace_id",
+                "session_id",
             )
-            if result.rowcount != 1:
+            rows = await dialect.update_returning(
+                session,
+                model=MemoryRow,
+                where=(
+                    (MemoryRow.memory_id == memory_id)
+                    & (MemoryRow.version == expected_version)
+                ),
+                values=values,
+                returning=columns,
+            )
+            if not rows:
                 await self._raise_write_conflict(session, memory_id, expected_version)
-            row = await session.scalar(
-                select(MemoryRow).where(MemoryRow.memory_id == memory_id)
-            )
-            return _row_to_record(row)
+            # update_returning yields a Row with attribute-per-column access,
+            # the same shape _row_to_record reads off an ORM MemoryRow.
+            return _row_to_record(rows[0])
 
         return await self._execute_in_session(_do)
 
     async def forget(self, memory_id: str, *, expected_version: int) -> None:
         async def _do(session):
             result = await session.execute(
-                delete(MemoryRow)
-                .where(
+                delete(MemoryRow).where(
                     MemoryRow.memory_id == memory_id,
                     MemoryRow.version == expected_version,
                 )
@@ -280,7 +329,9 @@ class SqlAlchemyMemoryBackend:
         if environ.debug:
             logger.debug(
                 "memory write conflict: id=%s expected=%s actual=%s",
-                memory_id, expected_version, actual,
+                memory_id,
+                expected_version,
+                actual,
             )
         raise MemoryConflictError(
             f"expected version {expected_version}, found {actual}"

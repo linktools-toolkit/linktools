@@ -13,10 +13,19 @@ reports 0 affected rows when the no-op update runs against an existing row
 and 1 when a fresh row is inserted, so the same ``rowcount == 1`` check the
 other dialects use holds here too."""
 
-
 from typing import Any, Mapping, Sequence
 
-from .base import IntegrityViolationKind, InsertResult, classify_integrity_error_by_message, primary_key_column
+from .base import (
+    IntegrityViolationKind,
+    InsertResult,
+    classify_integrity_error_by_message,
+    primary_key_column,
+)
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from sqlalchemy import ColumnExpressionArgument
 
 # MySQL error codes (mysqlclient/PyMySQL/aiomysql/asyncmy all surface these as
 # error.orig.args[0]).
@@ -174,9 +183,48 @@ class MySQLDialect:
         )
         await session.execute(stmt)
 
-    def classify_integrity_error(
-        self, error: BaseException
-    ) -> IntegrityViolationKind:
+    async def delete_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        # MySQL has no portable RETURNING (only >= 8.0.21, and the project
+        # keeps no minimum-version promise): SELECT the columns, then DELETE
+        # the same rows in the same caller-owned transaction, so the data is
+        # consistent with the delete.
+        from sqlalchemy import delete as sqldel, select
+
+        cols = [getattr(model, col) for col in returning]
+        fetched = (await session.execute(select(*cols).where(where))).all()
+        if not fetched:
+            return ()
+        await session.execute(sqldel(model).where(where))
+        return tuple(fetched)
+
+    async def update_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        values: "Mapping[str, Any]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        # MySQL has no portable RETURNING (only >= 8.0.21): UPDATE, then SELECT
+        # the same rows in the same caller-owned transaction. The ``where``
+        # predicate must still match the updated rows -- true for every caller
+        # (all key by PK or business key, which the UPDATE does not change).
+        from sqlalchemy import select, update as sqlupd
+
+        await session.execute(sqlupd(model).where(where).values(**values))
+        cols = [getattr(model, col) for col in returning]
+        result = await session.execute(select(*cols).where(where))
+        return tuple(result)
+
+    def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         orig = getattr(error, "orig", None)
         args = getattr(orig, "args", None)
         code = args[0] if args and isinstance(args[0], int) else None

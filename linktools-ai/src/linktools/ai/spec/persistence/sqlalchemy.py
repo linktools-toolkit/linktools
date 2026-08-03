@@ -334,16 +334,22 @@ class SqlAlchemySpecBackend(
     async def delete(self, path: str) -> "int | None":
         async with self.session_factory() as session:
             async with session.begin():
-                row = (
-                    await session.execute(
-                        _metadata_query().where(EntryRow.path == path)
-                    )
-                ).first()
-                if row is None:
+                dialect = await self._dialect_for(session)
+                # DELETE ... RETURNING folds the tombstone SELECT and the DELETE
+                # into one statement (SELECT-then-DELETE on MySQL); an empty
+                # result means the path was already absent -- a no-op.
+                deleted = await dialect.delete_returning(
+                    session,
+                    model=EntryRow,
+                    where=EntryRow.path == path,
+                    returning=("path", "kind", "version", "etag", "active"),
+                )
+                if not deleted:
                     return None
-                tombstone = _metadata_info(row)
+                # delete_returning yields a Row with attribute-per-column
+                # access, the same shape _metadata_info reads off an ORM row.
+                tombstone = _metadata_info(deleted[0])
                 revision = await self._next_revision(session)
-                await session.execute(delete(EntryRow).where(EntryRow.path == path))
                 session.add(
                     _change_row(revision, tombstone, deleted=True, object_id=None)
                 )
@@ -361,37 +367,59 @@ class SqlAlchemySpecBackend(
                 old_rows = (await session.execute(_metadata_query())).all()
                 old = {row.path: _metadata_info(row) for row in old_rows}
                 new = {entry.info.path: entry for entry in entries}
+                # Partition the union into deletes / puts / untouched, matching
+                # the old per-path loop but collecting each class to batch below.
+                delete_paths = [path for path in sorted(old) if path not in new]
+                put_docs = [
+                    new[path]
+                    for path in sorted(new)
+                    if path not in old or new[path].info != old[path]
+                ]
                 revision = await self._next_revision(session)
-                for path in sorted(set(old) | set(new)):
-                    before = old.get(path)
-                    doc = new.get(path)
-                    if before is not None and doc is None:
+                change_rows: "list[ChangeRow]" = []
+                if put_docs:
+                    object_ids = await put_blobs(
+                        session,
+                        dialect,
+                        SpecBlobRow,
+                        [doc.content for doc in put_docs],
+                    )
+                    await dialect.upsert_many(
+                        session,
+                        model=EntryRow,
+                        rows=[
+                            {"path": doc.info.path, **_entry_values(doc)}
+                            for doc in put_docs
+                        ],
+                        set_columns=["kind", "version", "etag", "active", "content"],
+                        index_elements=("path",),
+                    )
+                    change_rows.extend(
+                        _change_row(revision, doc.info, deleted=False, object_id=oid)
+                        for doc, oid in zip(put_docs, object_ids)
+                    )
+                if delete_paths:
+                    tombstone_rows = (
                         await session.execute(
-                            delete(EntryRow).where(EntryRow.path == path)
+                            _metadata_query().where(EntryRow.path.in_(delete_paths))
                         )
-                        session.add(
-                            _change_row(revision, before, deleted=True, object_id=None)
+                    ).all()
+                    tombstones = {
+                        row.path: _metadata_info(row) for row in tombstone_rows
+                    }
+                    if tombstones:
+                        await session.execute(
+                            delete(EntryRow).where(EntryRow.path.in_(list(tombstones)))
                         )
-                    elif doc is not None and before != doc.info:
-                        object_id = await put_blob(
-                            session, dialect, SpecBlobRow, doc.content
-                        )
-                        values = _entry_values(doc)
-                        # Lock-free insert-or-update, same shape as put(): one
-                        # dialect upsert keyed on path, no SELECT existence check.
-                        await dialect.upsert(
-                            session,
-                            model=EntryRow,
-                            values={"path": path, **values},
-                            set_values=values,
-                            index_elements=("path",),
-                        )
-                        session.add(
+                        change_rows.extend(
                             _change_row(
-                                revision, doc.info, deleted=False, object_id=object_id
+                                revision, tombstones[path], deleted=True, object_id=None
                             )
+                            for path in delete_paths
+                            if path in tombstones
                         )
-                    # unchanged: leave the row (and its content) untouched.
+                if change_rows:
+                    session.add_all(change_rows)
                 # Reset raises the incremental window's lower bound
                 # (minimum_delta_revision) so readers below it take a full
                 # REPLACE snapshot rather than replay history. History itself is

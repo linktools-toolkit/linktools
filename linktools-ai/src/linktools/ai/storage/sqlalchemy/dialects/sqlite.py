@@ -13,14 +13,16 @@ Downstreams with a different engine (their own vendor) implement
 :class:`SqlAlchemyDialect` themselves and run the kernel conformance suite in
 their own CI."""
 
-
 from typing import Any, Mapping, Sequence
 from .base import InsertResult, classify_integrity_error_by_message, primary_key_column
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from sqlalchemy import ColumnExpressionArgument
+
     from .base import IntegrityViolationKind
+
 
 class SqliteDialect:
     """The SQLite reference dialect. ``insert_ignore_conflict`` issues an
@@ -137,6 +139,37 @@ class SqliteDialect:
             set_={col: stmt.excluded[col] for col in set_columns},
         )
         await session.execute(stmt)
+
+    async def delete_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        from sqlalchemy import delete as sqldel
+
+        cols = [getattr(model, col) for col in returning]
+        stmt = sqldel(model).where(where).returning(*cols)
+        result = await session.execute(stmt)
+        return tuple(result)
+
+    async def update_returning(
+        self,
+        session: Any,
+        *,
+        model: type,
+        where: "ColumnExpressionArgument[bool]",
+        values: "Mapping[str, Any]",
+        returning: "Sequence[str]",
+    ) -> "tuple[Any, ...]":
+        from sqlalchemy import update as sqlupd
+
+        cols = [getattr(model, col) for col in returning]
+        stmt = sqlupd(model).where(where).values(**values).returning(*cols)
+        result = await session.execute(stmt)
+        return tuple(result)
 
     def classify_integrity_error(
         self, error: BaseException

@@ -7,12 +7,11 @@ different sha256/tenant/provenance under an existing id is refused rather than
 overwriting the prior write's lineage.
 """
 
-
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, Integer, String, UniqueConstraint, select
+from sqlalchemy import JSON, Integer, String, UniqueConstraint, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,9 +33,7 @@ if TYPE_CHECKING:
 class ArtifactRow(Base):
     __tablename__ = f"{TABLE_PREFIX}artifacts"
     __table_args__ = (
-        UniqueConstraint(
-            "tenant_id", "artifact_id", name="uq_artifact_tenant_id"
-        ),
+        UniqueConstraint("tenant_id", "artifact_id", name="uq_artifact_tenant_id"),
     )
     artifact_id: "Mapped[str]" = mapped_column(String(128), index=True)
     sha256: "Mapped[str]" = mapped_column(String(64), index=True)
@@ -68,16 +65,24 @@ def _record(row: ArtifactRow) -> ArtifactRecord:
 
 
 class SqlArtifactBackend:
-    def __init__(self, session_factory, blobs: "FilesystemArtifactBlobStore | str | Path") -> None:
+    def __init__(
+        self, session_factory, blobs: "FilesystemArtifactBlobStore | str | Path"
+    ) -> None:
         self._session_factory = session_factory
-        self._blobs = blobs if isinstance(blobs, FilesystemArtifactBlobStore) else FilesystemArtifactBlobStore(blobs)
+        self._blobs = (
+            blobs
+            if isinstance(blobs, FilesystemArtifactBlobStore)
+            else FilesystemArtifactBlobStore(blobs)
+        )
 
     async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         await self._blobs.initialize_storage()
 
-    async def put(self, *, record: ArtifactRecord, content: "AsyncIterator[bytes]") -> ArtifactRecord:
+    async def put(
+        self, *, record: ArtifactRecord, content: "AsyncIterator[bytes]"
+    ) -> ArtifactRecord:
         await self._blobs.put(ref=record.ref, content=content)
         row = ArtifactRow(
             artifact_id=record.ref.id,
@@ -107,7 +112,9 @@ class SqlArtifactBackend:
                 raise ArtifactRecordConflictError(record.ref.id)
             return existing
 
-    async def get_record(self, artifact_id: str, *, tenant_id: str) -> "ArtifactRecord | None":
+    async def get_record(
+        self, artifact_id: str, *, tenant_id: str
+    ) -> "ArtifactRecord | None":
         async with self._session_factory() as session:
             row = await session.scalar(
                 select(ArtifactRow).where(
@@ -127,14 +134,12 @@ class SqlArtifactBackend:
     async def delete(self, artifact_id: str, *, tenant_id: str) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.scalar(
-                    select(ArtifactRow).where(
+                await session.execute(
+                    delete(ArtifactRow).where(
                         ArtifactRow.artifact_id == artifact_id,
                         ArtifactRow.tenant_id == tenant_id,
                     )
                 )
-                if row is not None:
-                    await session.delete(row)
 
 
 def _same_artifact_identity(

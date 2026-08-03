@@ -957,16 +957,16 @@ class SqlAlchemyExecutionBackend:
                 )
                 if sequence_result.rowcount != 1:
                     raise StorageConflictError("trace sequence conflict")
-                for offset, step in enumerate(steps, 1):
-                    session.add(
-                        TraceRow(
-                            execution_id=run_id,
-                            sequence=expected_sequence + offset,
-                            kind=step.kind,
-                            payload=step.payload,
-                            created_at=step.created_at,
-                        )
+                session.add_all(
+                    TraceRow(
+                        execution_id=run_id,
+                        sequence=expected_sequence + offset,
+                        kind=step.kind,
+                        payload=step.payload,
+                        created_at=step.created_at,
                     )
+                    for offset, step in enumerate(steps, 1)
+                )
                 return next_sequence
 
     async def list_trace_steps(
