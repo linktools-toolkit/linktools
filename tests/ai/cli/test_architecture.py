@@ -57,6 +57,7 @@ class TestCommandsAiContents(unittest.TestCase):
             "run.py",
             "continue_.py",
             "doctor.py",
+            "history.py",
         }
         actual = {
             p.name for p in _COMMANDS_AI.iterdir() if p.is_file() and p.suffix == ".py"
