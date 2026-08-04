@@ -25,7 +25,6 @@ class Command(BaseCommand):
         parser.add_argument(
             "--project", type=Path, default=None, help="project root (default: cwd)"
         )
-        parser.add_argument("--remote", default=None, help="remote Runtime url")
         parser.add_argument(
             "--json", action="store_true", help="emit the report as JSON"
         )
@@ -35,7 +34,6 @@ class Command(BaseCommand):
 
         return run_doctor(
             project=args.project,
-            remote=args.remote,
             json_output=args.json,
         )
 

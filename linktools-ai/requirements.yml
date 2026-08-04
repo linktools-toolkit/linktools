@@ -13,7 +13,6 @@ dependencies:
 
 dev-dependencies:
   - linktools
-  - textual
   - pytest-asyncio
   - sqlalchemy[asyncio]>=2.0,<3
   - aiosqlite>=0.20,<1
@@ -28,5 +27,5 @@ optional-dependencies:
   sqlite:
     - sqlalchemy[asyncio]>=2.0,<3
     - aiosqlite>=0.20,<1
-  tui:
-    - textual
+  acp:
+    - agent-client-protocol==0.12.0

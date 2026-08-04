@@ -45,6 +45,7 @@ FORBIDDEN_TOP_LEVEL_PACKAGES = (
 # Spec 2.1: the final converged top-level package set.
 EXPECTED_TOP_LEVEL_PACKAGES = {
     "agent",
+    "acp",
     "artifact",
     "cli",
     "evaluation",

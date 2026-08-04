@@ -72,9 +72,8 @@ def announce_paused(
 ) -> None:
     """Render a ``paused`` stream event.
 
-    Prints the fields the spec requires -- ``tool``, ``arguments``, ``reason``,
-    ``run_id``, ``approval_id`` -- plus the cross-process command that resumes
-    the run. ``approval_request`` is the request fetched by the caller via
+    Prints the approval fields -- ``tool``, ``arguments``, ``reason``,
+    ``run_id``, and ``approval_id``. ``approval_request`` is fetched by the caller via
     ``RuntimeClient.get_approval`` (best-effort: only ``run_id``/``approval_id``
     travel on the stream event); ``None`` degrades to the ids alone."""
     run_id = event.get("run_id")
@@ -93,4 +92,3 @@ def announce_paused(
         logger.info(f"reason: {reason}")
     logger.info(f"run_id: {run_id}")
     logger.info(f"approval_id: {approval_id}")
-    logger.info(f"resume with: lt ai continue {run_id} --approve")

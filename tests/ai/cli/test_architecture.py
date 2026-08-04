@@ -5,8 +5,7 @@
  -- ``commands/ai`` holds only the five frozen command files.
  -- command files import only ``linktools.ai.cli.*`` (+ stdlib/``linktools.cli``);
          they must NOT import Textual or Runtime internals (storage/runner/mcp/registry).
- -- the core ``linktools.ai`` package does not depend on Textual
-         (``linktools.ai.cli.tui`` is the UI layer and is excluded from this check).
+ -- the core ``linktools.ai`` package does not depend on Textual.
 
 The spec writes the path as ``linktools-ai-cli/src/linktools/commands/ai``
 (a notional separate package); this build keeps the CLI in place under
@@ -19,10 +18,6 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[3]
 _COMMANDS_AI = _REPO / "linktools-ai" / "src" / "linktools" / "commands" / "ai"
 _AI_PKG = _REPO / "linktools-ai" / "src" / "linktools" / "ai"
-# Subtree under ai/ that owns the (deliberately Textual-backed) UI layer; the
-# core-ai textual guard skips it so it targets runtime/storage/agent/model.
-_AI_TUI_SUBTREE = _AI_PKG / "cli" / "tui"
-
 # Modules the command layer is forbidden to import directly. They
 # are reached transitively through linktools.ai.cli, never from a command shell.
 _FORBIDDEN_COMMAND_PREFIXES = (
@@ -52,12 +47,10 @@ class TestCommandsAiContents(unittest.TestCase):
     def test_only_command_files_present(self):
         expected = {
             "__init__.py",
-            "tui.py",
-            "init.py",
+            "acp.py",
+            "smoke.py",
             "run.py",
-            "continue_.py",
             "doctor.py",
-            "history.py",
         }
         actual = {
             p.name for p in _COMMANDS_AI.iterdir() if p.is_file() and p.suffix == ".py"
@@ -96,18 +89,12 @@ class TestCommandsAiImports(unittest.TestCase):
             )
 
 
-class TestCoreAuiHasNoTextual(unittest.TestCase):
-    """-- linktools.ai never imports Textual.
-
-    ``linktools.ai.cli.tui`` is the UI layer (Textual is an optional extra,
-    imported lazily so the rest of the package works without it); it is excluded
-    so this check targets the core runtime/storage/agent/model domains."""
+class TestCoreAiHasNoTextual(unittest.TestCase):
+    """-- linktools.ai never imports Textual."""
 
     def test_no_textual_import_in_core_ai(self):
         offenders: "list[str]" = []
         for path in sorted(_AI_PKG.rglob("*.py")):
-            if _AI_TUI_SUBTREE in path.parents:
-                continue
             modules = _imported_modules(path.read_text(encoding="utf-8"))
             for module in modules:
                 if module == "textual" or module.startswith("textual."):

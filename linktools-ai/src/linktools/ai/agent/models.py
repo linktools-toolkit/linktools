@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from pydantic_ai import Agent as PydanticAgent
     from ..model.resolver import ResolvedModel
     from ..execution.domain import RunErrorInfo
+    from ..prompt import UserPrompt
     from .spec import AgentSpec
     from .middleware.capability import MiddlewareCapability
 
@@ -61,7 +62,7 @@ class AgentInput:
     public surface does not couple to the Run domain's input shape as that
     shape evolves independently."""
 
-    prompt: str
+    prompt: "str | UserPrompt"
     metadata: "Mapping[str, Any]" = field(default_factory=dict)
     # Session history ExecutionService already loaded (via SessionReader) and
     # converted to pydantic-ai's message shape -- AgentEngine folds it into

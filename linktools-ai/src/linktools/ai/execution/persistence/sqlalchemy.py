@@ -21,6 +21,8 @@ from sqlalchemy import (
     desc,
     select,
     update,
+    inspect as sa_inspect,
+    text,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
@@ -62,7 +64,7 @@ from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
 from ...evaluation import RunEvaluation
-from ..session import SessionRecord, SessionTurn
+from ..session import SessionContextSeed, SessionRecord, SessionTurn
 from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from ..commands import (
@@ -101,6 +103,7 @@ class SessionRow(Base):
     user_id: "Mapped[str | None]" = mapped_column(String(255))
     next_turn_sequence: "Mapped[int]" = mapped_column(Integer, default=1)
     latest_completed_run_id: "Mapped[str | None]" = mapped_column(String(255))
+    context_seed: "Mapped[dict | None]" = mapped_column(JSON, nullable=True)
 
 
 class TurnRow(Base):
@@ -272,6 +275,38 @@ def _snapshot_usage_payload(usage: RunUsage) -> dict[str, JsonValue]:
     return raw
 
 
+def _context_seed(raw: object) -> "SessionContextSeed | None":
+    if raw is None:
+        return None
+    value = dict(raw)
+    turns = []
+    for turn in value.get("turns", ()):
+        item = dict(turn)
+        item["delta_messages"] = tuple(item.get("delta_messages") or ())
+        item["status"] = RunStatus(item["status"])
+        item["capture_state"] = MessageCaptureState(item.get("capture_state", "complete"))
+        from ..session import SeedTurn
+
+        turns.append(SeedTurn(**item))
+    value["turns"] = tuple(turns)
+    source_updated_at = value["source_updated_at"]
+    if isinstance(source_updated_at, str):
+        source_updated_at = datetime.fromisoformat(source_updated_at)
+    value["source_updated_at"] = as_utc(source_updated_at)
+    return SessionContextSeed(**value)
+
+
+def _context_seed_payload(seed: "SessionContextSeed | None") -> "dict | None":
+    if seed is None:
+        return None
+    value = asdict(seed)
+    value["source_updated_at"] = seed.source_updated_at.isoformat()
+    for turn in value["turns"]:
+        turn["status"] = turn["status"].value
+        turn["capture_state"] = turn["capture_state"].value
+    return value
+
+
 class SqlAlchemyExecutionBackend:
     coordination_scope = CoordinationScope.SHARED_DATABASE
 
@@ -281,6 +316,16 @@ class SqlAlchemyExecutionBackend:
     async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            columns = await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]
+                    for column in sa_inspect(sync_connection).get_columns(SessionRow.__tablename__)
+                }
+            )
+            if "context_seed" not in columns:
+                await connection.execute(
+                    text(f"ALTER TABLE {SessionRow.__tablename__} ADD COLUMN context_seed JSON NULL")
+                )
 
     @staticmethod
     async def _session_row(session, session_id: str, *, for_update: bool = False):
@@ -311,7 +356,12 @@ class SqlAlchemyExecutionBackend:
         )
 
     async def create_session(
-        self, *, session_id: str, user_id: "str | None", tenant_id: "str | None"
+        self,
+        *,
+        session_id: str,
+        user_id: "str | None",
+        tenant_id: "str | None",
+        context_seed: "SessionContextSeed | None" = None,
     ) -> SessionRecord:
         try:
             async with self.session_factory() as session:
@@ -333,6 +383,7 @@ class SqlAlchemyExecutionBackend:
                         tenant_id=tenant_id,
                         next_turn_sequence=1,
                         latest_completed_run_id=None,
+                        context_seed=_context_seed_payload(context_seed),
                         created_at=now,
                         updated_at=now,
                     )
@@ -372,7 +423,20 @@ class SqlAlchemyExecutionBackend:
             row.latest_completed_run_id,
             as_utc(row.created_at),
             as_utc(row.updated_at),
+            _context_seed(row.context_seed),
         )
+
+    async def update_session_context_seed(
+        self, session_id: str, context_seed: SessionContextSeed
+    ) -> SessionRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._session_row(session, session_id, for_update=True)
+                if row is None:
+                    raise StorageError("unknown session")
+                row.context_seed = _context_seed_payload(context_seed)
+                row.updated_at = datetime.now(timezone.utc)
+            return self._owned_session(row, user_id=row.user_id, tenant_id=row.tenant_id)
 
     async def get_session(self, session_id: str) -> "SessionRecord | None":
         async with self.session_factory() as session:
@@ -386,8 +450,9 @@ class SqlAlchemyExecutionBackend:
                     row.tenant_id,
                     row.next_turn_sequence,
                     row.latest_completed_run_id,
-                    row.created_at,
-                    row.updated_at,
+                    as_utc(row.created_at),
+                    as_utc(row.updated_at),
+                    _context_seed(row.context_seed),
                 )
             )
 
@@ -432,6 +497,7 @@ class SqlAlchemyExecutionBackend:
         # order. 1 query. PAUSED/CANCELLED/FAILED deltas are excluded so a
         # paused-then-cancelled turn never pollutes the next turn's context.
         async with self.session_factory() as session:
+            session_row = await self._session_row(session, session_id)
             rows = (
                 await session.scalars(
                     select(TurnRow.delta_messages)
@@ -442,7 +508,15 @@ class SqlAlchemyExecutionBackend:
                     .order_by(TurnRow.sequence)
                 )
             ).all()
-        return tuple(msg for delta in rows for msg in (delta or ()))
+        messages = []
+        if session_row is not None and session_row.context_seed is not None:
+            seed = _context_seed(session_row.context_seed)
+            if seed is not None:
+                for turn in seed.turns:
+                    if turn.status is RunStatus.COMPLETED and turn.capture_state is MessageCaptureState.COMPLETE:
+                        messages.extend(turn.delta_messages)
+        messages.extend(msg for delta in rows for msg in (delta or ()))
+        return tuple(messages)
 
     async def load_resume_messages(self, execution_id: str) -> "tuple[JsonValue, ...]":
         # Resume Context: the PAUSED run's RESUME_CHECKPOINT only.
@@ -995,8 +1069,9 @@ class SqlAlchemyExecutionBackend:
                     r.tenant_id,
                     r.next_turn_sequence,
                     r.latest_completed_run_id,
-                    r.created_at,
-                    r.updated_at,
+                    as_utc(r.created_at),
+                    as_utc(r.updated_at),
+                    _context_seed(r.context_seed),
                 )
                 for r in rows
             )

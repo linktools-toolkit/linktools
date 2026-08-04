@@ -29,6 +29,20 @@ from .session import SessionRecord, SessionTurn
 from .snapshots import AgentSnapshotData, RunSnapshot
 from .store import ExecutionStore
 from .trace_models import RunTraceStep
+from .live_events import (
+    AssistantTextDelta,
+    AssistantThoughtDelta,
+    ExecutionCancelled,
+    ExecutionCompleted,
+    ExecutionEvent,
+    ExecutionEventHub,
+    ExecutionFailed,
+    ExecutionPaused,
+    ToolCallCompleted,
+    ToolCallFailed,
+    ToolCallProgress,
+    ToolCallStarted,
+)
 
 __all__ = [
     "AbortExecution",
@@ -63,4 +77,16 @@ __all__ = [
     "StartExecution",
     "StartExecutionIdentity",
     "StartRunResult",
+    "AssistantTextDelta",
+    "AssistantThoughtDelta",
+    "ExecutionCancelled",
+    "ExecutionCompleted",
+    "ExecutionEvent",
+    "ExecutionEventHub",
+    "ExecutionFailed",
+    "ExecutionPaused",
+    "ToolCallCompleted",
+    "ToolCallFailed",
+    "ToolCallProgress",
+    "ToolCallStarted",
 ]

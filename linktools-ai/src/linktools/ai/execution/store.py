@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     )
     from .domain import RunRecord
     from ..evaluation import RunEvaluation
-    from .session import SessionRecord
+    from .session import SessionContextSeed, SessionRecord
 
 class ExecutionStore(Protocol):
     coordination_scope: "CoordinationScope"
@@ -46,6 +46,11 @@ class ExecutionStore(Protocol):
         session_id: str,
         user_id: "str | None",
         tenant_id: "str | None",
+        context_seed: "SessionContextSeed | None" = None,
+    ) -> "SessionRecord": ...
+
+    async def update_session_context_seed(
+        self, session_id: str, context_seed: "SessionContextSeed"
     ) -> "SessionRecord": ...
 
     async def get_session(self, session_id: str) -> "SessionRecord | None": ...

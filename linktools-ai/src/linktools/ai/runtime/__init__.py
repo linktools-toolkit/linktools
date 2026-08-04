@@ -8,6 +8,15 @@ from .dependencies import RuntimeDependencies
 from .facade import Runtime
 from .requirements import RuntimeRequirements, RuntimeTopology
 from .storage import LocalDirectoryStorage, RuntimeStorage, SqlAlchemyRuntimeStorage
+from .prompt import (
+    AudioPromptPart,
+    EmbeddedResourcePromptPart,
+    ImagePromptPart,
+    PromptValidationError,
+    ResourceLinkPromptPart,
+    TextPromptPart,
+    UserPrompt,
+)
 
 __all__ = [
     "Runtime",
@@ -18,4 +27,11 @@ __all__ = [
     "LocalDirectoryStorage",
     "RuntimeStorage",
     "SqlAlchemyRuntimeStorage",
+    "AudioPromptPart",
+    "EmbeddedResourcePromptPart",
+    "ImagePromptPart",
+    "PromptValidationError",
+    "ResourceLinkPromptPart",
+    "TextPromptPart",
+    "UserPrompt",
 ]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Project discovery and configuration for the ``lt ai`` CLI/TUI.
+"""Project discovery and configuration for the ``lt ai`` CLI.
 
 All project configuration lives under ``<root>/.linktools/``; run state lives
 under ``<data_root>/projects/<project_hash>/`` so two projects never share

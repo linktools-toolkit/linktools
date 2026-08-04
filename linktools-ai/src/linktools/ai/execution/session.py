@@ -4,6 +4,7 @@
 
 
 from dataclasses import dataclass
+from typing import Literal
 
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,29 @@ if TYPE_CHECKING:
     from ..json import JsonValue
     from .domain import RunStatus
 
+
+@dataclass(frozen=True, slots=True)
+class SeedTurn:
+    session_id: str
+    sequence: int
+    run_id: str
+    input: "JsonValue"
+    delta_messages: "tuple[JsonValue, ...]"
+    status: "RunStatus"
+    capture_state: MessageCaptureState
+
+
+@dataclass(frozen=True, slots=True)
+class SessionContextSeed:
+    schema: Literal["session-context-seed.v1"]
+    source_session_id: str
+    source_updated_at: "datetime"
+    turns: "tuple[SeedTurn, ...]"
+
+    def __post_init__(self) -> None:
+        if self.schema != "session-context-seed.v1":
+            raise ValueError("unsupported session context seed schema")
+
 @dataclass(frozen=True, slots=True)
 class SessionRecord:
     id: str
@@ -23,6 +47,7 @@ class SessionRecord:
     latest_completed_run_id: "str | None"
     created_at: "datetime"
     updated_at: "datetime"
+    context_seed: "SessionContextSeed | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,4 +73,6 @@ class SessionTurn:
 __all__: "list[str]" = [
     "SessionRecord",
     "SessionTurn",
+    "SeedTurn",
+    "SessionContextSeed",
 ]

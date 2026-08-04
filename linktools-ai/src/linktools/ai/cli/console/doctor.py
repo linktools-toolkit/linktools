@@ -4,9 +4,8 @@
 """``lt ai doctor`` business logic.
 
 Delegates every check to :meth:`LocalRuntimeClient.doctor` (which owns the
-project bundle) and only renders the resulting :class:`DoctorReport` here. The
-``--project`` flag overrides where project discovery starts; ``--remote`` would
-target the HTTP client (unsupported in this build, fails explicitly)."""
+project bundle) and only renders the resulting :class:`DoctorReport` here.
+The ``--project`` flag overrides where project discovery starts."""
 
 import asyncio
 import json
@@ -24,24 +23,22 @@ if TYPE_CHECKING:
 def run_doctor(
     *,
     project: "Path | None",
-    remote: "str | None",
     json_output: bool,
 ) -> int:
     return asyncio.run(
-        _doctor_async(project=project, remote=remote, json_output=json_output)
+        _doctor_async(project=project, json_output=json_output)
     )
 
 
 async def _doctor_async(
     *,
     project: "Path | None",
-    remote: "str | None",
     json_output: bool,
     client: "RuntimeClient | None" = None,
 ) -> int:
     logger = environ.logger
     if client is None:
-        client = build_runtime_client(remote=remote, with_model=False, project=project)
+        client = build_runtime_client(with_model=False, project=project)
     report = await client.doctor()
     if json_output:
         payload = {

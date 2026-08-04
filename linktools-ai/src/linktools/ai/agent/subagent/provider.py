@@ -112,6 +112,7 @@ class SubagentProvider:
         # the AgentSpecIndex, or a transient store error) FAIL CLOSED with an
         # empty set -- the child keeps no tools -- never "no constraint".
         parent_delegated = self.parent_delegated_tools
+        child_model_policy = self.child_model_policy
         if (
             parent_delegated is None
             and self.subagent_provider is not None
@@ -119,11 +120,15 @@ class SubagentProvider:
         ):
             try:
                 parent_spec = await self.subagent_provider.get(context.agent_id)
+                if child_model_policy is None:
+                    child_model_policy = parent_spec.model
                 parent_delegated = {
                     feature.name
                     for feature in parent_spec.features
                     if feature.kind == "builtin"
                 }
+                if "*" in parent_delegated:
+                    parent_delegated = None
             except Exception:
                 parent_delegated = set()
 
@@ -140,7 +145,7 @@ class SubagentProvider:
             parent=parent,
             skill_resolver=self.skill_resolver,
             active_skill_provider=self.active_skill_provider,
-            child_model_policy=self.child_model_policy,
+            child_model_policy=child_model_policy,
             parent_delegated_tools=parent_delegated,
         )
         from ...governance.policy.rule import RiskLevel, SideEffectKind

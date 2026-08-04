@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai run`: run one Agent task without the TUI."""
+"""`lt ai run`: run one Agent task."""
 
 from typing import TYPE_CHECKING
 
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 
 
 class Command(BaseCommand):
-    """run one Agent task without the TUI"""
+    """run one Agent task"""
 
     @property
     def known_errors(self) -> "list[type[BaseException]]":

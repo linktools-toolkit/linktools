@@ -53,7 +53,7 @@ from ..domain import (
 )
 from ..domain import Page
 from ...evaluation import RunEvaluation
-from ..session import SessionRecord, SessionTurn
+from ..session import SessionContextSeed, SeedTurn, SessionRecord, SessionTurn
 from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from ..commands import (
@@ -123,6 +123,22 @@ def _run(raw: dict) -> RunRecord:
 def _session(raw: dict) -> SessionRecord:
     raw["created_at"] = _dt(raw["created_at"])
     raw["updated_at"] = _dt(raw["updated_at"])
+    seed = raw.get("context_seed")
+    if seed is not None:
+        seed["source_updated_at"] = _dt(seed["source_updated_at"])
+        seed["turns"] = tuple(
+            SeedTurn(
+                session_id=turn["session_id"],
+                sequence=turn["sequence"],
+                run_id=turn["run_id"],
+                input=turn["input"],
+                delta_messages=tuple(turn.get("delta_messages") or ()),
+                status=RunStatus(turn["status"]),
+                capture_state=MessageCaptureState(turn.get("capture_state", "complete")),
+            )
+            for turn in seed.get("turns", ())
+        )
+        raw["context_seed"] = SessionContextSeed(**seed)
     return SessionRecord(**raw)
 
 
@@ -415,7 +431,12 @@ class LocalExecutionBackend:
         await asyncio.to_thread(self.root.mkdir, parents=True, exist_ok=True)
 
     async def create_session(
-        self, *, session_id: str, user_id: "str | None", tenant_id: "str | None"
+        self,
+        *,
+        session_id: str,
+        user_id: "str | None",
+        tenant_id: "str | None",
+        context_seed: "SessionContextSeed | None" = None,
     ) -> SessionRecord:
         path = self._session_path(session_id)
         async with self._locks.acquire(("session", session_id)):
@@ -425,9 +446,22 @@ class LocalExecutionBackend:
                     raise StorageConflictError("session ownership conflict")
                 return existing
             now = _now()
-            value = SessionRecord(session_id, user_id, tenant_id, 1, None, now, now)
+            value = SessionRecord(session_id, user_id, tenant_id, 1, None, now, now, context_seed)
             await asyncio.to_thread(atomic_write_json, path, asdict(value))
             return value
+
+    async def update_session_context_seed(
+        self, session_id: str, context_seed: SessionContextSeed
+    ) -> SessionRecord:
+        async with self._locks.acquire(("session", session_id)):
+            session = await self._read_session(session_id)
+            if session is None:
+                raise StorageError("unknown session")
+            updated = replace(session, context_seed=context_seed, updated_at=_now())
+            await asyncio.to_thread(
+                atomic_write_json, self._session_path(session_id), asdict(updated)
+            )
+            return updated
 
     async def get_session(self, session_id: str) -> "SessionRecord | None":
         run_ids = await self._session_journal_runs(session_id)
@@ -1608,6 +1642,10 @@ class LocalExecutionBackend:
             if session is None:
                 return ()
             messages: "list[JsonValue]" = []
+            if session.context_seed is not None:
+                for turn in session.context_seed.turns:
+                    if turn.status is RunStatus.COMPLETED and turn.capture_state is MessageCaptureState.COMPLETE:
+                        messages.extend(turn.delta_messages)
             for sequence in range(1, session.next_turn_sequence):
                 path = self._turn_path(session_id, sequence)
                 if not await self._exists(path):

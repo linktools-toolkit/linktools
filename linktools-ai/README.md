@@ -3,8 +3,7 @@
 Agent / session / execution runtime built on
 [pydantic-ai](https://ai.pydantic.dev/). Consumers declare an `AgentSpec`,
 wire a storage backend + a `ModelResolver`, and call `Runtime.run`. An optional
-CLI (`linktools.ai.cli`) and TUI (`linktools.ai.cli.tui`) are included for
-local runs and inspection.
+CLI (`linktools.ai.cli`) is included for local runs and inspection.
 
 ## Quick start
 

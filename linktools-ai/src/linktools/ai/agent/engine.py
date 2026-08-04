@@ -28,7 +28,7 @@ execute_pure drives ``agent.pydantic_agent.iter()`` and:
   (model routing/policy/output denials, ToolError, MCPToolError) -> AgentFailed;
   everything else (config/invariant/protocol violations, programming errors)
   propagates unchanged;
-* publishes ONLY process dict-events through the injected ``live_events``
+* publishes ONLY process-local typed execution events through the injected ``live_events``
   sink (text / tool / model_progress); state events (paused / completed /
   failed / cancelled) are the ExecutionService's job, published only AFTER the
   durable commit succeeds. Security+observability events route through the
@@ -70,11 +70,20 @@ from ..execution.snapshots import (
     ModelRequestUsageObservation,
     RequestUsage,
 )
+from ..execution.live_events import (
+    AssistantTextDelta,
+    AssistantThoughtDelta,
+    ToolCallCompleted,
+    ToolCallFailed,
+    ToolCallStarted,
+    publish_execution_event,
+)
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..model.recording import SemanticRecordingModel
 from ..model.resolver import resolve_pricing_id
 from ..observability.tracing import use_span
+from ..prompt import UserPrompt
 from .dependencies import AgentDependencies
 from .middleware.pipeline import MiddlewarePipeline
 from .models import (
@@ -112,6 +121,16 @@ if TYPE_CHECKING:
 
 
 logger = environ.get_logger("ai.agent.engine")
+
+
+def _execution_id_from_run_context(run_ctx: object) -> str:
+    direct = getattr(run_ctx, "run_id", None)
+    if isinstance(direct, str):
+        return direct
+    dependencies = getattr(run_ctx, "deps", None)
+    tool_context = getattr(dependencies, "tool_context", None)
+    value = getattr(tool_context, "run_id", None)
+    return value if isinstance(value, str) else ""
 
 
 def _request_usage_from_provider(usage: object) -> RequestUsage:
@@ -375,7 +394,19 @@ class AgentEngine:
                     if chunk:
                         if kind == "text":
                             accumulated += chunk
-                        await live_events.publish({"type": kind, "text": chunk})
+                        event_type = (
+                            AssistantTextDelta
+                            if kind == "text"
+                            else AssistantThoughtDelta
+                        )
+                        await publish_execution_event(
+                            live_events,
+                            _execution_id_from_run_context(run_ctx),
+                            event_type(
+                                execution_id=_execution_id_from_run_context(run_ctx),
+                                text=chunk,
+                            ),
+                        )
                         await cancellation.raise_if_cancelled()
                 if observe_usage is not None:
                     response = request_stream.get()
@@ -424,21 +455,30 @@ class AgentEngine:
             async for ev in tool_stream:
                 tool_event = None
                 if isinstance(ev, FunctionToolCallEvent):
-                    tool_event = {
-                        "type": "tool",
-                        "name": ev.part.tool_name,
-                        "phase": "start",
-                        "ok": None,
-                    }
+                    tool_event = ToolCallStarted(
+                        execution_id=_execution_id_from_run_context(run_ctx),
+                        tool_call_id=ev.part.tool_call_id,
+                        tool_name=ev.part.tool_name,
+                        arguments=ev.part.args,
+                    )
                 elif isinstance(ev, FunctionToolResultEvent):
-                    tool_event = {
-                        "type": "tool",
-                        "name": ev.part.tool_name,
-                        "phase": "end",
-                        "ok": isinstance(ev.part, ToolReturnPart),
-                    }
+                    execution_id = _execution_id_from_run_context(run_ctx)
+                    if isinstance(ev.part, ToolReturnPart) and ev.part.outcome == "success":
+                        tool_event = ToolCallCompleted(
+                            execution_id=execution_id,
+                            tool_call_id=ev.part.tool_call_id,
+                            tool_name=ev.part.tool_name,
+                            result=ev.part.content,
+                        )
+                    else:
+                        tool_event = ToolCallFailed(
+                            execution_id=execution_id,
+                            tool_call_id=ev.part.tool_call_id,
+                            tool_name=ev.part.tool_name,
+                            error=str(getattr(ev.part, "content", "tool failed")),
+                        )
                 if tool_event is not None:
-                    await live_events.publish(tool_event)
+                    await publish_execution_event(live_events, _execution_id_from_run_context(run_ctx), tool_event)
                     await cancellation.raise_if_cancelled()
 
     async def _apply_window_policy(
@@ -472,24 +512,29 @@ class AgentEngine:
     async def _build_turn_prompt(
         self,
         context: "RunContext",
-        user_prompt: "str | None",
+        user_prompt: "str | UserPrompt | None",
     ) -> "str | None":
         """Build the base prompt for a NEW turn: memory section (from the wired
         memory policy) + knowledge section (from the wired retrieval policy) +
         the user's prompt, combined by PromptBuilder. Returns None on the resume
         path (the prompt is already baked into the checkpointed history)."""
+        prompt_text = (
+            user_prompt.text_fallback()
+            if isinstance(user_prompt, UserPrompt)
+            else user_prompt
+        )
         memory_section = ""
         memory_policy = self._effective_memory_policy()
         if memory_policy is not None:
-            memories = await memory_policy.select_memories(context, user_prompt)
+            memories = await memory_policy.select_memories(context, prompt_text)
             memory_section = self._prompt_formatter().format_memory(memories) or ""
         knowledge_section = ""
         retrieval_policy = self._effective_retrieval_policy()
         if retrieval_policy is not None:
-            items = await retrieval_policy.retrieve(context, user_prompt)
+            items = await retrieval_policy.retrieve(context, prompt_text)
             knowledge_section = self._prompt_formatter().format_knowledge(items) or ""
         return PromptBuilder.build_base_prompt(
-            user_prompt=user_prompt,
+            user_prompt=prompt_text or "",
             prior_messages=(),
             memory_section=memory_section,
             knowledge_section=knowledge_section,
@@ -681,6 +726,7 @@ class AgentEngine:
         trace_sequence: int = 0,
         trace_collector: "SemanticTraceCollector | None" = None,
         usage_sink: "RunUsageSink | None" = None,
+        extra_toolsets: "tuple[Any, ...]" = (),
     ) -> "AgentExecutionOutcome":
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- ExecutionService
@@ -862,6 +908,7 @@ class AgentEngine:
                     trace_collector=trace_collector,
                     security_events=security_events,
                 )
+                toolsets.extend(extra_toolsets)
 
                 timeout = agent.spec.model.timeout_seconds
                 accumulated_text = ""
@@ -875,6 +922,11 @@ class AgentEngine:
                     static_sections=agent.spec.instructions.sections,
                     resuming=input.resuming,
                 )
+                if isinstance(input.prompt, UserPrompt) and not input.resuming:
+                    prompt_content = input.prompt.model_content()
+                    if effective_prompt and effective_prompt != input.prompt.text_fallback():
+                        prompt_content.insert(0, effective_prompt[: -len(input.prompt.text_fallback())].rstrip())
+                    effective_prompt = prompt_content
                 iter_model = self._wrap_iter_model(
                     agent.pydantic_agent.model,
                     context,

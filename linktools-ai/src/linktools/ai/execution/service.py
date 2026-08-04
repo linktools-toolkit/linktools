@@ -71,6 +71,7 @@ from .domain import (
     sanitize_run_error,
 )
 from .query import ExecutionResultView
+from .session import SessionContextSeed, SessionRecord, SeedTurn
 from .snapshots import (
     AgentSnapshotData,
     ModelRequestUsageObservation,
@@ -78,6 +79,16 @@ from .snapshots import (
 )
 from . import trace_codec
 from .trace_collector import SemanticTraceCollector
+from ..prompt import UserPrompt
+from .live_events import (
+    ExecutionCancelled,
+    ExecutionCompleted,
+    ExecutionFailed,
+    ExecutionPaused,
+    LiveEventConsumerSlowError,
+    UsageUpdated,
+    publish_execution_event,
+)
 
 from typing import TYPE_CHECKING
 
@@ -320,14 +331,58 @@ class ExecutionService:
         # token that's only checked between execution points.
         self._controller = controller or ExecutionControllerRegistry()
 
+    async def create_session(
+        self,
+        session_id: str,
+        *,
+        principal: PrincipalContext,
+        context_seed: "SessionContextSeed | None" = None,
+    ) -> SessionRecord:
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
+        session = await self._store.create_session(
+            session_id=session_id,
+            user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            context_seed=context_seed,
+        )
+        self._authorization.assert_session_access(principal=principal, session=session)
+        return session
+
+    async def get_session(self, session_id: str, *, principal: PrincipalContext) -> "SessionRecord | None":
+        session = await self._store.get_session(session_id)
+        if session is not None:
+            self._authorization.assert_session_access(principal=principal, session=session)
+        return session
+
+    async def get_execution_record(
+        self, execution_id: str, *, principal: PrincipalContext
+    ) -> "RunRecord | None":
+        record = await self._store.get_run(execution_id)
+        if record is not None:
+            self._authorize(principal, record, ExecutionAction.INSPECT)
+        return record
+
+    async def list_sessions(self, *, principal: PrincipalContext) -> "tuple[SessionRecord, ...]":
+        values = await self._store.list_all_sessions()
+        visible = []
+        for session in values:
+            try:
+                self._authorization.assert_session_access(principal=principal, session=session)
+            except Exception:
+                continue
+            visible.append(session)
+        return tuple(visible)
+
     async def run(
         self,
         spec: "AgentSpec",
-        prompt: str,
+        prompt: "str | UserPrompt",
         *,
         principal: PrincipalContext,
         session_id: "str | None" = None,
         execution_id: "str | None" = None,
+        extra_toolsets: "tuple[Any, ...]" = (),
     ) -> object:
         if not isinstance(principal, PrincipalContext):
             raise TypeError("principal must be a PrincipalContext")
@@ -350,6 +405,7 @@ class ExecutionService:
             principal=principal,
             session=session,
         )
+        persisted_prompt = prompt.to_json() if isinstance(prompt, UserPrompt) else prompt
         record = (
             await self._store.start_run(
                 StartExecution(
@@ -357,7 +413,7 @@ class ExecutionService:
                     session_id,
                     RunKind.USER_TURN,
                     _definition(spec, self._codec),
-                    prompt,
+                    persisted_prompt,
                 )
             )
         ).record
@@ -381,9 +437,76 @@ class ExecutionService:
             resuming=False,
             message_history=messages,
             assembly=assembly,
+            extra_toolsets=extra_toolsets,
         )
 
-    async def resume(self, run_id: str, *, principal: PrincipalContext) -> object:
+    async def fork_session(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        principal: PrincipalContext,
+    ) -> SessionRecord:
+        """Create an immutable context seed from a complete idle session."""
+        source = await self._store.get_session(source_session_id)
+        if source is None:
+            raise StorageError("unknown session")
+        self._authorization.assert_session_access(principal=principal, session=source)
+        active = {
+            RunStatus.PENDING,
+            RunStatus.RUNNING,
+            RunStatus.PAUSED,
+            RunStatus.CANCELLING,
+        }
+        if any(
+            record.session_id == source_session_id and record.status in active
+            for record in await self._store.list_all_runs()
+        ):
+            raise StorageError("session is busy")
+        turns = await self._store.get_session_messages(source_session_id)
+        if any(
+            turn.status is not RunStatus.COMPLETED
+            or turn.capture_state is not MessageCaptureState.COMPLETE
+            for turn in turns
+        ):
+            raise StorageError("session history is incomplete")
+        seed = SessionContextSeed(
+            schema="session-context-seed.v1",
+            source_session_id=source_session_id,
+            source_updated_at=source.updated_at,
+            turns=tuple(
+                SeedTurn(
+                    session_id=turn.session_id,
+                    sequence=turn.sequence,
+                    run_id=turn.run_id,
+                    input=turn.input,
+                    delta_messages=turn.delta_messages,
+                    status=turn.status,
+                    capture_state=turn.capture_state,
+                )
+                for turn in turns
+            ),
+        )
+        target = await self._store.create_session(
+            session_id=target_session_id,
+            user_id=principal.user_id,
+            tenant_id=principal.tenant_id,
+            context_seed=seed,
+        )
+        logger.info(
+            "session forked source=%s target=%s turns=%s",
+            source_session_id,
+            target_session_id,
+            len(turns),
+        )
+        return target
+
+    async def resume(
+        self,
+        run_id: str,
+        *,
+        principal: PrincipalContext,
+        extra_toolsets: "tuple[Any, ...]" = (),
+    ) -> object:
         if not isinstance(principal, PrincipalContext):
             raise TypeError("principal must be a PrincipalContext")
         record = await self._required(run_id)
@@ -415,6 +538,7 @@ class ExecutionService:
             resuming=True,
             message_history=messages,
             assembly=assembly,
+            extra_toolsets=extra_toolsets,
         )
 
     async def run_child(
@@ -803,7 +927,17 @@ class ExecutionService:
                 await self._controller.cancel(run_id)
                 return
 
-    async def _execute(self, spec: "AgentSpec", prompt: str, record: "RunRecord", *, resuming: bool, message_history: "tuple[object, ...]" = (), assembly: "AgentAssembly | None" = None) -> object:
+    async def _execute(
+        self,
+        spec: "AgentSpec",
+        prompt: "str | UserPrompt",
+        record: "RunRecord",
+        *,
+        resuming: bool,
+        message_history: "tuple[object, ...]" = (),
+        assembly: "AgentAssembly | None" = None,
+        extra_toolsets: "tuple[Any, ...]" = (),
+    ) -> object:
         owner = record.lease.owner or "runtime"
         compiled = await self._compiler.compile(spec)
         context = RunContext(record.id, record.root_execution_id, record.parent_execution_id, record.session_id, record.runnable_id, record.definition.runnable_type, record.user_id, record.tenant_id, None)
@@ -822,7 +956,7 @@ class ExecutionService:
         approved = record.approval if resuming else None
         task = await self._controller.start(
             record.id,
-            self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector, usage_sink=usage_sink),
+            self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector, usage_sink=usage_sink, extra_toolsets=extra_toolsets),
             token,
         )
         heartbeat = asyncio.ensure_future(self._heartbeat(record.id, owner, record.lease.fence, token))
@@ -960,6 +1094,24 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
+            usage = usage_sink.snapshot()
+            if usage.total_tokens > 0 or usage.total_cost is not None:
+                await self._publish_lifecycle_event(
+                    UsageUpdated(
+                        execution_id=record.id,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        total_tokens=usage.total_tokens,
+                        total_cost=(
+                            str(usage.total_cost)
+                            if usage.total_cost is not None
+                            else None
+                        ),
+                    )
+                )
+            await self._publish_lifecycle_event(
+                ExecutionCancelled(execution_id=record.id)
+            )
             return None
         if isinstance(outcome, AgentCompleted):
             await self._store.complete_run(
@@ -970,6 +1122,9 @@ class ExecutionService:
                     snapshot,
                     usage_sink.last_snapshot_revision,
                 )
+            )
+            await self._publish_lifecycle_event(
+                ExecutionCompleted(execution_id=record.id)
             )
             return ExecutionResultView(record.id, outcome.result.output)
         if isinstance(outcome, AgentPaused):
@@ -994,6 +1149,14 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
+            await self._publish_lifecycle_event(
+                ExecutionPaused(
+                    execution_id=record.id,
+                    approval_id=approval.approval_id,
+                    tool_call_id=approval.tool_call_id or "",
+                    tool_name=approval.tool_name or "",
+                )
+            )
             return None
         if isinstance(outcome, AgentCancelled):
             await self._store.acknowledge_cancel(
@@ -1004,6 +1167,9 @@ class ExecutionService:
                     snapshot,
                     usage_sink.last_snapshot_revision,
                 )
+            )
+            await self._publish_lifecycle_event(
+                ExecutionCancelled(execution_id=record.id)
             )
             return None
         if isinstance(outcome, AgentFailed):
@@ -1017,8 +1183,28 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
+            await self._publish_lifecycle_event(
+                ExecutionFailed(
+                    execution_id=record.id,
+                    error_id=record.error.code if record.error is not None else "",
+                    error_type=record.error.message if record.error is not None else "",
+                )
+            )
             raise RuntimeError(outcome.error.message)
         raise AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
+
+    async def _publish_lifecycle_event(self, event: object) -> None:
+        try:
+            await publish_execution_event(self._live_events, event.execution_id, event)
+        except LiveEventConsumerSlowError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "run %s lifecycle event delivery failed event=%s error_type=%s",
+                event.execution_id,
+                type(event).__name__,
+                type(exc).__name__,
+            )
 
     async def _required(self, run_id: str) -> "RunRecord":
         record = await self._store.get_run(run_id)

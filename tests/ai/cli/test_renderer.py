@@ -4,9 +4,8 @@
 
 ``announce_paused`` expands a pause event with the approval request's
 tool/arguments/reason; the request is fetched by the caller through
-``RuntimeClient.get_approval`` (so this renderer never touches Storage -- spec
-). ``print_event`` renders streamed text/tool events and the ``--json`` line
-form."""
+``RuntimeClient.get_approval``. ``print_event`` renders streamed text/tool
+events and the ``--json`` line form."""
 
 import contextlib
 import io
@@ -54,7 +53,6 @@ class TestAnnouncePaused(unittest.TestCase):
         self.assertIn("reason: high-risk shell", rendered)
         self.assertIn("run_id: r1", rendered)
         self.assertIn("approval_id: a1", rendered)
-        self.assertIn("lt ai continue r1 --approve", rendered)
 
     def test_no_request_degrades_to_ids_only(self):
         logger = _RecordingLogger()
