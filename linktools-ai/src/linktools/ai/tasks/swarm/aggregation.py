@@ -114,6 +114,12 @@ def _encode_node_view(node: "Mapping[str, Any]") -> JsonValue:
             "input_tokens": int(usage.get("input_tokens", 0)) if usage else 0,
             "output_tokens": int(usage.get("output_tokens", 0)) if usage else 0,
             "total_cost": total_cost,
+            "cache_write_tokens": (
+                int(usage.get("cache_write_tokens", 0)) if usage else 0
+            ),
+            "cache_read_tokens": (
+                int(usage.get("cache_read_tokens", 0)) if usage else 0
+            ),
         },
     }
 

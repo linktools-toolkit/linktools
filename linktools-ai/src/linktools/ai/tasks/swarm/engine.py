@@ -13,19 +13,22 @@ to label node-runner programming errors, accepted as a baselined import
 cycle."""
 
 import asyncio
+import inspect
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Awaitable, Callable, Protocol
 
-from ...errors import TaskGraphInvariantError
+from ...errors import StorageConflictError, SwarmLimitExceededError, TaskGraphInvariantError
 from ...execution.domain import RunError
+from ...execution.identifiers import child_run_id
 from ..models import (
     TaskExecution,
     TaskNode,
     TaskPlan,
     TaskStatus,
     TaskUsage,
+    UsageAccumulator,
 )
 from ..store import TaskStore
 from .validation import Readiness, all_terminal, classify_readiness
@@ -33,10 +36,12 @@ from .validation import Readiness, all_terminal, classify_readiness
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from ...governance.identity import PrincipalContext
     from .limits import SwarmLimits
 
 
 DEFAULT_LEASE_DURATION = timedelta(minutes=10)
+CONTROL_POLL_INTERVAL = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +74,10 @@ class NodeRunner(Protocol):
 
     async def run(self, request: NodeRunRequest) -> NodeRunResult: ...
 
+    async def request_cancel(
+        self, *, child_run_id: str, principal: "PrincipalContext", reason: str
+    ) -> None: ...
+
 
 class ControlGate(Protocol):
     """Checks the parent run's liveness before each scheduling pass. ``check``
@@ -79,7 +88,9 @@ class ControlGate(Protocol):
     after each node terminal so the gate can accumulate token/cost spend and
     enforce caps mid-run."""
 
-    async def check(self, *, now: float) -> None: ...
+    async def check(self, *, now_monotonic: float) -> None: ...
+
+    def next_wake_delay(self, *, now_monotonic: float) -> float: ...
 
     @property
     def cancel_requested(self) -> bool: ...
@@ -103,6 +114,7 @@ class TaskGraphEngine:
         limits: "SwarmLimits",
         owner: str,
         parent_run_id: str,
+        principal: "PrincipalContext | None" = None,
         on_skip: "Callable[[str, tuple[str, ...]], Awaitable[None]] | None" = None,
         on_node_terminal: "Callable[[str, NodeRunResult], Awaitable[None]] | None" = None,
         logger=None,
@@ -113,42 +125,92 @@ class TaskGraphEngine:
         self._limits = limits
         self._owner = owner
         self._parent_run_id = parent_run_id
+        self._principal = principal
         self._on_skip = on_skip
         self._on_node_terminal = on_node_terminal
         self._tasks: "dict[asyncio.Task[None], str]" = {}
+        self._stopping = False
         self._completion = asyncio.Event()
         self._logger = logger
 
     async def execute(self, plan: TaskPlan) -> TaskUsage:
         """Drive every node to a terminal status. Returns the summed real
         usage across all worker attempts (success, failure, cancellation)."""
-        while True:
-            await self._gate.check(now=time.monotonic())
-            if self._gate.cancel_requested:
-                await self._converge_cancellation(plan)
-            executions = {
-                e.node_id: e for e in await self._store.list_executions(plan.id)
-            }
-            await self._propagate_skips(plan, executions)
-            executions = {
-                e.node_id: e for e in await self._store.list_executions(plan.id)
-            }
-            if all_terminal(executions):
-                break
-            self._completion.clear()
-            await self._launch_ready(plan, executions)
-            if not self._tasks and not self._has_launchable(plan, executions):
-                raise TaskGraphInvariantError("task graph cannot make progress")
+        stop_reason: BaseException | None = None
+        try:
+            while True:
+                now = time.monotonic()
+                await self._check_gate(now)
+                await self._renew_active_nodes(plan)
+                if self._gate.cancel_requested:
+                    await self._converge_cancellation(plan)
+                executions = {
+                    e.node_id: e for e in await self._store.list_executions(plan.id)
+                }
+                await self._propagate_skips(plan, executions)
+                executions = {
+                    e.node_id: e for e in await self._store.list_executions(plan.id)
+                }
+                if all_terminal(executions):
+                    break
+                check_before_launch = getattr(
+                    self._gate, "check_before_launch", None
+                )
+                if check_before_launch is not None and self._has_launchable(
+                    plan, executions
+                ):
+                    await check_before_launch()
+                self._completion.clear()
+                await self._launch_ready(plan, executions)
+                await self._reap_completed()
+                if not self._tasks and not self._has_launchable(plan, executions):
+                    raise TaskGraphInvariantError("task graph cannot make progress")
+                if self._tasks:
+                    await self._wait_for_completion_or_signal()
+            return await self._sum_usage(plan)
+        except BaseException as exc:
+            stop_reason = exc
+            raise
+        finally:
             if self._tasks:
-                await self._wait_for_completion_or_signal()
-        return await self._sum_usage(plan)
+                await self._shutdown_active_nodes(plan, stop_reason)
+
+    async def _check_gate(self, now: float) -> None:
+        parameters = inspect.signature(self._gate.check).parameters
+        keyword = "now_monotonic" if "now_monotonic" in parameters else "now"
+        await self._gate.check(**{keyword: now})
+
+    async def _renew_active_nodes(self, plan: TaskPlan) -> None:
+        if not self._tasks:
+            return
+        by_node = {
+            execution.node_id: execution
+            for execution in await self._store.list_executions(plan.id)
+        }
+        for task, node_id in tuple(self._tasks.items()):
+            if task.done():
+                continue
+            execution = by_node.get(node_id)
+            if execution is None or execution.status is not TaskStatus.CLAIMED:
+                continue
+            try:
+                await self._store.renew(
+                    execution.id,
+                    owner=self._owner,
+                    fence=execution.fence,
+                    duration=DEFAULT_LEASE_DURATION,
+                )
+            except StorageConflictError as exc:
+                raise SwarmLimitExceededError(
+                    "node lease lost", kind="node_lease_lost"
+                ) from exc
 
     async def _launch_ready(
         self,
         plan: TaskPlan,
         executions: "dict[str, TaskExecution]",
     ) -> None:
-        if self._gate.cancel_requested:
+        if self._stopping or self._gate.cancel_requested:
             return
         running = len(self._tasks)
         slots = max(0, self._limits.max_concurrency - running)
@@ -193,16 +255,28 @@ class TaskGraphEngine:
         executions: "dict[str, TaskExecution]",
     ) -> None:
         execution = executions[node.id]
+        if execution.active_run_id is not None:
+            raise TaskGraphInvariantError("ready node already has a child run")
         claimed = await self._store.claim_ready(
             execution.id, owner=self._owner, duration=DEFAULT_LEASE_DURATION
         )
-        child_id = _child_run_id(self._parent_run_id, node.id)
-        bound = await self._store.bind_child_run(
-            claimed.id,
-            owner=self._owner,
-            fence=claimed.fence,
-            child_run_id=child_id,
-        )
+        child_id = child_run_id(self._parent_run_id, node.id)
+        try:
+            bound = await self._store.bind_child_run(
+                claimed.id,
+                owner=self._owner,
+                fence=claimed.fence,
+                child_run_id=child_id,
+            )
+        except BaseException:
+            await self._store.cancel_claimed(
+                claimed.id,
+                owner=self._owner,
+                fence=claimed.fence,
+                reason="bind_failed",
+                usage=TaskUsage(),
+            )
+            raise
         deps = tuple(
             executions[dep.node_id]
             for dep in node.dependencies
@@ -219,23 +293,29 @@ class TaskGraphEngine:
         task = asyncio.create_task(self._drive_node(request))
         self._tasks[task] = node.id
         task.add_done_callback(self._on_node_done)
+        if self._logger is not None:
+            self._logger.info(
+                "task graph launched node=%s child_run_id=%s",
+                node.id,
+                child_id,
+            )
 
     def _on_node_done(self, task: "asyncio.Task[None]") -> None:
-        self._tasks.pop(task, None)
         self._completion.set()
+
+    async def _reap_completed(self) -> None:
+        for task in tuple(self._tasks):
+            if not task.done():
+                continue
+            self._tasks.pop(task, None)
+            await task
 
     async def _drive_node(self, request: NodeRunRequest) -> None:
         try:
             outcome = await self._runner.run(request)
         except asyncio.CancelledError:
-            await self._cancel_claimed(request, TaskUsage())
+            await self._cancel_claimed(request, request.execution.usage)
             raise
-        except Exception as exc:  # programming error -> FAIL the node
-            outcome = NodeRunResult(
-                status=TaskStatus.FAILED,
-                error=RunError("node_runner_error", str(exc)),
-                usage=TaskUsage(),
-            )
         self._gate.record_usage(outcome.usage)
         await self._apply_outcome(request, outcome, request.node.id)
 
@@ -270,16 +350,13 @@ class TaskGraphEngine:
     async def _cancel_claimed(
         self, request: NodeRunRequest, usage: TaskUsage
     ) -> None:
-        try:
-            await self._store.cancel_claimed(
-                request.execution.id,
-                owner=request.owner,
-                fence=request.fence,
-                reason="cancelled",
-                usage=usage,
-            )
-        except Exception:
-            pass
+        await self._store.cancel_claimed(
+            request.execution.id,
+            owner=request.owner,
+            fence=request.fence,
+            reason="cancelled",
+            usage=usage,
+        )
 
     async def _propagate_skips(
         self,
@@ -306,43 +383,145 @@ class TaskGraphEngine:
                     changed = True
 
     async def _converge_cancellation(self, plan: TaskPlan) -> None:
-        for task in list(self._tasks):
+        self._stopping = True
+        cleanup_error: BaseException | None = None
+        for task, node_id in tuple(self._tasks.items()):
+            if not task.done():
+                request = await self._store.get_execution(
+                    next((e.id for e in await self._store.list_executions(plan.id) if e.node_id == node_id), "")
+                )
+                if request is not None and request.active_run_id:
+                    try:
+                        await self._request_child_cancel(request.active_run_id)
+                    except BaseException as exc:
+                        cleanup_error = cleanup_error or exc
             task.cancel()
         await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._tasks.clear()
+        if cleanup_error is not None:
+            raise cleanup_error
         executions = await self._store.list_executions(plan.id)
         for execution in executions:
             if execution.status is TaskStatus.READY:
                 await self._store.cancel_ready(
                     execution.id, reason="parent_cancelled"
                 )
+            elif (
+                execution.status is TaskStatus.CLAIMED
+                and execution.owner == self._owner
+            ):
+                await self._store.cancel_claimed(
+                    execution.id,
+                    owner=self._owner,
+                    fence=execution.fence,
+                    reason="parent_cancelled",
+                    usage=execution.usage,
+                )
 
+    async def _request_child_cancel(self, child_run_id: str) -> None:
+        await self._runner.request_cancel(
+            child_run_id=child_run_id,
+            principal=self._principal,
+            reason="parent_cancelled",
+        )
+
+    async def _shutdown_active_nodes(
+        self, plan: TaskPlan, stop_reason: BaseException | None
+    ) -> None:
+        self._stopping = True
+        if self._logger is not None:
+            self._logger.info(
+                "task graph stopping parent_run_id=%s reason=%s",
+                self._parent_run_id,
+                getattr(
+                    stop_reason,
+                    "kind",
+                    type(stop_reason).__name__ if stop_reason else "complete",
+                ),
+            )
+        reason = "parent_failed"
+        if self._gate.cancel_requested:
+            reason = "parent_cancelled"
+        elif getattr(stop_reason, "kind", None) == "timeout":
+            reason = "parent_timeout"
+        elif getattr(stop_reason, "kind", None) in {
+            "max_total_tokens",
+            "token_limit_reached",
+            "max_total_cost",
+            "cost_limit_reached",
+            "cost_usage_unavailable",
+        }:
+            reason = "parent_limit"
+        cleanup_error: BaseException | None = None
+        for task, node_id in tuple(self._tasks.items()):
+            execution = next(
+                (e for e in await self._store.list_executions(plan.id) if e.node_id == node_id),
+                None,
+            )
+            if execution is not None and execution.active_run_id:
+                try:
+                    await self._request_child_cancel(execution.active_run_id)
+                except BaseException as exc:
+                    cleanup_error = cleanup_error or exc
+            task.cancel()
+        await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+        self._tasks.clear()
+        if cleanup_error is not None:
+            raise cleanup_error
+        if getattr(stop_reason, "kind", None) == "parent_lease_lost":
+            return
+        for execution in await self._store.list_executions(plan.id):
+            if execution.status is TaskStatus.READY:
+                await self._store.cancel_ready(execution.id, reason=reason)
+            elif execution.status is TaskStatus.CLAIMED and execution.owner == self._owner:
+                try:
+                    await self._store.cancel_claimed(
+                        execution.id,
+                        owner=self._owner,
+                        fence=execution.fence,
+                        reason=reason,
+                        usage=execution.usage,
+                    )
+                except StorageConflictError:
+                    if getattr(stop_reason, "kind", None) != "node_lease_lost":
+                        raise
     async def _wait_for_completion_or_signal(self) -> None:
-        await self._completion.wait()
+        waiter = asyncio.create_task(self._completion.wait())
+        try:
+            now = time.monotonic()
+            next_wake = getattr(self._gate, "next_wake_delay", None)
+            delay = (
+                CONTROL_POLL_INTERVAL
+                if next_wake is None
+                else next_wake(now_monotonic=now)
+            )
+            if delay is None:
+                delay = CONTROL_POLL_INTERVAL
+            await asyncio.wait(
+                tuple(self._tasks) + (waiter,),
+                timeout=max(0.0, min(float(delay), CONTROL_POLL_INTERVAL)),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            await self._reap_completed()
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
 
     async def _sum_usage(self, plan: TaskPlan) -> TaskUsage:
-        total = TaskUsage()
+        total = UsageAccumulator()
         for execution in await self._store.list_executions(plan.id):
-            total = total.add(execution.usage)
-        return total
-
-
-def _child_run_id(parent_run_id: str, node_id: str) -> str:
-    """Deterministic child run id; mirrors execution.domain.child_run_id so the
-    engine does not import the execution layer."""
-    import hashlib
-
-    digest = hashlib.sha256(
-        "task-graph-child-v1\0".encode()
-        + parent_run_id.encode()
-        + b"\0"
-        + node_id.encode()
-    ).hexdigest()
-    return f"tg-child-{digest}"
+            if execution.status is TaskStatus.READY or execution.status is TaskStatus.SKIPPED:
+                continue
+            if execution.status is TaskStatus.CANCELLED and execution.attempt == 0:
+                continue
+            total.add(execution.usage)
+        return total.freeze()
 
 
 __all__ = [
     "ControlGate",
+    "CONTROL_POLL_INTERVAL",
     "DEFAULT_LEASE_DURATION",
     "NodeRunRequest",
     "NodeRunResult",

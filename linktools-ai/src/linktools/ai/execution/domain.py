@@ -4,8 +4,8 @@
 """Pure Run domain values and the single Run state machine."""
 
 
-import hashlib
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from typing import Generic, Literal, TypeVar
 
@@ -67,7 +67,7 @@ class ApprovalDecision(StrEnum):
 class RunDefinition:
     runnable_id: str
     runnable_type: RunnableType
-    schema: "Literal['agent-spec.v1', 'swarm-spec.v1']"
+    schema: "Literal['agent-spec.v1', 'swarm-spec.v1', 'swarm-task-graph.v1']"
     spec: "JsonValue"
     spec_hash: str
 
@@ -94,6 +94,22 @@ class RunUsage:
     # consumption add these in: real_total = total + cache_write + cache_read.
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
+    total_cost: "Decimal | None" = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("cache_write_tokens", self.cache_write_tokens),
+            ("cache_read_tokens", self.cache_read_tokens),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative int")
+        if self.total_cost is not None and not isinstance(self.total_cost, Decimal):
+            object.__setattr__(self, "total_cost", Decimal(str(self.total_cost)))
+        if (
+            self.total_cost is not None
+            and (not self.total_cost.is_finite() or self.total_cost < 0)
+        ):
+            raise ValueError("total_cost must be finite and non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +117,13 @@ class RunError:
     error_type: str
     message: str
     detail: "JsonValue | None" = None
+
+
+def sanitize_run_error(exc: BaseException) -> RunError:
+    error_type = type(exc).__name__
+    kind = getattr(exc, "kind", None)
+    message = str(kind) if isinstance(kind, str) else "execution failed"
+    return RunError(error_type=error_type, message=message)
 
 
 RunErrorInfo = RunError
@@ -139,7 +162,7 @@ class RunRecord:
 
 
 ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
-    RunStatus.PENDING: frozenset({RunStatus.RUNNING, RunStatus.CANCELLED}),
+    RunStatus.PENDING: frozenset({RunStatus.RUNNING, RunStatus.FAILED, RunStatus.CANCELLED}),
     RunStatus.RUNNING: frozenset({RunStatus.PAUSED, RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLING}),
     RunStatus.PAUSED: frozenset({RunStatus.PENDING, RunStatus.CANCELLED, RunStatus.CANCELLING}),
     RunStatus.CANCELLING: frozenset({RunStatus.CANCELLED, RunStatus.FAILED}),
@@ -147,19 +170,6 @@ ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
     RunStatus.FAILED: frozenset(),
     RunStatus.CANCELLED: frozenset(),
 }
-
-
-def child_run_id(parent_run_id: str, node_id: str) -> str:
-    """Deterministic child RunRecord id for a task_graph node: collision-free
-    across distinct (parent, node) pairs and stable across re-drives, so crash
-    recovery never mints a second child for the same node."""
-    digest = hashlib.sha256(
-        "task-graph-child-v1\0".encode()
-        + parent_run_id.encode()
-        + b"\0"
-        + node_id.encode()
-    ).hexdigest()
-    return f"tg-child-{digest}"
 
 
 __all__ = [
@@ -176,5 +186,5 @@ __all__ = [
     "RunStatus",
     "RunUsage",
     "RunnableType",
-    "child_run_id",
+    "sanitize_run_error",
 ]

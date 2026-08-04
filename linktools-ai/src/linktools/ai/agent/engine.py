@@ -44,7 +44,7 @@ import asyncio
 import contextlib
 import dataclasses
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from linktools.core import environ
 
@@ -137,6 +137,10 @@ async def _noop_span():
     fallback for :meth:`AgentEngine._span` when observability is not wired,
     so the lifecycle body has a single ``async with`` shape regardless."""
     yield None
+
+
+class RunUsageSink(Protocol):
+    def observe_absolute(self, usage: object) -> None: ...
 
 
 class AgentEngine:
@@ -534,6 +538,7 @@ class AgentEngine:
         assembly: "AgentAssembly | None" = None,
         trace_sequence: int = 0,
         trace_collector: "SemanticTraceCollector | None" = None,
+        usage_sink: "RunUsageSink | None" = None,
     ) -> "AgentExecutionOutcome":
         """The target pure execution loop. Touches NO run_store/
         session_store/commit_coordinator/run_controller -- ExecutionService
@@ -611,6 +616,22 @@ class AgentEngine:
                 status=status,
                 usage=usage or ExecutionRunUsage(),
                 capture_state=capture_state,
+            )
+
+        def _captured_usage() -> "ExecutionRunUsage":
+            if usage_sink is None:
+                return ExecutionRunUsage()
+            snapshot_usage = getattr(usage_sink, "snapshot", None)
+            if snapshot_usage is None:
+                return ExecutionRunUsage()
+            captured = snapshot_usage()
+            return ExecutionRunUsage(
+                input_tokens=captured.input_tokens,
+                output_tokens=captured.output_tokens,
+                total_tokens=captured.total_tokens,
+                cache_write_tokens=captured.cache_write_tokens,
+                cache_read_tokens=captured.cache_read_tokens,
+                total_cost=captured.total_cost,
             )
 
         try:
@@ -763,6 +784,7 @@ class AgentEngine:
                                 if trace_collector is not None:
                                     snapshot = await _snapshot(
                                         ExecutionRunStatus.PAUSED,
+                                        usage=_captured_usage(),
                                     )
                                 # The engine does NOT publish a "paused" state
                                 # event: per the state-event split, state events
@@ -783,7 +805,13 @@ class AgentEngine:
                                         idempotency_key=paused.idempotency_key,
                                         binding=paused.binding,
                                     ),
-                                    usage=AgentUsage(),
+                                    usage=AgentUsage(
+                                        input_tokens=_captured_usage().input_tokens,
+                                        output_tokens=_captured_usage().output_tokens,
+                                        cache_write_tokens=_captured_usage().cache_write_tokens,
+                                        cache_read_tokens=_captured_usage().cache_read_tokens,
+                                        total_cost=_captured_usage().total_cost,
+                                    ),
                                     snapshot=snapshot,
                                 )
                             else:
@@ -822,8 +850,10 @@ class AgentEngine:
                 if timed_out:
                     raise ModelRoutingError("model timeout")
 
-                output = result.output if result is not None else accumulated_text
                 usage = result.usage if result is not None else None
+                if usage is not None and usage_sink is not None:
+                    usage_sink.observe_absolute(usage)
+                output = result.output if result is not None else accumulated_text
                 await self._enforce_usage_policy(agent.spec.model, usage)
 
                 run_result = RunResult(
@@ -846,6 +876,7 @@ class AgentEngine:
                             else 0,
                             cache_write_tokens=usage.cache_write_tokens if usage else 0,
                             cache_read_tokens=usage.cache_read_tokens if usage else 0,
+                            total_cost=getattr(usage, "total_cost", None) if usage else None,
                         ),
                     )
 
@@ -878,6 +909,9 @@ class AgentEngine:
                     usage=AgentUsage(
                         input_tokens=usage.input_tokens if usage else 0,
                         output_tokens=usage.output_tokens if usage else 0,
+                        total_cost=getattr(usage, "total_cost", None) if usage else None,
+                        cache_write_tokens=usage.cache_write_tokens if usage else 0,
+                        cache_read_tokens=usage.cache_read_tokens if usage else 0,
                     ),
                     snapshot=snapshot,
                 )
@@ -887,12 +921,21 @@ class AgentEngine:
                 if trace_collector is not None:
                     snapshot = await _snapshot(
                         ExecutionRunStatus.CANCELLED,
+                        usage=_captured_usage(),
                         capture_state=MessageCaptureState.PARTIAL,
                     )
                 if environ.debug:
                     logger.debug("run %s cancelled", context.run_id)
                 return AgentCancelled(
-                    reason=None, usage=AgentUsage(), snapshot=snapshot
+                    reason=None,
+                    usage=AgentUsage(
+                        input_tokens=_captured_usage().input_tokens,
+                        output_tokens=_captured_usage().output_tokens,
+                        total_cost=_captured_usage().total_cost,
+                        cache_write_tokens=_captured_usage().cache_write_tokens,
+                        cache_read_tokens=_captured_usage().cache_read_tokens,
+                    ),
+                    snapshot=snapshot,
                 )
             raise
         except _EXPECTED_RUN_FAILURES as exc:
@@ -919,6 +962,7 @@ class AgentEngine:
             if trace_collector is not None:
                 snapshot = await _snapshot(
                     ExecutionRunStatus.FAILED,
+                    usage=_captured_usage(),
                     capture_state=MessageCaptureState.PARTIAL,
                 )
             logger.warning(
@@ -931,6 +975,12 @@ class AgentEngine:
             return AgentFailed(
                 error=RunErrorInfo(error_type=type(exc).__name__, message=safe_error),
                 retryable=False,
-                usage=AgentUsage(),
+                usage=AgentUsage(
+                    input_tokens=_captured_usage().input_tokens,
+                    output_tokens=_captured_usage().output_tokens,
+                    total_cost=_captured_usage().total_cost,
+                    cache_write_tokens=_captured_usage().cache_write_tokens,
+                    cache_read_tokens=_captured_usage().cache_read_tokens,
+                ),
                 snapshot=snapshot,
             )

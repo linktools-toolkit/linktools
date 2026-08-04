@@ -4,6 +4,7 @@
 """Structural execution-store contract implemented directly by backends."""
 
 
+from datetime import datetime, timedelta
 from typing import Protocol
 from .domain import Page
 from .session import SessionTurn
@@ -38,6 +39,15 @@ class ExecutionStore(Protocol):
     async def get_run(self, run_id: str) -> "RunRecord | None": ...
 
     async def claim_run(self, command: "ClaimExecution") -> "RunRecord": ...
+
+    async def claim_run_for_recovery(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration: timedelta,
+    ) -> "RunRecord": ...
 
     async def heartbeat_run(self, command: "HeartbeatExecution") -> "RunRecord": ...
 

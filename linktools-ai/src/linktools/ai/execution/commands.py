@@ -4,7 +4,7 @@
 """Validated commands accepted by the execution lifecycle port."""
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from typing import TYPE_CHECKING
 
@@ -104,13 +104,48 @@ class AcknowledgeCancellation:
     snapshot: "AgentSnapshotData"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class AbortExecution:
     run_id: str
     owner: str
     fence: int
+    snapshot: "AgentSnapshotData"
     error: "RunError"
-    trace_end_sequence: int
+    persist_snapshot: bool = field(init=False, repr=False)
+
+    def __init__(
+        self,
+        run_id: str,
+        owner: str,
+        fence: int,
+        snapshot: "AgentSnapshotData | RunError",
+        error: "RunError | int",
+    ) -> None:
+        legacy_without_snapshot = isinstance(error, int)
+        if legacy_without_snapshot:
+            from .domain import MessageCaptureState, RunUsage
+            from .snapshots import AgentSnapshotData
+
+            snapshot, error = (
+                AgentSnapshotData(
+                    delta_messages=(),
+                    final_output=None,
+                    usage=RunUsage(),
+                    trace_end_sequence=error,
+                    capture_state=MessageCaptureState.UNAVAILABLE,
+                ),
+                snapshot,
+            )
+        object.__setattr__(self, "run_id", run_id)
+        object.__setattr__(self, "owner", owner)
+        object.__setattr__(self, "fence", fence)
+        object.__setattr__(self, "snapshot", snapshot)
+        object.__setattr__(self, "error", error)
+        object.__setattr__(self, "persist_snapshot", not legacy_without_snapshot)
+
+    @property
+    def trace_end_sequence(self) -> int:
+        return self.snapshot.trace_end_sequence
 
 
 __all__ = [

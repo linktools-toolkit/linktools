@@ -11,6 +11,7 @@ verify owner+fence. skip/cancel_ready move READY nodes straight to a terminal
 without a lease."""
 
 from datetime import timedelta
+from datetime import datetime
 from typing import Protocol
 
 from typing import TYPE_CHECKING
@@ -48,9 +49,8 @@ class TaskStore(Protocol):
         owner: str,
         duration: timedelta,
     ) -> "TaskExecution":
-        """READY -> CLAIMED. Advances the fence, sets attempt to 1, issues the
-        lease. Conflict (already claimed/terminal/racing owner) raises
-        StorageConflictError."""
+        """READY -> CLAIMED. Expired CLAIMED rows use the reconcile operation;
+        this method never starts a node a second time."""
         ...
 
     async def bind_child_run(
@@ -137,6 +137,19 @@ class TaskStore(Protocol):
     ) -> "TaskExecution":
         """CLAIMED -> CANCELLED with the reason and the real usage produced so
         far. Releases the lease. Verifies owner+fence."""
+        ...
+
+    async def take_over_expired_claim_for_reconcile(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration: timedelta,
+    ) -> "TaskExecution":
+        """Take over only an expired CLAIMED execution for child reconciliation.
+        The attempt and active child id are retained; the caller must not launch
+        a new child after this operation."""
         ...
 
 

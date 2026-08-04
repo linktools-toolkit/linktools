@@ -82,11 +82,7 @@ class LocalTaskBackend:
         async with self._lock:
             current = self._require(execution_id)
             now = datetime.now(timezone.utc)
-            if current.status is TaskStatus.READY:
-                pass
-            elif current.status is TaskStatus.CLAIMED and is_expired(current.lease, now):
-                pass
-            else:
+            if current.status is not TaskStatus.READY:
                 raise StorageConflictError(
                     f"task {execution_id!r} is {current.status.value}, not claimable"
                 )
@@ -96,6 +92,28 @@ class LocalTaskBackend:
                 status=TaskStatus.CLAIMED,
                 lease=new_lease,
                 attempt=1,
+                updated_at=now,
+            )
+            self._executions[execution_id] = updated
+            return updated
+
+    async def take_over_expired_claim_for_reconcile(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration: timedelta,
+    ) -> TaskExecution:
+        async with self._lock:
+            current = self._require(execution_id)
+            if current.status is not TaskStatus.CLAIMED or not is_expired(
+                current.lease, now
+            ):
+                raise StorageConflictError("task is not an expired CLAIMED execution")
+            updated = replace(
+                current,
+                lease=claim(current.lease, owner=owner, now=now, duration=duration),
                 updated_at=now,
             )
             self._executions[execution_id] = updated
@@ -281,6 +299,8 @@ class LocalTaskBackend:
             )
         if execution.lease.owner != owner or execution.lease.fence != fence:
             raise StorageConflictError("stale fence for task execution")
+        if execution.lease.expires_at is None or execution.lease.expires_at <= datetime.now(timezone.utc):
+            raise StorageConflictError("task execution lease expired")
 
 
 def _freeze(result: "JsonValue") -> "JsonValue":

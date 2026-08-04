@@ -38,6 +38,8 @@ class SwarmRunView:
     error: "RunErrorInfo | None"
     nodes: "tuple[JsonValue, ...]"
     status_counts: "Mapping[str, int]"
+    final_output: "JsonValue | None" = None
+    usage: "TaskUsage | None" = None
 
 
 @dataclass(frozen=True, slots=True)

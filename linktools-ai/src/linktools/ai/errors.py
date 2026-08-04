@@ -93,6 +93,10 @@ class StorageConflictError(StorageError, ValueError):
     """A compare-and-swap, lease, or revision update lost a race."""
 
 
+class RecoveryConflictError(StorageConflictError):
+    """Another owner won the exclusive recovery claim."""
+
+
 class StorageCorruptionError(StorageError):
     """Required local or database persistence data is missing or malformed."""
 

@@ -220,14 +220,7 @@ class SqlAlchemyTaskBackend:
                     )
                 now = datetime.now(timezone.utc)
                 current_lease = Lease(row.owner, row.fence, row.lease_expires_at)
-                if row.status == TaskStatus.READY.value:
-                    pass
-                elif row.status == TaskStatus.CLAIMED.value and is_expired(
-                    current_lease, now
-                ):
-                    # an expired CLAIMED lease is reclaimable as if READY
-                    pass
-                else:
+                if row.status != TaskStatus.READY.value:
                     raise StorageConflictError(
                         f"task {execution_id!r} is {row.status}, not claimable"
                     )
@@ -263,6 +256,43 @@ class SqlAlchemyTaskBackend:
                 row.updated_at = now
                 return self._execution(row)
 
+    async def take_over_expired_claim_for_reconcile(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration: timedelta,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._execution_row(session, execution_id)
+                if row is None:
+                    raise StorageConflictError(f"task execution {execution_id!r} not found")
+                current_lease = Lease(row.owner, row.fence, row.lease_expires_at)
+                if row.status != TaskStatus.CLAIMED.value or not is_expired(current_lease, now):
+                    raise StorageConflictError("task is not an expired CLAIMED execution")
+                new_lease = claim(current_lease, owner=owner, now=now, duration=duration)
+                result = await session.execute(
+                    update(ExecutionRow)
+                    .where(
+                        ExecutionRow.execution_id == execution_id,
+                        ExecutionRow.status == TaskStatus.CLAIMED.value,
+                        ExecutionRow.owner == row.owner,
+                        ExecutionRow.fence == row.fence,
+                        ExecutionRow.lease_expires_at <= now,
+                    )
+                    .execution_options(synchronize_session=False)
+                    .values(owner=owner, fence=new_lease.fence, lease_expires_at=new_lease.expires_at, updated_at=now)
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("expired task reconcile lost the race")
+                row.owner = owner
+                row.fence = new_lease.fence
+                row.lease_expires_at = new_lease.expires_at
+                row.updated_at = now
+                return self._execution(row)
+
     async def bind_child_run(
         self,
         execution_id: str,
@@ -280,7 +310,7 @@ class SqlAlchemyTaskBackend:
                     )
                 now = datetime.now(timezone.utc)
                 result = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence).values(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
                         active_run_id=child_run_id,
                         updated_at=now,
                     )
@@ -311,7 +341,7 @@ class SqlAlchemyTaskBackend:
                     duration=duration,
                 )
                 result = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence).values(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
                         lease_expires_at=new_lease.expires_at,
                         updated_at=now,
                     )
@@ -336,7 +366,7 @@ class SqlAlchemyTaskBackend:
                 row = await self._claimed_row(session, execution_id, owner, fence)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence).values(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
                         status=TaskStatus.COMPLETED.value,
                         result=result,
                         usage=_encode_usage(usage),
@@ -367,7 +397,7 @@ class SqlAlchemyTaskBackend:
                 row = await self._claimed_row(session, execution_id, owner, fence)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence).values(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
                         status=TaskStatus.FAILED.value,
                         error=_encode_error(error),
                         usage=_encode_usage(usage),
@@ -479,7 +509,7 @@ class SqlAlchemyTaskBackend:
                 row = await self._claimed_row(session, execution_id, owner, fence)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence).values(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
                         status=TaskStatus.CANCELLED.value,
                         terminal_reason=reason,
                         usage=_encode_usage(usage),
@@ -512,15 +542,25 @@ class SqlAlchemyTaskBackend:
             )
         if row.owner != owner or row.fence != fence:
             raise StorageConflictError("stale fence for task execution")
+        expires_at = row.lease_expires_at
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at is None or expires_at <= datetime.now(timezone.utc):
+            raise StorageConflictError("task execution lease expired")
         return row
 
     @staticmethod
-    def _claimed_guard(execution_id: str, owner: str, fence: int):
-        return update(ExecutionRow).where(
-            ExecutionRow.execution_id == execution_id,
-            ExecutionRow.status == TaskStatus.CLAIMED.value,
-            ExecutionRow.owner == owner,
-            ExecutionRow.fence == fence,
+    def _claimed_guard(execution_id: str, owner: str, fence: int, now: datetime):
+        return (
+            update(ExecutionRow)
+            .where(
+                ExecutionRow.execution_id == execution_id,
+                ExecutionRow.status == TaskStatus.CLAIMED.value,
+                ExecutionRow.owner == owner,
+                ExecutionRow.fence == fence,
+                ExecutionRow.lease_expires_at > now,
+            )
+            .execution_options(synchronize_session=False)
         )
 
 
@@ -541,6 +581,8 @@ def _encode_usage(usage: TaskUsage) -> "dict[str, JsonValue]":
         "total_cost": (
             None if usage.total_cost is None else format(usage.total_cost, "f")
         ),
+        "cache_write_tokens": usage.cache_write_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
     }
 
 
@@ -552,6 +594,8 @@ def _decode_usage(value: "Any") -> TaskUsage:
         input_tokens=int(value.get("input_tokens", 0)),
         output_tokens=int(value.get("output_tokens", 0)),
         total_cost=Decimal(total_cost) if total_cost is not None else None,
+        cache_write_tokens=int(value.get("cache_write_tokens", 0)),
+        cache_read_tokens=int(value.get("cache_read_tokens", 0)),
     )
 
 

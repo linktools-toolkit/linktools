@@ -9,6 +9,7 @@ SwarmSpec. Parse failures propagate the domain's existing errors
 swarm/spec.py."""
 
 
+from dataclasses import dataclass
 from typing import Any
 
 from collections.abc import Mapping
@@ -30,6 +31,33 @@ from .spec import (
     SwarmSpec,
     SwarmStrategySpec,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmStrategyDefaults:
+    limits: SwarmLimits
+    aggregation: AggregationPolicy
+
+
+def defaults_for_strategy(kind: str) -> SwarmStrategyDefaults:
+    if kind == "task_graph":
+        return SwarmStrategyDefaults(
+            limits=SwarmLimits(
+                max_rounds=1,
+                max_tasks=DEFAULT_SWARM_LIMITS.max_tasks,
+                max_delegations=0,
+                max_depth=0,
+                max_concurrency=DEFAULT_SWARM_LIMITS.max_concurrency,
+                max_total_tokens=DEFAULT_SWARM_LIMITS.max_total_tokens,
+                max_total_cost=DEFAULT_SWARM_LIMITS.max_total_cost,
+                timeout_seconds=DEFAULT_SWARM_LIMITS.timeout_seconds,
+            ),
+            aggregation=AggregationPolicy(mode=AggregationMode.COLLECT),
+        )
+    return SwarmStrategyDefaults(
+        limits=DEFAULT_SWARM_LIMITS,
+        aggregation=AggregationPolicy(),
+    )
 
 
 def _parse_agent_ref(item: Any, *, swarm_id: str, kind: str) -> AgentRef:
@@ -134,10 +162,12 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
             raise InvalidSpecError(f"swarm {swarm_id}: 'coordinator' is required")
         coordinator = _parse_agent_ref(coord_raw, swarm_id=swarm_id, kind="coordinator")
 
-    # limits — fall back to DEFAULT_SWARM_LIMITS; missing fields inherit defaults.
+    defaults = defaults_for_strategy(strategy.kind)
+
+    # limits — missing fields inherit strategy-specific defaults.
     limits_raw = payload.get("limits")
     if limits_raw is None:
-        limits = DEFAULT_SWARM_LIMITS
+        limits = defaults.limits
     elif isinstance(limits_raw, dict):
         limits_reader = StrictConfigReader(
             limits_raw,
@@ -155,24 +185,24 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
         )
         limits = SwarmLimits(
             max_rounds=limits_reader.positive_int(
-                "max_rounds", DEFAULT_SWARM_LIMITS.max_rounds
+                "max_rounds", defaults.limits.max_rounds
             ),
             max_tasks=limits_reader.positive_int(
-                "max_tasks", DEFAULT_SWARM_LIMITS.max_tasks
+                "max_tasks", defaults.limits.max_tasks
             ),
             max_delegations=limits_reader.non_negative_int(
-                "max_delegations", DEFAULT_SWARM_LIMITS.max_delegations
+                "max_delegations", defaults.limits.max_delegations
             ),
             max_depth=limits_reader.non_negative_int(
-                "max_depth", DEFAULT_SWARM_LIMITS.max_depth
+                "max_depth", defaults.limits.max_depth
             ),
             max_concurrency=limits_reader.positive_int(
-                "max_concurrency", DEFAULT_SWARM_LIMITS.max_concurrency
+                "max_concurrency", defaults.limits.max_concurrency
             ),
             max_total_tokens=limits_reader.positive_int("max_total_tokens"),
             max_total_cost=limits_reader.non_negative_decimal("max_total_cost"),
             timeout_seconds=limits_reader.positive_number(
-                "timeout_seconds", DEFAULT_SWARM_LIMITS.timeout_seconds
+                "timeout_seconds", defaults.limits.timeout_seconds
             ),
         )
     else:
@@ -202,10 +232,10 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
             ),
         )
 
-    # aggregation — string or {mode: ...}, default CONCAT.
+    # aggregation — string or {mode: ...}, default strategy policy.
     agg_raw = payload.get("aggregation")
     if agg_raw is None:
-        aggregation = AggregationPolicy()
+        aggregation = defaults.aggregation
     elif isinstance(agg_raw, str):
         try:
             aggregation = AggregationPolicy(mode=AggregationMode(agg_raw))
@@ -219,7 +249,7 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
             allowed={"mode"},
             context=f"swarm {swarm_id}.aggregation",
         )
-        mode_raw = agg_reader.optional_str("mode") or AggregationMode.CONCAT.value
+        mode_raw = agg_reader.optional_str("mode") or defaults.aggregation.mode.value
         try:
             aggregation = AggregationPolicy(mode=AggregationMode(mode_raw))
         except ValueError as exc:
@@ -310,13 +340,14 @@ def decode_swarm_spec(value: "JsonValue") -> SwarmSpec:
     )
     strat = data.get("strategy") or {}
     strategy = SwarmStrategySpec(kind=str(strat.get("kind", "")), config=dict(strat.get("config") or {}))
+    strategy_kind = strategy.kind
     return SwarmSpec(
         id=str(data.get("id", "")),
         name=str(data.get("name", "")),
         agents=agents,
         coordinator=coordinator,
         strategy=strategy,
-        limits=_decode_limits(data.get("limits")),
+        limits=_decode_limits(data.get("limits"), strategy_kind),
         context_policy=SwarmContextPolicy(
             coordinator_reads_session=bool(
                 (data.get("context_policy") or {}).get("coordinator_reads_session", True)
@@ -331,7 +362,13 @@ def decode_swarm_spec(value: "JsonValue") -> SwarmSpec:
                 (data.get("context_policy") or {}).get("write_aggregate_to_session", True)
             ),
         ),
-        aggregation=AggregationPolicy(mode=AggregationMode((data.get("aggregation") or {}).get("mode", "concat"))),
+        aggregation=AggregationPolicy(
+            mode=AggregationMode(
+                (data.get("aggregation") or {}).get(
+                    "mode", defaults_for_strategy(strategy_kind).aggregation.mode.value
+                )
+            )
+        ),
         middleware=tuple(
             MiddlewareRef(name=str(m["name"]), config=dict(m.get("config") or {}))
             for m in data.get("middleware", ())
@@ -355,20 +392,21 @@ def _encode_limits(limits: "SwarmLimits") -> "JsonValue":
     }
 
 
-def _decode_limits(value: "JsonValue") -> "SwarmLimits":
+def _decode_limits(value: "JsonValue", strategy_kind: str = "") -> "SwarmLimits":
     from decimal import Decimal
 
     data = value if isinstance(value, dict) else {}
+    defaults = defaults_for_strategy(strategy_kind).limits
     cost = data.get("max_total_cost")
     return SwarmLimits(
-        max_rounds=int(data.get("max_rounds", 1)),
-        max_tasks=int(data.get("max_tasks", 50)),
-        max_delegations=int(data.get("max_delegations", 0)),
-        max_depth=int(data.get("max_depth", 0)),
-        max_concurrency=int(data.get("max_concurrency", 4)),
+        max_rounds=int(data.get("max_rounds", defaults.max_rounds)),
+        max_tasks=int(data.get("max_tasks", defaults.max_tasks)),
+        max_delegations=int(data.get("max_delegations", defaults.max_delegations)),
+        max_depth=int(data.get("max_depth", defaults.max_depth)),
+        max_concurrency=int(data.get("max_concurrency", defaults.max_concurrency)),
         max_total_tokens=data.get("max_total_tokens"),
         max_total_cost=Decimal(cost) if cost is not None else None,
-        timeout_seconds=data.get("timeout_seconds"),
+        timeout_seconds=data.get("timeout_seconds", defaults.timeout_seconds),
     )
 
 
@@ -377,4 +415,6 @@ __all__: "list[str]" = [
     "decode_swarm_spec",
     "encode_swarm_spec",
     "parse_swarm_spec",
+    "SwarmStrategyDefaults",
+    "defaults_for_strategy",
 ]

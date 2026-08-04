@@ -5,7 +5,7 @@
 
 import asyncio
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -235,6 +235,13 @@ def _record(row: ExecutionRow) -> RunRecord:
         error=RunError(**data["error"]) if data.get("error") else None,
         input=data.get("input"),
     )
+
+
+def _snapshot_usage_payload(usage: RunUsage) -> dict[str, JsonValue]:
+    raw = asdict(usage)
+    if raw["total_cost"] is not None:
+        raw["total_cost"] = format(raw["total_cost"], "f")
+    return raw
 
 
 class SqlAlchemyExecutionBackend:
@@ -628,6 +635,63 @@ class SqlAlchemyExecutionBackend:
                     )
                 )
                 await session.flush()
+                return _record(row)
+
+    async def claim_run_for_recovery(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration: timedelta,
+    ) -> RunRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._run_row(session, run_id)
+                if row is None:
+                    raise StorageError("unknown run")
+                if row.status not in {
+                    RunStatus.PENDING.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.CANCELLING.value,
+                }:
+                    raise StorageConflictError("terminal or paused run cannot be recovered")
+                current = Lease(row.owner, row.fence, row.lease_expires_at)
+                target_status = (
+                    RunStatus.RUNNING.value
+                    if row.status == RunStatus.PENDING.value
+                    else row.status
+                )
+                if row.status != RunStatus.PENDING.value and (row.lease_expires_at is None or not is_expired(current, now)):
+                    raise StorageConflictError("run recovery lease is still active")
+                new_lease = claim(current, owner=owner, now=now, duration=duration)
+                recovery_conditions = [
+                    ExecutionRow.execution_id == run_id,
+                    ExecutionRow.status == row.status,
+                    ExecutionRow.owner == row.owner,
+                    ExecutionRow.fence == row.fence,
+                ]
+                if row.status != RunStatus.PENDING.value:
+                    recovery_conditions.append(ExecutionRow.lease_expires_at <= now)
+                result = await session.execute(
+                    update(ExecutionRow)
+                    .where(*recovery_conditions)
+                    .execution_options(synchronize_session=False)
+                    .values(
+                        status=target_status,
+                        owner=owner,
+                        fence=new_lease.fence,
+                        lease_expires_at=new_lease.expires_at,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("run recovery claim conflict")
+                row.status = target_status
+                row.owner = owner
+                row.fence = new_lease.fence
+                row.lease_expires_at = new_lease.expires_at
+                row.updated_at = now
                 return _record(row)
 
     async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
@@ -1111,7 +1175,7 @@ class SqlAlchemyExecutionBackend:
                             resume_messages=checkpoint,
                             outcome={
                                 "final_output": snapshot.final_output,
-                                "usage": asdict(snapshot.usage),
+                                "usage": _snapshot_usage_payload(snapshot.usage),
                             },
                             status=status.value,
                             trace_end_sequence=snapshot.trace_end_sequence,
@@ -1132,7 +1196,7 @@ class SqlAlchemyExecutionBackend:
                         checkpoint,
                         {
                             "final_output": snapshot.final_output,
-                            "usage": asdict(snapshot.usage),
+                            "usage": _snapshot_usage_payload(snapshot.usage),
                         },
                         status.value,
                         snapshot.trace_end_sequence,
@@ -1225,20 +1289,26 @@ class SqlAlchemyExecutionBackend:
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
-                assert_owner(
-                    record, command.owner, command.fence, datetime.now(timezone.utc)
-                )
+                if record.status is not RunStatus.PENDING:
+                    assert_owner(
+                        record, command.owner, command.fence, datetime.now(timezone.utc)
+                    )
                 assert_transition(record.status, RunStatus.FAILED)
                 event_sequence = row.event_sequence + 1
                 now = datetime.now(timezone.utc)
+                snapshot_revision = row.snapshot_revision + (1 if command.persist_snapshot else 0)
                 result = await session.execute(
                     update(ExecutionRow)
                     .where(
                         ExecutionRow.execution_id == command.run_id,
                         ExecutionRow.status == row.status,
-                        ExecutionRow.owner == command.owner,
-                        ExecutionRow.fence == command.fence,
+                        ExecutionRow.fence == row.fence,
                         ExecutionRow.event_sequence == row.event_sequence,
+                        *(
+                            ()
+                            if record.status is RunStatus.PENDING
+                            else (ExecutionRow.owner == command.owner,)
+                        ),
                     )
                     .values(
                         status=RunStatus.FAILED.value,
@@ -1246,6 +1316,7 @@ class SqlAlchemyExecutionBackend:
                         owner=None,
                         lease_expires_at=None,
                         trace_sequence=command.trace_end_sequence,
+                        snapshot_revision=snapshot_revision,
                         updated_at=now,
                         event_sequence=event_sequence,
                     )
@@ -1259,8 +1330,25 @@ class SqlAlchemyExecutionBackend:
                 row.owner = None
                 row.lease_expires_at = None
                 row.trace_sequence = command.trace_end_sequence
+                row.snapshot_revision = snapshot_revision
                 row.updated_at = now
                 row.event_sequence = event_sequence
+                if command.persist_snapshot:
+                    session.add(
+                        SnapshotRow(
+                            execution_id=command.run_id,
+                            revision=snapshot_revision,
+                            resume_messages=[],
+                            outcome={
+                                "final_output": command.snapshot.final_output,
+                                "usage": _snapshot_usage_payload(command.snapshot.usage),
+                            },
+                            status=RunStatus.FAILED.value,
+                            trace_end_sequence=command.snapshot.trace_end_sequence,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
                 session.add(
                     EventRow(
                         execution_id=row.execution_id,

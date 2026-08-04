@@ -153,6 +153,8 @@ def _encode_usage(usage: TaskUsage) -> "JsonValue":
         "total_cost": (
             None if usage.total_cost is None else format(usage.total_cost, "f")
         ),
+        "cache_write_tokens": usage.cache_write_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
     }
 
 
@@ -168,6 +170,8 @@ def _decode_usage(value: "JsonValue", context: str) -> TaskUsage:
         input_tokens=_int_field(data, "input_tokens", context),
         output_tokens=_int_field(data, "output_tokens", context),
         total_cost=total_cost,
+        cache_write_tokens=int(data.get("cache_write_tokens", 0)),
+        cache_read_tokens=int(data.get("cache_read_tokens", 0)),
     )
 
 

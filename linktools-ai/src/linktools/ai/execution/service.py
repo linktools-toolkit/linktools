@@ -30,12 +30,12 @@ from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
 from ..observability.events.payloads import SecurityDegraded
 from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
-from .domain import MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage
+from .domain import MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage, sanitize_run_error
 from .context import RunContext
 from .cancellation import CancellationToken
 from .controller import ExecutionControllerRegistry
 from .query import ExecutionResultView
-from .snapshots import AgentSnapshotData
+from .snapshots import AgentSnapshotData, RunUsageCapture
 from . import trace_codec
 from .trace_collector import SemanticTraceCollector
 
@@ -105,6 +105,14 @@ class ChildRunResult:
     usage: "TaskUsage"
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedAgentExecution:
+    agent_spec: "AgentSpec"
+    assembled_agent: object
+    tool_descriptors: "tuple[object, ...]"
+    fingerprint: str
+
+
 def _outcome_usage(outcome: "object | None", record: "RunRecord | None") -> "TaskUsage":
     """Pull the real token/cost usage out of an AgentExecutionOutcome (or fall
     back to the persisted record's RunUsage). Cost stays None unless every agent
@@ -121,12 +129,26 @@ def _outcome_usage(outcome: "object | None", record: "RunRecord | None") -> "Tas
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_cost=total_cost,
+            cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
+            cache_read_tokens=getattr(usage, "cache_read_tokens", 0),
         )
     if record is not None:
         return TaskUsage(input_tokens=0, output_tokens=0, total_cost=None)
     from ..tasks.models import TaskUsage as _TU
 
     return _TU()
+
+
+def _task_usage_from_run_usage(usage: RunUsage) -> "TaskUsage":
+    from ..tasks.models import TaskUsage
+
+    return TaskUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        total_cost=usage.total_cost,
+        cache_write_tokens=usage.cache_write_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+    )
 
 
 def _child_result_from_outcome(
@@ -138,6 +160,24 @@ def _child_result_from_outcome(
         output = outcome.result.output
     usage = _outcome_usage(outcome, record)
     return ChildRunResult(run_id=run_id, status=record.status, output=output, error=error, usage=usage)
+
+
+async def _child_result_from_persistence(
+    store: "ExecutionStore",
+    run_id: str,
+    outcome: "object | None",
+    record: "RunRecord",
+) -> "ChildRunResult":
+    snapshot = await store.get_snapshot(run_id)
+    if snapshot is None:
+        return _child_result_from_outcome(run_id, outcome, record)
+    return ChildRunResult(
+        run_id=run_id,
+        status=record.status,
+        output=snapshot.final_output if record.status is RunStatus.COMPLETED else None,
+        error=record.error,
+        usage=_task_usage_from_run_usage(snapshot.usage),
+    )
 
 
 class ExecutionService:
@@ -271,6 +311,7 @@ class ExecutionService:
         parent_execution_id: str,
         message_history: "tuple[object, ...]" = (),
         metadata: "Mapping[str, Any] | None" = None,
+        prepared_execution: "PreparedAgentExecution | None" = None,
     ) -> "ChildRunResult":
         """Run one agent as a swarm child: a TASK run that propagates the parent
         and root execution ids, reads the parent's immutable message snapshot,
@@ -279,13 +320,19 @@ class ExecutionService:
         the agent sees upstream results without session cross-talk."""
         if not isinstance(principal, PrincipalContext):
             raise TypeError("principal must be a PrincipalContext")
-        assembly = await self._preflight(
-            spec,
-            execution_id=execution_id,
-            session_id=session_id,
-            root_execution_id=root_execution_id,
-            parent_execution_id=parent_execution_id,
-            principal=principal,
+        if prepared_execution is not None and prepared_execution.agent_spec.id != spec.id:
+            raise RuntimeInitializationError("agent_preflight_failed")
+        assembly = (
+            prepared_execution.assembled_agent
+            if prepared_execution is not None
+            else await self._preflight(
+                spec,
+                execution_id=execution_id,
+                session_id=session_id,
+                root_execution_id=root_execution_id,
+                parent_execution_id=parent_execution_id,
+                principal=principal,
+            )
         )
         record = await self._store.start_run(
             StartExecution(
@@ -315,6 +362,7 @@ class ExecutionService:
             metadata=metadata or {},
         )
         collector = SemanticTraceCollector(claimed.id, self._store, claimed.trace_sequence)
+        usage_capture = RunUsageCapture()
         decoded_history = decode_model_messages(message_history) if message_history else ()
         token = CancellationToken()
         agent_input = AgentInput(prompt=prompt, message_history=decoded_history, metadata=metadata or {})
@@ -331,6 +379,7 @@ class ExecutionService:
                 assembly=assembly,
                 trace_sequence=claimed.trace_sequence,
                 trace_collector=collector,
+                usage_sink=usage_capture,
             ),
             token,
         )
@@ -360,18 +409,32 @@ class ExecutionService:
                 except (asyncio.CancelledError, Exception):
                     pass
             latest = await self._required(execution_id)
-            await self._converge_child_cancel(claimed, owner)
+            await self._converge_child_cancel(
+                claimed, owner, _task_usage_from_run_usage(usage_capture.snapshot())
+            )
             return ChildRunResult(
                 run_id=execution_id,
                 status=RunStatus.CANCELLED,
                 output=None,
                 error=latest.error,
-                usage=_outcome_usage(outcome, None),
+                usage=_task_usage_from_run_usage(usage_capture.snapshot()),
             )
         except Exception as exc:
             trace_end = await collector.flush()
             await self._store.abort_run(
-                AbortExecution(claimed.id, owner, claimed.lease.fence, RunError(type(exc).__name__, str(exc)), trace_end)
+                AbortExecution(
+                    claimed.id,
+                    owner,
+                    claimed.lease.fence,
+                    AgentSnapshotData(
+                        delta_messages=(),
+                        final_output=None,
+                        usage=usage_capture.snapshot(),
+                        trace_end_sequence=trace_end,
+                        capture_state=MessageCaptureState.PARTIAL,
+                    ),
+                    RunError(type(exc).__name__, "child execution failed"),
+                )
             )
             raise
         finally:
@@ -384,7 +447,9 @@ class ExecutionService:
         snapshot = _snapshot(outcome) if outcome is not None else None
         latest = await self._required(execution_id)
         if latest.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-            return _child_result_from_outcome(execution_id, outcome, latest)
+            return await _child_result_from_persistence(
+                self._store, execution_id, outcome, latest
+            )
         if isinstance(outcome, AgentCompleted):
             await self._store.complete_run(
                 CompleteExecution(claimed.id, owner, claimed.lease.fence, snapshot)
@@ -401,12 +466,8 @@ class ExecutionService:
                 )
             )
             latest = await self._required(execution_id)
-            return ChildRunResult(
-                run_id=execution_id,
-                status=latest.status,
-                output=None,
-                error=latest.error,
-                usage=_outcome_usage(outcome, None),
+            return await _child_result_from_persistence(
+                self._store, execution_id, outcome, latest
             )
         elif isinstance(outcome, AgentCancelled):
             await self._store.acknowledge_cancel(
@@ -417,9 +478,13 @@ class ExecutionService:
                 FailExecution(claimed.id, owner, claimed.lease.fence, snapshot, outcome.error)
             )
         latest = await self._required(execution_id)
-        return _child_result_from_outcome(execution_id, outcome, latest)
+        return await _child_result_from_persistence(
+            self._store, execution_id, outcome, latest
+        )
 
-    async def _converge_child_cancel(self, record: "RunRecord", owner: str) -> None:
+    async def _converge_child_cancel(
+        self, record: "RunRecord", owner: str, usage: "TaskUsage"
+    ) -> None:
         latest = await self._required(record.id)
         if latest.status is RunStatus.RUNNING:
             await self._store.request_cancel(
@@ -430,7 +495,16 @@ class ExecutionService:
             await self._store.acknowledge_cancel(
                 AcknowledgeCancellation(
                     record.id, owner, record.lease.fence,
-                    AgentSnapshotData((), None, RunUsage(), record.trace_sequence, MessageCaptureState.PARTIAL),
+                    AgentSnapshotData(
+                        (), None, RunUsage(
+                            input_tokens=usage.input_tokens,
+                            output_tokens=usage.output_tokens,
+                            total_tokens=usage.total_tokens,
+                            total_cost=usage.total_cost,
+                            cache_write_tokens=usage.cache_write_tokens,
+                            cache_read_tokens=usage.cache_read_tokens,
+                        ), record.trace_sequence, MessageCaptureState.PARTIAL
+                    ),
                 )
             )
 
@@ -464,6 +538,62 @@ class ExecutionService:
                 "agent tools require ToolStateStore and ToolPolicyResolver"
             )
         return assembly
+
+    async def prepare_agent_execution(
+        self,
+        agent_spec: "AgentSpec",
+        *,
+        principal: PrincipalContext,
+        session_id: str,
+        execution_id: str,
+        root_execution_id: str,
+        parent_execution_id: "str | None",
+    ) -> PreparedAgentExecution:
+        """Assemble and freeze the exact tool surface used by a child run."""
+        if not isinstance(principal, PrincipalContext):
+            raise RuntimeInitializationError("agent_preflight_failed")
+        try:
+            assembly = await self._preflight(
+                agent_spec,
+                execution_id=execution_id,
+                session_id=session_id,
+                root_execution_id=root_execution_id,
+                parent_execution_id=parent_execution_id,
+                principal=principal,
+            )
+        except Exception as exc:
+            if isinstance(exc, RuntimeInitializationError):
+                raise
+            raise RuntimeInitializationError("agent_preflight_failed") from exc
+        try:
+            descriptors = []
+            for tool in getattr(assembly, "tools", ()):
+                descriptor = getattr(tool, "descriptor", None)
+                if descriptor is None:
+                    raise RuntimeInitializationError("agent_preflight_failed")
+                descriptors.append(descriptor)
+                if descriptor.mutating:
+                    raise RuntimeInitializationError("mutating_tool_not_allowed")
+            encoded_spec = self._codec.encode(agent_spec)
+            tool_fingerprints = [descriptor.fingerprint() for descriptor in descriptors]
+        except RuntimeInitializationError:
+            raise
+        except Exception as exc:
+            raise RuntimeInitializationError("agent_preflight_failed") from exc
+        fingerprint = sha256(
+            canonical_json_bytes(
+                {
+                    "agent": encoded_spec,
+                    "tools": tool_fingerprints,
+                }
+            )
+        ).hexdigest()
+        return PreparedAgentExecution(
+            agent_spec=agent_spec,
+            assembled_agent=assembly,
+            tool_descriptors=tuple(descriptors),
+            fingerprint=fingerprint,
+        )
 
     async def cancel(self, run_id: str, *, principal: PrincipalContext) -> None:
         if not isinstance(principal, PrincipalContext):
@@ -586,7 +716,7 @@ class ExecutionService:
                             SecurityDegraded(
                                 run_id=record.id,
                                 component="execution_cancel_cleanup",
-                                reason=str(cleanup_error),
+                                reason="execution cancel cleanup failed",
                                 error_code=type(cleanup_error).__name__,
                             )
                         )
@@ -607,7 +737,21 @@ class ExecutionService:
             # what the caller must see.
             try:
                 trace_end = await collector.flush()
-                await self._store.abort_run(AbortExecution(record.id, owner, record.lease.fence, RunError(type(exc).__name__, str(exc)), trace_end))
+                await self._store.abort_run(
+                    AbortExecution(
+                        record.id,
+                        owner,
+                        record.lease.fence,
+                        AgentSnapshotData(
+                            delta_messages=(),
+                            final_output=None,
+                            usage=RunUsage(),
+                            trace_end_sequence=trace_end,
+                            capture_state=MessageCaptureState.PARTIAL,
+                        ),
+                        sanitize_run_error(exc),
+                    )
+                )
             except Exception as abort_exc:
                 logger.warning(
                     "run %s abort/flush failed (run may strand in RUNNING): %s: %s",
@@ -700,4 +844,4 @@ def spec_type(record: "RunRecord") -> RunnableType:
     return record.definition.runnable_type
 
 
-__all__ = ["ExecutionService", "spec_type"]
+__all__ = ["ExecutionService", "PreparedAgentExecution", "spec_type"]

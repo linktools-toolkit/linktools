@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from linktools.core import environ
 
-from ...storage.coordination.lease import Lease, claim, release, renew
+from ...storage.coordination.lease import Lease, claim, is_expired, release, renew
 from ...storage.database import CoordinationScope
 from ...errors import StorageConflictError, StorageCorruptionError, StorageError
 from ...storage.local.files import (
@@ -123,6 +123,14 @@ def _snapshot(raw: dict) -> RunSnapshot:
     raw["usage"] = RunUsage(**raw["usage"])
     raw["created_at"] = _dt(raw["created_at"])
     return RunSnapshot(**raw)
+
+
+def _snapshot_json(snapshot: RunSnapshot) -> dict:
+    raw = asdict(snapshot)
+    usage = raw["usage"]
+    if usage["total_cost"] is not None:
+        usage["total_cost"] = format(usage["total_cost"], "f")
+    return raw
 
 
 logger = environ.get_logger("ai.execution.persistence.local")
@@ -582,6 +590,36 @@ class LocalExecutionBackend:
             )
             return updated
 
+    async def claim_run_for_recovery(
+        self,
+        run_id: str,
+        *,
+        owner: str,
+        now: datetime,
+        duration,
+    ) -> RunRecord:
+        await self.get_run(run_id)
+        async with self._locks.acquire(("run", run_id)):
+            record = await self._required_run(run_id)
+            if record.status is RunStatus.PENDING:
+                target = RunStatus.RUNNING
+            elif record.status in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+                if record.lease.expires_at is None or not is_expired(record.lease, now):
+                    raise StorageConflictError("run recovery lease is still active")
+                target = record.status
+            else:
+                raise StorageConflictError("terminal or paused run cannot be recovered")
+            updated = replace(
+                record,
+                status=target,
+                lease=claim(record.lease, owner=owner, now=now, duration=duration),
+                updated_at=now,
+            )
+            await asyncio.to_thread(
+                atomic_write_json, self._run_path(run_id), asdict(updated)
+            )
+            return updated
+
     async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         await self.get_run(command.run_id)
         async with self._locks.acquire(("run", command.run_id)):
@@ -775,7 +813,7 @@ class LocalExecutionBackend:
                         )
                     )
                 )
-                additional = (
+                additional = additional + (
                     (
                         self._turn_path(
                             record.session_id, record.session_turn_sequence
@@ -846,19 +884,39 @@ class LocalExecutionBackend:
             ("session", current.session_id), ("run", command.run_id)
         ):
             record = await self._required_run(command.run_id)
-            assert_owner(record, command.owner, command.fence, _now())
+            if record.status is not RunStatus.PENDING:
+                assert_owner(record, command.owner, command.fence, _now())
             assert_transition(record.status, RunStatus.FAILED)
             now = _now()
+            snapshot_revision = record.snapshot_revision
+            if command.persist_snapshot:
+                snapshot_revision += 1
             updated = replace(
                 record,
                 status=RunStatus.FAILED,
                 error=command.error,
                 lease=release(record.lease),
                 trace_sequence=command.trace_end_sequence,
+                snapshot_revision=snapshot_revision,
                 event_sequence=record.event_sequence + 1,
                 updated_at=now,
             )
             additional = ()
+            if command.persist_snapshot:
+                stored_snapshot = RunSnapshot(
+                    "run-snapshot.v1",
+                    command.run_id,
+                    snapshot_revision,
+                    (),
+                    command.snapshot.final_output,
+                    RunStatus.FAILED,
+                    command.snapshot.usage,
+                    command.snapshot.trace_end_sequence,
+                    now,
+                )
+                additional = (
+                    (self._snapshot_path(command.run_id), _snapshot_json(stored_snapshot)),
+                )
             if record.session_turn_sequence is not None:
                 turn = _turn(
                     dict(
@@ -872,7 +930,7 @@ class LocalExecutionBackend:
                 )
                 # abort_run fires before the engine produced a snapshot, so this
                 # turn has no trustworthy delta -> UNAVAILABLE.
-                additional = (
+                additional = additional + (
                     (
                         self._turn_path(
                             record.session_id, record.session_turn_sequence
@@ -948,7 +1006,7 @@ class LocalExecutionBackend:
                 updated_at=now,
             )
             writes: "list[tuple[Path, object, bool]]" = [
-                (self._snapshot_path(run_id), asdict(stored_snapshot), False),
+                (self._snapshot_path(run_id), _snapshot_json(stored_snapshot), False),
                 (
                     self._numbered(run_id, "events", updated.event_sequence),
                     asdict(

@@ -162,6 +162,8 @@ class TaskUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     total_cost: "Decimal | None" = None
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -176,6 +178,12 @@ class TaskUsage:
             or self.output_tokens < 0
         ):
             raise ValueError("output_tokens must be a non-negative int")
+        for name, value in (
+            ("cache_write_tokens", self.cache_write_tokens),
+            ("cache_read_tokens", self.cache_read_tokens),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative int")
         if self.total_cost is not None:
             if not isinstance(self.total_cost, Decimal):
                 raise ValueError("total_cost must be a Decimal or None")
@@ -194,11 +202,46 @@ class TaskUsage:
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             total_cost=cost,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
         )
 
     @property
     def cost_known(self) -> bool:
         return self.total_cost is not None
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
+@dataclass(slots=True)
+class UsageAccumulator:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_cost: Decimal = Decimal("0")
+    cost_known: bool = True
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+
+    def add(self, usage: TaskUsage) -> None:
+        self.input_tokens += usage.input_tokens
+        self.output_tokens += usage.output_tokens
+        self.cache_write_tokens += usage.cache_write_tokens
+        self.cache_read_tokens += usage.cache_read_tokens
+        if usage.total_cost is None:
+            self.cost_known = False
+        else:
+            self.total_cost += usage.total_cost
+
+    def freeze(self) -> TaskUsage:
+        return TaskUsage(
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            total_cost=self.total_cost if self.cost_known else None,
+            cache_write_tokens=self.cache_write_tokens,
+            cache_read_tokens=self.cache_read_tokens,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,4 +320,5 @@ __all__ = [
     "TaskPlan",
     "TaskStatus",
     "TaskUsage",
+    "UsageAccumulator",
 ]
