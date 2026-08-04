@@ -25,9 +25,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from linktools.core import environ
-from ...storage.coordination.lease import Lease, claim, renew
+from ...storage.coordination.lease import Lease, claim, is_expired, renew
 from ...storage.database import CoordinationScope
-from ...errors import StorageConflictError, StorageError
+from ...errors import (
+    ParentLeaseGuardError,
+    StorageConflictError,
+    StorageCorruptionError,
+    StorageError,
+)
 from ...json import JsonValue, normalize_json
 from ..lifecycle import (
     assert_approval_decided,
@@ -471,8 +476,51 @@ class SqlAlchemyExecutionBackend:
                 owner = await self._session_row(session, command.session_id)
                 if owner is None:
                     raise StorageError("unknown session")
-                if await self._run_row(session, command.run_id) is not None:
-                    raise StorageConflictError("run already exists")
+                if (
+                    command.kind is RunKind.TASK
+                    and command.parent_execution_id is not None
+                    and command.parent_guard is None
+                ):
+                    raise ParentLeaseGuardError("task_graph child requires parent guard")
+                if (
+                    command.parent_guard is not None
+                    and command.parent_execution_id != command.parent_guard.run_id
+                ):
+                    raise ParentLeaseGuardError(
+                        "parent lease guard does not match child parent"
+                    )
+                existing = await self._run_row(session, command.run_id)
+                if existing is not None:
+                    if _record(existing).definition == command.definition:
+                        return _record(existing)
+                    raise StorageCorruptionError(
+                        "run id reused with a different definition"
+                    )
+                if command.parent_guard is not None:
+                    parent = await session.scalar(
+                        select(ExecutionRow)
+                        .where(
+                            ExecutionRow.execution_id
+                            == command.parent_guard.run_id
+                        )
+                        .with_for_update()
+                    )
+                    now = datetime.now(timezone.utc)
+                    if parent is None:
+                        raise ParentLeaseGuardError("parent run does not exist")
+                    parent_lease = Lease(
+                        parent.owner, parent.fence, parent.lease_expires_at
+                    )
+                    if (
+                        parent.status
+                        not in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}
+                        or parent.owner != command.parent_guard.owner
+                        or parent.fence != command.parent_guard.fence
+                        or is_expired(parent_lease, now)
+                    ):
+                        raise ParentLeaseGuardError(
+                            "parent lease guard rejected child"
+                        )
                 now = datetime.now(timezone.utc)
                 sequence = (
                     owner.next_turn_sequence
@@ -546,6 +594,43 @@ class SqlAlchemyExecutionBackend:
         async with self.session_factory() as session:
             row = await self._run_row(session, run_id)
             return None if row is None else _record(row)
+
+    async def list_runs_by_ids(
+        self, run_ids: "tuple[str, ...]"
+    ) -> "tuple[RunRecord, ...]":
+        if not run_ids:
+            return ()
+        async with self.session_factory() as session:
+            rows = (
+                await session.scalars(
+                    select(ExecutionRow).where(
+                        ExecutionRow.execution_id.in_(tuple(dict.fromkeys(run_ids)))
+                    )
+                )
+            ).all()
+            by_id = {row.execution_id: _record(row) for row in rows}
+        return tuple(
+            by_id[run_id]
+            for run_id in dict.fromkeys(run_ids)
+            if run_id in by_id
+        )
+
+    async def assert_active_lease(
+        self, run_id: str, *, owner: str, fence: int
+    ) -> None:
+        async with self.session_factory() as session:
+            row = await self._run_row(session, run_id)
+            if row is None:
+                raise StorageError(f"unknown run: {run_id}")
+            lease = Lease(row.owner, row.fence, row.lease_expires_at)
+            if (
+                row.status
+                not in {RunStatus.RUNNING.value, RunStatus.CANCELLING.value}
+                or row.owner != owner
+                or row.fence != fence
+                or is_expired(lease, datetime.now(timezone.utc))
+            ):
+                raise StorageConflictError("parent run lease is not active")
 
     async def list_all_sessions(self) -> "tuple[SessionRecord, ...]":
         async with self.session_factory() as session:

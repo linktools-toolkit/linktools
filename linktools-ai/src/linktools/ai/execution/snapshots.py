@@ -5,63 +5,112 @@
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Literal
-from ..json import JsonValue
+from typing import TYPE_CHECKING, Literal
 
 from ..errors import UsageRegressionError
+from ..json import JsonValue
 from .domain import MessageCaptureState, RunUsage
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from datetime import datetime
     from .domain import RunStatus
 
 
+@dataclass(frozen=True, slots=True)
+class RequestUsage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_read_tokens: int = 0
+    total_cost: "Decimal | None" = None
+
+    def __post_init__(self) -> None:
+        if self.total_cost is not None and not isinstance(self.total_cost, Decimal):
+            object.__setattr__(self, "total_cost", Decimal(str(self.total_cost)))
+
+
+@dataclass(frozen=True, slots=True)
+class ModelUsageObservation:
+    request_usage: RequestUsage
+    cumulative_usage: RunUsage
+    resolved_model_id: "str | None"
+    provider_total_cost: "Decimal | None" = None
+
+    def __post_init__(self) -> None:
+        if self.provider_total_cost is not None and not isinstance(
+            self.provider_total_cost, Decimal
+        ):
+            object.__setattr__(
+                self,
+                "provider_total_cost",
+                Decimal(str(self.provider_total_cost)),
+            )
+
+
 @dataclass(slots=True)
 class RunUsageCapture:
-    """Per-run sink for authoritative cumulative model usage snapshots."""
+    """Per-run sink for authoritative cumulative model usage observations."""
 
     current: "RunUsage" = field(default_factory=RunUsage)
+    cost_known: bool = True
+    _last_observation_key: object = field(default=None, init=False, repr=False)
 
-    def observe_absolute(self, usage: object) -> None:
-        input_tokens = int(getattr(usage, "input_tokens", 0))
-        output_tokens = int(getattr(usage, "output_tokens", 0))
-        raw_total_tokens = getattr(usage, "total_tokens", None)
-        total_tokens = (
-            input_tokens + output_tokens
-            if raw_total_tokens is None
-            or (int(raw_total_tokens) == 0 and input_tokens + output_tokens > 0)
-            else int(raw_total_tokens)
+    def observe(self, observation: ModelUsageObservation) -> None:
+        key = (
+            observation.request_usage,
+            observation.cumulative_usage,
+            observation.resolved_model_id,
+            observation.provider_total_cost,
         )
-        cache_write = int(getattr(usage, "cache_write_tokens", 0))
-        cache_read = int(getattr(usage, "cache_read_tokens", 0))
-        raw_cost = getattr(usage, "total_cost", None)
-        if input_tokens < self.current.input_tokens:
+        if key == self._last_observation_key:
+            return
+        self._last_observation_key = key
+        cumulative = observation.cumulative_usage
+        if cumulative.input_tokens < self.current.input_tokens:
             raise UsageRegressionError("input_tokens decreased")
-        if output_tokens < self.current.output_tokens:
+        if cumulative.output_tokens < self.current.output_tokens:
             raise UsageRegressionError("output_tokens decreased")
-        if total_tokens < self.current.total_tokens:
+        if cumulative.total_tokens < self.current.total_tokens:
             raise UsageRegressionError("total_tokens decreased")
-        if cache_write < self.current.cache_write_tokens:
+        if cumulative.cache_write_tokens < self.current.cache_write_tokens:
             raise UsageRegressionError("cache_write_tokens decreased")
-        if cache_read < self.current.cache_read_tokens:
+        if cumulative.cache_read_tokens < self.current.cache_read_tokens:
             raise UsageRegressionError("cache_read_tokens decreased")
-        total_cost = Decimal(str(raw_cost)) if raw_cost is not None else None
-        if (
-            total_cost is not None
-            and self.current.total_cost is not None
-            and total_cost < self.current.total_cost
-        ):
-            raise UsageRegressionError("total_cost decreased")
+        total_cost = self._resolve_total_cost(observation)
         self.current = RunUsage(
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
-            cache_write_tokens=cache_write,
-            cache_read_tokens=cache_read,
+            input_tokens=cumulative.input_tokens,
+            output_tokens=cumulative.output_tokens,
+            total_tokens=cumulative.total_tokens,
+            cache_write_tokens=cumulative.cache_write_tokens,
+            cache_read_tokens=cumulative.cache_read_tokens,
             total_cost=total_cost,
         )
+
+    def _resolve_total_cost(
+        self, observation: ModelUsageObservation
+    ) -> "Decimal | None":
+        provider_total = observation.provider_total_cost
+        if provider_total is not None:
+            if not provider_total.is_finite() or provider_total < 0:
+                raise ValueError("provider_total_cost must be finite and non-negative")
+            if (
+                self.current.total_cost is not None
+                and provider_total < self.current.total_cost
+            ):
+                raise UsageRegressionError("total_cost decreased")
+            self.cost_known = True
+            return provider_total
+        if observation.resolved_model_id is None:
+            self.cost_known = False
+            return None
+        request_cost = observation.request_usage.total_cost
+        if request_cost is None or not self.cost_known:
+            self.cost_known = False
+            return None
+        if not request_cost.is_finite() or request_cost < 0:
+            raise ValueError("request cost must be finite and non-negative")
+        return (self.current.total_cost or Decimal("0")) + request_cost
 
     def snapshot(self) -> "RunUsage":
         return self.current
@@ -99,4 +148,10 @@ class RunSnapshot:
     created_at: "datetime"
 
 
-__all__: "list[str]" = ["AgentSnapshotData", "RunSnapshot", "RunUsageCapture"]
+__all__: "list[str]" = [
+    "AgentSnapshotData",
+    "ModelUsageObservation",
+    "RequestUsage",
+    "RunSnapshot",
+    "RunUsageCapture",
+]

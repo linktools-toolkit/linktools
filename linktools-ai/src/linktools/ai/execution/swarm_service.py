@@ -20,19 +20,22 @@ from uuid import uuid4
 
 from linktools.core import environ
 
-from ..agent.spec import AgentSpec
 from ..errors import (
     ChildCancelNotConvergedError,
     ChildExecutionPlatformError,
     ChildRunMissingError,
     ChildSnapshotError,
     InvalidSpecError,
+    ParentLeaseGuardError,
+    ParentTerminalGateError,
     PrincipalAccessDeniedError,
     RecoveryConflictError,
     RuntimeInitializationError,
     StorageConflictError,
     StorageError,
     SwarmLimitExceededError,
+    SwarmConvergenceError,
+    TaskGraphCleanupError,
     TaskGraphInvariantError,
 )
 from ..execution.domain import (
@@ -281,8 +284,8 @@ class SwarmExecutionService:
             SwarmStarted(swarm_run_id=parent_run_id, swarm_id=spec.id)
         )
         try:
-            usage = await self._drive(
-                spec, task_plan, parent_run_id, owner, gate, principal,
+            usage, engine = await self._drive(
+                spec, task_plan, parent_run_id, owner, fence, gate, principal,
                 resolved_session, snapshot, prepared_agents,
             )
         except SwarmLimitExceededError as exc:
@@ -315,6 +318,27 @@ class SwarmExecutionService:
             await self._converge_cancel(task_plan, parent_run_id, owner, fence)
             await self._publish(SwarmCancelled(swarm_run_id=parent_run_id))
             raise
+        except TaskGraphCleanupError as exc:
+            logger.error(
+                "swarm cleanup did not converge run_id=%s error_type=%s",
+                parent_run_id,
+                type(exc.cleanup_error).__name__,
+            )
+            raise SwarmConvergenceError(
+                "swarm cleanup did not converge",
+                primary_error=exc.primary_error,
+                cleanup_error=exc.cleanup_error,
+                diagnostics=exc.diagnostics,
+            ) from exc
+        except ParentLeaseGuardError as exc:
+            logger.warning(
+                "swarm child start rejected by parent guard run_id=%s",
+                parent_run_id,
+            )
+            raise SwarmConvergenceError(
+                "parent lease guard rejected child",
+                primary_error=exc,
+            ) from exc
         except Exception as exc:
             logger.warning(
                 "swarm %s run %s failed: %s", spec.id, parent_run_id, type(exc).__name__,
@@ -348,6 +372,7 @@ class SwarmExecutionService:
             task_plan=task_plan,
             usage=usage,
             final_output=projection,
+            engine=engine,
         )
         await self._publish(SwarmCompleted(swarm_run_id=parent_run_id))
         return SwarmCompletedOutcome(collect=projection, usage=usage)
@@ -438,11 +463,12 @@ class SwarmExecutionService:
                     )
                 )
             )
-            usage = await self._drive(
+            usage, engine = await self._drive(
                 spec,
                 task_plan,
                 execution_id,
                 owner,
+                claimed.lease.fence,
                 gate,
                 principal,
                 record.session_id,
@@ -472,6 +498,23 @@ class SwarmExecutionService:
                 task_plan, execution_id, owner, claimed.lease.fence
             )
             raise
+        except TaskGraphCleanupError as exc:
+            logger.error(
+                "recovered swarm cleanup did not converge run_id=%s error_type=%s",
+                execution_id,
+                type(exc.cleanup_error).__name__,
+            )
+            raise SwarmConvergenceError(
+                "swarm cleanup did not converge",
+                primary_error=exc.primary_error,
+                cleanup_error=exc.cleanup_error,
+                diagnostics=exc.diagnostics,
+            ) from exc
+        except ParentLeaseGuardError as exc:
+            raise SwarmConvergenceError(
+                "parent lease guard rejected child",
+                primary_error=exc,
+            ) from exc
         except ChildCancelNotConvergedError as exc:
             logger.warning(
                 "swarm run %s child cancellation did not converge: %s",
@@ -508,6 +551,7 @@ class SwarmExecutionService:
             task_plan=task_plan,
             usage=usage,
             final_output=projection,
+            engine=engine,
         )
         return SwarmCompletedOutcome(collect=projection, usage=usage)
 
@@ -668,15 +712,15 @@ class SwarmExecutionService:
         task_plan: TaskPlan,
         parent_run_id: str,
         owner: str,
+        fence: int,
         gate: "_SwarmControlGate",
         principal: PrincipalContext,
         session_id: str,
         snapshot: "tuple[object, ...]",
         prepared_agents: "Mapping[str, PreparedAgentExecution] | None" = None,
-    ) -> TaskUsage:
+    ) -> "tuple[TaskUsage, TaskGraphEngine]":
         runner = _ChildNodeRunner(
             agent_execution=self._agent_execution,
-            agent_provider=self._agent_provider,
             principal=principal,
             session_id=session_id,
             parent_run_id=parent_run_id,
@@ -693,6 +737,8 @@ class SwarmExecutionService:
             limits=spec.limits,
             owner=owner,
             parent_run_id=parent_run_id,
+            parent_owner=owner,
+            parent_fence=fence,
             principal=principal,
             on_skip=lambda nid, blk: self._publish_skip(parent_run_id, nid, blk),
             on_node_terminal=lambda nid, outcome: self._publish_node_terminal(
@@ -700,7 +746,7 @@ class SwarmExecutionService:
             ),
             logger=logger,
         )
-        return await engine.execute(task_plan)
+        return await engine.execute(task_plan), engine
 
     async def _validate_agents(
         self,
@@ -824,12 +870,14 @@ class SwarmExecutionService:
         task_plan: TaskPlan,
         usage: TaskUsage,
         final_output: object,
+        engine: "TaskGraphEngine | None" = None,
     ) -> None:
         await self._assert_parent_terminal_gate(
             parent_run_id,
             owner,
             fence,
             task_plan,
+            engine,
         )
         await self._store.complete_run(
             CompleteExecution(
@@ -870,23 +918,41 @@ class SwarmExecutionService:
         owner: str,
         fence: int,
         task_plan: TaskPlan,
+        engine: "TaskGraphEngine | None" = None,
     ) -> None:
+        if engine is not None and engine.active_count != 0:
+            raise ParentTerminalGateError("engine still has active tasks")
+        await self._store.assert_active_lease(
+            parent_run_id,
+            owner=owner,
+            fence=fence,
+        )
         record = await self._store.get_run(parent_run_id)
         if record is None:
             raise StorageError("parent run disappeared before terminal commit")
-        if record.lease.owner != owner or record.lease.fence != fence:
-            raise StorageConflictError("parent lease lost before terminal commit")
-        if record.lease.expires_at is None or record.lease.expires_at <= datetime.now(timezone.utc):
-            raise StorageConflictError("parent lease expired before terminal commit")
         executions = await self._tasks.list_executions(task_plan.id)
-        if any(
-            execution.status is TaskStatus.CLAIMED
-            and execution.owner == owner
+        if any(execution.status is TaskStatus.CLAIMED for execution in executions):
+            raise ParentTerminalGateError("plan still has claimed tasks")
+        if any(not execution.terminal for execution in executions):
+            raise ParentTerminalGateError("plan has non-terminal tasks")
+        child_ids = tuple(
+            execution.active_run_id
             for execution in executions
+            if execution.active_run_id is not None
+        )
+        children = await self._store.list_runs_by_ids(child_ids)
+        if len(children) != len(set(child_ids)):
+            raise ParentTerminalGateError("child run record is missing")
+        if any(
+            child.status
+            not in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }
+            for child in children
         ):
-            raise TaskGraphInvariantError(
-                "parent terminal gate found current-owner CLAIMED nodes"
-            )
+            raise ParentTerminalGateError("child run is still active")
         definition = record.definition.spec
         if (
             not isinstance(definition, dict)
@@ -959,17 +1025,25 @@ class SwarmExecutionService:
         *,
         principal: PrincipalContext,
     ) -> None:
-        claimed = tuple(
-            execution
-            for execution in await self._tasks.list_executions(task_plan.id)
-            if execution.status is TaskStatus.CLAIMED
-        )
-        for execution in claimed:
-            await self._reconcile_claimed(
-                execution,
-                recovery_lease,
-                principal=principal,
+        stable_empty_scans = 0
+        while stable_empty_scans < 2:
+            await self._renew_recovery_parent(recovery_lease)
+            claimed = tuple(
+                execution
+                for execution in await self._tasks.list_executions(task_plan.id)
+                if execution.status is TaskStatus.CLAIMED
             )
+            if not claimed:
+                stable_empty_scans += 1
+                await asyncio.sleep(0)
+                continue
+            stable_empty_scans = 0
+            for execution in claimed:
+                await self._reconcile_claimed(
+                    execution,
+                    recovery_lease,
+                    principal=principal,
+                )
 
     async def _reconcile_claimed(
         self,
@@ -1057,6 +1131,7 @@ class SwarmExecutionService:
             child.id,
         )
         await self._agent_execution.cancel(child.id, principal=principal)
+        execution = await self._sync_recovered_usage(execution, child.id)
         deadline = time.monotonic() + RECOVERY_CHILD_CANCEL_TIMEOUT
         next_node_renew = time.monotonic() + _LEASE_DURATION.total_seconds() / 3
         while True:
@@ -1073,6 +1148,7 @@ class SwarmExecutionService:
             child = await self._store.get_run(child.id)
             if child is None:
                 raise ChildRunMissingError(execution.active_run_id)
+            execution = await self._sync_recovered_usage(execution, child.id)
             if child.status in {
                 RunStatus.COMPLETED,
                 RunStatus.FAILED,
@@ -1122,6 +1198,7 @@ class SwarmExecutionService:
     ) -> None:
         owner = execution.owner or ""
         output, usage = await self._recover_child_artifacts(child)
+        usage = _merge_recovery_usage(execution.usage, usage)
         if child.status is RunStatus.COMPLETED:
             await self._tasks.complete(
                 execution.id,
@@ -1197,6 +1274,33 @@ class SwarmExecutionService:
         except (AttributeError, TypeError, ValueError) as exc:
             raise ChildSnapshotError(child.id) from exc
 
+    async def _sync_recovered_usage(
+        self, execution: TaskExecution, child_run_id: str
+    ) -> TaskExecution:
+        usage = await self._read_child_usage(child_run_id)
+        return await self._tasks.record_claimed_usage(
+            execution.id,
+            owner=execution.owner or "",
+            fence=execution.fence,
+            usage=_merge_recovery_usage(execution.usage, usage),
+        )
+
+    async def _read_child_usage(self, child_run_id: str) -> TaskUsage:
+        snapshot = await self._store.get_snapshot(child_run_id)
+        if snapshot is None:
+            raise ChildSnapshotError(child_run_id)
+        try:
+            usage = snapshot.usage
+            return TaskUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_cost=usage.total_cost,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ChildSnapshotError(child_run_id) from exc
+
     def _authorize(
         self, principal: PrincipalContext, record: RunRecord, action: ExecutionAction
     ) -> None:
@@ -1244,6 +1348,28 @@ class SwarmExecutionService:
                     ),
                 )
             )
+
+
+def _merge_recovery_usage(previous: TaskUsage, observed: TaskUsage) -> TaskUsage:
+    if previous.total_cost is None:
+        total_cost = observed.total_cost
+    elif observed.total_cost is None:
+        total_cost = None
+    else:
+        total_cost = max(previous.total_cost, observed.total_cost)
+    return TaskUsage(
+        input_tokens=max(previous.input_tokens, observed.input_tokens),
+        output_tokens=max(previous.output_tokens, observed.output_tokens),
+        total_cost=total_cost,
+        cache_write_tokens=max(
+            previous.cache_write_tokens,
+            observed.cache_write_tokens,
+        ),
+        cache_read_tokens=max(
+            previous.cache_read_tokens,
+            observed.cache_read_tokens,
+        ),
+    )
 
 
 def _plan_id_from_run(record: RunRecord) -> str:
@@ -1502,6 +1628,11 @@ class _SwarmControlGate(ControlGate):
                 )
 
     async def check_before_launch(self) -> None:
+        await self.check()
+        if self._cancel:
+            raise SwarmLimitExceededError(
+                "parent cancellation requested", kind="parent_cancelled"
+            )
         max_tokens = getattr(self._limits, "max_total_tokens", None)
         if max_tokens is not None and self._accumulated.input_tokens + self._accumulated.output_tokens >= max_tokens:
             raise SwarmLimitExceededError("token limit reached", kind="token_limit_reached")
@@ -1516,7 +1647,6 @@ class _ChildNodeRunner(NodeRunner):
     threading the dependency view into the child's AgentInput.metadata."""
 
     agent_execution: ExecutionService
-    agent_provider: "object | None"
     principal: PrincipalContext
     session_id: str
     parent_run_id: str
@@ -1529,11 +1659,9 @@ class _ChildNodeRunner(NodeRunner):
     async def run(self, request: NodeRunRequest) -> NodeRunResult:
         node = request.node
         prepared = self.prepared_agents.get(node.id)
-        agent_spec = (
-            prepared.agent_spec
-            if prepared is not None
-            else await self._resolve(node.payload.agent_id)
-        )
+        if prepared is None:
+            raise RuntimeInitializationError("agent_preflight_failed")
+        agent_spec = prepared.agent_spec
         child_id = request.child_run_id
         deps_metadata = _dependency_metadata(self.parent_run_id, request)
         await self._publish(
@@ -1547,11 +1675,11 @@ class _ChildNodeRunner(NodeRunner):
             execution_id=child_id,
             root_execution_id=self.root_execution_id,
             parent_execution_id=self.parent_run_id,
+            parent_guard=request.parent_guard,
             message_history=self.message_history,
             metadata={"task_graph": deps_metadata},
         )
-        if prepared is not None:
-            kwargs["prepared_execution"] = prepared
+        kwargs["prepared_execution"] = prepared
         try:
             result = await self.agent_execution.run_child(
                 agent_spec,
@@ -1559,6 +1687,8 @@ class _ChildNodeRunner(NodeRunner):
                 **kwargs,
             )
         except asyncio.CancelledError:
+            raise
+        except ParentLeaseGuardError:
             raise
         except BaseException as exc:
             child = await self.execution_store.get_run(child_id)
@@ -1677,11 +1807,6 @@ class _ChildNodeRunner(NodeRunner):
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise ChildSnapshotError(child.id) from exc
-
-    async def _resolve(self, agent_id: str) -> AgentSpec:
-        if self.agent_provider is None:
-            raise InvalidSpecError("no agent provider configured")
-        return await self.agent_provider.get(agent_id)  # type: ignore[attr-defined]
 
     async def _publish(self, event: object) -> None:
         try:

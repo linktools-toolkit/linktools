@@ -89,6 +89,7 @@ class FakeExecutionService:
     outcomes: "dict[str, ChildRunResult]" = field(default_factory=dict)
     in_flight: int = 0
     max_seen: int = 0
+    execution_store: object | None = None
 
     async def run_child(
         self,
@@ -100,6 +101,7 @@ class FakeExecutionService:
         execution_id: str,
         root_execution_id: str,
         parent_execution_id: str,
+        parent_guard=None,
         message_history=(),
         metadata=None,
         prepared_execution=None,
@@ -109,7 +111,7 @@ class FakeExecutionService:
         self.max_seen = max(self.max_seen, self.in_flight)
         try:
             await asyncio.sleep(0)
-            return self.outcomes.get(
+            result = self.outcomes.get(
                 agent_id,
                 ChildRunResult(
                     run_id=execution_id,
@@ -119,6 +121,106 @@ class FakeExecutionService:
                     usage=TaskUsage(input_tokens=10, output_tokens=5),
                 ),
             )
+            store = self.execution_store
+            if store is not None and hasattr(store, "start_run"):
+                from linktools.ai.execution.commands import (
+                    AcknowledgeCancellation,
+                    ClaimExecution,
+                    CompleteExecution,
+                    FailExecution,
+                    RequestCancellation,
+                    StartExecution,
+                )
+                from linktools.ai.execution.domain import RunUsage
+                from linktools.ai.execution.snapshots import AgentSnapshotData, RunSnapshot
+
+                parent = await store.get_run(parent_execution_id)
+                child = await store.start_run(
+                    StartExecution(
+                        execution_id,
+                        session_id,
+                        RunKind.TASK,
+                        parent.definition,
+                        {"prompt": prompt},
+                        root_execution_id=root_execution_id,
+                        parent_execution_id=parent_execution_id,
+                        parent_guard=parent_guard,
+                    )
+                )
+                claimed = await store.claim_run(
+                    ClaimExecution(
+                        child.id,
+                        "swarm",
+                        datetime.now(timezone.utc),
+                        timedelta(minutes=5),
+                    )
+                )
+                snapshot = AgentSnapshotData(
+                    (),
+                    result.output,
+                    RunUsage(
+                        input_tokens=result.usage.input_tokens,
+                        output_tokens=result.usage.output_tokens,
+                        total_tokens=result.usage.total_tokens,
+                        total_cost=result.usage.total_cost,
+                        cache_write_tokens=result.usage.cache_write_tokens,
+                        cache_read_tokens=result.usage.cache_read_tokens,
+                    ),
+                    0,
+                )
+                if hasattr(store, "_snapshots"):
+                    store._snapshots[child.id] = RunSnapshot(
+                        "run-snapshot.v1",
+                        child.id,
+                        1,
+                        (),
+                        result.output,
+                        result.status,
+                        snapshot.usage,
+                        0,
+                        datetime.now(timezone.utc),
+                    )
+                if result.status is RunStatus.COMPLETED:
+                    await store.complete_run(
+                        CompleteExecution(child.id, "swarm", claimed.lease.fence, snapshot)
+                    )
+                elif result.status is RunStatus.FAILED:
+                    await store.fail_run(
+                        FailExecution(
+                            child.id,
+                            "swarm",
+                            claimed.lease.fence,
+                            snapshot,
+                            result.error,
+                        )
+                    )
+                else:
+                    await store.request_cancel(
+                        RequestCancellation(
+                            child.id,
+                            "swarm",
+                            claimed.lease.fence,
+                            datetime.now(timezone.utc),
+                        )
+                    )
+                    await store.acknowledge_cancel(
+                        AcknowledgeCancellation(
+                            child.id, "swarm", claimed.lease.fence, snapshot
+                        )
+                    )
+            elif store is not None and hasattr(store, "_runs"):
+                parent = store._runs.get(parent_execution_id)
+                if parent is not None:
+                    store._runs[execution_id] = replace(
+                        parent,
+                        id=execution_id,
+                        status=result.status,
+                        parent_execution_id=parent_execution_id,
+                        root_execution_id=root_execution_id,
+                        lease=Lease(),
+                        error=result.error,
+                    )
+            return result
         finally:
             self.in_flight -= 1
 
@@ -188,6 +290,7 @@ def _service(
     agent_provider: "object | None" = None,
 ) -> "tuple[SwarmExecutionService, _MemoryExecutionStore]":
     store = _MemoryExecutionStore()
+    fake_exec.execution_store = store
     svc = SwarmExecutionService(
         store=store,
         tasks=tasks,
@@ -289,6 +392,25 @@ class _MemoryExecutionStore:
 
     async def get_run(self, run_id: str):
         return self._runs.get(run_id)
+
+    async def list_runs_by_ids(self, run_ids):
+        return tuple(
+            self._runs[run_id]
+            for run_id in dict.fromkeys(run_ids)
+            if run_id in self._runs
+        )
+
+    async def assert_active_lease(self, run_id: str, *, owner: str, fence: int):
+        record = self._runs.get(run_id)
+        if (
+            record is None
+            or record.status not in {RunStatus.RUNNING, RunStatus.CANCELLING}
+            or record.lease.owner != owner
+            or record.lease.fence != fence
+            or record.lease.expires_at is None
+            or record.lease.expires_at <= datetime.now(timezone.utc)
+        ):
+            raise StorageConflictError("parent run lease is not active")
 
     async def get_snapshot(self, run_id: str):
         return self._snapshots.get(run_id)
@@ -701,6 +823,12 @@ async def test_reconcile_claimed_backfills_from_child_terminal_branches():
             active_run_id=child_id,
         )
         await tasks.create_plan(plan, (claimed,))
+        if child_status is RunStatus.PAUSED:
+            from linktools.ai.errors import ParentTerminalGateError
+
+            with pytest.raises(ParentTerminalGateError):
+                await svc.recover_swarm(plan_id, principal=_principal())
+            return
         await svc.recover_swarm(plan_id, principal=_principal())
         execs = {e.node_id: e for e in await tasks.list_executions(plan_id)}
         assert execs["a"].status is expect_node_status, (child_status, execs["a"])
@@ -786,6 +914,7 @@ async def test_step_terminal_event_published_only_after_taskexecution_persisted(
     fake = FakeExecutionService()
     tasks = LocalTaskBackend()
     store = _MemoryExecutionStore()
+    fake.execution_store = store
     svc = SwarmExecutionService(
         store=store,
         tasks=tasks,
@@ -832,6 +961,30 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
                 store._runs[parent_run_id] = replace(
                     store._runs[parent_run_id], status=RunStatus.CANCELLING
                 )
+            child_id = kwargs["execution_id"]
+            parent = store._runs[parent_run_id]
+            store._runs[child_id] = replace(
+                parent,
+                id=child_id,
+                status=RunStatus.COMPLETED,
+                parent_execution_id=parent_run_id,
+                root_execution_id=kwargs["root_execution_id"],
+                lease=Lease(),
+            )
+            from linktools.ai.execution.domain import RunUsage
+            from linktools.ai.execution.snapshots import RunSnapshot
+
+            store._snapshots[child_id] = RunSnapshot(
+                "run-snapshot.v1",
+                child_id,
+                1,
+                (),
+                {"ok": True},
+                RunStatus.COMPLETED,
+                RunUsage(),
+                0,
+                datetime.now(timezone.utc),
+            )
             return ChildRunResult(
                 parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
             )
@@ -853,6 +1006,7 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
     fake = _CancelMidRunExec()
     tasks = LocalTaskBackend()
     store = _MemoryExecutionStore()
+    fake.execution_store = store
     svc = SwarmExecutionService(
         store=store,
         tasks=tasks,
@@ -1003,6 +1157,7 @@ async def test_run_swarm_completes_parent_run_against_real_execution_store(tmp_p
     fake = FakeExecutionService()
     tasks = LocalTaskBackend()
     exec_store = LocalExecutionBackend(tmp_path / "exec")
+    fake.execution_store = exec_store
     svc = SwarmExecutionService(
         store=exec_store,
         tasks=tasks,

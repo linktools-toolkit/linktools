@@ -352,6 +352,32 @@ class SqlAlchemyTaskBackend:
                 row.updated_at = now
                 return self._execution(row)
 
+    async def record_claimed_usage(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        usage: TaskUsage,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._claimed_row(session, execution_id, owner, fence)
+                old_usage = _decode_usage(row.usage)
+                _assert_usage_monotonic(old_usage, usage)
+                now = datetime.now(timezone.utc)
+                result = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence, now).values(
+                        usage=_encode_usage(usage),
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("task usage update lost a race")
+                row.usage = _encode_usage(usage)
+                row.updated_at = now
+                return self._execution(row)
+
     async def complete(
         self,
         execution_id: str,
@@ -364,6 +390,7 @@ class SqlAlchemyTaskBackend:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
+                _assert_usage_monotonic(_decode_usage(row.usage), usage)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
                     self._claimed_guard(execution_id, owner, fence, now).values(
@@ -395,6 +422,7 @@ class SqlAlchemyTaskBackend:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
+                _assert_usage_monotonic(_decode_usage(row.usage), usage)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
                     self._claimed_guard(execution_id, owner, fence, now).values(
@@ -507,6 +535,7 @@ class SqlAlchemyTaskBackend:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
+                _assert_usage_monotonic(_decode_usage(row.usage), usage)
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
                     self._claimed_guard(execution_id, owner, fence, now).values(
@@ -597,6 +626,23 @@ def _decode_usage(value: "Any") -> TaskUsage:
         cache_write_tokens=int(value.get("cache_write_tokens", 0)),
         cache_read_tokens=int(value.get("cache_read_tokens", 0)),
     )
+
+
+def _assert_usage_monotonic(old: TaskUsage, new: TaskUsage) -> None:
+    if new.input_tokens < old.input_tokens:
+        raise StorageConflictError("claimed usage input_tokens decreased")
+    if new.output_tokens < old.output_tokens:
+        raise StorageConflictError("claimed usage output_tokens decreased")
+    if new.cache_write_tokens < old.cache_write_tokens:
+        raise StorageConflictError("claimed usage cache_write_tokens decreased")
+    if new.cache_read_tokens < old.cache_read_tokens:
+        raise StorageConflictError("claimed usage cache_read_tokens decreased")
+    if (
+        old.total_cost is not None
+        and new.total_cost is not None
+        and new.total_cost < old.total_cost
+    ):
+        raise StorageConflictError("claimed usage total_cost decreased")
 
 
 def _encode_error(error: "RunError | None") -> "dict[str, JsonValue] | None":

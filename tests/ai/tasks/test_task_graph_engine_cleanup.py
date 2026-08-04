@@ -4,7 +4,11 @@
 
 import pytest
 
-from linktools.ai.errors import ChildExecutionPlatformError
+from linktools.ai.errors import (
+    ChildExecutionPlatformError,
+    StorageError,
+    TaskGraphCleanupError,
+)
 from linktools.ai.tasks.models import TaskStatus, TaskUsage
 from linktools.ai.tasks.persistence.local import LocalTaskBackend
 from linktools.ai.tasks.swarm.engine import NodeRunRequest, NodeRunResult, TaskGraphEngine
@@ -49,6 +53,8 @@ async def test_platform_failure_keeps_primary_error_and_converges_claim():
         limits=_limits(max_concurrency=1),
         owner="scheduler",
         parent_run_id="parent",
+        parent_owner="scheduler",
+        parent_fence=0,
     )
 
     with pytest.raises(ChildExecutionPlatformError) as raised:
@@ -75,10 +81,13 @@ async def test_cleanup_error_is_attached_without_masking_primary_error():
         limits=_limits(max_concurrency=1),
         owner="scheduler",
         parent_run_id="parent",
+        parent_owner="scheduler",
+        parent_fence=0,
     )
 
-    with pytest.raises(ChildExecutionPlatformError) as raised:
+    with pytest.raises(TaskGraphCleanupError) as raised:
         await engine.execute(plan)
 
-    assert any("cleanup failed" in note for note in raised.value.__notes__)
+    assert isinstance(raised.value.primary_error, ChildExecutionPlatformError)
+    assert isinstance(raised.value.cleanup_error, StorageError)
     assert engine.active_count == 0

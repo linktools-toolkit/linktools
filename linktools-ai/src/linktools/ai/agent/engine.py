@@ -66,6 +66,7 @@ from ..execution.domain import (
     RunStatus as ExecutionRunStatus,
     RunUsage as ExecutionRunUsage,
 )
+from ..execution.snapshots import ModelUsageObservation, RequestUsage
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..model.recording import SemanticRecordingModel
@@ -109,6 +110,66 @@ if TYPE_CHECKING:
 logger = environ.get_logger("ai.agent.engine")
 
 
+def _request_usage_from_provider(usage: object) -> RequestUsage:
+    input_tokens = int(getattr(usage, "input_tokens", 0))
+    output_tokens = int(getattr(usage, "output_tokens", 0))
+    raw_total = getattr(usage, "total_tokens", None)
+    total_tokens = (
+        input_tokens + output_tokens
+        if raw_total is None or (int(raw_total) == 0 and input_tokens + output_tokens > 0)
+        else int(raw_total)
+    )
+    return RequestUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        cache_write_tokens=int(getattr(usage, "cache_write_tokens", 0)),
+        cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0)),
+        total_cost=getattr(usage, "total_cost", None),
+    )
+
+
+def _run_usage_from_provider(usage: object) -> ExecutionRunUsage:
+    request = _request_usage_from_provider(usage)
+    return ExecutionRunUsage(
+        input_tokens=request.input_tokens,
+        output_tokens=request.output_tokens,
+        total_tokens=request.total_tokens,
+        cache_write_tokens=request.cache_write_tokens,
+        cache_read_tokens=request.cache_read_tokens,
+        total_cost=request.total_cost,
+    )
+
+
+def _add_run_usage(cumulative: ExecutionRunUsage, request: RequestUsage) -> ExecutionRunUsage:
+    return ExecutionRunUsage(
+        input_tokens=cumulative.input_tokens + request.input_tokens,
+        output_tokens=cumulative.output_tokens + request.output_tokens,
+        total_tokens=cumulative.total_tokens + request.total_tokens,
+        cache_write_tokens=cumulative.cache_write_tokens + request.cache_write_tokens,
+        cache_read_tokens=cumulative.cache_read_tokens + request.cache_read_tokens,
+        total_cost=None,
+    )
+
+
+def _request_delta(before: ExecutionRunUsage, after: ExecutionRunUsage) -> RequestUsage:
+    return RequestUsage(
+        input_tokens=max(0, after.input_tokens - before.input_tokens),
+        output_tokens=max(0, after.output_tokens - before.output_tokens),
+        total_tokens=max(0, after.total_tokens - before.total_tokens),
+        cache_write_tokens=max(0, after.cache_write_tokens - before.cache_write_tokens),
+        cache_read_tokens=max(0, after.cache_read_tokens - before.cache_read_tokens),
+        total_cost=None,
+    )
+
+
+def _resolved_model_id(response: object) -> "str | None":
+    value = getattr(response, "model_id", None)
+    if not isinstance(value, str) or not value:
+        value = getattr(response, "model_name", None)
+    return value if isinstance(value, str) and value else None
+
+
 # Exception types that count as EXPECTED provider/model/tool failures for the
 # pure execution loop's outcome classification. Only these are turned into an
 # AgentFailed outcome; every other exception (configuration / invariant /
@@ -140,7 +201,9 @@ async def _noop_span():
 
 
 class RunUsageSink(Protocol):
-    def observe_absolute(self, usage: object) -> None: ...
+    def observe(self, observation: ModelUsageObservation) -> None: ...
+
+    def snapshot(self) -> "ExecutionRunUsage": ...
 
 
 class AgentEngine:
@@ -204,7 +267,7 @@ class AgentEngine:
         *,
         cancellation: "CancellationToken",
         live_events: "RunLiveEventSink",
-        observe_usage: "Callable[[object], Awaitable[None]] | None",
+        observe_usage: "Callable[[RequestUsage, RunUsage, str | None], Awaitable[None]] | None",
     ) -> str:
         """Stream one model-request node, publishing text/thinking chunks to
         ``live_events`` as they arrive. Returns the concatenated text delta so
@@ -222,37 +285,61 @@ class AgentEngine:
         )
 
         accumulated = ""
-        async with node.stream(run_ctx) as request_stream:
-            async for ev in request_stream:
-                chunk = None
-                kind = None
-                if isinstance(ev, PartStartEvent) and isinstance(ev.part, TextPart):
-                    chunk = ev.part.content
-                    kind = "text"
-                elif isinstance(ev, PartDeltaEvent) and isinstance(
-                    ev.delta, TextPartDelta
-                ):
-                    chunk = ev.delta.content_delta
-                    kind = "text"
-                elif isinstance(ev, PartStartEvent) and isinstance(
-                    ev.part, ThinkingPart
-                ):
-                    chunk = ev.part.content
-                    kind = "thinking"
-                elif isinstance(ev, PartDeltaEvent) and isinstance(
-                    ev.delta, ThinkingPartDelta
-                ):
-                    chunk = ev.delta.content_delta
-                    kind = "thinking"
-                if chunk:
-                    if kind == "text":
-                        accumulated += chunk
-                    await live_events.publish({"type": kind, "text": chunk})
-                    await cancellation.raise_if_cancelled()
-            if observe_usage is not None:
-                await observe_usage(request_stream.usage)
-        if observe_usage is not None:
-            await observe_usage(run_ctx.state.usage)
+        prior = _run_usage_from_provider(run_ctx.state.usage)
+        request_stream = None
+        try:
+            async with node.stream(run_ctx) as request_stream:
+                async for ev in request_stream:
+                    chunk = None
+                    kind = None
+                    if isinstance(ev, PartStartEvent) and isinstance(ev.part, TextPart):
+                        chunk = ev.part.content
+                        kind = "text"
+                    elif isinstance(ev, PartDeltaEvent) and isinstance(
+                        ev.delta, TextPartDelta
+                    ):
+                        chunk = ev.delta.content_delta
+                        kind = "text"
+                    elif isinstance(ev, PartStartEvent) and isinstance(
+                        ev.part, ThinkingPart
+                    ):
+                        chunk = ev.part.content
+                        kind = "thinking"
+                    elif isinstance(ev, PartDeltaEvent) and isinstance(
+                        ev.delta, ThinkingPartDelta
+                    ):
+                        chunk = ev.delta.content_delta
+                        kind = "thinking"
+                    if chunk:
+                        if kind == "text":
+                            accumulated += chunk
+                        await live_events.publish({"type": kind, "text": chunk})
+                        await cancellation.raise_if_cancelled()
+                if observe_usage is not None:
+                    await observe_usage(
+                        _request_usage_from_provider(request_stream.usage),
+                        _run_usage_from_provider(run_ctx.state.usage),
+                        _resolved_model_id(request_stream),
+                    )
+        except BaseException:
+            if observe_usage is not None and request_stream is not None:
+                request_usage = _request_usage_from_provider(request_stream.usage)
+                state_usage = _run_usage_from_provider(run_ctx.state.usage)
+                cumulative = (
+                    state_usage
+                    if state_usage.total_tokens > prior.total_tokens
+                    or state_usage.input_tokens > prior.input_tokens
+                    or state_usage.output_tokens > prior.output_tokens
+                    or state_usage.cache_write_tokens > prior.cache_write_tokens
+                    or state_usage.cache_read_tokens > prior.cache_read_tokens
+                    else _add_run_usage(prior, request_usage)
+                )
+                await observe_usage(
+                    request_usage,
+                    cumulative,
+                    _resolved_model_id(request_stream),
+                )
+            raise
         return accumulated
 
     async def _forward_tool_stream(
@@ -486,8 +573,8 @@ class AgentEngine:
         usage: Any,
     ) -> None:
         """Raise ModelPolicyExceededError when the run's token usage breaches
-        ``max_tokens`` or ``budget``. ``usage`` is the pydantic-ai RunUsage from
-        the completed run; nothing happens when it is None (no usage recorded)."""
+        ``max_tokens`` or ``budget``. ``usage`` is the captured cumulative usage;
+        nothing happens when it is None (no usage recorded)."""
         if usage is None:
             return
         max_tokens = model_policy.max_tokens
@@ -501,25 +588,13 @@ class AgentEngine:
         budget = model_policy.budget
         if budget is None:
             return
-        if self._pricing_provider is None:
+        cost = getattr(usage, "total_cost", None)
+        if cost is None:
             raise ModelPolicyExceededError(
-                "ModelPolicy.budget is set but no ModelPricingProvider "
-                "is wired; refusing to run without a cost limit",
+                "ModelPolicy.budget cannot be enforced because actual model cost "
+                "is unknown",
                 kind="budget",
             )
-        pricing = await self._pricing_provider.get_pricing(model_policy.primary)
-        if pricing is None:
-            raise ModelPolicyExceededError(
-                f"ModelPolicy.budget set but model {model_policy.primary!r} has "
-                f"no pricing; refusing to run without a cost limit",
-                kind="budget",
-            )
-        cost = pricing.cost(
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.cache_read_tokens,
-            cache_write_tokens=usage.cache_write_tokens,
-        )
         if cost > budget:
             raise ModelPolicyExceededError(
                 f"cost budget exceeded: {cost} > budget {budget}",
@@ -625,11 +700,13 @@ class AgentEngine:
 
         def _captured_usage() -> "ExecutionRunUsage":
             if usage_sink is None:
-                return ExecutionRunUsage()
-            snapshot_usage = getattr(usage_sink, "snapshot", None)
-            if snapshot_usage is None:
-                return ExecutionRunUsage()
-            captured = snapshot_usage()
+                current = current_run
+                state = getattr(getattr(current, "ctx", None), "state", None)
+                usage = getattr(state, "usage", None)
+                if usage is None:
+                    return ExecutionRunUsage()
+                return _run_usage_from_provider(usage)
+            captured = usage_sink.snapshot()
             return ExecutionRunUsage(
                 input_tokens=captured.input_tokens,
                 output_tokens=captured.output_tokens,
@@ -639,55 +716,53 @@ class AgentEngine:
                 total_cost=captured.total_cost,
             )
 
-        async def _observe_model_usage(usage: object) -> None:
+        pricing_cache: "dict[str, Any]" = {}
+
+        async def _observe_model_usage(
+            request_usage: RequestUsage,
+            cumulative_usage: ExecutionRunUsage,
+            resolved_model_id: "str | None",
+        ) -> None:
             if usage_sink is None:
                 return
-            usage_sink.observe_absolute(usage)
+            request_cost = None
             if (
-                getattr(usage, "total_cost", None) is not None
-                or self._pricing_provider is None
+                cumulative_usage.total_cost is None
+                and resolved_model_id is not None
+                and self._pricing_provider is not None
             ):
-                return
-            try:
-                pricing = await self._pricing_provider.get_pricing(
-                    agent.spec.model.primary
-                )
-            except Exception as exc:
-                logger.debug(
-                    "usage pricing unavailable for run %s: %s: %s",
-                    context.run_id,
-                    type(exc).__name__,
-                    exc,
-                )
-                return
-            if pricing is None:
-                return
-            usage_sink.observe_absolute(
-                ExecutionRunUsage(
-                    input_tokens=int(getattr(usage, "input_tokens", 0)),
-                    output_tokens=int(getattr(usage, "output_tokens", 0)),
-                    total_tokens=int(
-                        getattr(
-                            usage,
-                            "total_tokens",
-                            int(getattr(usage, "input_tokens", 0))
-                            + int(getattr(usage, "output_tokens", 0)),
+                if resolved_model_id not in pricing_cache:
+                    try:
+                        pricing_cache[resolved_model_id] = (
+                            await self._pricing_provider.get_pricing(resolved_model_id)
                         )
-                    ),
-                    cache_write_tokens=int(
-                        getattr(usage, "cache_write_tokens", 0)
-                    ),
-                    cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0)),
-                    total_cost=pricing.cost(
-                        input_tokens=int(getattr(usage, "input_tokens", 0)),
-                        output_tokens=int(getattr(usage, "output_tokens", 0)),
-                        cache_read_tokens=int(
-                            getattr(usage, "cache_read_tokens", 0)
-                        ),
-                        cache_write_tokens=int(
-                            getattr(usage, "cache_write_tokens", 0)
-                        ),
-                    ),
+                    except Exception as exc:
+                        logger.debug(
+                            "usage pricing unavailable run_id=%s model_id=%s error_type=%s",
+                            context.run_id,
+                            resolved_model_id,
+                            type(exc).__name__,
+                        )
+                        pricing_cache[resolved_model_id] = None
+                pricing = pricing_cache[resolved_model_id]
+                if pricing is not None:
+                    request_cost = pricing.cost(
+                        input_tokens=request_usage.input_tokens,
+                        output_tokens=request_usage.output_tokens,
+                        cache_read_tokens=request_usage.cache_read_tokens,
+                        cache_write_tokens=request_usage.cache_write_tokens,
+                    )
+            if request_cost is not None:
+                request_usage = dataclasses.replace(
+                    request_usage,
+                    total_cost=request_cost,
+                )
+            usage_sink.observe(
+                ModelUsageObservation(
+                    request_usage=request_usage,
+                    cumulative_usage=cumulative_usage,
+                    resolved_model_id=resolved_model_id,
+                    provider_total_cost=cumulative_usage.total_cost,
                 )
             )
 
@@ -808,12 +883,24 @@ class AgentEngine:
                                     if not model_supports_streaming(
                                         model
                                     ) and PydanticAgent.is_model_request_node(node):
+                                        prior_usage = _run_usage_from_provider(
+                                            run.ctx.state.usage
+                                        )
                                         try:
                                             node = await node.run(run.ctx)
                                         finally:
                                             if usage_sink is not None:
-                                                await _observe_model_usage(
+                                                cumulative_usage = _run_usage_from_provider(
                                                     run.ctx.state.usage
+                                                )
+                                                await _observe_model_usage(
+                                                    _request_delta(
+                                                        prior_usage, cumulative_usage
+                                                    ),
+                                                    cumulative_usage,
+                                                    _resolved_model_id(
+                                                        getattr(run.ctx, "model", model)
+                                                    ),
                                                 )
                                         continue
 
@@ -917,10 +1004,30 @@ class AgentEngine:
 
                 usage = result.usage if result is not None else None
                 if usage is not None:
-                    await _observe_model_usage(usage)
+                    cumulative_usage = _run_usage_from_provider(usage)
+                    captured_before_final = _captured_usage()
+                    if (
+                        cumulative_usage.input_tokens != captured_before_final.input_tokens
+                        or cumulative_usage.output_tokens != captured_before_final.output_tokens
+                        or cumulative_usage.total_tokens != captured_before_final.total_tokens
+                        or (
+                            cumulative_usage.cache_write_tokens
+                            != captured_before_final.cache_write_tokens
+                        )
+                        or (
+                            cumulative_usage.cache_read_tokens
+                            != captured_before_final.cache_read_tokens
+                        )
+                        or cumulative_usage.total_cost != captured_before_final.total_cost
+                    ):
+                        await _observe_model_usage(
+                            _request_delta(captured_before_final, cumulative_usage),
+                            cumulative_usage,
+                            _resolved_model_id(getattr(run.ctx, "model", None)),
+                        )
                 captured = _captured_usage()
                 output = result.output if result is not None else accumulated_text
-                await self._enforce_usage_policy(agent.spec.model, usage)
+                await self._enforce_usage_policy(agent.spec.model, captured)
 
                 run_result = RunResult(
                     output=output,

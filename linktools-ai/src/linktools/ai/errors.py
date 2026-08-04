@@ -526,6 +526,31 @@ class ParentLeaseLostError(SwarmError):
     """The scheduler lost ownership of the parent run lease."""
 
 
+class ParentLeaseGuardError(SwarmError):
+    """A child start was rejected by the parent's owner/fence/lease guard."""
+
+
+class ParentTerminalGateError(SwarmError):
+    """A parent cannot enter a terminal state while its graph is not converged."""
+
+
+class SwarmConvergenceError(SwarmError):
+    """A swarm could not safely converge its children or cleanup state."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        primary_error: "BaseException | None" = None,
+        cleanup_error: "BaseException | None" = None,
+        diagnostics: "tuple[CleanupDiagnostic, ...]" = (),
+    ) -> None:
+        super().__init__(message)
+        self.primary_error = primary_error
+        self.cleanup_error = cleanup_error
+        self.diagnostics = diagnostics
+
+
 class UsageRegressionError(SwarmError):
     """An authoritative cumulative usage snapshot moved backwards."""
 
@@ -533,6 +558,37 @@ class UsageRegressionError(SwarmError):
 class TaskGraphInvariantError(SwarmError):
     """The DAG cannot make progress: no node is ready, in flight, or skippable,
     yet not all nodes are terminal. A run-level failure, not a node failure."""
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupDiagnostic:
+    stage: str
+    node_id: "str | None"
+    error_type: str
+    safe_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class TaskGraphCleanupError(SwarmError):
+    """Primary graph failure plus cleanup failure that requires recovery."""
+
+    primary_error: "BaseException | None"
+    cleanup_error: BaseException
+    diagnostics: "tuple[CleanupDiagnostic, ...]"
+
+    def __post_init__(self) -> None:
+        Exception.__init__(self, "task graph cleanup failed")
+
+
+def _set_cleanup_error_attribute(self, name: str, value: object) -> None:
+    if name in {"primary_error", "cleanup_error", "diagnostics"} and hasattr(
+        self, name
+    ):
+        raise AttributeError(f"{name} is immutable")
+    object.__setattr__(self, name, value)
+
+
+TaskGraphCleanupError.__setattr__ = _set_cleanup_error_attribute
 
 
 class MemoryError(LinktoolsAIError):

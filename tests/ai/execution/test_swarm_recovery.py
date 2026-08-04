@@ -125,4 +125,4 @@ async def test_recovery_timeout_keeps_parent_and_claim_nonterminal(monkeypatch):
     assert parent.status is RunStatus.RUNNING
     assert current.status is TaskStatus.CLAIMED
     assert current.active_run_id == child_id
-    assert current.usage.input_tokens == 0
+    assert current.usage.input_tokens == 8

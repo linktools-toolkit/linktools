@@ -9,6 +9,7 @@ import pytest
 
 from linktools.ai.errors import ChildExecutionPlatformError
 from linktools.ai.execution.domain import RunStatus, RunUsage
+from linktools.ai.execution.commands import ParentLeaseGuard
 from linktools.ai.execution.identifiers import child_run_id
 from linktools.ai.execution.live_events import NoopRunLiveEventSink
 from linktools.ai.execution.service import PreparedAgentExecution
@@ -72,7 +73,6 @@ async def test_platform_error_carries_persisted_child_usage_and_cause():
     )
     runner = _ChildNodeRunner(
         agent_execution=ExplodingExecutionService(),
-        agent_provider=None,
         principal=_principal(),
         session_id="s",
         parent_run_id=parent_id,
@@ -92,6 +92,7 @@ async def test_platform_error_carries_persisted_child_usage_and_cause():
                 fence=0,
                 child_run_id=child_id,
                 dependencies=(),
+                parent_guard=ParentLeaseGuard("parent", "scheduler", 0),
             )
         )
 
@@ -121,7 +122,6 @@ async def test_child_runner_reads_usage_without_task_store_access():
     )
     runner = _ChildNodeRunner(
         agent_execution=FakeExecutionService(),
-        agent_provider=None,
         principal=_principal(),
         session_id="s",
         parent_run_id="parent",

@@ -7,18 +7,23 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import timedelta
+from enum import StrEnum
 from typing import Awaitable, Callable, Protocol
 
 from ...errors import (
     ChildExecutionPlatformError,
+    CleanupDiagnostic,
     NodeLeaseLostError,
+    ParentLeaseGuardError,
     ParentLeaseLostError,
     StorageConflictError,
     StorageError,
     SwarmLimitExceededError,
+    TaskGraphCleanupError,
     TaskGraphInvariantError,
 )
 from ...execution.domain import RunError
+from ...execution.commands import ParentLeaseGuard
 from ...execution.identifiers import child_run_id
 from ..models import (
     TaskExecution,
@@ -52,6 +57,18 @@ class NodeRunRequest:
     fence: int
     child_run_id: str
     dependencies: "tuple[TaskExecution, ...]"
+    parent_guard: "ParentLeaseGuard"
+
+
+class StopReason(StrEnum):
+    NORMAL = "normal"
+    USER_CANCELLED = "user_cancelled"
+    CALLER_CANCELLED = "caller_cancelled"
+    TIMEOUT = "timeout"
+    TOKEN_LIMIT = "token_limit"
+    COST_LIMIT = "cost_limit"
+    PLATFORM_FAILURE = "platform_failure"
+    PARENT_LEASE_LOST = "parent_lease_lost"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +132,8 @@ class TaskGraphEngine:
         limits: "SwarmLimits",
         owner: str,
         parent_run_id: str,
+        parent_owner: str,
+        parent_fence: int,
         principal: "PrincipalContext | None" = None,
         on_skip: "Callable[[str, tuple[str, ...]], Awaitable[None]] | None" = None,
         on_node_terminal: "Callable[[str, NodeRunResult], Awaitable[None]] | None" = None,
@@ -126,6 +145,8 @@ class TaskGraphEngine:
         self._limits = limits
         self._owner = owner
         self._parent_run_id = parent_run_id
+        self._parent_owner = parent_owner
+        self._parent_fence = parent_fence
         self._principal = principal
         self._on_skip = on_skip
         self._on_node_terminal = on_node_terminal
@@ -135,6 +156,7 @@ class TaskGraphEngine:
         self._requests_by_node: "dict[str, NodeRunRequest]" = {}
         self._usage_by_node: "dict[str, TaskUsage]" = {}
         self._stopping = False
+        self._stop_reason = StopReason.NORMAL
         self._completion = asyncio.Event()
         self._logger = logger
 
@@ -145,36 +167,46 @@ class TaskGraphEngine:
     async def execute(self, plan: TaskPlan) -> TaskUsage:
         """Run the graph and always perform the final convergence pass."""
         primary_error: BaseException | None = None
-        stop_reason = "normal"
+        stop_reason = StopReason.NORMAL
+        result: TaskUsage | None = None
         try:
-            return await self._run_loop(plan)
+            result = await self._run_loop(plan)
         except asyncio.CancelledError as exc:
             primary_error = exc
-            stop_reason = "caller_cancelled"
-            raise
+            stop_reason = StopReason.CALLER_CANCELLED
         except BaseException as exc:
             primary_error = exc
             stop_reason = self._classify_stop_reason(exc)
-            raise
-        finally:
-            try:
-                await self._shutdown_active_nodes(
-                    plan,
-                    stop_reason=stop_reason,
-                    primary_error=primary_error,
+        self._stop_reason = stop_reason
+        try:
+            await self._shutdown_active_nodes(
+                plan,
+                stop_reason=stop_reason,
+                primary_error=primary_error,
+            )
+        except BaseException as cleanup_error:
+            diagnostic = CleanupDiagnostic(
+                stage="engine_cleanup",
+                node_id=None,
+                error_type=type(cleanup_error).__name__,
+                safe_message="task graph cleanup failed",
+            )
+            if self._logger is not None:
+                self._logger.error(
+                    "task graph cleanup failed parent_run_id=%s error_type=%s",
+                    self._parent_run_id,
+                    type(cleanup_error).__name__,
                 )
-            except BaseException as cleanup_error:
-                if primary_error is None:
-                    raise
-                primary_error.add_note(
-                    "task graph cleanup failed: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
-                )
-                if self._logger is not None:
-                    self._logger.exception(
-                        "task graph cleanup failed after primary error",
-                        exc_info=cleanup_error,
-                    )
+            raise TaskGraphCleanupError(
+                primary_error=primary_error,
+                cleanup_error=cleanup_error,
+                diagnostics=(diagnostic,),
+            ) from cleanup_error
+        if primary_error is not None:
+            raise primary_error
+        if result is None:
+            raise TaskGraphInvariantError("task graph completed without usage")
+        return result
 
     async def _run_loop(self, plan: TaskPlan) -> TaskUsage:
         while True:
@@ -313,6 +345,7 @@ class TaskGraphEngine:
         executions: "dict[str, TaskExecution]",
     ) -> TaskExecution:
         execution = executions[node.id]
+        await self._gate.check_before_launch()
         if node.id in self._active_by_node or execution.active_run_id is not None:
             raise TaskGraphInvariantError("ready node already has an active child")
         claimed = await self._store.claim_ready(
@@ -341,6 +374,11 @@ class TaskGraphEngine:
                     executions[dependency.node_id]
                     for dependency in node.dependencies
                     if dependency.node_id in executions
+                ),
+                parent_guard=ParentLeaseGuard(
+                    run_id=self._parent_run_id,
+                    owner=self._parent_owner,
+                    fence=self._parent_fence,
                 ),
             )
             self._requests_by_node[node.id] = request
@@ -383,14 +421,25 @@ class TaskGraphEngine:
                     claimed.id,
                     owner=claimed.owner or self._owner,
                     fence=claimed.fence,
-                    reason="node_start_failed",
+                    reason=(
+                        "parent_lease_lost_before_child_start"
+                        if isinstance(exc, ParentLeaseGuardError)
+                        else "node_start_failed"
+                    ),
                     usage=claimed.usage,
                 )
             except BaseException as cleanup_error:
-                exc.add_note(
-                    "failed to release node claim: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                diagnostic = CleanupDiagnostic(
+                    stage="claim_release",
+                    node_id=node.id,
+                    error_type=type(cleanup_error).__name__,
+                    safe_message="node claim cleanup failed",
                 )
+                raise TaskGraphCleanupError(
+                    primary_error=exc,
+                    cleanup_error=cleanup_error,
+                    diagnostics=(diagnostic,),
+                ) from cleanup_error
             raise
 
     def _on_node_done(self, task: "asyncio.Task[None]") -> None:
@@ -403,10 +452,41 @@ class TaskGraphEngine:
             raise TaskGraphInvariantError("active node registration disappeared")
         try:
             outcome = await self._runner.run(request)
+        except ParentLeaseGuardError as exc:
+            usage = self._usage_by_node.get(node_id, TaskUsage())
+            try:
+                await self._store.cancel_claimed(
+                    active.execution_id,
+                    owner=active.owner,
+                    fence=active.fence,
+                    reason="parent_lease_lost_before_child_start",
+                    usage=usage,
+                )
+            except BaseException as cleanup_error:
+                diagnostic = CleanupDiagnostic(
+                    stage="guard_claim_release",
+                    node_id=node_id,
+                    error_type=type(cleanup_error).__name__,
+                    safe_message="guard-failed claim cleanup failed",
+                )
+                raise TaskGraphCleanupError(
+                    primary_error=exc,
+                    cleanup_error=cleanup_error,
+                    diagnostics=(diagnostic,),
+                ) from cleanup_error
+            raise
         except ChildExecutionPlatformError as exc:
             self._usage_by_node[node_id] = exc.usage
+            if self._stopping:
+                return
+            raise
+        except BaseException:
+            if self._stopping:
+                return
             raise
         self._usage_by_node[node_id] = outcome.usage
+        if self._stopping:
+            return
         self._gate.record_usage(outcome.usage)
         if outcome.status is TaskStatus.COMPLETED:
             await self._store.complete(
@@ -519,10 +599,11 @@ class TaskGraphEngine:
         self,
         plan: TaskPlan,
         *,
-        stop_reason: str,
+        stop_reason: StopReason,
         primary_error: BaseException | None,
     ) -> None:
         self._stopping = True
+        self._stop_reason = stop_reason
         active_nodes = tuple(self._active_by_node.values())
         if self._logger is not None:
             self._logger.info(
@@ -534,16 +615,18 @@ class TaskGraphEngine:
         cancel_errors: "list[BaseException]" = []
         cancel_failed_nodes: "set[str]" = set()
         reason = self._task_cancel_reason(stop_reason)
-        for active in active_nodes:
-            try:
-                await self._runner.request_cancel(
-                    child_run_id=active.child_run_id,
-                    principal=self._principal,
-                    reason=reason,
-                )
-            except BaseException as exc:
-                cancel_errors.append(exc)
-                cancel_failed_nodes.add(active.node_id)
+        parent_lease_lost = stop_reason is StopReason.PARENT_LEASE_LOST
+        if not parent_lease_lost:
+            for active in active_nodes:
+                try:
+                    await self._runner.request_cancel(
+                        child_run_id=active.child_run_id,
+                        principal=self._principal,
+                        reason=reason,
+                    )
+                except BaseException as exc:
+                    cancel_errors.append(exc)
+                    cancel_failed_nodes.add(active.node_id)
         for active in active_nodes:
             if not active.task.done():
                 active.task.cancel()
@@ -552,7 +635,6 @@ class TaskGraphEngine:
             return_exceptions=True,
         )
 
-        parent_lease_lost = stop_reason == "parent_lease_lost"
         storage_errors: "list[BaseException]" = []
         usage_failed_nodes: "set[str]" = set()
         if not parent_lease_lost:
@@ -590,9 +672,12 @@ class TaskGraphEngine:
                                 owner=active.owner,
                                 fence=active.fence,
                                 reason=reason,
-                                usage=self._usage_by_node.get(
-                                    active.node_id,
+                                usage=_merge_cleanup_usage(
                                     execution.usage,
+                                    self._usage_by_node.get(
+                                        active.node_id,
+                                        execution.usage,
+                                    ),
                                 ),
                             )
                     elif not execution.terminal:
@@ -615,10 +700,9 @@ class TaskGraphEngine:
                 final_executions = await self._store.list_executions(plan.id)
                 if any(
                     execution.status is TaskStatus.CLAIMED
-                    and execution.owner == self._owner
                     for execution in final_executions
                 ):
-                    raise StorageError("current owner still holds CLAIMED nodes")
+                    raise StorageError("a worker still holds CLAIMED nodes")
             except BaseException as exc:
                 storage_errors.append(exc)
         if self._active_by_node or self._active_by_task:
@@ -629,33 +713,37 @@ class TaskGraphEngine:
             raise cancel_errors[0]
 
     @staticmethod
-    def _classify_stop_reason(exc: BaseException) -> str:
+    def _classify_stop_reason(exc: BaseException) -> StopReason:
+        if isinstance(exc, TaskGraphCleanupError) and exc.primary_error is not None:
+            return TaskGraphEngine._classify_stop_reason(exc.primary_error)
         kind = getattr(exc, "kind", None)
-        if kind == "parent_lease_lost" or isinstance(exc, ParentLeaseLostError):
-            return "parent_lease_lost"
-        if isinstance(exc, NodeLeaseLostError):
-            return "node_lease_lost"
+        if (
+            kind == "parent_lease_lost"
+            or isinstance(exc, (ParentLeaseLostError, ParentLeaseGuardError))
+        ):
+            return StopReason.PARENT_LEASE_LOST
+        if kind == "parent_cancelled":
+            return StopReason.USER_CANCELLED
         if kind in {"timeout"}:
-            return "timeout"
-        if kind in {
-            "max_total_tokens",
-            "token_limit_reached",
-            "max_total_cost",
-            "cost_limit_reached",
-            "cost_usage_unavailable",
-        }:
-            return "parent_limit"
-        return "parent_failed"
+            return StopReason.TIMEOUT
+        if kind in {"max_total_tokens", "token_limit_reached"}:
+            return StopReason.TOKEN_LIMIT
+        if kind in {"max_total_cost", "cost_limit_reached", "cost_usage_unavailable"}:
+            return StopReason.COST_LIMIT
+        if isinstance(exc, NodeLeaseLostError) or isinstance(exc, ChildExecutionPlatformError):
+            return StopReason.PLATFORM_FAILURE
+        return StopReason.PLATFORM_FAILURE
 
-    def _task_cancel_reason(self, stop_reason: str) -> str:
-        if self._gate.cancel_requested or stop_reason in {
-            "caller_cancelled",
-            "parent_cancelled",
-        }:
+    def _task_cancel_reason(self, stop_reason: StopReason) -> str:
+        if stop_reason is StopReason.PARENT_LEASE_LOST:
+            return "parent_lease_lost"
+        if self._gate.cancel_requested:
             return "parent_cancelled"
-        if stop_reason == "timeout":
+        if stop_reason in {StopReason.USER_CANCELLED, StopReason.CALLER_CANCELLED}:
+            return "parent_cancelled"
+        if stop_reason is StopReason.TIMEOUT:
             return "parent_timeout"
-        if stop_reason == "parent_limit":
+        if stop_reason in {StopReason.TOKEN_LIMIT, StopReason.COST_LIMIT}:
             return "parent_limit"
         return "parent_failed"
 
@@ -670,6 +758,28 @@ class TaskGraphEngine:
         return total.freeze()
 
 
+def _merge_cleanup_usage(previous: TaskUsage, observed: TaskUsage) -> TaskUsage:
+    if previous.total_cost is None:
+        total_cost = observed.total_cost
+    elif observed.total_cost is None:
+        total_cost = previous.total_cost
+    else:
+        total_cost = max(previous.total_cost, observed.total_cost)
+    return TaskUsage(
+        input_tokens=max(previous.input_tokens, observed.input_tokens),
+        output_tokens=max(previous.output_tokens, observed.output_tokens),
+        total_cost=total_cost,
+        cache_write_tokens=max(
+            previous.cache_write_tokens,
+            observed.cache_write_tokens,
+        ),
+        cache_read_tokens=max(
+            previous.cache_read_tokens,
+            observed.cache_read_tokens,
+        ),
+    )
+
+
 __all__ = [
     "ActiveNode",
     "ControlGate",
@@ -678,5 +788,6 @@ __all__ = [
     "NodeRunRequest",
     "NodeRunResult",
     "NodeRunner",
+    "StopReason",
     "TaskGraphEngine",
 ]

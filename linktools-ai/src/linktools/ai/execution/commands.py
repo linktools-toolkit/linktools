@@ -16,6 +16,13 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class ParentLeaseGuard:
+    run_id: str
+    owner: str
+    fence: int
+
+
+@dataclass(frozen=True, slots=True)
 class CreateSession:
     session_id: str
     user_id: "str | None"
@@ -31,6 +38,7 @@ class StartExecution:
     input: "JsonValue"
     root_execution_id: "str | None" = None
     parent_execution_id: "str | None" = None
+    parent_guard: "ParentLeaseGuard | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +145,7 @@ __all__ = [
     "FailExecution",
     "HeartbeatExecution",
     "PauseExecution",
+    "ParentLeaseGuard",
     "RequestCancellation",
     "ResumeExecution",
     "StartExecution",

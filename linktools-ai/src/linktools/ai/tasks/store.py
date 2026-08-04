@@ -77,6 +77,17 @@ class TaskStore(Protocol):
         """Extend the lease on a CLAIMED execution, verifying owner+fence."""
         ...
 
+    async def record_claimed_usage(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        usage: "TaskUsage",
+    ) -> "TaskExecution":
+        """Persist monotonic usage without changing any task lifecycle field."""
+        ...
+
     async def complete(
         self,
         execution_id: str,

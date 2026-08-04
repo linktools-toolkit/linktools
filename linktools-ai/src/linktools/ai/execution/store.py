@@ -38,6 +38,14 @@ class ExecutionStore(Protocol):
 
     async def get_run(self, run_id: str) -> "RunRecord | None": ...
 
+    async def list_runs_by_ids(
+        self, run_ids: "tuple[str, ...]"
+    ) -> "tuple[RunRecord, ...]": ...
+
+    async def assert_active_lease(
+        self, run_id: str, *, owner: str, fence: int
+    ) -> None: ...
+
     async def claim_run(self, command: "ClaimExecution") -> "RunRecord": ...
 
     async def claim_run_for_recovery(

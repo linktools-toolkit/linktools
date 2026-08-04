@@ -22,18 +22,52 @@ from uuid import uuid4
 from linktools.core import environ
 
 from ..agent.assembly.provider import AgentFeatureContext
-from ..agent.models import AgentCancelled, AgentCompleted, AgentFailed, AgentInput, AgentPaused
+from ..agent.models import (
+    AgentCancelled,
+    AgentCompleted,
+    AgentFailed,
+    AgentInput,
+    AgentPaused,
+)
 from ..agent.sandbox.protocols import Sandbox
-from ..errors import RunDefinitionError, RunDefinitionIntegrityError, RuntimeInitializationError, StorageError
+from ..errors import (
+    RunDefinitionError,
+    RunDefinitionIntegrityError,
+    RuntimeInitializationError,
+    StorageError,
+)
 from ..governance.authorization import ExecutionAction
 from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
 from ..observability.events.payloads import SecurityDegraded
-from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
-from .domain import MessageCaptureState, RunApproval, RunDefinition, RunError, RunKind, RunStatus, RunnableType, RunUsage, sanitize_run_error
-from .context import RunContext
 from .cancellation import CancellationToken
+from .commands import (
+    AbortExecution,
+    AcknowledgeCancellation,
+    ClaimExecution,
+    CompleteExecution,
+    DecideApproval,
+    FailExecution,
+    HeartbeatExecution,
+    ParentLeaseGuard,
+    PauseExecution,
+    RequestCancellation,
+    ResumeExecution,
+    StartExecution,
+)
 from .controller import ExecutionControllerRegistry
+from .context import RunContext
+from .domain import (
+    MessageCaptureState,
+    RunApproval,
+    RunDefinition,
+    RunError,
+    RunKind,
+    RunStatus,
+    RunnableType,
+    RunUsage,
+    sanitize_run_error,
+)
 from .query import ExecutionResultView
 from .snapshots import AgentSnapshotData, RunUsageCapture
 from . import trace_codec
@@ -309,6 +343,7 @@ class ExecutionService:
         execution_id: str,
         root_execution_id: str,
         parent_execution_id: str,
+        parent_guard: "ParentLeaseGuard",
         message_history: "tuple[object, ...]" = (),
         metadata: "Mapping[str, Any] | None" = None,
         prepared_execution: "PreparedAgentExecution | None" = None,
@@ -343,6 +378,7 @@ class ExecutionService:
                 {"prompt": prompt, "metadata": dict(metadata) if metadata else {}},
                 root_execution_id=root_execution_id,
                 parent_execution_id=parent_execution_id,
+                parent_guard=parent_guard,
             )
         )
         claimed = await self._store.claim_run(

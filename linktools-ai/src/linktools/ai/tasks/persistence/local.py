@@ -162,6 +162,26 @@ class LocalTaskBackend:
             self._executions[execution_id] = updated
             return updated
 
+    async def record_claimed_usage(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        usage: TaskUsage,
+    ) -> TaskExecution:
+        async with self._lock:
+            current = self._require(execution_id)
+            self._assert_claimed(current, owner, fence)
+            _assert_usage_monotonic(current.usage, usage)
+            updated = replace(
+                current,
+                usage=usage,
+                updated_at=datetime.now(timezone.utc),
+            )
+            self._executions[execution_id] = updated
+            return updated
+
     async def complete(
         self,
         execution_id: str,
@@ -174,6 +194,7 @@ class LocalTaskBackend:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
+            _assert_usage_monotonic(current.usage, usage)
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
@@ -198,6 +219,7 @@ class LocalTaskBackend:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
+            _assert_usage_monotonic(current.usage, usage)
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
@@ -272,6 +294,7 @@ class LocalTaskBackend:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
+            _assert_usage_monotonic(current.usage, usage)
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
@@ -309,6 +332,23 @@ def _freeze(result: "JsonValue") -> "JsonValue":
     if isinstance(result, list):
         return tuple(_freeze(v) for v in result)
     return result
+
+
+def _assert_usage_monotonic(old: TaskUsage, new: TaskUsage) -> None:
+    if new.input_tokens < old.input_tokens:
+        raise StorageConflictError("claimed usage input_tokens decreased")
+    if new.output_tokens < old.output_tokens:
+        raise StorageConflictError("claimed usage output_tokens decreased")
+    if new.cache_write_tokens < old.cache_write_tokens:
+        raise StorageConflictError("claimed usage cache_write_tokens decreased")
+    if new.cache_read_tokens < old.cache_read_tokens:
+        raise StorageConflictError("claimed usage cache_read_tokens decreased")
+    if (
+        old.total_cost is not None
+        and new.total_cost is not None
+        and new.total_cost < old.total_cost
+    ):
+        raise StorageConflictError("claimed usage total_cost decreased")
 
 
 __all__ = ["LocalTaskBackend"]

@@ -11,7 +11,12 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.errors import SwarmLimitExceededError, TaskGraphInvariantError
+from linktools.ai.errors import (
+    StorageError,
+    SwarmLimitExceededError,
+    TaskGraphCleanupError,
+    TaskGraphInvariantError,
+)
 from linktools.ai.execution.domain import RunError
 from linktools.ai.tasks.models import (
     DependencyFailurePolicy,
@@ -63,6 +68,8 @@ def _engine(store, runner, *, limits=None, owner="scheduler") -> "tuple[TaskGrap
         limits=lim,
         owner=owner,
         parent_run_id="parent-run",
+        parent_owner=owner,
+        parent_fence=0,
     ), gate
 
 
@@ -268,6 +275,8 @@ async def test_token_limit_aborts_via_accumulated_usage():
         ),
         owner="sch",
         parent_run_id="pr",
+        parent_owner="sch",
+        parent_fence=0,
     )
     with pytest.raises(SwarmLimitExceededError):
         await engine.execute(plan)
@@ -296,5 +305,7 @@ async def test_no_busy_loop_raises_invariant_error():
     await store.create_plan(plan, (claimed, executions[1]))
     runner = RecordingRunner(results={"a": 1, "b": 2})
     engine, _ = _engine(store, runner, limits=_limits(max_concurrency=1))
-    with pytest.raises(TaskGraphInvariantError):
+    with pytest.raises(TaskGraphCleanupError) as raised:
         await engine.execute(plan)
+    assert isinstance(raised.value.primary_error, TaskGraphInvariantError)
+    assert isinstance(raised.value.cleanup_error, StorageError)
