@@ -1,85 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Swarm domain models: SwarmRun/SwarmStep state, AgentRef, TaskInput, TokenUsage,
-and the SwarmStatus/SwarmStepStatus enums + transition table. Mirrors the
-frozen-dataclass + str-Enum conventions of run/models.py and session/models.py."""
 
+"""Swarm domain value types shared across strategies.
 
-from decimal import Decimal
+The task_graph strategy holds NO authoritative swarm-level state: the parent
+RunRecord is the sole authority for the run and TaskExecution is the sole
+authority for a node. Only the AgentRef member type and the strategy outcome
+shapes live here."""
+
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any, Mapping, TypeAlias
+from typing import Mapping, TypeAlias
+
 from ...json import JsonValue
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from ..models import TaskUsage
     from ...execution.domain import RunErrorInfo
-    from ...agent.models import RunResult
-
-class SwarmStatus(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    PAUSED = "paused"
-    RECOVERABLE = "recoverable"
-    # CANCELLING distinguishes "cancel requested" from "actually cancelled"
-    # (mirrors RunStatus.CANCELLING):
-    # SwarmEngine.cancel() flips to CANCELLING while an in-flight swarm
-    # coroutine is still unwinding; the CancelledError handler in
-    # SwarmEngine.run() transitions CANCELLING -> CANCELLED once actually
-    # stopped.
-    CANCELLING = "cancelling"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class SwarmStepStatus(str, Enum):
-    PENDING = "pending"
-    CLAIMED = "claimed"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-class AttemptStatus(str, Enum):
-    """Lifecycle of a single task execution attempt (SwarmStepAttempt.status).
-
-    Each (re)try of a SwarmStep records one SwarmStepAttempt so
-    retries, agent migrations, and failure recovery are fully auditable. A task
-    that succeeds on the second try leaves attempt #1 = FAILED and #2 = SUCCEEDED.
-    """
-
-    RUNNING = "running"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-
-
-ALLOWED_SWARM_TRANSITIONS: "Mapping[SwarmStatus, frozenset[SwarmStatus]]" = {
-    SwarmStatus.PENDING: frozenset({SwarmStatus.RUNNING}),
-    SwarmStatus.RUNNING: frozenset(
-        {
-            SwarmStatus.PAUSED,
-            SwarmStatus.SUCCEEDED,
-            SwarmStatus.FAILED,
-            SwarmStatus.CANCELLING,
-            SwarmStatus.CANCELLED,
-        }
-    ),
-    SwarmStatus.PAUSED: frozenset(
-        {
-            SwarmStatus.RUNNING,
-            SwarmStatus.CANCELLING,
-            SwarmStatus.CANCELLED,
-        }
-    ),
-    SwarmStatus.RECOVERABLE: frozenset({SwarmStatus.RUNNING}),
-    SwarmStatus.CANCELLING: frozenset({SwarmStatus.CANCELLED, SwarmStatus.FAILED}),
-    SwarmStatus.SUCCEEDED: frozenset(),
-    SwarmStatus.FAILED: frozenset(),
-    SwarmStatus.CANCELLED: frozenset(),
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,173 +27,47 @@ class AgentRef:
 
 
 @dataclass(frozen=True, slots=True)
-class TaskInput:
-    prompt: str
-    metadata: "Mapping[str, Any]" = field(default_factory=dict)
+class SwarmRunView:
+    """Read-only projection of a swarm run for inspect_swarm: the parent run's
+    status/error plus the per-node TaskExecution snapshot, already authorized
+    by the caller."""
 
-
-@dataclass(frozen=True, slots=True)
-class TokenUsage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_cost: "Decimal" = field(default_factory=lambda: Decimal("0"))
-
-    def add(self, other: "TokenUsage") -> "TokenUsage":
-        return TokenUsage(
-            input_tokens=self.input_tokens + other.input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            total_cost=self.total_cost + other.total_cost,
-        )
-
-    @classmethod
-    def from_mapping(cls, m: "Mapping[str, Any]") -> "TokenUsage":
-        """Strictly parse token usage from a mapping. Non-int / negative values
-        are rejected rather than silently coerced via int()."""
-        raw_input = m.get("input_tokens", 0)
-        raw_output = m.get("output_tokens", 0)
-        if (
-            not isinstance(raw_input, int)
-            or isinstance(raw_input, bool)
-            or raw_input < 0
-        ):
-            raise ValueError(
-                f"input_tokens must be a non-negative int, got {raw_input!r}"
-            )
-        if (
-            not isinstance(raw_output, int)
-            or isinstance(raw_output, bool)
-            or raw_output < 0
-        ):
-            raise ValueError(
-                f"output_tokens must be a non-negative int, got {raw_output!r}"
-            )
-        return cls(input_tokens=raw_input, output_tokens=raw_output)
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmRun:
-    id: str
-    run_id: str
-    round: int
-    status: SwarmStatus
-    version: int
-    token_usage: TokenUsage
-    cost: "Decimal"
-    created_at: "datetime"
-    updated_at: "datetime"
-    metadata: "Mapping[str, Any]" = field(default_factory=dict)
-    execution_token: "str | None" = None
-    execution_owner_id: "str | None" = None
-    execution_generation: int = 0
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmCheckpoint:
-    """Durable strategy input for resume; it never replays completed tasks."""
-
-    completed_task_ids: "tuple[str, ...]"
-    failed_task_ids: "tuple[str, ...]"
-    pending_task_ids: "tuple[str, ...]"
-    active_task_ids: "tuple[str, ...]"
-    task_outputs: "Mapping[str, RunResult]" = field(default_factory=dict)
-    strategy_state: "Mapping[str, Any]" = field(default_factory=dict)
-    aggregate_state: "Mapping[str, Any]" = field(default_factory=dict)
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmStep:
-    id: str
-    swarm_run_id: str
-    parent_task_id: "str | None"
-    assigned_agent_id: "str | None"
-    description: str
-    status: SwarmStepStatus
-    dependencies: "tuple[str, ...]"
-    input: TaskInput
-    result: "RunResult | None"
+    plan_id: str
+    parent_run_id: str
+    status: str
     error: "RunErrorInfo | None"
-    attempts: int
-    version: int
-    claimed_at: "datetime | None"
-    lease_expires_at: "datetime | None"
-    created_at: "datetime"
-    updated_at: "datetime"
-    # The id of the child RunRecord this task's execution creates (set in
-    # strategy._run_task right after claim_task succeeds). The child identity:
-    # task.id IS NOT its child RunRecord.id; each (re)execution mints a fresh
-    # run_id and stores it here. None until claimed, or after a reclaim reset.
-    active_run_id: "str | None" = None
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmStepAttempt:
-    """One execution attempt of a SwarmStep.
-
-    A single SwarmStep may produce several SwarmStepAttempts over its life:
-    retries inside one ``_run_task`` call each record their own attempt, as does
-    a re-invocation of ``_run_task`` after a prior FAILED. The ``run_id`` is the
-    child RunRecord id for that execution (NOT the task id), and the
-    ``attempt`` field is 1-based and monotonically increments per task. The
-    status transitions RUNNING -> SUCCEEDED | FAILED so the audit trail records
-    both the failures and the eventual success (or final failure).
-    """
-
-    id: str
-    task_id: str
-    run_id: str
-    agent_id: str
-    attempt: int
-    status: AttemptStatus
-    started_at: "datetime"
-    finished_at: "datetime | None"
-    error: "RunErrorInfo | None"
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmUsage:
-    """Aggregate token/cost usage a swarm execution produced across all worker
-    runs -- the swarm analogue of agent RunUsage. ``total_cost`` is None until
-    per-token pricing is wired."""
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_cost: "float | None" = None
+    nodes: "tuple[JsonValue, ...]"
+    status_counts: "Mapping[str, int]"
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmCompleted:
-    """SwarmEngine drove the strategy to a final aggregate result. ``result`` is
-    the merged aggregate RunResult; ``aggregate_messages`` are the session
-    messages ExecutionService persists to the parent/shared session; ``usage`` is
-    the cross-worker aggregate."""
+    """task_graph drove every node to a terminal status with no run-level
+    error. ``collect`` is the structured projection of all nodes; ``usage`` is
+    the aggregate across worker runs. Node-level FAILED/SKIPPED does NOT make
+    the swarm FAILED."""
 
-    result: "RunResult"
-    aggregate_messages: "tuple[JsonValue, ...]"
-    usage: SwarmUsage
-
-
-@dataclass(frozen=True, slots=True)
-class SwarmPaused:
-    """SwarmEngine suspended (e.g. a worker awaited approval). Carries the
-    SwarmCheckpoint ExecutionService persists so a later resume replays only the
-    unfinished tasks."""
-
-    checkpoint: SwarmCheckpoint
+    collect: JsonValue
+    usage: "TaskUsage"
 
 
 @dataclass(frozen=True, slots=True)
 class SwarmFailed:
-    """SwarmEngine caught an expected strategy/worker/limit failure (the
-    redacted error is carried here). Configuration/invariant violations and
-    unknown programming errors propagate as raised exceptions instead -- the
-    swarm did not 'fail' in the expected sense."""
+    """task_graph hit a run-level error (plan/DAG/store/limit/usage/protocol or
+    programming error). The redacted error is carried here."""
 
     error: "RunErrorInfo"
 
 
-SwarmExecutionOutcome: TypeAlias = "SwarmCompleted | SwarmPaused | SwarmFailed"
-"""The sole return shape of SwarmEngine.execute(): a discriminated union so
-ExecutionService can converge the driving Run's lifecycle (transition/checkpoint/
-session/event writes) from ONE outcome object. Invalid combinations (a paused
-swarm carrying a result, etc.) are not constructible -- callers dispatch with
-``isinstance()``."""
+SwarmExecutionOutcome: TypeAlias = "SwarmCompleted | SwarmFailed"
+"""Discriminated union returned by the task_graph executor so the runtime can
+converge the parent RunRecord lifecycle from one object."""
+
+
+__all__ = [
+    "AgentRef",
+    "SwarmCompleted",
+    "SwarmExecutionOutcome",
+    "SwarmFailed",
+    "SwarmRunView",
+]

@@ -1,17 +1,20 @@
 import pytest
 
-from linktools.ai.tasks.models import TaskExecution, TaskPlan
 from linktools.ai.tasks.persistence.local import LocalTaskBackend
-from linktools.ai.tasks.store import TaskStore
+
+from tests.ai.tasks.contracts import (
+    assert_task_store_contract,
+    assert_usage_round_trips_through_complete,
+)
 
 
 @pytest.mark.asyncio
-async def test_task_store_uses_one_fenced_claim_path():
+async def test_local_task_store_meets_contract():
     store = LocalTaskBackend()
-    await store.save_plan(TaskPlan("plan", ()))
-    await store.add_execution(TaskExecution("execution", "plan", "node", "ready"))
-    claimed = await store.claim("execution", owner="worker")
-    with pytest.raises(ValueError):
-        await store.complete("execution", owner="other", fence=claimed.fence, result=None)
-    result = await store.complete("execution", owner="worker", fence=claimed.fence, result="ok")
-    assert result.status == "completed"
+    await assert_task_store_contract(store)
+
+
+@pytest.mark.asyncio
+async def test_local_task_store_round_trips_usage():
+    store = LocalTaskBackend()
+    await assert_usage_round_trips_through_complete(store)

@@ -24,6 +24,7 @@ class ExecutionAction(StrEnum):
     CANCEL = "cancel"
     DECIDE_APPROVAL = "decide_approval"
     INSPECT = "inspect"
+    SWARM = "swarm"
 
 
 class AuthorizationPolicy(Protocol):

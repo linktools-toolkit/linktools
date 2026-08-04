@@ -10,6 +10,7 @@ from ..agent.mcp.models import MCPRuntimePolicy
 from ..agent.mcp.tool_provider import MCPToolProvider
 from ..agent.extension.provider import ExtensionProvider
 from ..agent.skill.provider import SkillProvider
+from ..agent.spec import AgentSpecProvider
 from ..agent.subagent.provider import SubagentProvider
 from ..agent.middleware.pipeline import MiddlewarePipeline
 from ..agent.prompt.window import SessionWindowPolicy
@@ -44,6 +45,7 @@ class RuntimeDependencies:
     subagent_provider: "SubagentProvider | None" = None
     extension_provider: "ExtensionProvider | None" = None
     mcp_provider: "MCPToolProvider | None" = None
+    agent_spec_provider: "AgentSpecProvider | None" = None
     middleware: "MiddlewarePipeline | None" = None
     session_window: "SessionWindowPolicy | None" = None
     memory: "MemoryStore | None" = None

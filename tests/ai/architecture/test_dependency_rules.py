@@ -161,9 +161,14 @@ def _two_cycles() -> "set[tuple[str, str]]":
 #   TYPE_CHECKING-only annotation (agent.capability.exposure), not a runtime
 #   dependency.
 # New cycles beyond this set must not appear.
+# ("execution", "tasks"): task_graph swarm orchestration. execution/swarm_service.py
+# drives the swarm (imports tasks.store/engine/aggregation), and tasks.swarm.engine
+# + tasks.persistence emit execution.domain.RunError for node failures. The two
+# layers share the RunError value type; engine/state stay leaf-like otherwise.
 _BASELINE_TWO_CYCLES: "frozenset[tuple[str, str]]" = frozenset({
     ("agent", "execution"),
     ("agent", "governance"),
+    ("execution", "tasks"),
 })
 
 

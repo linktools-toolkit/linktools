@@ -4,6 +4,7 @@
 """Pure Run domain values and the single Run state machine."""
 
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Generic, Literal, TypeVar
@@ -66,7 +67,7 @@ class ApprovalDecision(StrEnum):
 class RunDefinition:
     runnable_id: str
     runnable_type: RunnableType
-    schema: "Literal['agent-spec.v1']"
+    schema: "Literal['agent-spec.v1', 'swarm-spec.v1']"
     spec: "JsonValue"
     spec_hash: str
 
@@ -148,6 +149,19 @@ ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
 }
 
 
+def child_run_id(parent_run_id: str, node_id: str) -> str:
+    """Deterministic child RunRecord id for a task_graph node: collision-free
+    across distinct (parent, node) pairs and stable across re-drives, so crash
+    recovery never mints a second child for the same node."""
+    digest = hashlib.sha256(
+        "task-graph-child-v1\0".encode()
+        + parent_run_id.encode()
+        + b"\0"
+        + node_id.encode()
+    ).hexdigest()
+    return f"tg-child-{digest}"
+
+
 __all__ = [
     "ALLOWED_RUN_TRANSITIONS",
     "ApprovalDecision",
@@ -162,4 +176,5 @@ __all__ = [
     "RunStatus",
     "RunUsage",
     "RunnableType",
+    "child_run_id",
 ]

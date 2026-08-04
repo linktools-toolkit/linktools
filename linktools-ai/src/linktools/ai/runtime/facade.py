@@ -22,7 +22,11 @@ if TYPE_CHECKING:
         RunMessagesView,
     )
     from ..execution.service import ExecutionService
+    from ..execution.swarm_service import SwarmExecutionService
     from ..json import JsonValue
+    from ..tasks.models import TaskPlan
+    from ..tasks.swarm.models import SwarmExecutionOutcome, SwarmRunView
+    from ..tasks.swarm.spec import SwarmSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,7 @@ class Runtime:
     tool_execution_ready: bool
     sandbox: "Sandbox | None" = None
     mcp_connections: "MCPConnectionPool | None" = None
+    swarm: "SwarmExecutionService | None" = None
 
     async def run(
         self,
@@ -97,6 +102,45 @@ class Runtime:
         return await self.query.get_session_messages(
             session_id=session_id, principal=principal
         )
+
+    async def run_swarm(
+        self,
+        spec: "SwarmSpec",
+        task_plan: "TaskPlan",
+        *,
+        principal: PrincipalContext,
+        session_id: "str | None" = None,
+        execution_id: "str | None" = None,
+    ) -> "SwarmExecutionOutcome":
+        if self.swarm is None:
+            raise RuntimeError("swarm execution is not available on this runtime")
+        return await self.swarm.run_swarm(
+            spec,
+            task_plan,
+            principal=principal,
+            session_id=session_id,
+            execution_id=execution_id,
+        )
+
+    async def recover_swarm(
+        self,
+        execution_id: str,
+        *,
+        principal: PrincipalContext,
+    ) -> "SwarmExecutionOutcome":
+        if self.swarm is None:
+            raise RuntimeError("swarm execution is not available on this runtime")
+        return await self.swarm.recover_swarm(execution_id, principal=principal)
+
+    async def inspect_swarm(
+        self,
+        execution_id: str,
+        *,
+        principal: PrincipalContext,
+    ) -> "SwarmRunView":
+        if self.swarm is None:
+            raise RuntimeError("swarm execution is not available on this runtime")
+        return await self.swarm.inspect_swarm(execution_id, principal=principal)
 
     async def aclose(self) -> None:
         if self.mcp_connections is not None:

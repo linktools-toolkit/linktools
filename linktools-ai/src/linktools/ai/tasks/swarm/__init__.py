@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""swarm: the unified Swarm subsystem's pure domain models
-(SwarmRun/SwarmStep, AgentRef, TaskInput, TokenUsage) and spec types
-(SwarmSpec and its policy/strategy specs). Persistence and orchestration now
-live in the task/execution domains; this package holds the SwarmStep
-per-task domain model and the surrounding value types."""
+"""Swarm subsystem value types and specs. The task_graph strategy holds no
+authoritative swarm-level state: the parent RunRecord and per-node
+TaskExecution are the sole authorities. This package owns the AgentRef member
+type, the SwarmSpec/policy/limits specs, the aggregation reductions, and the
+strategy outcome shapes."""
 
-from .models import SwarmStep
+from .models import AgentRef, SwarmCompleted, SwarmExecutionOutcome, SwarmFailed, SwarmRunView
 from .spec import SwarmSpec
 
-__all__ = ["SwarmSpec", "SwarmStep"]
+__all__ = [
+    "AgentRef",
+    "SwarmCompleted",
+    "SwarmExecutionOutcome",
+    "SwarmFailed",
+    "SwarmRunView",
+    "SwarmSpec",
+]

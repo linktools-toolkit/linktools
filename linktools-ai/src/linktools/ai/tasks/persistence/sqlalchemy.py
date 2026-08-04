@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SQLAlchemy TaskStore with database-side fencing."""
+"""SQLAlchemy TaskStore with database-side fencing.
 
-from dataclasses import asdict
+Every state transition is a single conditional UPDATE whose WHERE clause
+re-checks the previously-read (status, owner, fence) so a stale fence or a
+racing writer updates zero rows; rowcount != 1 is a StorageConflictError. The
+fence column never resets, so a stale owner can never re-win. create_plan
+inserts ``plan`` and every node execution in one transaction; any failure
+rolls the whole batch back."""
+
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import JSON, DateTime, Integer, String, select, update
+from sqlalchemy import JSON, DateTime, Integer, String, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from linktools.core import environ
 
-from ...storage.sqlalchemy.base import Base
+from ...errors import StorageConflictError
+from ...execution.domain import RunError
+from ...json import JsonValue
+from ...storage.coordination.lease import Lease, claim, is_expired, renew
 from ...storage.database import CoordinationScope
+from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX
 from ...storage.sqlalchemy.dialects import resolve_dialect
-from ...errors import StorageConflictError
-from ...storage.coordination.lease import Lease, assert_active, claim, release, renew
-from ..models import TaskExecution, TaskNode, TaskPlan, TaskStatus
+from ..codec import decode_plan, encode_plan
+from ..models import TaskExecution, TaskPlan, TaskStatus, TaskUsage
 
 logger = environ.get_logger("ai.tasks.persistence.sqlalchemy")
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
     from ...storage.sqlalchemy.dialects import SqlAlchemyDialect
 
@@ -38,17 +48,25 @@ class PlanRow(Base):
 class ExecutionRow(Base):
     __tablename__ = f"{TABLE_PREFIX}task_executions"
     execution_id: "Mapped[str]" = mapped_column(String(255), unique=True)
-    plan_id: "Mapped[str]" = mapped_column(String(255), index=True)
+    plan_id: "Mapped[str]" = mapped_column(
+        String(255), index=True
+    )
     node_id: "Mapped[str]" = mapped_column(String(255))
-    status: "Mapped[str]" = mapped_column(String(32), index=True)
+    status: "Mapped[str]" = mapped_column(String(32))
     owner: "Mapped[str | None]" = mapped_column(String(255))
     fence: "Mapped[int]" = mapped_column(Integer, default=0)
     attempt: "Mapped[int]" = mapped_column(Integer, default=0)
+    active_run_id: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
     result: "Mapped[Any]" = mapped_column(JSON, nullable=True)
     error: "Mapped[Any]" = mapped_column(JSON, nullable=True)
+    blocked_by: "Mapped[Any]" = mapped_column(JSON, nullable=False, default=list)
+    terminal_reason: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
+    usage: "Mapped[Any]" = mapped_column(JSON, nullable=False, default=dict)
     lease_expires_at: "Mapped[Any]" = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    created_at: "Mapped[Any]" = mapped_column(DateTime(timezone=True))
+    updated_at: "Mapped[Any]" = mapped_column(DateTime(timezone=True))
 
 
 class SqlAlchemyTaskBackend:
@@ -63,136 +81,158 @@ class SqlAlchemyTaskBackend:
     async def initialize_storage(self, engine: "AsyncEngine") -> None:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.execute(
+                text(
+                    f"CREATE UNIQUE INDEX IF NOT EXISTS "
+                    f"ix_{TABLE_PREFIX}task_exec_plan_node "
+                    f"ON {TABLE_PREFIX}task_executions (plan_id, node_id)"
+                )
+            )
+            await connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS "
+                    f"ix_{TABLE_PREFIX}task_exec_plan_status "
+                    f"ON {TABLE_PREFIX}task_executions (plan_id, status)"
+                )
+            )
 
-    async def _dialect_for(self, session) -> "SqlAlchemyDialect":
+    async def _dialect_for(self, session: "AsyncSession") -> "SqlAlchemyDialect":
         if self._dialect is None:
             self._dialect = resolve_dialect(session)
         return self._dialect
 
     @staticmethod
-    async def _plan_row(session, plan_id: str):
+    async def _plan_row(session: "AsyncSession", plan_id: str):
         return await session.scalar(select(PlanRow).where(PlanRow.plan_id == plan_id))
 
     @staticmethod
-    async def _execution_row(session, execution_id: str):
+    async def _execution_row(
+        session: "AsyncSession", execution_id: str
+    ) -> "ExecutionRow | None":
         return await session.scalar(
             select(ExecutionRow).where(ExecutionRow.execution_id == execution_id)
         )
 
     @staticmethod
     def _plan(row: PlanRow) -> TaskPlan:
-        return TaskPlan(
-            row.plan_id, tuple(TaskNode(**node) for node in row.payload["nodes"])
-        )
+        return decode_plan(row.payload)
 
     @staticmethod
     def _execution(row: ExecutionRow) -> TaskExecution:
         return TaskExecution(
-            row.execution_id,
-            row.plan_id,
-            row.node_id,
-            TaskStatus(row.status),
-            Lease(row.owner, row.fence, row.lease_expires_at),
-            row.attempt,
-            row.result,
-            row.error,
-            row.created_at,
-            row.updated_at,
+            id=row.execution_id,
+            plan_id=row.plan_id,
+            node_id=row.node_id,
+            status=TaskStatus(row.status),
+            lease=Lease(row.owner, row.fence, row.lease_expires_at),
+            attempt=row.attempt,
+            active_run_id=row.active_run_id,
+            result=row.result,
+            error=_decode_error(row.error),
+            blocked_by=tuple(row.blocked_by or ()),
+            terminal_reason=row.terminal_reason,
+            usage=_decode_usage(row.usage),
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )
+
+    async def create_plan(
+        self,
+        plan: TaskPlan,
+        executions: "tuple[TaskExecution, ...]",
+    ) -> None:
+        payload = encode_plan(plan)
+        try:
+            async with self.session_factory() as session:
+                async with session.begin():
+                    dialect = await self._dialect_for(session)
+                    result = await dialect.insert_ignore_conflict(
+                        session,
+                        model=PlanRow,
+                        values={"plan_id": plan.id, "payload": payload},
+                        index_elements=("plan_id",),
+                    )
+                    if not result.inserted:
+                        raise StorageConflictError(
+                            f"task plan {plan.id!r} already exists"
+                        )
+                    for execution in executions:
+                        session.add(self._execution_row_for(execution))
+                    await session.flush()
+        except IntegrityError as exc:
+            raise StorageConflictError(
+                f"task plan {plan.id!r} or a node already exists"
+            ) from exc
 
     @staticmethod
-    async def _update_claimed(
-        session, row: ExecutionRow, **values: object
-    ) -> ExecutionRow:
-        result = await session.execute(
-            update(ExecutionRow)
-            .where(
-                ExecutionRow.execution_id == row.execution_id,
-                ExecutionRow.status == TaskStatus.CLAIMED.value,
-                ExecutionRow.owner == row.owner,
-                ExecutionRow.fence == row.fence,
-                ExecutionRow.lease_expires_at == row.lease_expires_at,
-            )
-            .values(**values)
+    def _execution_row_for(execution: TaskExecution) -> ExecutionRow:
+        return ExecutionRow(
+            execution_id=execution.id,
+            plan_id=execution.plan_id,
+            node_id=execution.node_id,
+            status=execution.status.value,
+            owner=execution.lease.owner,
+            fence=execution.lease.fence,
+            attempt=execution.attempt,
+            active_run_id=execution.active_run_id,
+            result=execution.result,
+            error=_encode_error(execution.error),
+            blocked_by=list(execution.blocked_by),
+            terminal_reason=execution.terminal_reason,
+            usage=_encode_usage(execution.usage),
+            lease_expires_at=execution.lease.expires_at,
+            created_at=execution.created_at,
+            updated_at=execution.updated_at,
         )
-        if result.rowcount != 1:
-            raise StorageConflictError("task claim changed concurrently")
-        # The CAS matched exactly one row at the held state, so the UPDATE's
-        # values are now the row's true state -- reflect them onto the loaded
-        # ORM object and build the record from it, skipping a re-SELECT.
-        for key, value in values.items():
-            setattr(row, key, value)
-        return row
-
-    async def save_plan(self, plan: TaskPlan) -> None:
-        payload = {"nodes": [asdict(node) for node in plan.nodes]}
-        async with self.session_factory() as session:
-            async with session.begin():
-                dialect = await self._dialect_for(session)
-                # One dialect upsert keyed on plan_id folds the insert-or-update
-                # that the hand-rolled UPDATE-then-INSERT-on-zero-rowcount loop
-                # did in 2 statements with a retry.
-                await dialect.upsert(
-                    session,
-                    model=PlanRow,
-                    values={"plan_id": plan.id, "payload": payload},
-                    set_values={"payload": payload},
-                    index_elements=("plan_id",),
-                )
 
     async def get_plan(self, plan_id: str) -> "TaskPlan | None":
         async with self.session_factory() as session:
             row = await self._plan_row(session, plan_id)
             return None if row is None else self._plan(row)
 
-    async def add_execution(self, execution: TaskExecution) -> None:
-        try:
-            async with self.session_factory() as session:
-                async with session.begin():
-                    session.add(
-                        ExecutionRow(
-                            execution_id=execution.id,
-                            plan_id=execution.plan_id,
-                            node_id=execution.node_id,
-                            status=execution.status.value,
-                            owner=execution.owner,
-                            fence=execution.fence,
-                            attempt=execution.attempt,
-                            result=execution.result,
-                            error=execution.error,
-                            lease_expires_at=execution.lease.expires_at,
-                        )
-                    )
-                    await session.flush()
-        except IntegrityError as exc:
-            raise StorageConflictError("task execution already exists") from exc
-
-    create_execution = add_execution
+    async def list_executions(self, plan_id: str) -> "tuple[TaskExecution, ...]":
+        async with self.session_factory() as session:
+            result = await session.scalars(
+                select(ExecutionRow)
+                .where(ExecutionRow.plan_id == plan_id)
+                .order_by(ExecutionRow.created_at)
+            )
+            return tuple(self._execution(row) for row in result)
 
     async def get_execution(self, execution_id: str) -> "TaskExecution | None":
         async with self.session_factory() as session:
             row = await self._execution_row(session, execution_id)
             return None if row is None else self._execution(row)
 
-    async def claim(
+    async def claim_ready(
         self,
         execution_id: str,
         *,
         owner: str,
-        duration: timedelta = timedelta(minutes=5),
+        duration: timedelta,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._execution_row(session, execution_id)
                 if row is None:
-                    raise KeyError(execution_id)
-                if row.status == TaskStatus.COMPLETED.value:
-                    return self._execution(row)
-                if row.status == TaskStatus.FAILED.value:
-                    raise StorageConflictError("failed task cannot be claimed")
+                    raise StorageConflictError(
+                        f"task execution {execution_id!r} not found"
+                    )
                 now = datetime.now(timezone.utc)
-                lease = claim(
-                    Lease(row.owner, row.fence, row.lease_expires_at),
+                current_lease = Lease(row.owner, row.fence, row.lease_expires_at)
+                if row.status == TaskStatus.READY.value:
+                    pass
+                elif row.status == TaskStatus.CLAIMED.value and is_expired(
+                    current_lease, now
+                ):
+                    # an expired CLAIMED lease is reclaimable as if READY
+                    pass
+                else:
+                    raise StorageConflictError(
+                        f"task {execution_id!r} is {row.status}, not claimable"
+                    )
+                new_lease = claim(
+                    current_lease,
                     owner=owner,
                     now=now,
                     duration=duration,
@@ -206,22 +246,48 @@ class SqlAlchemyTaskBackend:
                     )
                     .values(
                         status=TaskStatus.CLAIMED.value,
-                        owner=lease.owner,
-                        fence=lease.fence,
-                        lease_expires_at=lease.expires_at,
-                        attempt=row.attempt + 1,
+                        owner=new_lease.owner,
+                        fence=new_lease.fence,
+                        lease_expires_at=new_lease.expires_at,
+                        attempt=1,
                         updated_at=now,
                     )
                 )
                 if result.rowcount != 1:
-                    raise StorageConflictError("task claim conflict")
-                # CAS matched at the held state: reflect the UPDATE's values onto
-                # the loaded row and build the record without a re-SELECT.
+                    raise StorageConflictError("task claim lost a race")
                 row.status = TaskStatus.CLAIMED.value
-                row.owner = lease.owner
-                row.fence = lease.fence
-                row.lease_expires_at = lease.expires_at
-                row.attempt = row.attempt + 1
+                row.owner = new_lease.owner
+                row.fence = new_lease.fence
+                row.lease_expires_at = new_lease.expires_at
+                row.attempt = 1
+                row.updated_at = now
+                return self._execution(row)
+
+    async def bind_child_run(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        child_run_id: str,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._claimed_row(session, execution_id, owner, fence)
+                if row.active_run_id is not None and row.active_run_id != child_run_id:
+                    raise StorageConflictError(
+                        f"task {execution_id!r} already bound to a different child run"
+                    )
+                now = datetime.now(timezone.utc)
+                result = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence).values(
+                        active_run_id=child_run_id,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("task bind lost a race")
+                row.active_run_id = child_run_id
                 row.updated_at = now
                 return self._execution(row)
 
@@ -231,57 +297,61 @@ class SqlAlchemyTaskBackend:
         *,
         owner: str,
         fence: int,
-        duration: timedelta = timedelta(minutes=5),
+        duration: timedelta,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id)
-                if row is None:
-                    raise KeyError(execution_id)
+                row = await self._claimed_row(session, execution_id, owner, fence)
                 now = datetime.now(timezone.utc)
-                lease = renew(
+                new_lease = renew(
                     Lease(row.owner, row.fence, row.lease_expires_at),
                     owner=owner,
                     fence=fence,
                     now=now,
                     duration=duration,
                 )
-                updated = await self._update_claimed(
-                    session,
-                    row,
-                    lease_expires_at=lease.expires_at,
-                    updated_at=now,
+                result = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence).values(
+                        lease_expires_at=new_lease.expires_at,
+                        updated_at=now,
+                    )
                 )
-                return self._execution(updated)
+                if result.rowcount != 1:
+                    raise StorageConflictError("task renew lost a race")
+                row.lease_expires_at = new_lease.expires_at
+                row.updated_at = now
+                return self._execution(row)
 
     async def complete(
-        self, execution_id: str, *, owner: str, fence: int, result: object
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        result: "JsonValue",
+        usage: TaskUsage,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._execution_row(session, execution_id)
-                if row is None:
-                    raise KeyError(execution_id)
+                row = await self._claimed_row(session, execution_id, owner, fence)
                 now = datetime.now(timezone.utc)
-                assert_active(
-                    Lease(row.owner, row.fence, row.lease_expires_at),
-                    owner=owner,
-                    fence=fence,
-                    now=now,
+                outcome = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence).values(
+                        status=TaskStatus.COMPLETED.value,
+                        result=result,
+                        usage=_encode_usage(usage),
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
                 )
-                if row.status != TaskStatus.CLAIMED.value:
-                    raise StorageConflictError("task is not claimed")
-                lease = release(Lease(row.owner, row.fence, row.lease_expires_at))
-                updated = await self._update_claimed(
-                    session,
-                    row,
-                    status=TaskStatus.COMPLETED.value,
-                    result=result,
-                    owner=lease.owner,
-                    lease_expires_at=lease.expires_at,
-                    updated_at=now,
-                )
-                return self._execution(updated)
+                if outcome.rowcount != 1:
+                    raise StorageConflictError("task complete lost a race")
+                row.status = TaskStatus.COMPLETED.value
+                row.result = result
+                row.usage = _encode_usage(usage)
+                row.lease_expires_at = None
+                row.updated_at = now
+                return self._execution(row)
 
     async def fail(
         self,
@@ -289,33 +359,220 @@ class SqlAlchemyTaskBackend:
         *,
         owner: str,
         fence: int,
-        retry: bool = False,
-        error: object = None,
+        error: RunError,
+        usage: TaskUsage,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._claimed_row(session, execution_id, owner, fence)
+                now = datetime.now(timezone.utc)
+                outcome = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence).values(
+                        status=TaskStatus.FAILED.value,
+                        error=_encode_error(error),
+                        usage=_encode_usage(usage),
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if outcome.rowcount != 1:
+                    raise StorageConflictError("task fail lost a race")
+                row.status = TaskStatus.FAILED.value
+                row.error = _encode_error(error)
+                row.usage = _encode_usage(usage)
+                row.lease_expires_at = None
+                row.updated_at = now
+                return self._execution(row)
+
+    async def skip(
+        self,
+        execution_id: str,
+        *,
+        blocked_by: "tuple[str, ...]",
+        reason: str,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._execution_row(session, execution_id)
                 if row is None:
-                    raise KeyError(execution_id)
+                    raise StorageConflictError(
+                        f"task execution {execution_id!r} not found"
+                    )
+                if row.status == TaskStatus.SKIPPED.value:
+                    return self._execution(row)
+                if row.status != TaskStatus.READY.value:
+                    raise StorageConflictError(
+                        f"task {execution_id!r} is {row.status}, cannot skip"
+                    )
                 now = datetime.now(timezone.utc)
-                assert_active(
-                    Lease(row.owner, row.fence, row.lease_expires_at),
-                    owner=owner,
-                    fence=fence,
-                    now=now,
+                outcome = await session.execute(
+                    update(ExecutionRow)
+                    .where(
+                        ExecutionRow.execution_id == execution_id,
+                        ExecutionRow.status == TaskStatus.READY.value,
+                    )
+                    .values(
+                        status=TaskStatus.SKIPPED.value,
+                        blocked_by=list(blocked_by),
+                        terminal_reason=reason,
+                        updated_at=now,
+                    )
                 )
-                if row.status != TaskStatus.CLAIMED.value:
-                    raise StorageConflictError("task is not claimed")
-                lease = release(Lease(row.owner, row.fence, row.lease_expires_at))
-                updated = await self._update_claimed(
-                    session,
-                    row,
-                    status=TaskStatus.READY.value if retry else TaskStatus.FAILED.value,
-                    owner=lease.owner,
-                    lease_expires_at=lease.expires_at,
-                    error=error,
-                    updated_at=now,
+                if outcome.rowcount != 1:
+                    raise StorageConflictError("task skip lost a race")
+                row.status = TaskStatus.SKIPPED.value
+                row.blocked_by = list(blocked_by)
+                row.terminal_reason = reason
+                row.updated_at = now
+                return self._execution(row)
+
+    async def cancel_ready(
+        self,
+        execution_id: str,
+        *,
+        reason: str,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._execution_row(session, execution_id)
+                if row is None:
+                    raise StorageConflictError(
+                        f"task execution {execution_id!r} not found"
+                    )
+                if row.status in _TERMINAL_VALUES:
+                    return self._execution(row)
+                if row.status != TaskStatus.READY.value:
+                    raise StorageConflictError(
+                        f"task {execution_id!r} is {row.status}, use cancel_claimed"
+                    )
+                now = datetime.now(timezone.utc)
+                outcome = await session.execute(
+                    update(ExecutionRow)
+                    .where(
+                        ExecutionRow.execution_id == execution_id,
+                        ExecutionRow.status == TaskStatus.READY.value,
+                    )
+                    .values(
+                        status=TaskStatus.CANCELLED.value,
+                        terminal_reason=reason,
+                        updated_at=now,
+                    )
                 )
-                if environ.debug and retry:
-                    logger.debug("task %s failed -> READY (re-claimable)", execution_id)
-                return self._execution(updated)
+                if outcome.rowcount != 1:
+                    raise StorageConflictError("task cancel_ready lost a race")
+                row.status = TaskStatus.CANCELLED.value
+                row.terminal_reason = reason
+                row.updated_at = now
+                return self._execution(row)
+
+    async def cancel_claimed(
+        self,
+        execution_id: str,
+        *,
+        owner: str,
+        fence: int,
+        reason: str,
+        usage: TaskUsage,
+    ) -> TaskExecution:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._claimed_row(session, execution_id, owner, fence)
+                now = datetime.now(timezone.utc)
+                outcome = await session.execute(
+                    self._claimed_guard(execution_id, owner, fence).values(
+                        status=TaskStatus.CANCELLED.value,
+                        terminal_reason=reason,
+                        usage=_encode_usage(usage),
+                        lease_expires_at=None,
+                        updated_at=now,
+                    )
+                )
+                if outcome.rowcount != 1:
+                    raise StorageConflictError("task cancel_claimed lost a race")
+                row.status = TaskStatus.CANCELLED.value
+                row.terminal_reason = reason
+                row.usage = _encode_usage(usage)
+                row.lease_expires_at = None
+                row.updated_at = now
+                return self._execution(row)
+
+    async def _claimed_row(
+        self,
+        session: "AsyncSession",
+        execution_id: str,
+        owner: str,
+        fence: int,
+    ) -> ExecutionRow:
+        row = await self._execution_row(session, execution_id)
+        if row is None:
+            raise StorageConflictError(f"task execution {execution_id!r} not found")
+        if row.status != TaskStatus.CLAIMED.value:
+            raise StorageConflictError(
+                f"task {execution_id!r} is {row.status}, not claimed"
+            )
+        if row.owner != owner or row.fence != fence:
+            raise StorageConflictError("stale fence for task execution")
+        return row
+
+    @staticmethod
+    def _claimed_guard(execution_id: str, owner: str, fence: int):
+        return update(ExecutionRow).where(
+            ExecutionRow.execution_id == execution_id,
+            ExecutionRow.status == TaskStatus.CLAIMED.value,
+            ExecutionRow.owner == owner,
+            ExecutionRow.fence == fence,
+        )
+
+
+_TERMINAL_VALUES = frozenset(
+    {
+        TaskStatus.COMPLETED.value,
+        TaskStatus.FAILED.value,
+        TaskStatus.SKIPPED.value,
+        TaskStatus.CANCELLED.value,
+    }
+)
+
+
+def _encode_usage(usage: TaskUsage) -> "dict[str, JsonValue]":
+    return {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "total_cost": (
+            None if usage.total_cost is None else format(usage.total_cost, "f")
+        ),
+    }
+
+
+def _decode_usage(value: "Any") -> TaskUsage:
+    if not value:
+        return TaskUsage()
+    total_cost = value.get("total_cost")
+    return TaskUsage(
+        input_tokens=int(value.get("input_tokens", 0)),
+        output_tokens=int(value.get("output_tokens", 0)),
+        total_cost=Decimal(total_cost) if total_cost is not None else None,
+    )
+
+
+def _encode_error(error: "RunError | None") -> "dict[str, JsonValue] | None":
+    if error is None:
+        return None
+    return {
+        "error_type": error.error_type,
+        "message": error.message,
+        "detail": error.detail,
+    }
+
+
+def _decode_error(value: "Any") -> "RunError | None":
+    if not value:
+        return None
+    return RunError(
+        error_type=value["error_type"],
+        message=value["message"],
+        detail=value.get("detail"),
+    )
+
+
+__all__ = ["SqlAlchemyTaskBackend"]

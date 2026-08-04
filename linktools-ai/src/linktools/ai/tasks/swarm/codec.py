@@ -100,12 +100,6 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
         _parse_agent_ref(a, swarm_id=swarm_id, kind="agent") for a in agents_raw
     )
 
-    # coordinator — required.
-    coord_raw = payload.get("coordinator")
-    if coord_raw is None:
-        raise InvalidSpecError(f"swarm {swarm_id}: 'coordinator' is required")
-    coordinator = _parse_agent_ref(coord_raw, swarm_id=swarm_id, kind="coordinator")
-
     # strategy — default coordinator_delegation.
     strat_raw = payload.get("strategy")
     if strat_raw is None:
@@ -125,6 +119,20 @@ def parse_swarm_spec(swarm_id: str, payload: "dict[str, Any]") -> SwarmSpec:
         )
     else:
         raise InvalidSpecError(f"swarm {swarm_id}: 'strategy' must be a mapping")
+
+    # coordinator — required for coordinator_delegation, forbidden for
+    # task_graph (which has no coordinator agent).
+    coord_raw = payload.get("coordinator")
+    if strategy.kind == "task_graph":
+        if coord_raw is not None:
+            raise InvalidSpecError(
+                f"swarm {swarm_id}: task_graph strategy has no coordinator"
+            )
+        coordinator = None
+    else:
+        if coord_raw is None:
+            raise InvalidSpecError(f"swarm {swarm_id}: 'coordinator' is required")
+        coordinator = _parse_agent_ref(coord_raw, swarm_id=swarm_id, kind="coordinator")
 
     # limits — fall back to DEFAULT_SWARM_LIMITS; missing fields inherit defaults.
     limits_raw = payload.get("limits")
@@ -255,4 +263,118 @@ class SwarmSpecCodec:
         return parse_swarm_spec(item_id, payload)
 
 
-__all__: "list[str]" = ["SwarmSpecCodec", "parse_swarm_spec"]
+def encode_swarm_spec(spec: SwarmSpec) -> "JsonValue":
+    """Canonical JSON encoding of a SwarmSpec for RunDefinition persistence. The
+    swarm's agents/coordinator/middleware/limits/context_policy/aggregation are
+    encoded so decode_swarm_spec rebuilds a semantically equal spec through the
+    same constructors that validate it."""
+    return {
+        "schema": "swarm-spec.v1",
+        "id": spec.id,
+        "name": spec.name,
+        "agents": [
+            {"agent_id": a.agent_id, "role": a.role} for a in spec.agents
+        ],
+        "coordinator": (
+            None
+            if spec.coordinator is None
+            else {"agent_id": spec.coordinator.agent_id, "role": spec.coordinator.role}
+        ),
+        "strategy": {"kind": spec.strategy.kind, "config": dict(spec.strategy.config)},
+        "limits": _encode_limits(spec.limits),
+        "context_policy": {
+            "coordinator_reads_session": spec.context_policy.coordinator_reads_session,
+            "worker_reads_session": spec.context_policy.worker_reads_session,
+            "worker_reads_summary": spec.context_policy.worker_reads_summary,
+            "write_aggregate_to_session": spec.context_policy.write_aggregate_to_session,
+        },
+        "aggregation": {"mode": spec.aggregation.mode.value},
+        "middleware": [
+            {"name": m.name, "config": dict(m.config)} for m in spec.middleware
+        ],
+        "metadata": dict(spec.metadata),
+    }
+
+
+def decode_swarm_spec(value: "JsonValue") -> SwarmSpec:
+    data = value if isinstance(value, dict) else {}
+    agents = tuple(
+        AgentRef(agent_id=str(a["agent_id"]), role=a.get("role"))
+        for a in data.get("agents", ())
+    )
+    coord_raw = data.get("coordinator")
+    coordinator = (
+        None
+        if coord_raw is None
+        else AgentRef(agent_id=str(coord_raw["agent_id"]), role=coord_raw.get("role"))
+    )
+    strat = data.get("strategy") or {}
+    strategy = SwarmStrategySpec(kind=str(strat.get("kind", "")), config=dict(strat.get("config") or {}))
+    return SwarmSpec(
+        id=str(data.get("id", "")),
+        name=str(data.get("name", "")),
+        agents=agents,
+        coordinator=coordinator,
+        strategy=strategy,
+        limits=_decode_limits(data.get("limits")),
+        context_policy=SwarmContextPolicy(
+            coordinator_reads_session=bool(
+                (data.get("context_policy") or {}).get("coordinator_reads_session", True)
+            ),
+            worker_reads_session=bool(
+                (data.get("context_policy") or {}).get("worker_reads_session", False)
+            ),
+            worker_reads_summary=bool(
+                (data.get("context_policy") or {}).get("worker_reads_summary", True)
+            ),
+            write_aggregate_to_session=bool(
+                (data.get("context_policy") or {}).get("write_aggregate_to_session", True)
+            ),
+        ),
+        aggregation=AggregationPolicy(mode=AggregationMode((data.get("aggregation") or {}).get("mode", "concat"))),
+        middleware=tuple(
+            MiddlewareRef(name=str(m["name"]), config=dict(m.get("config") or {}))
+            for m in data.get("middleware", ())
+        ),
+        metadata=dict(data.get("metadata") or {}),
+    )
+
+
+def _encode_limits(limits: "SwarmLimits") -> "JsonValue":
+    return {
+        "max_rounds": limits.max_rounds,
+        "max_tasks": limits.max_tasks,
+        "max_delegations": limits.max_delegations,
+        "max_depth": limits.max_depth,
+        "max_concurrency": limits.max_concurrency,
+        "max_total_tokens": limits.max_total_tokens,
+        "max_total_cost": (
+            None if limits.max_total_cost is None else format(limits.max_total_cost, "f")
+        ),
+        "timeout_seconds": limits.timeout_seconds,
+    }
+
+
+def _decode_limits(value: "JsonValue") -> "SwarmLimits":
+    from decimal import Decimal
+
+    data = value if isinstance(value, dict) else {}
+    cost = data.get("max_total_cost")
+    return SwarmLimits(
+        max_rounds=int(data.get("max_rounds", 1)),
+        max_tasks=int(data.get("max_tasks", 50)),
+        max_delegations=int(data.get("max_delegations", 0)),
+        max_depth=int(data.get("max_depth", 0)),
+        max_concurrency=int(data.get("max_concurrency", 4)),
+        max_total_tokens=data.get("max_total_tokens"),
+        max_total_cost=Decimal(cost) if cost is not None else None,
+        timeout_seconds=data.get("timeout_seconds"),
+    )
+
+
+__all__: "list[str]" = [
+    "SwarmSpecCodec",
+    "decode_swarm_spec",
+    "encode_swarm_spec",
+    "parse_swarm_spec",
+]

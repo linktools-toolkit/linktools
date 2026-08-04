@@ -476,6 +476,11 @@ class SwarmLimitExceededError(SwarmError):
         self.kind = kind
 
 
+class TaskGraphInvariantError(SwarmError):
+    """The DAG cannot make progress: no node is ready, in flight, or skippable,
+    yet not all nodes are terminal. A run-level failure, not a node failure."""
+
+
 class MemoryError(LinktoolsAIError):
     """Base class for Memory-related errors."""
 

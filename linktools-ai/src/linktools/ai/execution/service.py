@@ -13,8 +13,10 @@ tools, middleware, output type -- round-trips across pause/resume.
 
 import asyncio
 import hmac
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from typing import Any, Mapping
 from uuid import uuid4
 
 from linktools.core import environ
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
     from ..agent.assembly.models import AgentAssembly
     from ..agent.spec import AgentSpec
     from ..governance.authorization import AuthorizationPolicy
+    from ..tasks.models import TaskUsage
     from .domain import ApprovalDecision, RunRecord
     from .live_events import RunLiveEventSink, SecurityEventSink
     from .store import ExecutionStore
@@ -87,6 +90,54 @@ def decode_model_messages(messages: "tuple[object, ...]") -> "tuple[object, ...]
 
 _LEASE_DURATION = timedelta(minutes=5)
 _HEARTBEAT_INTERVAL = min(max(_LEASE_DURATION / 3, timedelta(seconds=1)), timedelta(seconds=10))
+
+
+@dataclass(frozen=True, slots=True)
+class ChildRunResult:
+    """Terminal outcome of a swarm child agent run: the persisted status, the
+    structured output (when completed), the redacted error (when failed), and
+    the real usage the child consumed. A swarm maps this to a NodeRunResult."""
+
+    run_id: str
+    status: "RunStatus"
+    output: "object | None"
+    error: "RunError | None"
+    usage: "TaskUsage"
+
+
+def _outcome_usage(outcome: "object | None", record: "RunRecord | None") -> "TaskUsage":
+    """Pull the real token/cost usage out of an AgentExecutionOutcome (or fall
+    back to the persisted record's RunUsage). Cost stays None unless every agent
+    reports it; unknown cost is NEVER coerced to zero."""
+    from ..tasks.models import TaskUsage
+    from decimal import Decimal
+
+    if isinstance(outcome, (AgentCompleted, AgentFailed, AgentCancelled)):
+        usage = outcome.usage
+        total_cost: "Decimal | None" = None
+        if getattr(usage, "total_cost", None) is not None:
+            total_cost = Decimal(str(usage.total_cost))
+        return TaskUsage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_cost=total_cost,
+        )
+    if record is not None:
+        return TaskUsage(input_tokens=0, output_tokens=0, total_cost=None)
+    from ..tasks.models import TaskUsage as _TU
+
+    return _TU()
+
+
+def _child_result_from_outcome(
+    run_id: str, outcome: "object | None", record: "RunRecord"
+) -> "ChildRunResult":
+    output: "object | None" = None
+    error: "RunError | None" = record.error
+    if isinstance(outcome, AgentCompleted):
+        output = outcome.result.output
+    usage = _outcome_usage(outcome, record)
+    return ChildRunResult(run_id=run_id, status=record.status, output=output, error=error, usage=usage)
 
 
 class ExecutionService:
@@ -207,6 +258,181 @@ class ExecutionService:
             message_history=messages,
             assembly=assembly,
         )
+
+    async def run_child(
+        self,
+        spec: "AgentSpec",
+        prompt: str,
+        *,
+        principal: PrincipalContext,
+        session_id: str,
+        execution_id: str,
+        root_execution_id: str,
+        parent_execution_id: str,
+        message_history: "tuple[object, ...]" = (),
+        metadata: "Mapping[str, Any] | None" = None,
+    ) -> "ChildRunResult":
+        """Run one agent as a swarm child: a TASK run that propagates the parent
+        and root execution ids, reads the parent's immutable message snapshot,
+        and never claims a user turn or writes the shared session. The child's
+        own ``AgentInput.metadata`` carries the task_graph dependency view so
+        the agent sees upstream results without session cross-talk."""
+        if not isinstance(principal, PrincipalContext):
+            raise TypeError("principal must be a PrincipalContext")
+        assembly = await self._preflight(
+            spec,
+            execution_id=execution_id,
+            session_id=session_id,
+            root_execution_id=root_execution_id,
+            parent_execution_id=parent_execution_id,
+            principal=principal,
+        )
+        record = await self._store.start_run(
+            StartExecution(
+                execution_id,
+                session_id,
+                RunKind.TASK,
+                _definition(spec, self._codec),
+                {"prompt": prompt, "metadata": dict(metadata) if metadata else {}},
+                root_execution_id=root_execution_id,
+                parent_execution_id=parent_execution_id,
+            )
+        )
+        claimed = await self._store.claim_run(
+            ClaimExecution(record.id, "swarm", datetime.now(timezone.utc), _LEASE_DURATION)
+        )
+        compiled = await self._compiler.compile(spec)
+        context = RunContext(
+            claimed.id,
+            claimed.root_execution_id,
+            claimed.parent_execution_id,
+            claimed.session_id,
+            claimed.runnable_id,
+            claimed.definition.runnable_type,
+            claimed.user_id,
+            claimed.tenant_id,
+            None,
+            metadata=metadata or {},
+        )
+        collector = SemanticTraceCollector(claimed.id, self._store, claimed.trace_sequence)
+        decoded_history = decode_model_messages(message_history) if message_history else ()
+        token = CancellationToken()
+        agent_input = AgentInput(prompt=prompt, message_history=decoded_history, metadata=metadata or {})
+        owner = claimed.lease.owner or "swarm"
+        task = await self._controller.start(
+            claimed.id,
+            self._engine.execute_pure(
+                compiled,
+                agent_input,
+                context,
+                cancellation=token,
+                live_events=self._live_events,
+                security_events=self._security_events,
+                assembly=assembly,
+                trace_sequence=claimed.trace_sequence,
+                trace_collector=collector,
+            ),
+            token,
+        )
+        heartbeat = asyncio.ensure_future(
+            self._heartbeat(claimed.id, owner, claimed.lease.fence, token)
+        )
+        outcome: "object | None" = None
+        run_error: "RunError | None" = None
+        try:
+            done, _ = await asyncio.wait({task, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
+            if heartbeat in done:
+                heartbeat_error = heartbeat.exception()
+                if heartbeat_error is not None:
+                    await self._controller.cancel(claimed.id)
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise heartbeat_error
+            outcome = await task
+        except asyncio.CancelledError:
+            token.cancel()
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            latest = await self._required(execution_id)
+            await self._converge_child_cancel(claimed, owner)
+            return ChildRunResult(
+                run_id=execution_id,
+                status=RunStatus.CANCELLED,
+                output=None,
+                error=latest.error,
+                usage=_outcome_usage(outcome, None),
+            )
+        except Exception as exc:
+            trace_end = await collector.flush()
+            await self._store.abort_run(
+                AbortExecution(claimed.id, owner, claimed.lease.fence, RunError(type(exc).__name__, str(exc)), trace_end)
+            )
+            raise
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+            await self._controller.unregister(claimed.id, task=task)
+        snapshot = _snapshot(outcome) if outcome is not None else None
+        latest = await self._required(execution_id)
+        if latest.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
+            return _child_result_from_outcome(execution_id, outcome, latest)
+        if isinstance(outcome, AgentCompleted):
+            await self._store.complete_run(
+                CompleteExecution(claimed.id, owner, claimed.lease.fence, snapshot)
+            )
+        elif isinstance(outcome, AgentPaused):
+            # task_graph does not support approval: a paused child is a failure.
+            await self._store.fail_run(
+                FailExecution(
+                    claimed.id,
+                    owner,
+                    claimed.lease.fence,
+                    snapshot,
+                    RunError("approval_not_supported", "task_graph child paused for approval"),
+                )
+            )
+            latest = await self._required(execution_id)
+            return ChildRunResult(
+                run_id=execution_id,
+                status=latest.status,
+                output=None,
+                error=latest.error,
+                usage=_outcome_usage(outcome, None),
+            )
+        elif isinstance(outcome, AgentCancelled):
+            await self._store.acknowledge_cancel(
+                AcknowledgeCancellation(claimed.id, owner, claimed.lease.fence, snapshot)
+            )
+        elif isinstance(outcome, AgentFailed):
+            await self._store.fail_run(
+                FailExecution(claimed.id, owner, claimed.lease.fence, snapshot, outcome.error)
+            )
+        latest = await self._required(execution_id)
+        return _child_result_from_outcome(execution_id, outcome, latest)
+
+    async def _converge_child_cancel(self, record: "RunRecord", owner: str) -> None:
+        latest = await self._required(record.id)
+        if latest.status is RunStatus.RUNNING:
+            await self._store.request_cancel(
+                RequestCancellation(record.id, owner, record.lease.fence, datetime.now(timezone.utc))
+            )
+            latest = await self._required(record.id)
+        if latest.status is RunStatus.CANCELLING:
+            await self._store.acknowledge_cancel(
+                AcknowledgeCancellation(
+                    record.id, owner, record.lease.fence,
+                    AgentSnapshotData((), None, RunUsage(), record.trace_sequence, MessageCaptureState.PARTIAL),
+                )
+            )
 
     async def _preflight(
         self,

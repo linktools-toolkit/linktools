@@ -179,6 +179,15 @@ class SwarmStepClaimed:
 
 
 @dataclass(frozen=True, slots=True)
+class SwarmStepStarted:
+    event_type: "ClassVar[str]" = 'SwarmStepStarted'
+    criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
+    swarm_run_id: str
+    task_id: str
+    child_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class SwarmStepCompleted:
     event_type: "ClassVar[str]" = 'SwarmStepCompleted'
     criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
@@ -193,6 +202,31 @@ class SwarmStepFailed:
     swarm_run_id: str
     task_id: str
     error_message: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmStepSkipped:
+    event_type: "ClassVar[str]" = 'SwarmStepSkipped'
+    criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
+    swarm_run_id: str
+    task_id: str
+    blocked_by: "tuple[str, ...]"
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmStepCancelled:
+    event_type: "ClassVar[str]" = 'SwarmStepCancelled'
+    criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
+    swarm_run_id: str
+    task_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SwarmLimitReached:
+    event_type: "ClassVar[str]" = 'SwarmLimitReached'
+    criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
+    swarm_run_id: str
+    kind: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -505,9 +539,15 @@ EventPayload = Union[
     SwarmRoundCompleted,
     SwarmStepCreated,
     SwarmStepClaimed,
+    SwarmStepStarted,
     SwarmStepCompleted,
     SwarmStepFailed,
+    SwarmStepSkipped,
+    SwarmStepCancelled,
+    SwarmLimitReached,
     SwarmCompleted,
+    SwarmFailed,
+    SwarmCancelled,
     AssetChanged,
     AgentFeatureResolveStarted,
     AgentFeatureResolveCompleted,

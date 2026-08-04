@@ -132,6 +132,7 @@ def build_runtime(
         trace_codec=trace_codec,
     )
     codec = AgentSpecCodec(output_types=dependencies.output_types)
+    live_events = dependencies.live_events or NoopRunLiveEventSink()
     execution = ExecutionService(
         storage.execution,
         compiler,
@@ -143,9 +144,21 @@ def build_runtime(
         sandbox=dependencies.sandbox,
         spec_codec=codec,
         authorization=dependencies.authorization,
-        live_events=dependencies.live_events or NoopRunLiveEventSink(),
+        live_events=live_events,
         security_events=security_events,
     )
+    swarm = None
+    if storage.tasks is not None and dependencies.agent_spec_provider is not None:
+        from ..execution.swarm_service import SwarmExecutionService
+
+        swarm = SwarmExecutionService(
+            storage.execution,
+            storage.tasks,
+            execution,
+            authorization=dependencies.authorization,
+            live_events=live_events,
+            agent_provider=dependencies.agent_spec_provider,
+        )
     return Runtime(
         execution=execution,
         query=ExecutionQueryService(
@@ -162,6 +175,7 @@ def build_runtime(
             if dependencies.mcp_provider is not None
             else None
         ),
+        swarm=swarm,
     )
 
 
