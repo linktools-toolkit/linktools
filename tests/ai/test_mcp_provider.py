@@ -488,6 +488,10 @@ async def test_connection_manager_close_aggregates_errors_and_closes_all():
 
     mgr._toolsets[("srv", "fp1")] = _Boom()
     mgr._toolsets[("srv", "fp2")] = _OK("second")
-    await mgr.close()  # must not abort on _Boom
-    assert mgr._toolsets == {}, "all connections must be closed despite an error"
+    await mgr.close()  # must not abort on _Boom; failed refs remain retryable
+    assert set(mgr._toolsets) == {("srv", "fp1")}
     assert "second" in order, "the connection after the failing one must still close"
+    mgr._toolsets["srv", "fp1"] = _OK("retry")
+    await mgr.close()
+    assert mgr._toolsets == {}
+    assert "retry" in order

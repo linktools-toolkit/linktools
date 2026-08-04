@@ -249,6 +249,21 @@ class StrictConfigReader:
             )
         return value
 
+    def nullable_non_negative_int(
+        self, name: str, default: "int | None" = None
+    ) -> "int | None":
+        """Read a retry-like integer where explicit null has a defined meaning."""
+        if name not in self._payload:
+            return default
+        value = self._payload[name]
+        if value is None:
+            return None
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise InvalidSpecError(
+                f"{self._context}: {name} must be a non-negative integer or null"
+            )
+        return value
+
     def positive_number(
         self, name: str, default: "float | None" = None
     ) -> "float | None":

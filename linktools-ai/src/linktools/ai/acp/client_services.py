@@ -5,8 +5,10 @@
 
 import logging
 import os
+import asyncio
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .errors import request_error
 from .sessions import ActiveAcpSession
@@ -48,7 +50,7 @@ class AcpClientServices:
 
     @staticmethod
     def _ensure_session_open(session: ActiveAcpSession) -> None:
-        if session.record.closed or session.closing:
+        if session.record.closed or session.closing_requested or session.cleanup_required:
             raise request_error("session_closed", session_id=session.record.session_id)
 
     def _has_fs(self, name: str) -> bool:
@@ -123,9 +125,40 @@ class AcpClientServices:
         for item in env:
             if not item.name or "\x00" in item.name or "\x00" in item.value:
                 raise request_error("invalid_terminal_environment", session_id=session.record.session_id)
-        response = await connection.create_terminal(session.record.session_id, **kwargs)
+        task = asyncio.create_task(
+            connection.create_terminal(session.record.session_id, **kwargs)
+        )
+        async with session.lock:
+            session.terminal_create_tasks.add(task)
+        try:
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            async with session.lock:
+                session.terminal_create_tasks.discard(task)
         terminal_id = response.terminal_id
-        session.terminal_handles.add(terminal_id)
+        async with session.lock:
+            operation = session.operation
+            valid = (
+                not session.record.closed
+                and not session.closing_requested
+                and operation is not None
+                and operation.kind.value == "prompt"
+            )
+            if valid:
+                session.terminal_handles.add(terminal_id)
+        if not valid:
+            try:
+                await connection.kill_terminal(session.record.session_id, terminal_id)
+            finally:
+                await connection.release_terminal(session.record.session_id, terminal_id)
+            logger.info(
+                "event=acp.terminal.stale_create_compensated session_id=%s terminal_count=0",
+                session.record.session_id,
+            )
+            raise request_error("session_closing", session_id=session.record.session_id)
         return response
 
     async def terminal_output(self, session: ActiveAcpSession, terminal_id: str) -> Any:
@@ -141,14 +174,34 @@ class AcpClientServices:
         return await self._connection_or_error().kill_terminal(session.record.session_id, terminal_id)
 
     async def release_terminal(self, session: ActiveAcpSession, terminal_id: str) -> Any:
-        if terminal_id not in session.terminal_handles:
-            return None
-        response = await self._connection_or_error().release_terminal(
-            session.record.session_id,
-            terminal_id,
-        )
-        session.terminal_handles.discard(terminal_id)
-        return response
+        async with session.lock:
+            if terminal_id not in session.terminal_handles:
+                return None
+            task = session.terminal_release_tasks.get(terminal_id)
+            if task is None:
+                task = asyncio.create_task(
+                    self._connection_or_error().release_terminal(
+                        session.record.session_id,
+                        terminal_id,
+                    )
+                )
+                session.terminal_release_tasks[terminal_id] = task
+        try:
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        except Exception:
+            async with session.lock:
+                if session.terminal_release_tasks.get(terminal_id) is task:
+                    session.terminal_release_tasks.pop(terminal_id, None)
+            raise
+        else:
+            async with session.lock:
+                if session.terminal_release_tasks.get(terminal_id) is task:
+                    session.terminal_release_tasks.pop(terminal_id, None)
+                    session.terminal_handles.discard(terminal_id)
+            return response
 
     async def create_elicitation(self, session: ActiveAcpSession, message: str, mode: Any) -> Any:
         self._ensure_session_open(session)
@@ -156,10 +209,48 @@ class AcpClientServices:
             raise request_error("client_capability_not_declared", session_id=session.record.session_id)
         if session.active_execution_id is None:
             raise request_error("no_active_execution", session_id=session.record.session_id)
-        response = await self._connection_or_error().create_elicitation(message, mode)
-        elicitation_id = getattr(response, "elicitation_id", None)
-        if elicitation_id is not None:
-            session.pending_elicitation_ids.add(elicitation_id)
+        root = getattr(mode, "root", mode)
+        elicitation_id = getattr(root, "elicitation_id", None)
+        mode_session_id = getattr(root, "session_id", None)
+        mode_name = type(root).__name__
+        is_url_session = mode_name == "ElicitationUrlSessionMode"
+        is_known = mode_name in {
+            "ElicitationUrlSessionMode",
+            "ElicitationUrlRequestMode",
+            "ElicitationFormSessionMode",
+            "ElicitationFormRequestMode",
+        }
+        if is_url_session:
+            if not isinstance(elicitation_id, str) or not elicitation_id:
+                raise request_error("invalid_elicitation_id", session_id=session.record.session_id)
+            if mode_session_id is not None and mode_session_id != session.record.session_id:
+                raise request_error("elicitation_session_mismatch", session_id=session.record.session_id)
+        elif not is_known:
+            raise request_error("unsupported_elicitation_mode", session_id=session.record.session_id)
+        task_id = elicitation_id if is_url_session else uuid4().hex
+        task = asyncio.create_task(
+            self._connection_or_error().create_elicitation(message, mode)
+        )
+        async with session.lock:
+            session.pending_elicitation_tasks[task_id] = task
+            if is_url_session:
+                session.pending_elicitation_ids.add(elicitation_id)
+        try:
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            async with session.lock:
+                if session.pending_elicitation_tasks.get(task_id) is task:
+                    session.pending_elicitation_tasks.pop(task_id, None)
+        if is_url_session:
+            try:
+                await self._connection_or_error().complete_elicitation(elicitation_id)
+            except Exception:
+                raise
+            async with session.lock:
+                session.pending_elicitation_ids.discard(elicitation_id)
         return response
 
     async def close_session_resources(self, session: ActiveAcpSession) -> "tuple[tuple[str, str | None, BaseException], ...]":
@@ -180,11 +271,17 @@ class AcpClientServices:
             return tuple(failures)
         for terminal_id in terminal_ids:
             try:
-                await connection.kill_terminal(session.record.session_id, terminal_id)
+                await asyncio.wait_for(
+                    connection.kill_terminal(session.record.session_id, terminal_id),
+                    timeout=5,
+                )
             except Exception as exc:
                 failures.append(("terminal", terminal_id, exc))
             try:
-                await connection.release_terminal(session.record.session_id, terminal_id)
+                await asyncio.wait_for(
+                    connection.release_terminal(session.record.session_id, terminal_id),
+                    timeout=5,
+                )
             except Exception as exc:
                 failures.append(("terminal", terminal_id, exc))
                 continue
@@ -196,12 +293,26 @@ class AcpClientServices:
                     session.terminal_handles.discard(terminal_id)
         for elicitation_id in elicitation_ids:
             try:
-                await connection.complete_elicitation(elicitation_id)
+                await asyncio.wait_for(
+                    connection.complete_elicitation(elicitation_id),
+                    timeout=10,
+                )
             except Exception as exc:
                 failures.append(("elicitation", elicitation_id, exc))
                 continue
             async with session.lock:
                 session.pending_elicitation_ids.discard(elicitation_id)
+            logger.info(
+                "event=acp.elicitation.completed_on_close session_id=%s elicitation_id=%s",
+                session.record.session_id,
+                elicitation_id,
+            )
+        async with session.lock:
+            remaining_tasks = tuple(session.pending_elicitation_tasks.values())
+        for task in remaining_tasks:
+            task.cancel()
+        if remaining_tasks:
+            await asyncio.gather(*remaining_tasks, return_exceptions=True)
         return tuple(failures)
 
     def _check_terminal(self, session: ActiveAcpSession, terminal_id: str) -> None:

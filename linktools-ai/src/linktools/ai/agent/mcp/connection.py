@@ -142,22 +142,25 @@ class MCPConnectionPool:
     async def close_server(self, server_id: str) -> None:
         keys = [key for key in self._toolsets if key[0] == server_id]
         for key in keys:
-            toolset = self._toolsets.pop(key, None)
+            toolset = self._toolsets.get(key)
             if toolset is None:
                 continue
             await MCPClient(toolset).close()
+            self._toolsets.pop(key, None)
 
     async def close(self) -> None:
         keys = list(self._toolsets)
         errors: "list[Exception]" = []
         for key in keys:
-            toolset = self._toolsets.pop(key, None)
+            toolset = self._toolsets.get(key)
             if toolset is None:
                 continue
             try:
                 await MCPClient(toolset).close()
             except Exception as exc:
                 errors.append(exc)
+            else:
+                self._toolsets.pop(key, None)
         if errors:
             logger.warning(
                 "MCP connection close failures (%d): %s",

@@ -128,8 +128,11 @@ def _execution_id_from_run_context(run_ctx: object) -> str:
     if isinstance(direct, str):
         return direct
     dependencies = getattr(run_ctx, "deps", None)
+    dependencies = getattr(dependencies, "user_deps", dependencies)
     tool_context = getattr(dependencies, "tool_context", None)
-    value = getattr(tool_context, "run_id", None)
+    value = getattr(tool_context, "run_id", None) or getattr(
+        tool_context, "execution_id", None
+    )
     return value if isinstance(value, str) else ""
 
 

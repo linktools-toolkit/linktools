@@ -93,12 +93,17 @@ def _with_default_features(spec: AgentSpec) -> AgentSpec:
 
 @dataclass(slots=True)
 class _AllowAllCliToolPolicy:
+    require_approval: bool = False
+
     async def resolve(
         self,
         descriptor: "ToolDescriptor",
         context: "RunContext",
     ) -> ResolvedToolPolicy:
-        return ResolvedToolPolicy(enabled=True)
+        return ResolvedToolPolicy(
+            enabled=True,
+            require_approval=self.require_approval and descriptor.mutating,
+        )
 
 
 @dataclass(slots=True)
@@ -210,6 +215,7 @@ def build_cli_runtime(
     project: "CliProject",
     model_resolver: "ModelResolver | None",
     live_events: "RunLiveEventSink | None" = None,
+    require_tool_approval: bool = False,
 ) -> CliRuntimeBundle:
     """Build the CLI bundle with the v4 runtime storage composition.
 
@@ -265,7 +271,7 @@ def build_cli_runtime(
         skill_provider=skill_provider,
         subagent_provider=subagent_provider,
         sandbox=sandbox,
-        tool_policy=_AllowAllCliToolPolicy(),
+        tool_policy=_AllowAllCliToolPolicy(require_approval=require_tool_approval),
         live_events=live_events,
     )
     runtime = build_runtime(

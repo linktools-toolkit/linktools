@@ -66,6 +66,14 @@ class AcpSessionRepository:
         return tuple(records)
 
     def save(self, record: AcpSessionRecord) -> None:
+        staged = self.stage(record)
+        try:
+            self.publish(staged, record.session_id)
+        finally:
+            self.discard(staged)
+
+    def stage(self, record: AcpSessionRecord) -> Path:
+        """Write a durable sidecar temporary file for a multi-system commit."""
         path = self.path_for(record.session_id)
         self.root.mkdir(parents=True, exist_ok=True)
         payload = asdict(record)
@@ -73,20 +81,31 @@ class AcpSessionRepository:
         payload["updated_at"] = record.updated_at.isoformat()
         fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=self.root)
         temp_path = Path(temp_name)
+        staged = False
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(payload, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temp_path, path)
-            directory_fd = os.open(self.root, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            staged = True
+            return temp_path
         finally:
-            temp_path.unlink(missing_ok=True)
+            if temp_path.exists() and not staged:
+                temp_path.unlink(missing_ok=True)
+
+    def publish(self, staged: Path, session_id: str) -> None:
+        path = self.path_for(session_id)
+        os.replace(staged, path)
+        directory_fd = os.open(self.root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def discard(staged: Path) -> None:
+        staged.unlink(missing_ok=True)
 
 
 def mcp_descriptor_fingerprint(descriptor: object) -> str:

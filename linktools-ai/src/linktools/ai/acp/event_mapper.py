@@ -60,9 +60,20 @@ class AcpEventMapper:
         if isinstance(event, PlanUpdated):
             return schema.AgentPlanUpdate(entries=list(event.entries), sessionUpdate="plan")
         if isinstance(event, UsageUpdated):
+            used = getattr(event, "context_tokens_used", None)
+            size = getattr(event, "context_window_size", None)
+            if (
+                not isinstance(used, int)
+                or isinstance(used, bool)
+                or not isinstance(size, int)
+                or isinstance(size, bool)
+                or used < 0
+                or size < used
+            ):
+                return None
             return schema.UsageUpdate(
-                used=event.total_tokens,
-                size=event.total_tokens,
+                used=used,
+                size=size,
                 sessionUpdate="usage_update",
             )
         return None

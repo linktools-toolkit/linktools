@@ -31,6 +31,7 @@ from .sessions import (
     ActiveAcpSession,
     PendingPermissionToken,
 )
+from .session_state import SessionOperationKind
 
 logger = logging.getLogger("linktools.ai.acp.agent")
 
@@ -200,11 +201,6 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        views = await self.runtime.get_session_messages(
-            session_id=session_id,
-            principal=self.sessions.principal,
-        )
-        history_updates = AcpHistoryMapper().preflight(session_id, views)
         active = await self.sessions.load_or_resume(
             session_id=session_id,
             cwd=cwd,
@@ -212,6 +208,11 @@ class LinktoolsAcpAgent:
             mcp_servers=mcp_servers,
             replay=True,
         )
+        views = await self.runtime.get_session_messages(
+            session_id=session_id,
+            principal=self.sessions.principal,
+        )
+        history_updates = AcpHistoryMapper().preflight(session_id, views)
         await self._replay_history(active, history_updates)
         return schema.LoadSessionResponse(modes=self._mode_state(active.record.mode_id), configOptions=[])
 
@@ -287,30 +288,7 @@ class LinktoolsAcpAgent:
                 logger.info("ACP cancel ignored unknown session=%s", session_id)
                 return
             raise
-        async with active.lock:
-            if active.active_execution_id is not None:
-                active.operation_epoch += 1
-                active.pending_permission = None
-                execution_id = active.active_execution_id
-            else:
-                execution_id = None
-        if execution_id is not None:
-            try:
-                await self.runtime.cancel(execution_id, principal=self.sessions.principal)
-                current = await self.runtime.get_execution_record(
-                    execution_id,
-                    principal=self.sessions.principal,
-                )
-                if current is not None and current.status in {
-                    RunStatus.COMPLETED,
-                    RunStatus.CANCELLED,
-                    RunStatus.FAILED,
-                }:
-                    async with active.lock:
-                        if active.active_execution_id == execution_id:
-                            active.active_execution_id = None
-            except (KeyError, ValueError):
-                logger.debug("ACP cancel raced execution creation session=%s", session_id)
+        await self.sessions.cancel_prompt(session_id)
 
     async def ext_method(self, method: str, params: "dict[str, Any]") -> "dict[str, Any]":
         from .errors import require_sdk
@@ -325,25 +303,29 @@ class LinktoolsAcpAgent:
     async def prompt(self, session_id: str, prompt: "list[Any]", **kwargs: Any) -> Any:
         self._require_initialized()
         active = await self.sessions.get(session_id)
-        async with active.lock:
-            if active.record.closed:
-                raise request_error("session_closed", session_id=session_id)
-            if active.active_execution_id is not None:
-                raise request_error("session_busy", session_id=session_id)
-            mapped = AcpContentMapper(
-                image=self.capability_input.image,
-                audio=self.capability_input.audio,
-                embedded=self.capability_input.embedded_context,
-            ).map(prompt)
-            execution_id = uuid4().hex
-            active.active_execution_id = execution_id
-            logger.info(
-                "event=acp.prompt.started session_id=%s execution_id=%s",
-                session_id,
-                execution_id,
-            )
+        mapped = AcpContentMapper(
+            image=self.capability_input.image,
+            audio=self.capability_input.audio,
+            embedded=self.capability_input.embedded_context,
+        ).map(prompt)
+        execution_id = uuid4().hex
+        operation = await self.sessions.coordinator.reserve(
+            active,
+            SessionOperationKind.PROMPT,
+            execution_id=execution_id,
+        )
+        logger.info(
+            "event=acp.session.operation_reserved session_id=%s execution_id=%s operation_id=%s kind=%s epoch=%s",
+            session_id,
+            execution_id,
+            operation.operation_id,
+            operation.kind.value,
+            operation.epoch,
+        )
         try:
-            spec = await self.spec_resolver(active.record.mode_id)
+            async with active.lock:
+                mode_id = active.record.mode_id
+            spec = await self.spec_resolver(mode_id)
             return await self._execute_prompt_until_terminal(
                 active,
                 execution_id,
@@ -352,10 +334,21 @@ class LinktoolsAcpAgent:
             )
         finally:
             async with active.lock:
-                if active.active_execution_id == execution_id:
-                    active.active_execution_id = None
-                if active.pending_permission is not None and active.pending_permission.execution_id == execution_id:
+                if (
+                    active.pending_permission is not None
+                    and active.pending_permission.execution_id == execution_id
+                ):
                     active.pending_permission = None
+                    active.pending_permission_task = None
+            await self.sessions.coordinator.release(active, operation)
+            logger.info(
+                "event=acp.session.operation_released session_id=%s execution_id=%s operation_id=%s kind=%s epoch=%s",
+                session_id,
+                execution_id,
+                operation.operation_id,
+                operation.kind.value,
+                operation.epoch,
+            )
             logger.info("ACP prompt detached session=%s execution=%s", session_id, execution_id)
 
     async def _execute_prompt_until_terminal(
@@ -463,7 +456,16 @@ class LinktoolsAcpAgent:
             schema.PermissionOption(optionId="reject_once", name="Reject once", kind="reject_once"),
         ]
         async with active.lock:
-            if active.active_execution_id != record.id or active.closing or record.approval is None:
+            operation = active.operation
+            if (
+                active.active_execution_id != record.id
+                or active.closing_requested
+                or record.approval is None
+                or (
+                    operation is not None
+                    and operation.kind is not SessionOperationKind.PROMPT
+                )
+            ):
                 return None
             active.operation_epoch += 1
             token = PendingPermissionToken(
@@ -474,8 +476,27 @@ class LinktoolsAcpAgent:
                 epoch=active.operation_epoch,
             )
             active.pending_permission = token
+            task = asyncio.create_task(
+                self._connection.request_permission(
+                    active.record.session_id,
+                    tool_call,
+                    options,
+                )
+            )
+            active.pending_permission_task = task
         try:
-            response = await self._connection.request_permission(active.record.session_id, tool_call, options)
+            response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            logger.info(
+                "event=acp.permission.task_cancelled session_id=%s execution_id=%s operation_id=%s epoch=%s",
+                token.session_id,
+                token.execution_id,
+                operation.operation_id if operation is not None else "legacy-recovery",
+                token.epoch,
+            )
+            await asyncio.gather(task, return_exceptions=True)
+            await self._cancel_permission_token(active, token)
+            return None
         except Exception:
             await self._cancel_permission_token(active, token)
             return None
@@ -488,17 +509,20 @@ class LinktoolsAcpAgent:
         )
         async with active.lock:
             valid = (
-                not active.closing
+                not active.closing_requested
                 and active.active_execution_id == token.execution_id
                 and active.pending_permission == token
                 and active.operation_epoch == token.epoch
+                and active.operation == operation
                 and current is not None
                 and current.status is RunStatus.PAUSED
                 and current.approval is not None
                 and current.approval.approval_id == token.approval_id
             )
-            if valid:
+            if active.pending_permission == token:
                 active.pending_permission = None
+                if active.pending_permission_task is task:
+                    active.pending_permission_task = None
         if not valid:
             logger.info(
                 "event=acp.permission.stale_result session_id=%s execution_id=%s approval_id=%s operation_epoch=%s",
@@ -525,9 +549,17 @@ class LinktoolsAcpAgent:
                 return
             active.operation_epoch += 1
             active.pending_permission = None
+            task = active.pending_permission_task
+            active.pending_permission_task = None
             execution_id = active.active_execution_id
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         try:
-            await self.runtime.cancel(execution_id, principal=self.sessions.principal)
+            await asyncio.wait_for(
+                self.runtime.cancel(execution_id, principal=self.sessions.principal),
+                timeout=5,
+            )
         except Exception:
             logger.debug("ACP permission cancellation failed execution=%s", execution_id)
 

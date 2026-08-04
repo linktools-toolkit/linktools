@@ -109,11 +109,22 @@ class AcpHistoryMapper:
                     self._unsupported(session_id, turn_index, part_index, str(part_type))
             usage = message.get("usage")
             if kind == "response" and isinstance(usage, Mapping):
-                try:
-                    total = int(usage.get("total_tokens", 0) or 0)
-                except (TypeError, ValueError):
-                    self._unsupported(session_id, turn_index, message_index, "usage")
-                updates.append(schema.UsageUpdate(used=total, size=total, sessionUpdate="usage_update"))
+                used = usage.get("context_tokens_used")
+                size = usage.get("context_window_size")
+                if (
+                    isinstance(used, int)
+                    and not isinstance(used, bool)
+                    and isinstance(size, int)
+                    and not isinstance(size, bool)
+                    and 0 <= used <= size
+                ):
+                    updates.append(
+                        schema.UsageUpdate(
+                            used=used,
+                            size=size,
+                            sessionUpdate="usage_update",
+                        )
+                    )
         return updates
 
     @staticmethod

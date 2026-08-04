@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -47,6 +48,7 @@ class SmokeResult:
             "permission_request_count": self.permission_request_count,
             "process_exit_code": self.process_exit_code,
             "elapsed_ms": self.elapsed_ms,
+            "error": self.error,
         }
 
 
@@ -126,6 +128,10 @@ async def _run(args: "Namespace") -> int:
     stderr_task: "asyncio.Task[bytes] | None" = None
     failure_code = 0
     try:
+        child_env = dict(os.environ)
+        child_env["PYTHONPATH"] = os.pathsep.join(
+            item for item in (str(project), child_env.get("PYTHONPATH", "")) if item
+        )
         async with acp.spawn_agent_process(
             client,
             sys.executable,
@@ -136,6 +142,7 @@ async def _run(args: "Namespace") -> int:
             "--project",
             str(project),
             cwd=str(project),
+            env=child_env,
             use_unstable_protocol=True,
         ) as (connection, process):
             if process.stderr is not None:
@@ -164,7 +171,8 @@ async def _run(args: "Namespace") -> int:
             for item in trace
         )
         result.tool_call_count = sum(
-            item.get("update", {}).get("sessionUpdate") in {"tool_call", "tool_call_update"}
+            item.get("update", {}).get("sessionUpdate") == "tool_call_update"
+            and item.get("update", {}).get("status") == "completed"
             for item in trace
         )
         result.permission_request_count = client.permission_request_count
@@ -176,13 +184,21 @@ async def _run(args: "Namespace") -> int:
             if result.update_count == 0:
                 result.error = "ACP prompt produced zero updates"
                 failure_code = 4
-            elif result.message_chunk_count == 0:
+            elif result.message_chunk_count == 0 and result.stop_reason != "cancelled":
                 result.error = "ACP prompt produced zero agent message chunks"
                 failure_code = 4
             elif result.prompt_response_time is None:
                 result.error = "ACP prompt produced no response"
                 failure_code = 4
-            elif result.stop_reason != args.expected_stop_reason:
+            elif result.stop_reason != (
+                "cancelled"
+                if (
+                    args.approval == "deny"
+                    and result.permission_request_count > 0
+                    and args.expected_stop_reason == "end_turn"
+                )
+                else args.expected_stop_reason
+            ):
                 result.error = f"unexpected stop reason: {result.stop_reason}"
                 failure_code = 4
             elif result.tool_call_count > 0 and result.permission_request_count == 0:

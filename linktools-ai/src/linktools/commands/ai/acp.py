@@ -65,7 +65,12 @@ async def _run(args: "Namespace") -> int:
     except RuntimeError as exc:
         raise AcpDependencyError(str(exc)) from exc
     hub = ExecutionEventHub()
-    bundle = build_cli_runtime(project=project, model_resolver=None, live_events=hub)
+    bundle = build_cli_runtime(
+        project=project,
+        model_resolver=None,
+        live_events=hub,
+        require_tool_approval=True,
+    )
     mode_ids = await bundle.agents.list_ids()
     if not mode_ids:
         mode_ids = (project.default_agent,)

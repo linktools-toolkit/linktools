@@ -29,7 +29,7 @@ def parse_model_policy(payload: "dict[str, Any]") -> ModelPolicy:
     return ModelPolicy(
         primary=primary,
         fallbacks=reader.string_tuple("fallbacks", default=()),
-        request_retries=reader.non_negative_int("request_retries", default=0),
+        request_retries=reader.nullable_non_negative_int("request_retries", default=0),
         timeout_seconds=reader.positive_number("timeout_seconds", default=30.0),
         max_tokens=reader.positive_int("max_tokens"),
         budget=reader.non_negative_decimal("budget"),
