@@ -159,6 +159,69 @@ def _provider_response_id(response: object) -> "str | None":
     return value if isinstance(value, str) and value else None
 
 
+def _raw_stream_usage(stream: object) -> "object | None":
+    accessor = getattr(stream, "usage", None)
+    return accessor() if callable(accessor) else accessor
+
+
+def _is_empty_unpriced_usage(usage: RequestUsage) -> bool:
+    return (
+        usage.input_tokens == 0
+        and usage.output_tokens == 0
+        and usage.cache_read_tokens == 0
+        and usage.cache_write_tokens == 0
+        and usage.total_cost is None
+    )
+
+
+def _optional_text(value: object) -> "str | None":
+    return value if isinstance(value, str) and value else None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PartialStreamResponse:
+    usage: object
+    provider_name: "str | None"
+    model_name: "str | None"
+    provider_response_id: "str | None"
+
+
+def _partial_stream_response(
+    stream: object,
+    raw_usage: object,
+) -> _PartialStreamResponse:
+    return _PartialStreamResponse(
+        usage=raw_usage,
+        provider_name=_optional_text(getattr(stream, "provider_name", None)),
+        model_name=_optional_text(getattr(stream, "model_name", None)),
+        provider_response_id=_optional_text(
+            getattr(stream, "provider_response_id", None)
+        ),
+    )
+
+
+async def _observe_failed_stream_usage(
+    *,
+    request_stream: object,
+    request_key: str,
+    observe_usage: "Callable[[str, RequestUsage, object], Awaitable[None]]",
+) -> None:
+    try:
+        response = request_stream.get()
+    except BaseException:
+        raw_usage = _raw_stream_usage(request_stream)
+        if raw_usage is None:
+            return
+        usage = _request_usage_from_provider(raw_usage)
+        if _is_empty_unpriced_usage(usage):
+            return
+        response = _partial_stream_response(request_stream, raw_usage)
+    else:
+        usage = _request_usage_from_provider(response.usage)
+
+    await observe_usage(request_key, usage, response)
+
+
 def _latest_model_response(
     state: object, *, after_count: "int | None" = None
 ) -> "object | None":
@@ -171,17 +234,8 @@ def _latest_model_response(
     return None
 
 
-# Exception types that count as EXPECTED provider/model/tool failures for the
-# pure execution loop's outcome classification. Only these are turned into an
-# AgentFailed outcome; every other exception (configuration / invariant /
-# protocol violations such as RuntimeInitializationError, RunInvariantError,
-# AgentAssemblyError, MCPConnectionError, ModelRetryConfigurationError,
-# and all unknown programming errors like TypeError/AttributeError/KeyError)
-# propagates unchanged -- the spec explicitly forbids an except-Exception
-# catch-all that swallows them into a FAILED outcome. ToolError is the base for
-# runtime tool-execution failures; the schema-definition subfamily is carved
-# out (re-raised) below because a malformed tool schema is a contract/config
-# violation, not a per-run tool failure.
+# Only modeled execution failures become AgentFailed.
+# Configuration, invariant, protocol, and programming errors propagate.
 _EXPECTED_RUN_FAILURES: "tuple[type[BaseException], ...]" = (
     ModelRoutingError,
     ModelPolicyExceededError,
@@ -293,6 +347,7 @@ class AgentEngine:
 
         accumulated = ""
         request_stream = None
+        usage_attempted = False
         usage_observed = False
         try:
             async with node.stream(run_ctx) as request_stream:
@@ -324,28 +379,28 @@ class AgentEngine:
                         await cancellation.raise_if_cancelled()
                 if observe_usage is not None:
                     response = request_stream.get()
-                    usage_observed = True
+                    usage_attempted = True
                     await observe_usage(
                         request_key,
                         _request_usage_from_provider(response.usage),
                         response,
                     )
-        except BaseException:
+                    usage_observed = True
+        except BaseException as primary_error:
             if (
                 observe_usage is not None
                 and request_stream is not None
+                and not usage_attempted
                 and not usage_observed
             ):
                 try:
-                    response = request_stream.get()
-                except BaseException:
-                    response = None
-                if response is not None:
-                    await observe_usage(
-                        request_key,
-                        _request_usage_from_provider(response.usage),
-                        response,
+                    await _observe_failed_stream_usage(
+                        request_stream=request_stream,
+                        request_key=request_key,
+                        observe_usage=observe_usage,
                     )
+                except BaseException as usage_error:
+                    raise usage_error from primary_error
             raise
         return accumulated
 

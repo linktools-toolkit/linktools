@@ -101,7 +101,6 @@ async def test_postgresql_parent_guard_and_child_insert_are_transactional():
         claimed_command = StartClaimedChildExecution(
             child_command,
             "swarm",
-            now,
             timedelta(minutes=5),
         )
         results = await asyncio.gather(
@@ -139,7 +138,6 @@ async def test_postgresql_parent_guard_and_child_insert_are_transactional():
                                 parent_guard=guard,
                             ),
                             "swarm",
-                            now,
                             timedelta(minutes=5),
                         )
                     )

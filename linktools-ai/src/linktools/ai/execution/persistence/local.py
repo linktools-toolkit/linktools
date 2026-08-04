@@ -624,11 +624,13 @@ class LocalExecutionBackend:
             session = await self._read_session(start.session_id)
             if session is None:
                 raise StorageError("unknown session")
+            parent = await self._read_run(start.parent_guard.run_id)
+            existing = await self._read_run(start.run_id)
+            checked_at = datetime.now(timezone.utc)
             if start.parent_execution_id != start.parent_guard.run_id:
                 raise ParentLeaseGuardError(
                     "parent lease guard does not match child parent"
                 )
-            parent = await self._read_run(start.parent_guard.run_id)
             if parent is None:
                 raise ParentLeaseGuardError("parent run does not exist")
             if (
@@ -642,13 +644,12 @@ class LocalExecutionBackend:
                 parent.status is not RunStatus.RUNNING
                 or parent.lease.owner != start.parent_guard.owner
                 or parent.lease.fence != start.parent_guard.fence
-                or is_expired(parent.lease, command.now)
+                or is_expired(parent.lease, checked_at)
             ):
                 raise ParentLeaseGuardError("parent lease guard rejected child")
             identity = start_execution_identity(
                 start, tenant_id=session.tenant_id, user_id=session.user_id
             )
-            existing = await self._read_run(start.run_id)
             if existing is not None:
                 if run_record_identity(existing) != identity:
                     raise RunIdentityConflictError(
@@ -667,7 +668,7 @@ class LocalExecutionBackend:
                 leased = claim(
                     existing.lease,
                     owner=command.child_owner,
-                    now=command.now,
+                    now=checked_at,
                     duration=command.lease_duration,
                 )
                 updated = replace(
@@ -675,7 +676,7 @@ class LocalExecutionBackend:
                     status=RunStatus.RUNNING,
                     lease=leased,
                     event_sequence=existing.event_sequence + 1,
-                    updated_at=command.now,
+                    updated_at=checked_at,
                 )
                 await asyncio.to_thread(
                     self._commit_files,
@@ -691,7 +692,7 @@ class LocalExecutionBackend:
                                     updated.event_sequence,
                                     "run.claimed",
                                     {},
-                                    command.now,
+                                    checked_at,
                                 )
                             ),
                             False,
@@ -700,11 +701,10 @@ class LocalExecutionBackend:
                     ),
                 )
                 return StartClaimedChildResult(updated, created=False, terminal=False)
-            now = command.now
             leased = claim(
                 Lease(),
                 owner=command.child_owner,
-                now=now,
+                now=checked_at,
                 duration=command.lease_duration,
             )
             record = RunRecord(
@@ -727,19 +727,23 @@ class LocalExecutionBackend:
                 tenant_id=session.tenant_id,
                 user_id=session.user_id,
                 error=None,
-                created_at=now,
-                updated_at=now,
+                created_at=checked_at,
+                updated_at=checked_at,
                 input=start.input,
             )
             writes = (
                 (
                     self._numbered(start.run_id, "events", 1),
-                    asdict(RunEvent(start.run_id, 1, "run.started", {}, now)),
+                    asdict(
+                        RunEvent(start.run_id, 1, "run.started", {}, checked_at)
+                    ),
                     False,
                 ),
                 (
                     self._numbered(start.run_id, "events", 2),
-                    asdict(RunEvent(start.run_id, 2, "run.claimed", {}, now)),
+                    asdict(
+                        RunEvent(start.run_id, 2, "run.claimed", {}, checked_at)
+                    ),
                     False,
                 ),
                 (self._run_path(start.run_id), asdict(record), True),

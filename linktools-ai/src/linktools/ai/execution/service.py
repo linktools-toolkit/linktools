@@ -455,7 +455,6 @@ class ExecutionService:
             StartClaimedChildExecution(
                 start=start_command,
                 child_owner="swarm",
-                now=datetime.now(timezone.utc),
                 lease_duration=_LEASE_DURATION,
             )
         )

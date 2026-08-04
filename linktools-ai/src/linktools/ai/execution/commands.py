@@ -125,7 +125,6 @@ class ClaimExecution:
 class StartClaimedChildExecution:
     start: "StartExecution"
     child_owner: str
-    now: "datetime"
     lease_duration: "timedelta"
 
 

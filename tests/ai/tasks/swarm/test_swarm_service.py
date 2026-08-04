@@ -171,7 +171,6 @@ class FakeExecutionService:
                             parent_guard=parent_guard,
                         ),
                         "swarm",
-                        datetime.now(timezone.utc),
                         timedelta(minutes=5),
                     )
                 )
@@ -388,7 +387,7 @@ class _MemoryExecutionStore:
             }:
                 return StartClaimedChildResult(existing, created=False, terminal=True)
             raise StorageConflictError("child run is already active")
-        now = command.now
+        now = datetime.now(timezone.utc)
         record = RunRecord(
             id=start.run_id,
             session_id=start.session_id,

@@ -524,28 +524,34 @@ class SqlAlchemyExecutionBackend:
                 parent = await self._run_row(
                     session, start.parent_guard.run_id, for_update=True
                 )
+                existing = await self._run_row(
+                    session, start.run_id, for_update=True
+                )
+                checked_at = datetime.now(timezone.utc)
                 self._assert_child_parent_guard(
                     start,
                     parent,
-                    command.now,
+                    checked_at,
                     session_id=owner.session_id,
                     tenant_id=owner.tenant_id,
                     user_id=owner.user_id,
-                )
-                existing = await self._run_row(
-                    session, start.run_id, for_update=True
                 )
                 identity = start_execution_identity(
                     start, tenant_id=owner.tenant_id, user_id=owner.user_id
                 )
                 if existing is not None:
                     return await self._claim_existing_child(
-                        session, existing, identity, command
+                        session,
+                        existing,
+                        identity,
+                        child_owner=command.child_owner,
+                        lease_duration=command.lease_duration,
+                        checked_at=checked_at,
                     )
                 lease = claim(
                     Lease(),
                     owner=command.child_owner,
-                    now=command.now,
+                    now=checked_at,
                     duration=command.lease_duration,
                 )
                 row = ExecutionRow(
@@ -572,8 +578,8 @@ class SqlAlchemyExecutionBackend:
                     event_sequence=2,
                     tenant_id=owner.tenant_id,
                     user_id=owner.user_id,
-                    created_at=command.now,
-                    updated_at=command.now,
+                    created_at=checked_at,
+                    updated_at=checked_at,
                 )
                 session.add(row)
                 session.add_all(
@@ -583,14 +589,14 @@ class SqlAlchemyExecutionBackend:
                             sequence=1,
                             type="run.started",
                             payload={},
-                            created_at=command.now,
+                            created_at=checked_at,
                         ),
                         EventRow(
                             execution_id=start.run_id,
                             sequence=2,
                             type="run.claimed",
                             payload={},
-                            created_at=command.now,
+                            created_at=checked_at,
                         ),
                     )
                 )
@@ -609,7 +615,7 @@ class SqlAlchemyExecutionBackend:
     def _assert_child_parent_guard(
         start: "StartExecution",
         parent: "ExecutionRow | None",
-        now: datetime,
+        checked_at: datetime,
         *,
         session_id: str,
         tenant_id: str | None,
@@ -633,7 +639,8 @@ class SqlAlchemyExecutionBackend:
             or parent.owner != start.parent_guard.owner
             or parent.fence != start.parent_guard.fence
             or is_expired(
-                Lease(parent.owner, parent.fence, parent.lease_expires_at), now
+                Lease(parent.owner, parent.fence, parent.lease_expires_at),
+                checked_at,
             )
         ):
             raise ParentLeaseGuardError("parent lease guard rejected child")
@@ -643,7 +650,10 @@ class SqlAlchemyExecutionBackend:
         session,
         row: "ExecutionRow",
         identity,
-        command: "StartClaimedChildExecution",
+        *,
+        child_owner: str,
+        lease_duration: timedelta,
+        checked_at: datetime,
     ) -> "StartClaimedChildResult":
         record = _record(row)
         if run_record_identity(record) != identity:
@@ -658,9 +668,9 @@ class SqlAlchemyExecutionBackend:
             raise ChildRunAlreadyActiveError(record.id)
         lease = claim(
             record.lease,
-            owner=command.child_owner,
-            now=command.now,
-            duration=command.lease_duration,
+            owner=child_owner,
+            now=checked_at,
+            duration=lease_duration,
         )
         event_sequence = row.event_sequence + 1
         result = await session.execute(
@@ -676,7 +686,7 @@ class SqlAlchemyExecutionBackend:
                 fence=lease.fence,
                 lease_expires_at=lease.expires_at,
                 event_sequence=event_sequence,
-                updated_at=command.now,
+                updated_at=checked_at,
             )
         )
         if result.rowcount != 1:
@@ -686,14 +696,14 @@ class SqlAlchemyExecutionBackend:
         row.fence = lease.fence
         row.lease_expires_at = lease.expires_at
         row.event_sequence = event_sequence
-        row.updated_at = command.now
+        row.updated_at = checked_at
         session.add(
             EventRow(
                 execution_id=row.execution_id,
                 sequence=event_sequence,
                 type="run.claimed",
                 payload={},
-                created_at=command.now,
+                created_at=checked_at,
             )
         )
         await session.flush()
@@ -713,21 +723,29 @@ class SqlAlchemyExecutionBackend:
                 parent = await self._run_row(
                     session, start.parent_guard.run_id, for_update=True
                 )
+                row = await self._run_row(session, start.run_id, for_update=True)
+                checked_at = datetime.now(timezone.utc)
                 self._assert_child_parent_guard(
                     start,
                     parent,
-                    command.now,
+                    checked_at,
                     session_id=owner.session_id,
                     tenant_id=owner.tenant_id,
                     user_id=owner.user_id,
                 )
-                row = await self._run_row(session, start.run_id, for_update=True)
                 if row is None:
                     raise StorageConflictError("child start conflict")
                 identity = start_execution_identity(
                     start, tenant_id=owner.tenant_id, user_id=owner.user_id
                 )
-                return await self._claim_existing_child(session, row, identity, command)
+                return await self._claim_existing_child(
+                    session,
+                    row,
+                    identity,
+                    child_owner=command.child_owner,
+                    lease_duration=command.lease_duration,
+                    checked_at=checked_at,
+                )
 
     async def _start_run_once(self, command: "StartExecution") -> StartRunResult:
         async with self.session_factory() as session:

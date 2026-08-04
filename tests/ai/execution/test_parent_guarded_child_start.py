@@ -62,7 +62,6 @@ async def _assert_guarded_start(store) -> None:
                 parent_guard=guard,
             ),
             "swarm",
-            datetime.now(timezone.utc),
             timedelta(minutes=5),
         )
     )
@@ -70,6 +69,18 @@ async def _assert_guarded_start(store) -> None:
     assert child.record.status is RunStatus.RUNNING
     assert child.record.lease.owner == "swarm"
     assert child.record.lease.fence == 1
+    events = (await store.list_run_events("child")).items
+    assert tuple(event.type for event in events) == ("run.started", "run.claimed")
+    assert all(
+        (
+            event.created_at
+            if event.created_at.tzinfo is not None
+            else event.created_at.replace(tzinfo=timezone.utc)
+        )
+        == child.record.created_at
+        for event in events
+    )
+    assert child.record.updated_at == child.record.created_at
     with pytest.raises(ParentLeaseGuardError):
         await store.start_run(
             StartExecution(
@@ -94,7 +105,6 @@ async def _assert_guarded_start(store) -> None:
                     parent_guard=ParentLeaseGuard(parent.id, "stale", 0),
                 ),
                 "swarm",
-                datetime.now(timezone.utc),
                 timedelta(minutes=5),
             )
         )
@@ -110,7 +120,6 @@ async def _assert_guarded_start(store) -> None:
                     ),
                 ),
                 "swarm",
-                datetime.now(timezone.utc),
                 timedelta(minutes=5),
             )
         )
@@ -124,7 +133,6 @@ async def _assert_guarded_start(store) -> None:
                     parent_execution_id=parent.id,
                 ),
                 "swarm",
-                datetime.now(timezone.utc),
                 timedelta(minutes=5),
             )
         )
@@ -141,7 +149,6 @@ async def _assert_guarded_start(store) -> None:
                     ),
                 ),
                 "swarm",
-                datetime.now(timezone.utc),
                 timedelta(minutes=5),
             )
         )
@@ -161,10 +168,9 @@ async def _assert_guarded_start(store) -> None:
                     root_execution_id=parent.id,
                     parent_execution_id=parent.id,
                     parent_guard=guard,
-                ),
-                "swarm",
-                datetime.now(timezone.utc),
-                timedelta(minutes=5),
+                    ),
+                    "swarm",
+                    timedelta(minutes=5),
             )
         )
 
