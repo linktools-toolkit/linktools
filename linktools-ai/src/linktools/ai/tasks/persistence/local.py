@@ -12,10 +12,16 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
-from ...errors import StorageConflictError
+from ...errors import StorageConflictError, UsageRegressionError
 from ...storage.coordination.lease import Lease, claim, is_expired, renew
 from ...storage.database import CoordinationScope
-from ..models import TaskExecution, TaskPlan, TaskStatus, TaskUsage
+from ..models import (
+    TaskExecution,
+    TaskPlan,
+    TaskStatus,
+    TaskUsage,
+    apply_usage_revision,
+)
 
 from typing import TYPE_CHECKING
 
@@ -168,15 +174,24 @@ class LocalTaskBackend:
         *,
         owner: str,
         fence: int,
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
-            _assert_usage_monotonic(current.usage, usage)
+            revision, merged, changed = apply_usage_revision(
+                current_revision=current.usage_revision,
+                current_usage=current.usage,
+                incoming_revision=snapshot_revision,
+                incoming_usage=usage,
+            )
+            if not changed:
+                return current
             updated = replace(
                 current,
-                usage=usage,
+                usage=merged,
+                usage_revision=revision,
                 updated_at=datetime.now(timezone.utc),
             )
             self._executions[execution_id] = updated
@@ -189,18 +204,22 @@ class LocalTaskBackend:
         owner: str,
         fence: int,
         result: "JsonValue",
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
-            _assert_usage_monotonic(current.usage, usage)
+            revision, merged, _ = _terminal_usage(
+                current, snapshot_revision=snapshot_revision, usage=usage
+            )
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
                 status=TaskStatus.COMPLETED,
                 result=_freeze(result),
-                usage=usage,
+                usage=merged,
+                usage_revision=revision,
                 lease=Lease(current.lease.owner, current.lease.fence, None),
                 updated_at=now,
             )
@@ -214,18 +233,22 @@ class LocalTaskBackend:
         owner: str,
         fence: int,
         error: "RunErrorInfo",
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
-            _assert_usage_monotonic(current.usage, usage)
+            revision, merged, _ = _terminal_usage(
+                current, snapshot_revision=snapshot_revision, usage=usage
+            )
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
                 status=TaskStatus.FAILED,
                 error=error,
-                usage=usage,
+                usage=merged,
+                usage_revision=revision,
                 lease=Lease(current.lease.owner, current.lease.fence, None),
                 updated_at=now,
             )
@@ -289,18 +312,22 @@ class LocalTaskBackend:
         owner: str,
         fence: int,
         reason: str,
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self._lock:
             current = self._require(execution_id)
             self._assert_claimed(current, owner, fence)
-            _assert_usage_monotonic(current.usage, usage)
+            revision, merged, _ = _terminal_usage(
+                current, snapshot_revision=snapshot_revision, usage=usage
+            )
             now = datetime.now(timezone.utc)
             updated = replace(
                 current,
                 status=TaskStatus.CANCELLED,
                 terminal_reason=reason,
-                usage=usage,
+                usage=merged,
+                usage_revision=revision,
                 lease=Lease(current.lease.owner, current.lease.fence, None),
                 updated_at=now,
             )
@@ -334,21 +361,17 @@ def _freeze(result: "JsonValue") -> "JsonValue":
     return result
 
 
-def _assert_usage_monotonic(old: TaskUsage, new: TaskUsage) -> None:
-    if new.input_tokens < old.input_tokens:
-        raise StorageConflictError("claimed usage input_tokens decreased")
-    if new.output_tokens < old.output_tokens:
-        raise StorageConflictError("claimed usage output_tokens decreased")
-    if new.cache_write_tokens < old.cache_write_tokens:
-        raise StorageConflictError("claimed usage cache_write_tokens decreased")
-    if new.cache_read_tokens < old.cache_read_tokens:
-        raise StorageConflictError("claimed usage cache_read_tokens decreased")
-    if (
-        old.total_cost is not None
-        and new.total_cost is not None
-        and new.total_cost < old.total_cost
-    ):
-        raise StorageConflictError("claimed usage total_cost decreased")
+def _terminal_usage(
+    current: TaskExecution, *, snapshot_revision: int, usage: TaskUsage
+) -> "tuple[int, TaskUsage, bool]":
+    if snapshot_revision < current.usage_revision:
+        raise UsageRegressionError("terminal snapshot revision decreased")
+    return apply_usage_revision(
+        current_revision=current.usage_revision,
+        current_usage=current.usage,
+        incoming_revision=snapshot_revision,
+        incoming_usage=usage,
+    )
 
 
 __all__ = ["LocalTaskBackend"]

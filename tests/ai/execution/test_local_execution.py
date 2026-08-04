@@ -67,8 +67,8 @@ async def test_local_constructor_is_lazy_and_session_context_uses_snapshot(tmp_p
     run = await store.start_run(
         StartExecution("r", "s", RunKind.USER_TURN, definition("agent"), "hello")
     )
-    assert run.input == "hello"
-    claimed = await store.claim_run(ClaimExecution(run.id, "worker", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
+    assert run.record.input == "hello"
+    claimed = await store.claim_run(ClaimExecution(run.record.id, "worker", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
     now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData(({"role": "user", "content": "hello"},), {"ok": True}, RunUsage(), 0)
     await store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, snapshot))
@@ -104,7 +104,7 @@ async def test_child_runs_do_not_create_session_turns_and_failed_runs_keep_snaps
     await store.create_session(session_id="s", user_id=None, tenant_id=None)
     await store.start_run(StartExecution("root", "s", RunKind.USER_TURN, definition("agent"), "p"))
     child = await store.start_run(StartExecution("child", "s", RunKind.SUBAGENT, definition("child"), "", root_execution_id="root", parent_execution_id="root"))
-    assert child.session_turn_sequence is None
+    assert child.record.session_turn_sequence is None
     assert (await store.list_session_turns("s")).items[0].run_id == "root"
     claimed = await store.claim_run(ClaimExecution("root", "worker", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)

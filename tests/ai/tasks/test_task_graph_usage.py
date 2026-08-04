@@ -6,10 +6,10 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.errors import UsageRegressionError
-from linktools.ai.execution.domain import RunError, RunUsage
+from linktools.ai.errors import UsageObservationConflictError
+from linktools.ai.execution.domain import RunError
 from linktools.ai.execution.snapshots import (
-    ModelUsageObservation,
+    ModelRequestUsageObservation,
     RequestUsage,
     RunUsageCapture,
 )
@@ -28,94 +28,73 @@ from tests.ai.tasks.swarm.test_engine import _limits
 
 def test_usage_capture_preserves_unknown_cost_and_accepts_authoritative_recovery():
     capture = RunUsageCapture()
-    capture.observe(
-        ModelUsageObservation(
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            "request-1",
             RequestUsage(input_tokens=10, output_tokens=4, total_tokens=14),
-            RunUsage(input_tokens=10, output_tokens=4, total_tokens=14),
             None,
-            provider_total_cost=Decimal("0.3"),
-        )
+            None,
+            provider_request_cost=Decimal("0.3"),
+        ),
+        pricing_id=None,
+        pricing=None,
     )
-    capture.observe(
-        ModelUsageObservation(
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            "request-2",
             RequestUsage(input_tokens=2, output_tokens=1, total_tokens=3),
-            RunUsage(input_tokens=12, output_tokens=5, total_tokens=17),
             None,
-        )
+            None,
+        ),
+        pricing_id=None,
+        pricing=None,
     )
     assert capture.snapshot().total_cost is None
 
-    capture.observe(
-        ModelUsageObservation(
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            "request-3",
             RequestUsage(),
-            RunUsage(input_tokens=12, output_tokens=5, total_tokens=17),
             None,
-            provider_total_cost=Decimal("0.4"),
-        )
+            None,
+            provider_request_cost=Decimal("0.4"),
+        ),
+        pricing_id=None,
+        pricing=None,
     )
-    assert capture.snapshot().total_cost == Decimal("0.4")
+    assert capture.snapshot().total_cost is None
 
 
-@pytest.mark.parametrize(
-    "field",
-    ("input_tokens", "output_tokens", "total_tokens", "cache_write_tokens", "cache_read_tokens"),
-)
-def test_usage_capture_rejects_any_cumulative_regression(field):
+def test_usage_capture_rejects_duplicate_request_with_different_observation():
     capture = RunUsageCapture()
-    capture.observe(
-        ModelUsageObservation(
-            RequestUsage(),
-            RunUsage(
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            "regression-base",
+            RequestUsage(
                 input_tokens=10,
                 output_tokens=8,
-                total_tokens=18,
                 cache_write_tokens=2,
                 cache_read_tokens=3,
             ),
             None,
-        )
+            None,
+        ),
+        pricing_id=None,
+        pricing=None,
     )
-    values = {
-        "input_tokens": 9,
-        "output_tokens": 7,
-        "total_tokens": 17,
-        "cache_write_tokens": 1,
-        "cache_read_tokens": 2,
-    }
-    current = capture.snapshot()
-    with pytest.raises(UsageRegressionError):
-        capture.observe(
-            ModelUsageObservation(
-                RequestUsage(),
-                RunUsage(
-                    input_tokens=(
-                        values["input_tokens"]
-                        if field == "input_tokens"
-                        else current.input_tokens
-                    ),
-                    output_tokens=(
-                        values["output_tokens"]
-                        if field == "output_tokens"
-                        else current.output_tokens
-                    ),
-                    total_tokens=(
-                        values["total_tokens"]
-                        if field == "total_tokens"
-                        else current.total_tokens
-                    ),
-                    cache_write_tokens=(
-                        values["cache_write_tokens"]
-                        if field == "cache_write_tokens"
-                        else current.cache_write_tokens
-                    ),
-                    cache_read_tokens=(
-                        values["cache_read_tokens"]
-                        if field == "cache_read_tokens"
-                        else current.cache_read_tokens
-                    ),
+    with pytest.raises(UsageObservationConflictError):
+        capture.observe_request(
+            ModelRequestUsageObservation(
+                "regression-base",
+                RequestUsage(
+                    input_tokens=9,
+                    output_tokens=8,
                 ),
                 None,
-            )
+                None,
+            ),
+            pricing_id=None,
+            pricing=None,
         )
 
 

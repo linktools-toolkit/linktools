@@ -8,9 +8,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Mapping
 
-from ..errors import InvalidSpecError
+from ..errors import (
+    InvalidSpecError,
+    UsageObservationConflictError,
+    UsageRegressionError,
+)
 from ..json import normalize_json
 from ..storage.coordination.lease import Lease
 
@@ -258,12 +262,19 @@ class TaskExecution:
     blocked_by: "tuple[str, ...]" = ()
     terminal_reason: "str | None" = None
     usage: TaskUsage = field(default_factory=TaskUsage)
+    usage_revision: int = 0
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __post_init__(self) -> None:
         if isinstance(self.status, str):
             object.__setattr__(self, "status", TaskStatus(self.status))
+        if (
+            not isinstance(self.usage_revision, int)
+            or isinstance(self.usage_revision, bool)
+            or self.usage_revision < 0
+        ):
+            raise ValueError("usage_revision must be a non-negative int")
         status = self.status
         if status is TaskStatus.READY:
             if self.attempt != 0:
@@ -309,6 +320,56 @@ class TaskExecution:
         return self.status in TERMINAL_TASK_STATUSES
 
 
+def merge_newer_cumulative_usage(
+    *, previous: TaskUsage, newer: TaskUsage
+) -> TaskUsage:
+    if newer.input_tokens < previous.input_tokens:
+        raise UsageRegressionError("input_tokens decreased")
+    if newer.output_tokens < previous.output_tokens:
+        raise UsageRegressionError("output_tokens decreased")
+    if newer.cache_write_tokens < previous.cache_write_tokens:
+        raise UsageRegressionError("cache_write_tokens decreased")
+    if newer.cache_read_tokens < previous.cache_read_tokens:
+        raise UsageRegressionError("cache_read_tokens decreased")
+    if newer.total_cost is None:
+        total_cost = None
+    elif previous.total_cost is None:
+        total_cost = newer.total_cost
+    elif newer.total_cost < previous.total_cost:
+        raise UsageRegressionError("total_cost decreased")
+    else:
+        total_cost = newer.total_cost
+    return TaskUsage(
+        input_tokens=newer.input_tokens,
+        output_tokens=newer.output_tokens,
+        total_cost=total_cost,
+        cache_write_tokens=newer.cache_write_tokens,
+        cache_read_tokens=newer.cache_read_tokens,
+    )
+
+
+def apply_usage_revision(
+    *,
+    current_revision: int,
+    current_usage: TaskUsage,
+    incoming_revision: int,
+    incoming_usage: TaskUsage,
+) -> "tuple[int, TaskUsage, bool]":
+    if incoming_revision < current_revision:
+        return current_revision, current_usage, False
+    if incoming_revision == current_revision:
+        if incoming_usage != current_usage:
+            raise UsageObservationConflictError(
+                "same usage revision contains different usage"
+            )
+        return current_revision, current_usage, False
+    return (
+        incoming_revision,
+        merge_newer_cumulative_usage(previous=current_usage, newer=incoming_usage),
+        True,
+    )
+
+
 __all__ = [
     "ALLOWED_TASK_TRANSITIONS",
     "DependencyFailurePolicy",
@@ -321,4 +382,6 @@ __all__ = [
     "TaskStatus",
     "TaskUsage",
     "UsageAccumulator",
+    "apply_usage_revision",
+    "merge_newer_cumulative_usage",
 ]

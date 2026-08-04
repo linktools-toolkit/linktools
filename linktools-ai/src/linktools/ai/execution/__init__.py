@@ -16,6 +16,8 @@ from .commands import (
     RequestCancellation,
     ResumeExecution,
     StartExecution,
+    StartExecutionIdentity,
+    StartRunResult,
 )
 from .context import RunContext
 from .query import ExecutionDetailView, ExecutionQueryService, ExecutionResultView
@@ -53,4 +55,6 @@ __all__ = [
     "SessionRecord",
     "SessionTurn",
     "StartExecution",
+    "StartExecutionIdentity",
+    "StartRunResult",
 ]

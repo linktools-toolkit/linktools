@@ -16,6 +16,7 @@ from ...storage.coordination.lease import Lease, claim, is_expired, release, ren
 from ...storage.database import CoordinationScope
 from ...errors import (
     ParentLeaseGuardError,
+    RunIdentityConflictError,
     StorageConflictError,
     StorageCorruptionError,
     StorageError,
@@ -52,6 +53,11 @@ from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
 from ..snapshots import RunSnapshot
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
+from ..commands import (
+    StartRunResult,
+    run_record_identity,
+    start_execution_identity,
+)
 
 from typing import TYPE_CHECKING
 
@@ -476,7 +482,7 @@ class LocalExecutionBackend:
 
         return tuple(await asyncio.to_thread(_scan))
 
-    async def start_run(self, command: "StartExecution") -> RunRecord:
+    async def start_run(self, command: "StartExecution") -> StartRunResult:
         journal_runs = await self._session_journal_runs(command.session_id)
         lock_keys = tuple(("run", run_id) for run_id in journal_runs)
         if command.parent_guard is not None:
@@ -506,23 +512,28 @@ class LocalExecutionBackend:
                 raise ParentLeaseGuardError(
                     "parent lease guard does not match child parent"
                 )
-            existing = await self._read_run(command.run_id)
-            if existing is not None:
-                if existing.definition == command.definition:
-                    return existing
-                raise StorageCorruptionError("run id reused with a different definition")
             if command.parent_guard is not None:
                 parent = await self._read_run(command.parent_guard.run_id)
                 now = _now()
                 if parent is None:
                     raise ParentLeaseGuardError("parent run does not exist")
                 if (
-                    parent.status not in {RunStatus.RUNNING, RunStatus.CANCELLING}
+                    parent.status is not RunStatus.RUNNING
                     or parent.lease.owner != command.parent_guard.owner
                     or parent.lease.fence != command.parent_guard.fence
                     or is_expired(parent.lease, now)
                 ):
                     raise ParentLeaseGuardError("parent lease guard rejected child")
+            existing = await self._read_run(command.run_id)
+            identity = start_execution_identity(
+                command, tenant_id=session.tenant_id, user_id=session.user_id
+            )
+            if existing is not None:
+                if run_record_identity(existing) == identity:
+                    return StartRunResult(existing, created=False)
+                raise RunIdentityConflictError(
+                    "run id reused with a different start identity"
+                )
             now = _now()
             is_root = command.kind is RunKind.USER_TURN
             sequence = session.next_turn_sequence if is_root else None
@@ -588,7 +599,7 @@ class LocalExecutionBackend:
                     )
                 )
             await asyncio.to_thread(self._commit_files, command.run_id, tuple(writes))
-            return record
+            return StartRunResult(record, created=True)
 
     async def get_run(self, run_id: str) -> "RunRecord | None":
         sessions = await self._run_journal_sessions(run_id)
@@ -631,10 +642,33 @@ class LocalExecutionBackend:
 
     async def claim_run(self, command: "ClaimExecution") -> RunRecord:
         await self.get_run(command.run_id)
-        async with self._locks.acquire(("run", command.run_id)):
+        initial = await self._read_run(command.run_id)
+        if initial is None:
+            raise StorageError("unknown run")
+        lock_keys = [("run", command.run_id)]
+        if initial.parent_execution_id is not None:
+            lock_keys.append(("run", initial.parent_execution_id))
+        async with self._locks.acquire(*lock_keys):
             record = await self._read_run(command.run_id)
             if record is None:
                 raise StorageError("unknown run")
+            if record.kind is RunKind.TASK and record.parent_execution_id is not None:
+                guard = command.parent_guard
+                if guard is None or guard.run_id != record.parent_execution_id:
+                    raise ParentLeaseGuardError(
+                        "task child claim requires parent guard"
+                    )
+                parent = await self._read_run(record.parent_execution_id)
+                if (
+                    parent is None
+                    or parent.status is not RunStatus.RUNNING
+                    or parent.lease.owner != guard.owner
+                    or parent.lease.fence != guard.fence
+                    or is_expired(parent.lease, command.now)
+                ):
+                    raise ParentLeaseGuardError(
+                        "parent lease guard rejected child claim"
+                    )
             assert_claimable(record, command.now)
             updated = replace(
                 record,

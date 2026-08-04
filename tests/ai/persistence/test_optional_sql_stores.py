@@ -54,12 +54,12 @@ async def test_sql_task_store_concurrent_complete_has_one_winner(tmp_path):
     claimed = await store.claim_ready("e", owner="w", duration=timedelta(seconds=30))
     await store.bind_child_run("e", owner="w", fence=claimed.fence, child_run_id="child-race")
     complete_coro = store.complete(
-        "e", owner="w", fence=claimed.fence, result={"ok": True}, usage=TaskUsage(1, 1)
+        "e", owner="w", fence=claimed.fence, result={"ok": True}, snapshot_revision=1, usage=TaskUsage(1, 1)
     )
     from linktools.ai.execution.domain import RunError
 
     cancel_coro = store.cancel_claimed(
-        "e", owner="w", fence=claimed.fence, reason="abort", usage=TaskUsage(1, 1)
+        "e", owner="w", fence=claimed.fence, reason="abort", snapshot_revision=1, usage=TaskUsage(1, 1)
     )
     results = await asyncio.gather(complete_coro, cancel_coro, return_exceptions=True)
     final = await store.get_execution("e")
@@ -92,7 +92,7 @@ async def test_sql_task_store_requires_reconcile_for_expired_claim(tmp_path):
     assert current.fence == stale.fence + 1
     with pytest.raises(StorageConflictError):
         await store.complete(
-            "e", owner="w-a", fence=stale.fence, result=None, usage=TaskUsage()
+            "e", owner="w-a", fence=stale.fence, result=None, snapshot_revision=1, usage=TaskUsage()
         )
     await engine.dispose()
 

@@ -3,13 +3,33 @@
 
 from decimal import Decimal
 
-from linktools.ai.execution.domain import RunUsage
+import pytest
+from pydantic_ai.exceptions import ModelHTTPError
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.usage import RequestUsage as PydanticRequestUsage
+
+from linktools.ai.agent.compiler import AgentCompiler
+from linktools.ai.agent.engine import AgentEngine
+from linktools.ai.agent.models import AgentInput
+from linktools.ai.agent.spec import AgentSpec, PromptSpec
+from linktools.ai.execution.cancellation import CancellationToken
+from linktools.ai.execution.context import RunContext
 from linktools.ai.execution.snapshots import (
-    ModelUsageObservation,
+    ModelRequestUsageObservation,
     RequestUsage,
     RunUsageCapture,
 )
+from linktools.ai.execution.domain import RunnableType
+from linktools.ai.execution.live_events import (
+    NoopRunLiveEventSink,
+    NoopSecurityEventSink,
+)
 from linktools.ai.model.pricing import ModelPricing
+from linktools.ai.model.pricing import StaticModelPricingProvider
+from linktools.ai.model.policy import ModelPolicy
+from linktools.ai.model.registry import ModelRegistry
+from linktools.ai.model.resolver import ModelResolver
 
 
 def test_capture_prices_actual_model_without_using_primary_model():
@@ -30,24 +50,30 @@ def test_capture_prices_actual_model_without_using_primary_model():
         output_tokens=3,
         total_cost=actual.cost(input_tokens=2, output_tokens=3),
     )
-    capture.observe(
-        ModelUsageObservation(
-            request_usage=first_request,
-            cumulative_usage=RunUsage(input_tokens=2, output_tokens=3, total_tokens=5),
-            resolved_model_id="provider/actual",
-        )
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            request_key="request-1",
+            usage=first_request,
+            provider_name="provider",
+            response_model_name="actual",
+        ),
+        pricing_id="provider/actual",
+        pricing=actual,
     )
     second_request = RequestUsage(
         input_tokens=1,
         output_tokens=1,
         total_cost=actual.cost(input_tokens=1, output_tokens=1),
     )
-    capture.observe(
-        ModelUsageObservation(
-            request_usage=second_request,
-            cumulative_usage=RunUsage(input_tokens=3, output_tokens=4, total_tokens=7),
-            resolved_model_id="provider/actual",
-        )
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            request_key="request-2",
+            usage=second_request,
+            provider_name="provider",
+            response_model_name="actual",
+        ),
+        pricing_id="provider/actual",
+        pricing=actual,
     )
 
     assert capture.snapshot().total_cost == Decimal("0.18")
@@ -56,21 +82,90 @@ def test_capture_prices_actual_model_without_using_primary_model():
 
 def test_capture_keeps_cost_unknown_until_authoritative_cost_arrives():
     capture = RunUsageCapture()
-    capture.observe(
-        ModelUsageObservation(
-            request_usage=RequestUsage(input_tokens=4, output_tokens=1),
-            cumulative_usage=RunUsage(input_tokens=4, output_tokens=1, total_tokens=5),
-            resolved_model_id=None,
-        )
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            request_key="request-unknown",
+            usage=RequestUsage(input_tokens=4, output_tokens=1),
+            provider_name=None,
+            response_model_name=None,
+        ),
+        pricing_id=None,
+        pricing=None,
+    )
+    assert capture.snapshot().total_cost is None
+    capture.observe_request(
+        ModelRequestUsageObservation(
+            request_key="request-authoritative",
+            usage=RequestUsage(),
+            provider_name="provider",
+            response_model_name="actual",
+            provider_request_cost=Decimal("0.21"),
+        ),
+        pricing_id=None,
+        pricing=None,
     )
     assert capture.snapshot().total_cost is None
 
-    capture.observe(
-        ModelUsageObservation(
-            request_usage=RequestUsage(),
-            cumulative_usage=RunUsage(input_tokens=4, output_tokens=1, total_tokens=5),
-            resolved_model_id=None,
-            provider_total_cost=Decimal("0.21"),
+
+@pytest.mark.asyncio
+async def test_agent_engine_records_actual_fallback_response_usage_once():
+    def primary(messages, info: AgentInfo):
+        raise ModelHTTPError(503, "primary", None)
+
+    def fallback(messages, info: AgentInfo):
+        return ModelResponse(
+            parts=[TextPart(content="ok")],
+            usage=PydanticRequestUsage(input_tokens=4, output_tokens=2),
+            model_name="fallback",
+            provider_name="provider",
+        )
+
+    registry = ModelRegistry()
+    registry.register("primary", model=FunctionModel(primary))
+    registry.register("fallback", model=FunctionModel(fallback))
+    spec = AgentSpec(
+        id="pricing-agent",
+        name="pricing-agent",
+        model=ModelPolicy(primary="primary", fallbacks=("fallback",)),
+        instructions=PromptSpec(instructions="answer"),
+    )
+    compiled = await AgentCompiler(
+        model_resolver=ModelResolver(registry=registry)
+    ).compile(spec)
+    capture = RunUsageCapture()
+    engine = AgentEngine(
+        pricing_provider=StaticModelPricingProvider(
+            {
+                "fallback": ModelPricing(
+                    "fallback",
+                    input_cost_per_token=Decimal("0.1"),
+                    output_cost_per_token=Decimal("0.2"),
+                )
+            }
         )
     )
-    assert capture.snapshot().total_cost == Decimal("0.21")
+    for run_id in ("run-1", "run-2"):
+        await engine.execute_pure(
+            compiled,
+            AgentInput(prompt="hello"),
+            RunContext(
+                run_id,
+                run_id,
+                None,
+                "session",
+                "pricing-agent",
+                RunnableType.AGENT,
+                None,
+                None,
+                None,
+            ),
+            cancellation=CancellationToken(),
+            live_events=NoopRunLiveEventSink(),
+            security_events=NoopSecurityEventSink(),
+            usage_sink=capture,
+        )
+
+    assert capture.snapshot().input_tokens == 8
+    assert capture.snapshot().output_tokens == 4
+    assert capture.snapshot().total_cost == Decimal("1.6")
+    assert len(capture.observations) == 2

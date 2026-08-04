@@ -16,7 +16,20 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..json import JsonValue
     from ..storage.database import CoordinationScope
-    from .commands import AbortExecution, AcknowledgeCancellation, ClaimExecution, CompleteExecution, DecideApproval, FailExecution, HeartbeatExecution, PauseExecution, RequestCancellation, ResumeExecution, StartExecution
+    from .commands import (
+        AbortExecution,
+        AcknowledgeCancellation,
+        ClaimExecution,
+        CompleteExecution,
+        DecideApproval,
+        FailExecution,
+        HeartbeatExecution,
+        PauseExecution,
+        RequestCancellation,
+        ResumeExecution,
+        StartExecution,
+        StartRunResult,
+    )
     from .domain import RunRecord
     from ..evaluation import RunEvaluation
     from .session import SessionRecord
@@ -34,7 +47,7 @@ class ExecutionStore(Protocol):
 
     async def get_session(self, session_id: str) -> "SessionRecord | None": ...
 
-    async def start_run(self, command: "StartExecution") -> "RunRecord": ...
+    async def start_run(self, command: "StartExecution") -> "StartRunResult": ...
 
     async def get_run(self, run_id: str) -> "RunRecord | None": ...
 

@@ -38,12 +38,22 @@ if TYPE_CHECKING:
     from .policy import ModelPolicy
     from .registry import ModelRegistry
 
+
+@dataclass(frozen=True)
+class ResolvedModelCandidate:
+    pricing_id: str
+    provider_name: "str | None"
+    model_name: str
+    model: "Model"
+
+
 @dataclass(frozen=True)
 class ResolvedModel:
     """The real model + its stable revision + per-call limits, ready to inject
     into a pydantic-ai Agent."""
 
     model: "Model"
+    candidates: "tuple[ResolvedModelCandidate, ...]"
     revision: str
     usage_limits: "UsageLimits"
     # Agent-layer structured-output retry count, sourced from the PRIMARY
@@ -76,14 +86,60 @@ class ModelResolver:
                 f"fallbacks={policy.fallbacks!r}"
             )
         models = [_candidate_model(b, policy.request_retries) for b in bundles]
+        candidates = tuple(
+            _candidate_identity(bundle, model)
+            for bundle, model in zip(bundles, models)
+        )
         revision = _resolved_revision(bundles, policy.request_retries)
         usage_limits = bundles[0].usage_limits
         output_retries = bundles[0].output_retries
         if len(models) == 1:
-            return ResolvedModel(models[0], revision, usage_limits, output_retries)
+            return ResolvedModel(
+                models[0], candidates, revision, usage_limits, output_retries
+            )
         from pydantic_ai.models.fallback import FallbackModel
 
-        return ResolvedModel(FallbackModel(*models), revision, usage_limits, output_retries)
+        return ResolvedModel(
+            FallbackModel(*models), candidates, revision, usage_limits, output_retries
+        )
+
+
+def _candidate_identity(
+    bundle: ModelBundle, model: "Model"
+) -> ResolvedModelCandidate:
+    pricing_id = bundle.config.model or bundle.config.model_type
+    if ":" in pricing_id:
+        provider_name, model_name = pricing_id.split(":", maxsplit=1)
+    else:
+        provider_name, model_name = None, pricing_id
+    return ResolvedModelCandidate(
+        pricing_id=pricing_id,
+        provider_name=provider_name,
+        model_name=model_name,
+        model=model,
+    )
+
+
+def resolve_pricing_id(
+    *,
+    provider_name: "str | None",
+    response_model_name: "str | None",
+    candidates: "tuple[ResolvedModelCandidate, ...]",
+) -> "str | None":
+    matches = [
+        candidate
+        for candidate in candidates
+        if response_model_name in {
+            candidate.model_name,
+            getattr(candidate.model, "model_name", None),
+        }
+        and (
+            provider_name is None
+            or candidate.provider_name is None
+            or candidate.provider_name == provider_name
+        )
+    ]
+    return matches[0].pricing_id if len(matches) == 1 else None
 
 
 def effective_request_retries(
@@ -161,9 +217,11 @@ def _resolved_revision(
 
 
 __all__: "list[str]" = [
+    "ResolvedModelCandidate",
     "ResolvedModel",
     "ModelResolver",
     "ModelRoutingError",
     "ModelRetryConfigurationError",
     "effective_request_retries",
+    "resolve_pricing_id",
 ]

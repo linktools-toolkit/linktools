@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from linktools.ai.errors import ParentLeaseGuardError, StorageCorruptionError
+from linktools.ai.errors import ParentLeaseGuardError, RunIdentityConflictError
 from linktools.ai.execution.commands import (
     ClaimExecution,
     ParentLeaseGuard,
@@ -22,12 +22,12 @@ def _definition() -> RunDefinition:
 async def _assert_guarded_start(store) -> None:
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
     definition = _definition()
-    parent = await store.start_run(
+    started = await store.start_run(
         StartExecution("parent", "s", RunKind.TASK, definition, {})
     )
     parent = await store.claim_run(
         ClaimExecution(
-            parent.id,
+            started.record.id,
             "scheduler",
             datetime.now(timezone.utc),
             timedelta(minutes=5),
@@ -46,8 +46,8 @@ async def _assert_guarded_start(store) -> None:
             parent_guard=guard,
         )
     )
-    assert child.id == "child"
-    assert (
+    assert child.record.id == "child"
+    with pytest.raises(ParentLeaseGuardError):
         await store.start_run(
             StartExecution(
                 "child",
@@ -60,7 +60,6 @@ async def _assert_guarded_start(store) -> None:
                 parent_guard=ParentLeaseGuard(parent.id, "stale", 0),
             )
         )
-    ).id == child.id
     with pytest.raises(ParentLeaseGuardError):
         await store.start_run(
             StartExecution(
@@ -106,7 +105,7 @@ async def _assert_guarded_start(store) -> None:
             )
         )
     assert await store.get_run("mismatched-guard") is None
-    with pytest.raises(StorageCorruptionError):
+    with pytest.raises(RunIdentityConflictError):
         await store.start_run(
             StartExecution(
                 "child",

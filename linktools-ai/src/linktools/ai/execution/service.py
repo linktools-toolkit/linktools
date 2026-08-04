@@ -31,14 +31,20 @@ from ..agent.models import (
 )
 from ..agent.sandbox.protocols import Sandbox
 from ..errors import (
+    ChildRunAlreadyActiveError,
+    ChildSnapshotError,
+    ParentLeaseGuardError,
     RunDefinitionError,
     RunDefinitionIntegrityError,
+    RunIdentityConflictError,
+    RunStateError,
     RuntimeInitializationError,
     StorageError,
 )
 from ..governance.authorization import ExecutionAction
 from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
+from ..storage.coordination.lease import is_expired
 from ..observability.events.payloads import SecurityDegraded
 from .cancellation import CancellationToken
 from .commands import (
@@ -52,6 +58,8 @@ from .commands import (
     ParentLeaseGuard,
     PauseExecution,
     RequestCancellation,
+    run_record_identity,
+    start_execution_identity,
     ResumeExecution,
     StartExecution,
 )
@@ -137,6 +145,7 @@ class ChildRunResult:
     output: "object | None"
     error: "RunError | None"
     usage: "TaskUsage"
+    snapshot_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +202,14 @@ def _child_result_from_outcome(
     if isinstance(outcome, AgentCompleted):
         output = outcome.result.output
     usage = _outcome_usage(outcome, record)
-    return ChildRunResult(run_id=run_id, status=record.status, output=output, error=error, usage=usage)
+    return ChildRunResult(
+        run_id=run_id,
+        status=record.status,
+        output=output,
+        error=error,
+        usage=usage,
+        snapshot_revision=record.snapshot_revision,
+    )
 
 
 async def _child_result_from_persistence(
@@ -204,13 +220,14 @@ async def _child_result_from_persistence(
 ) -> "ChildRunResult":
     snapshot = await store.get_snapshot(run_id)
     if snapshot is None:
-        return _child_result_from_outcome(run_id, outcome, record)
+        raise ChildSnapshotError(run_id)
     return ChildRunResult(
         run_id=run_id,
         status=record.status,
         output=snapshot.final_output if record.status is RunStatus.COMPLETED else None,
         error=record.error,
         usage=_task_usage_from_run_usage(snapshot.usage),
+        snapshot_revision=snapshot.revision,
     )
 
 
@@ -276,7 +293,17 @@ class ExecutionService:
             principal=principal,
             session=session,
         )
-        record = await self._store.start_run(StartExecution(execution_id, session_id, RunKind.USER_TURN, _definition(spec, self._codec), prompt))
+        record = (
+            await self._store.start_run(
+                StartExecution(
+                    execution_id,
+                    session_id,
+                    RunKind.USER_TURN,
+                    _definition(spec, self._codec),
+                    prompt,
+                )
+            )
+        ).record
         # Claiming the just-started run and loading the session's latest
         # completed snapshot (so the next turn sees the prior turn's context;
         # resume uses the target run's own snapshot, not this path) don't
@@ -357,6 +384,86 @@ class ExecutionService:
             raise TypeError("principal must be a PrincipalContext")
         if prepared_execution is not None and prepared_execution.agent_spec.id != spec.id:
             raise RuntimeInitializationError("agent_preflight_failed")
+        start_command = StartExecution(
+            execution_id,
+            session_id,
+            RunKind.TASK,
+            _definition(spec, self._codec),
+            {"prompt": prompt, "metadata": dict(metadata) if metadata else {}},
+            root_execution_id=root_execution_id,
+            parent_execution_id=parent_execution_id,
+            parent_guard=parent_guard,
+        )
+        if parent_guard is not None:
+            parent = await self._store.get_run(parent_guard.run_id)
+            if parent is None:
+                raise ParentLeaseGuardError("parent run does not exist")
+            if parent.status is RunStatus.CANCELLING:
+                if parent_execution_id != parent_guard.run_id:
+                    raise ParentLeaseGuardError(
+                        "parent lease guard does not match child parent"
+                    )
+                if (
+                    parent.lease.owner != parent_guard.owner
+                    or parent.lease.fence != parent_guard.fence
+                    or is_expired(parent.lease, datetime.now(timezone.utc))
+                ):
+                    raise ParentLeaseGuardError("parent lease guard rejected child")
+                # CANCELLING may only read and converge an existing child; its
+                # terminal snapshot is never reached through start_run.
+                existing = await self._store.get_run(execution_id)
+                if existing is None:
+                    raise ParentLeaseGuardError(
+                        "parent is cancelling; child does not exist"
+                    )
+                identity = start_execution_identity(
+                    start_command,
+                    tenant_id=existing.tenant_id,
+                    user_id=existing.user_id,
+                )
+                if run_record_identity(existing) != identity:
+                    raise RunIdentityConflictError(
+                        "run id reused with a different start identity"
+                    )
+                if existing.status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    return await _child_result_from_persistence(
+                        self._store, existing.id, None, existing
+                    )
+                raise ParentLeaseGuardError(
+                    "parent is cancelling; child cannot be started"
+                )
+        start = await self._store.start_run(start_command)
+        record = start.record
+        if record.status is RunStatus.PENDING:
+            claimed = await self._store.claim_run(
+                ClaimExecution(
+                    record.id,
+                    "swarm",
+                    datetime.now(timezone.utc),
+                    _LEASE_DURATION,
+                    parent_guard=parent_guard,
+                )
+            )
+        elif record.status in {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            return await _child_result_from_persistence(
+                self._store, record.id, None, record
+            )
+        elif record.status in {
+            RunStatus.RUNNING,
+            RunStatus.CANCELLING,
+            RunStatus.PAUSED,
+        }:
+            raise ChildRunAlreadyActiveError(record.id)
+        else:
+            raise RunStateError(f"child {record.id!r} has unsupported state")
         assembly = (
             prepared_execution.assembled_agent
             if prepared_execution is not None
@@ -368,21 +475,6 @@ class ExecutionService:
                 parent_execution_id=parent_execution_id,
                 principal=principal,
             )
-        )
-        record = await self._store.start_run(
-            StartExecution(
-                execution_id,
-                session_id,
-                RunKind.TASK,
-                _definition(spec, self._codec),
-                {"prompt": prompt, "metadata": dict(metadata) if metadata else {}},
-                root_execution_id=root_execution_id,
-                parent_execution_id=parent_execution_id,
-                parent_guard=parent_guard,
-            )
-        )
-        claimed = await self._store.claim_run(
-            ClaimExecution(record.id, "swarm", datetime.now(timezone.utc), _LEASE_DURATION)
         )
         compiled = await self._compiler.compile(spec)
         context = RunContext(
@@ -447,12 +539,14 @@ class ExecutionService:
             await self._converge_child_cancel(
                 claimed, owner, _task_usage_from_run_usage(usage_capture.snapshot())
             )
+            latest = await self._required(execution_id)
             return ChildRunResult(
                 run_id=execution_id,
                 status=RunStatus.CANCELLED,
                 output=None,
                 error=latest.error,
                 usage=_task_usage_from_run_usage(usage_capture.snapshot()),
+                snapshot_revision=latest.snapshot_revision,
             )
         except BaseException as exc:
             trace_end = await collector.flush()

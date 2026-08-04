@@ -20,7 +20,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from linktools.core import environ
 
-from ...errors import StorageConflictError
+from ...errors import StorageConflictError, UsageRegressionError
 from ...execution.domain import RunError
 from ...json import JsonValue
 from ...storage.coordination.lease import Lease, claim, is_expired, renew
@@ -29,7 +29,13 @@ from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX
 from ...storage.sqlalchemy.dialects import resolve_dialect
 from ..codec import decode_plan, encode_plan
-from ..models import TaskExecution, TaskPlan, TaskStatus, TaskUsage
+from ..models import (
+    TaskExecution,
+    TaskPlan,
+    TaskStatus,
+    TaskUsage,
+    apply_usage_revision,
+)
 
 logger = environ.get_logger("ai.tasks.persistence.sqlalchemy")
 
@@ -62,6 +68,7 @@ class ExecutionRow(Base):
     blocked_by: "Mapped[Any]" = mapped_column(JSON, nullable=False, default=list)
     terminal_reason: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
     usage: "Mapped[Any]" = mapped_column(JSON, nullable=False, default=dict)
+    usage_revision: "Mapped[int]" = mapped_column(Integer, default=0)
     lease_expires_at: "Mapped[Any]" = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -132,6 +139,7 @@ class SqlAlchemyTaskBackend:
             blocked_by=tuple(row.blocked_by or ()),
             terminal_reason=row.terminal_reason,
             usage=_decode_usage(row.usage),
+            usage_revision=row.usage_revision,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -180,6 +188,7 @@ class SqlAlchemyTaskBackend:
             blocked_by=list(execution.blocked_by),
             terminal_reason=execution.terminal_reason,
             usage=_encode_usage(execution.usage),
+            usage_revision=execution.usage_revision,
             lease_expires_at=execution.lease.expires_at,
             created_at=execution.created_at,
             updated_at=execution.updated_at,
@@ -310,7 +319,12 @@ class SqlAlchemyTaskBackend:
                     )
                 now = datetime.now(timezone.utc)
                 result = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                    ).values(
                         active_run_id=child_run_id,
                         updated_at=now,
                     )
@@ -341,7 +355,12 @@ class SqlAlchemyTaskBackend:
                     duration=duration,
                 )
                 result = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                    ).values(
                         lease_expires_at=new_lease.expires_at,
                         updated_at=now,
                     )
@@ -358,23 +377,57 @@ class SqlAlchemyTaskBackend:
         *,
         owner: str,
         fence: int,
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
                 old_usage = _decode_usage(row.usage)
-                _assert_usage_monotonic(old_usage, usage)
+                revision, merged, changed = apply_usage_revision(
+                    current_revision=row.usage_revision,
+                    current_usage=old_usage,
+                    incoming_revision=snapshot_revision,
+                    incoming_usage=usage,
+                )
+                if not changed:
+                    return self._execution(row)
                 now = datetime.now(timezone.utc)
                 result = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
-                        usage=_encode_usage(usage),
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                        expected_revision=row.usage_revision,
+                    ).values(
+                        usage=_encode_usage(merged),
+                        usage_revision=revision,
                         updated_at=now,
                     )
                 )
                 if result.rowcount != 1:
+                    current_row = await self._execution_row(session, execution_id)
+                    if current_row is None:
+                        raise StorageConflictError(
+                            f"task execution {execution_id!r} disappeared"
+                        )
+                    current = self._execution(current_row)
+                    if current.status is not TaskStatus.CLAIMED:
+                        raise StorageConflictError(
+                            f"task {execution_id!r} is no longer claimed"
+                        )
+                    _, _, changed_again = apply_usage_revision(
+                        current_revision=current.usage_revision,
+                        current_usage=current.usage,
+                        incoming_revision=snapshot_revision,
+                        incoming_usage=usage,
+                    )
+                    if not changed_again:
+                        return current
                     raise StorageConflictError("task usage update lost a race")
-                row.usage = _encode_usage(usage)
+                row.usage = _encode_usage(merged)
+                row.usage_revision = revision
                 row.updated_at = now
                 return self._execution(row)
 
@@ -385,18 +438,28 @@ class SqlAlchemyTaskBackend:
         owner: str,
         fence: int,
         result: "JsonValue",
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
-                _assert_usage_monotonic(_decode_usage(row.usage), usage)
+                revision, merged, _ = _terminal_usage(
+                    row, snapshot_revision=snapshot_revision, usage=usage
+                )
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                        expected_revision=row.usage_revision,
+                    ).values(
                         status=TaskStatus.COMPLETED.value,
                         result=result,
-                        usage=_encode_usage(usage),
+                        usage=_encode_usage(merged),
+                        usage_revision=revision,
                         lease_expires_at=None,
                         updated_at=now,
                     )
@@ -405,7 +468,8 @@ class SqlAlchemyTaskBackend:
                     raise StorageConflictError("task complete lost a race")
                 row.status = TaskStatus.COMPLETED.value
                 row.result = result
-                row.usage = _encode_usage(usage)
+                row.usage = _encode_usage(merged)
+                row.usage_revision = revision
                 row.lease_expires_at = None
                 row.updated_at = now
                 return self._execution(row)
@@ -417,18 +481,28 @@ class SqlAlchemyTaskBackend:
         owner: str,
         fence: int,
         error: RunError,
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
-                _assert_usage_monotonic(_decode_usage(row.usage), usage)
+                revision, merged, _ = _terminal_usage(
+                    row, snapshot_revision=snapshot_revision, usage=usage
+                )
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                        expected_revision=row.usage_revision,
+                    ).values(
                         status=TaskStatus.FAILED.value,
                         error=_encode_error(error),
-                        usage=_encode_usage(usage),
+                        usage=_encode_usage(merged),
+                        usage_revision=revision,
                         lease_expires_at=None,
                         updated_at=now,
                     )
@@ -437,7 +511,8 @@ class SqlAlchemyTaskBackend:
                     raise StorageConflictError("task fail lost a race")
                 row.status = TaskStatus.FAILED.value
                 row.error = _encode_error(error)
-                row.usage = _encode_usage(usage)
+                row.usage = _encode_usage(merged)
+                row.usage_revision = revision
                 row.lease_expires_at = None
                 row.updated_at = now
                 return self._execution(row)
@@ -530,18 +605,28 @@ class SqlAlchemyTaskBackend:
         owner: str,
         fence: int,
         reason: str,
+        snapshot_revision: int,
         usage: TaskUsage,
     ) -> TaskExecution:
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._claimed_row(session, execution_id, owner, fence)
-                _assert_usage_monotonic(_decode_usage(row.usage), usage)
+                revision, merged, _ = _terminal_usage(
+                    row, snapshot_revision=snapshot_revision, usage=usage
+                )
                 now = datetime.now(timezone.utc)
                 outcome = await session.execute(
-                    self._claimed_guard(execution_id, owner, fence, now).values(
+                    self._claimed_guard(
+                        execution_id,
+                        owner,
+                        fence,
+                        now,
+                        expected_revision=row.usage_revision,
+                    ).values(
                         status=TaskStatus.CANCELLED.value,
                         terminal_reason=reason,
-                        usage=_encode_usage(usage),
+                        usage=_encode_usage(merged),
+                        usage_revision=revision,
                         lease_expires_at=None,
                         updated_at=now,
                     )
@@ -550,7 +635,8 @@ class SqlAlchemyTaskBackend:
                     raise StorageConflictError("task cancel_claimed lost a race")
                 row.status = TaskStatus.CANCELLED.value
                 row.terminal_reason = reason
-                row.usage = _encode_usage(usage)
+                row.usage = _encode_usage(merged)
+                row.usage_revision = revision
                 row.lease_expires_at = None
                 row.updated_at = now
                 return self._execution(row)
@@ -579,7 +665,19 @@ class SqlAlchemyTaskBackend:
         return row
 
     @staticmethod
-    def _claimed_guard(execution_id: str, owner: str, fence: int, now: datetime):
+    def _claimed_guard(
+        execution_id: str,
+        owner: str,
+        fence: int,
+        now: datetime,
+        *,
+        expected_revision: "int | None" = None,
+    ):
+        revision_clause = (
+            ()
+            if expected_revision is None
+            else (ExecutionRow.usage_revision == expected_revision,)
+        )
         return (
             update(ExecutionRow)
             .where(
@@ -588,6 +686,7 @@ class SqlAlchemyTaskBackend:
                 ExecutionRow.owner == owner,
                 ExecutionRow.fence == fence,
                 ExecutionRow.lease_expires_at > now,
+                *revision_clause,
             )
             .execution_options(synchronize_session=False)
         )
@@ -628,21 +727,17 @@ def _decode_usage(value: "Any") -> TaskUsage:
     )
 
 
-def _assert_usage_monotonic(old: TaskUsage, new: TaskUsage) -> None:
-    if new.input_tokens < old.input_tokens:
-        raise StorageConflictError("claimed usage input_tokens decreased")
-    if new.output_tokens < old.output_tokens:
-        raise StorageConflictError("claimed usage output_tokens decreased")
-    if new.cache_write_tokens < old.cache_write_tokens:
-        raise StorageConflictError("claimed usage cache_write_tokens decreased")
-    if new.cache_read_tokens < old.cache_read_tokens:
-        raise StorageConflictError("claimed usage cache_read_tokens decreased")
-    if (
-        old.total_cost is not None
-        and new.total_cost is not None
-        and new.total_cost < old.total_cost
-    ):
-        raise StorageConflictError("claimed usage total_cost decreased")
+def _terminal_usage(
+    row: ExecutionRow, *, snapshot_revision: int, usage: TaskUsage
+) -> "tuple[int, TaskUsage, bool]":
+    if snapshot_revision < row.usage_revision:
+        raise UsageRegressionError("terminal snapshot revision decreased")
+    return apply_usage_revision(
+        current_revision=row.usage_revision,
+        current_usage=_decode_usage(row.usage),
+        incoming_revision=snapshot_revision,
+        incoming_usage=usage,
+    )
 
 
 def _encode_error(error: "RunError | None") -> "dict[str, JsonValue] | None":

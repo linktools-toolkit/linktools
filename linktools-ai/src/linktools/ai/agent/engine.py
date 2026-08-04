@@ -66,10 +66,14 @@ from ..execution.domain import (
     RunStatus as ExecutionRunStatus,
     RunUsage as ExecutionRunUsage,
 )
-from ..execution.snapshots import ModelUsageObservation, RequestUsage
+from ..execution.snapshots import (
+    ModelRequestUsageObservation,
+    RequestUsage,
+)
 from ..governance.policy.engine import ToolContext
 from ..governance.security.redact import redact_exception
 from ..model.recording import SemanticRecordingModel
+from ..model.resolver import resolve_pricing_id
 from ..observability.tracing import use_span
 from .dependencies import AgentDependencies
 from .middleware.pipeline import MiddlewarePipeline
@@ -141,33 +145,34 @@ def _run_usage_from_provider(usage: object) -> ExecutionRunUsage:
     )
 
 
-def _add_run_usage(cumulative: ExecutionRunUsage, request: RequestUsage) -> ExecutionRunUsage:
-    return ExecutionRunUsage(
-        input_tokens=cumulative.input_tokens + request.input_tokens,
-        output_tokens=cumulative.output_tokens + request.output_tokens,
-        total_tokens=cumulative.total_tokens + request.total_tokens,
-        cache_write_tokens=cumulative.cache_write_tokens + request.cache_write_tokens,
-        cache_read_tokens=cumulative.cache_read_tokens + request.cache_read_tokens,
-        total_cost=None,
+def _response_identity(response: object) -> "tuple[str | None, str | None]":
+    provider_name = getattr(response, "provider_name", None)
+    model_name = getattr(response, "model_name", None)
+    return (
+        provider_name if isinstance(provider_name, str) else None,
+        model_name if isinstance(model_name, str) and model_name else None,
     )
 
 
-def _request_delta(before: ExecutionRunUsage, after: ExecutionRunUsage) -> RequestUsage:
-    return RequestUsage(
-        input_tokens=max(0, after.input_tokens - before.input_tokens),
-        output_tokens=max(0, after.output_tokens - before.output_tokens),
-        total_tokens=max(0, after.total_tokens - before.total_tokens),
-        cache_write_tokens=max(0, after.cache_write_tokens - before.cache_write_tokens),
-        cache_read_tokens=max(0, after.cache_read_tokens - before.cache_read_tokens),
-        total_cost=None,
-    )
-
-
-def _resolved_model_id(response: object) -> "str | None":
-    value = getattr(response, "model_id", None)
-    if not isinstance(value, str) or not value:
-        value = getattr(response, "model_name", None)
+def _provider_response_id(response: object) -> "str | None":
+    value = getattr(response, "provider_response_id", None)
     return value if isinstance(value, str) and value else None
+
+
+def _provider_request_cost(response: object) -> "object | None":
+    return getattr(response, "provider_request_cost", None)
+
+
+def _latest_model_response(
+    state: object, *, after_count: "int | None" = None
+) -> "object | None":
+    history = tuple(getattr(state, "message_history", ()) or ())
+    if after_count is not None and len(history) <= after_count:
+        return None
+    for message in reversed(history):
+        if hasattr(message, "usage") and hasattr(message, "model_name"):
+            return message
+    return None
 
 
 # Exception types that count as EXPECTED provider/model/tool failures for the
@@ -201,7 +206,13 @@ async def _noop_span():
 
 
 class RunUsageSink(Protocol):
-    def observe(self, observation: ModelUsageObservation) -> None: ...
+    def observe_request(
+        self,
+        observation: ModelRequestUsageObservation,
+        *,
+        pricing_id: "str | None",
+        pricing: object | None,
+    ) -> None: ...
 
     def snapshot(self) -> "ExecutionRunUsage": ...
 
@@ -267,7 +278,8 @@ class AgentEngine:
         *,
         cancellation: "CancellationToken",
         live_events: "RunLiveEventSink",
-        observe_usage: "Callable[[RequestUsage, RunUsage, str | None], Awaitable[None]] | None",
+        request_key: str,
+        observe_usage: "Callable[[str, RequestUsage, object], Awaitable[None]] | None",
     ) -> str:
         """Stream one model-request node, publishing text/thinking chunks to
         ``live_events`` as they arrive. Returns the concatenated text delta so
@@ -285,8 +297,8 @@ class AgentEngine:
         )
 
         accumulated = ""
-        prior = _run_usage_from_provider(run_ctx.state.usage)
         request_stream = None
+        usage_observed = False
         try:
             async with node.stream(run_ctx) as request_stream:
                 async for ev in request_stream:
@@ -316,29 +328,29 @@ class AgentEngine:
                         await live_events.publish({"type": kind, "text": chunk})
                         await cancellation.raise_if_cancelled()
                 if observe_usage is not None:
+                    response = request_stream.get()
+                    usage_observed = True
                     await observe_usage(
-                        _request_usage_from_provider(request_stream.usage),
-                        _run_usage_from_provider(run_ctx.state.usage),
-                        _resolved_model_id(request_stream),
+                        request_key,
+                        _request_usage_from_provider(response.usage),
+                        response,
                     )
         except BaseException:
-            if observe_usage is not None and request_stream is not None:
-                request_usage = _request_usage_from_provider(request_stream.usage)
-                state_usage = _run_usage_from_provider(run_ctx.state.usage)
-                cumulative = (
-                    state_usage
-                    if state_usage.total_tokens > prior.total_tokens
-                    or state_usage.input_tokens > prior.input_tokens
-                    or state_usage.output_tokens > prior.output_tokens
-                    or state_usage.cache_write_tokens > prior.cache_write_tokens
-                    or state_usage.cache_read_tokens > prior.cache_read_tokens
-                    else _add_run_usage(prior, request_usage)
-                )
-                await observe_usage(
-                    request_usage,
-                    cumulative,
-                    _resolved_model_id(request_stream),
-                )
+            if (
+                observe_usage is not None
+                and request_stream is not None
+                and not usage_observed
+            ):
+                try:
+                    response = request_stream.get()
+                except BaseException:
+                    response = None
+                if response is not None:
+                    await observe_usage(
+                        request_key,
+                        _request_usage_from_provider(response.usage),
+                        response,
+                    )
             raise
         return accumulated
 
@@ -716,54 +728,54 @@ class AgentEngine:
                 total_cost=captured.total_cost,
             )
 
-        pricing_cache: "dict[str, Any]" = {}
+        request_sequence = 0
+        pricing_cache: "dict[str, object | None]" = {}
+
+        def _next_request_key() -> str:
+            nonlocal request_sequence
+            request_sequence += 1
+            return f"{context.run_id}:{request_sequence}"
 
         async def _observe_model_usage(
+            request_key: str,
             request_usage: RequestUsage,
-            cumulative_usage: ExecutionRunUsage,
-            resolved_model_id: "str | None",
+            response: object,
         ) -> None:
             if usage_sink is None:
                 return
-            request_cost = None
-            if (
-                cumulative_usage.total_cost is None
-                and resolved_model_id is not None
-                and self._pricing_provider is not None
-            ):
-                if resolved_model_id not in pricing_cache:
+            provider_name, response_model_name = _response_identity(response)
+            pricing_id = resolve_pricing_id(
+                provider_name=provider_name,
+                response_model_name=response_model_name,
+                candidates=agent.model_bundle.candidates,
+            )
+            pricing = None
+            if pricing_id is not None and self._pricing_provider is not None:
+                if pricing_id not in pricing_cache:
                     try:
-                        pricing_cache[resolved_model_id] = (
-                            await self._pricing_provider.get_pricing(resolved_model_id)
+                        pricing_cache[pricing_id] = (
+                            await self._pricing_provider.get_pricing(pricing_id)
                         )
                     except Exception as exc:
                         logger.debug(
-                            "usage pricing unavailable run_id=%s model_id=%s error_type=%s",
+                            "usage pricing unavailable run_id=%s pricing_id=%s error_type=%s",
                             context.run_id,
-                            resolved_model_id,
+                            pricing_id,
                             type(exc).__name__,
                         )
-                        pricing_cache[resolved_model_id] = None
-                pricing = pricing_cache[resolved_model_id]
-                if pricing is not None:
-                    request_cost = pricing.cost(
-                        input_tokens=request_usage.input_tokens,
-                        output_tokens=request_usage.output_tokens,
-                        cache_read_tokens=request_usage.cache_read_tokens,
-                        cache_write_tokens=request_usage.cache_write_tokens,
-                    )
-            if request_cost is not None:
-                request_usage = dataclasses.replace(
-                    request_usage,
-                    total_cost=request_cost,
-                )
-            usage_sink.observe(
-                ModelUsageObservation(
-                    request_usage=request_usage,
-                    cumulative_usage=cumulative_usage,
-                    resolved_model_id=resolved_model_id,
-                    provider_total_cost=cumulative_usage.total_cost,
-                )
+                        pricing_cache[pricing_id] = None
+                pricing = pricing_cache[pricing_id]
+            observed_key = _provider_response_id(response) or request_key
+            usage_sink.observe_request(
+                ModelRequestUsageObservation(
+                    request_key=observed_key,
+                    usage=request_usage,
+                    provider_name=provider_name,
+                    response_model_name=response_model_name,
+                    provider_request_cost=_provider_request_cost(response),
+                ),
+                pricing_id=pricing_id,
+                pricing=pricing,
             )
 
         try:
@@ -883,34 +895,45 @@ class AgentEngine:
                                     if not model_supports_streaming(
                                         model
                                     ) and PydanticAgent.is_model_request_node(node):
-                                        prior_usage = _run_usage_from_provider(
-                                            run.ctx.state.usage
+                                        request_key = _next_request_key()
+                                        state = run.ctx.state
+                                        history_count = len(
+                                            tuple(
+                                                getattr(
+                                                    state,
+                                                    "message_history",
+                                                    (),
+                                                )
+                                                or ()
+                                            )
                                         )
                                         try:
                                             node = await node.run(run.ctx)
                                         finally:
                                             if usage_sink is not None:
-                                                cumulative_usage = _run_usage_from_provider(
-                                                    run.ctx.state.usage
+                                                response = _latest_model_response(
+                                                    run.ctx.state,
+                                                    after_count=history_count,
                                                 )
-                                                await _observe_model_usage(
-                                                    _request_delta(
-                                                        prior_usage, cumulative_usage
-                                                    ),
-                                                    cumulative_usage,
-                                                    _resolved_model_id(
-                                                        getattr(run.ctx, "model", model)
-                                                    ),
-                                                )
+                                                if response is not None:
+                                                    await _observe_model_usage(
+                                                        request_key,
+                                                        _request_usage_from_provider(
+                                                            response.usage
+                                                        ),
+                                                        response,
+                                                    )
                                         continue
 
                                     if PydanticAgent.is_model_request_node(node):
+                                        request_key = _next_request_key()
                                         accumulated_text += (
                                             await self._forward_model_stream(
                                                 node,
                                                 run.ctx,
                                                 cancellation=cancellation,
                                                 live_events=live_events,
+                                                request_key=request_key,
                                                 observe_usage=_observe_model_usage,
                                             )
                                         )
@@ -1002,29 +1025,6 @@ class AgentEngine:
                 if timed_out:
                     raise ModelRoutingError("model timeout")
 
-                usage = result.usage if result is not None else None
-                if usage is not None:
-                    cumulative_usage = _run_usage_from_provider(usage)
-                    captured_before_final = _captured_usage()
-                    if (
-                        cumulative_usage.input_tokens != captured_before_final.input_tokens
-                        or cumulative_usage.output_tokens != captured_before_final.output_tokens
-                        or cumulative_usage.total_tokens != captured_before_final.total_tokens
-                        or (
-                            cumulative_usage.cache_write_tokens
-                            != captured_before_final.cache_write_tokens
-                        )
-                        or (
-                            cumulative_usage.cache_read_tokens
-                            != captured_before_final.cache_read_tokens
-                        )
-                        or cumulative_usage.total_cost != captured_before_final.total_cost
-                    ):
-                        await _observe_model_usage(
-                            _request_delta(captured_before_final, cumulative_usage),
-                            cumulative_usage,
-                            _resolved_model_id(getattr(run.ctx, "model", None)),
-                        )
                 captured = _captured_usage()
                 output = result.output if result is not None else accumulated_text
                 await self._enforce_usage_policy(agent.spec.model, captured)
@@ -1072,8 +1072,8 @@ class AgentEngine:
                     logger.debug(
                         "run %s completed: input=%s output=%s",
                         context.run_id,
-                        usage.input_tokens if usage else 0,
-                        usage.output_tokens if usage else 0,
+                        captured.input_tokens,
+                        captured.output_tokens,
                     )
                 return AgentCompleted(
                     result=run_result,

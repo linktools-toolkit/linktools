@@ -6,7 +6,11 @@ from decimal import Decimal
 
 import pytest
 
-from linktools.ai.errors import StorageConflictError
+from linktools.ai.errors import (
+    StorageConflictError,
+    UsageObservationConflictError,
+    UsageRegressionError,
+)
 from linktools.ai.tasks.models import (
     TaskExecution,
     TaskGraphNodePayload,
@@ -35,20 +39,23 @@ async def _assert_usage_contract(store) -> None:
         claimed.id,
         owner="worker",
         fence=claimed.fence,
+        snapshot_revision=1,
         usage=TaskUsage(input_tokens=8, output_tokens=1),
     )
     assert first.usage.input_tokens == 8
-    with pytest.raises(StorageConflictError):
+    with pytest.raises(UsageObservationConflictError):
         await store.record_claimed_usage(
             claimed.id,
             owner="worker",
             fence=claimed.fence,
+            snapshot_revision=1,
             usage=TaskUsage(input_tokens=7, output_tokens=1),
         )
     recovered = await store.record_claimed_usage(
         claimed.id,
         owner="worker",
         fence=claimed.fence,
+        snapshot_revision=2,
         usage=TaskUsage(input_tokens=8, output_tokens=1, total_cost=Decimal("0.2")),
     )
     assert recovered.usage.total_cost == Decimal("0.2")
@@ -56,19 +63,27 @@ async def _assert_usage_contract(store) -> None:
         claimed.id,
         owner="worker",
         fence=claimed.fence,
+        snapshot_revision=3,
         usage=TaskUsage(input_tokens=9, output_tokens=2),
     )
     assert unknown.usage.total_cost is None
     assert unknown.active_run_id is None
     assert unknown.attempt == 1
+    await store.bind_child_run(
+        claimed.id,
+        owner="worker",
+        fence=claimed.fence,
+        child_run_id="child",
+    )
 
-    with pytest.raises(StorageConflictError):
+    with pytest.raises(UsageRegressionError):
         await store.complete(
             claimed.id,
             owner="worker",
             fence=claimed.fence,
+            snapshot_revision=4,
             result={},
-            usage=TaskUsage(input_tokens=1),
+            usage=TaskUsage(input_tokens=8, output_tokens=2),
         )
 
 

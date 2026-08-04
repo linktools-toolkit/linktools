@@ -11,7 +11,12 @@ from linktools.ai.errors import (
 )
 from linktools.ai.tasks.models import TaskStatus, TaskUsage
 from linktools.ai.tasks.persistence.local import LocalTaskBackend
-from linktools.ai.tasks.swarm.engine import NodeRunRequest, NodeRunResult, TaskGraphEngine
+from linktools.ai.tasks.swarm.engine import (
+    NodeRunRequest,
+    NodeRunResult,
+    NodeUsageSnapshot,
+    TaskGraphEngine,
+)
 
 from tests.ai.tasks.swarm._support import NoopGate, make_plan, ready_executions
 from tests.ai.tasks.swarm.test_engine import _limits
@@ -36,8 +41,10 @@ class _PlatformFailureRunner:
         if self.cancel_fails:
             raise RuntimeError("cancel request failed")
 
-    async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-        return TaskUsage(input_tokens=7, output_tokens=3)
+    async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+        return NodeUsageSnapshot(
+            usage=TaskUsage(input_tokens=7, output_tokens=3), snapshot_revision=1
+        )
 
 
 @pytest.mark.asyncio

@@ -32,6 +32,7 @@ from ..models import (
     TaskStatus,
     TaskUsage,
     UsageAccumulator,
+    merge_newer_cumulative_usage,
 )
 from ..store import TaskStore
 from .validation import all_terminal, classify_readiness
@@ -60,6 +61,12 @@ class NodeRunRequest:
     parent_guard: "ParentLeaseGuard"
 
 
+@dataclass(frozen=True, slots=True)
+class NodeUsageSnapshot:
+    usage: TaskUsage
+    snapshot_revision: int
+
+
 class StopReason(StrEnum):
     NORMAL = "normal"
     USER_CANCELLED = "user_cancelled"
@@ -80,6 +87,7 @@ class NodeRunResult:
     error: "RunError | None" = None
     reason: "str | None" = None
     usage: TaskUsage = field(default_factory=TaskUsage)
+    snapshot_revision: int = 0
 
 
 class NodeRunner(Protocol):
@@ -91,7 +99,7 @@ class NodeRunner(Protocol):
         self, *, child_run_id: str, principal: "PrincipalContext | None", reason: str
     ) -> None: ...
 
-    async def read_usage(self, *, child_run_id: str) -> TaskUsage: ...
+    async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot: ...
 
 
 class ControlGate(Protocol):
@@ -155,6 +163,9 @@ class TaskGraphEngine:
         self._active_by_task: "dict[asyncio.Task[None], ActiveNode]" = {}
         self._requests_by_node: "dict[str, NodeRunRequest]" = {}
         self._usage_by_node: "dict[str, TaskUsage]" = {}
+        self._usage_revision_by_node: "dict[str, int]" = {}
+        self._terminal_event_nodes: "set[str]" = set()
+        self._raced_claimed_nodes: "set[str]" = set()
         self._stopping = False
         self._stop_reason = StopReason.NORMAL
         self._completion = asyncio.Event()
@@ -254,6 +265,18 @@ class TaskGraphEngine:
                 return await self._sum_usage(plan)
             if self._has_launchable_ready_node(plan, executions):
                 continue
+            if any(
+                execution.status is TaskStatus.CLAIMED
+                and execution.node_id in self._raced_claimed_nodes
+                for execution in executions.values()
+            ):
+                if self._logger is not None:
+                    self._logger.debug(
+                        "task graph waiting for externally claimed nodes parent_run_id=%s",
+                        self._parent_run_id,
+                    )
+                await self._wait_for_task_or_control_signal()
+                continue
             raise TaskGraphInvariantError("task graph cannot make progress")
 
     async def _execution_map(self, plan: TaskPlan) -> "dict[str, TaskExecution]":
@@ -322,6 +345,8 @@ class TaskGraphEngine:
             if not readiness.ready or readiness.skip:
                 continue
             bound = await self._spawn_node(node, executions)
+            if bound is None:
+                return
             executions[node.id] = bound
             slots -= 1
 
@@ -343,16 +368,50 @@ class TaskGraphEngine:
         self,
         node: TaskNode,
         executions: "dict[str, TaskExecution]",
-    ) -> TaskExecution:
+    ) -> "TaskExecution | None":
         execution = executions[node.id]
         await self._gate.check_before_launch()
         if node.id in self._active_by_node or execution.active_run_id is not None:
             raise TaskGraphInvariantError("ready node already has an active child")
-        claimed = await self._store.claim_ready(
-            execution.id,
-            owner=self._owner,
-            duration=self._node_lease_duration,
-        )
+        try:
+            claimed = await self._store.claim_ready(
+                execution.id,
+                owner=self._owner,
+                duration=self._node_lease_duration,
+            )
+        except StorageConflictError as exc:
+            current = await self._store.get_execution(execution.id)
+            if current is None:
+                raise TaskGraphInvariantError(
+                    f"node {node.id!r} disappeared after claim race"
+                ) from exc
+            if current.status is TaskStatus.READY:
+                if self._logger is not None:
+                    self._logger.debug(
+                        "task graph claim race node=%s remains READY; rereading",
+                        node.id,
+                    )
+                return None
+            if current.status in {
+                TaskStatus.CLAIMED,
+                TaskStatus.COMPLETED,
+                TaskStatus.FAILED,
+                TaskStatus.SKIPPED,
+                TaskStatus.CANCELLED,
+            }:
+                if self._logger is not None:
+                    self._logger.debug(
+                        "task graph claim race node=%s observed status=%s",
+                        node.id,
+                        current.status.value,
+                    )
+                if current.status is TaskStatus.CLAIMED:
+                    self._raced_claimed_nodes.add(node.id)
+                return current
+            raise TaskGraphInvariantError(
+                f"node {node.id!r} has invalid status after claim race: "
+                f"{current.status.value}"
+            ) from exc
         child_id = child_run_id(self._parent_run_id, node.id)
         task: "asyncio.Task[None] | None" = None
         active: ActiveNode | None = None
@@ -417,7 +476,7 @@ class TaskGraphEngine:
                 self._remove_active(active)
             self._requests_by_node.pop(node.id, None)
             try:
-                await self._store.cancel_claimed(
+                cancelled = await self._store.cancel_claimed(
                     claimed.id,
                     owner=claimed.owner or self._owner,
                     fence=claimed.fence,
@@ -426,7 +485,21 @@ class TaskGraphEngine:
                         if isinstance(exc, ParentLeaseGuardError)
                         else "node_start_failed"
                     ),
+                    snapshot_revision=claimed.usage_revision,
                     usage=claimed.usage,
+                )
+                await self._publish_node_terminal_once(
+                    node.id,
+                    NodeRunResult(
+                        status=TaskStatus.CANCELLED,
+                        reason=(
+                            "parent_lease_lost_before_child_start"
+                            if isinstance(exc, ParentLeaseGuardError)
+                            else "node_start_failed"
+                        ),
+                        usage=cancelled.usage,
+                        snapshot_revision=cancelled.usage_revision,
+                    ),
                 )
             except BaseException as cleanup_error:
                 diagnostic = CleanupDiagnostic(
@@ -455,12 +528,22 @@ class TaskGraphEngine:
         except ParentLeaseGuardError as exc:
             usage = self._usage_by_node.get(node_id, TaskUsage())
             try:
-                await self._store.cancel_claimed(
+                cancelled = await self._store.cancel_claimed(
                     active.execution_id,
                     owner=active.owner,
                     fence=active.fence,
                     reason="parent_lease_lost_before_child_start",
+                    snapshot_revision=0,
                     usage=usage,
+                )
+                await self._publish_node_terminal_once(
+                    node_id,
+                    NodeRunResult(
+                        status=TaskStatus.CANCELLED,
+                        reason="parent_lease_lost_before_child_start",
+                        usage=cancelled.usage,
+                        snapshot_revision=cancelled.usage_revision,
+                    ),
                 )
             except BaseException as cleanup_error:
                 diagnostic = CleanupDiagnostic(
@@ -477,6 +560,7 @@ class TaskGraphEngine:
             raise
         except ChildExecutionPlatformError as exc:
             self._usage_by_node[node_id] = exc.usage
+            self._usage_revision_by_node[node_id] = 0
             if self._stopping:
                 return
             raise
@@ -485,6 +569,7 @@ class TaskGraphEngine:
                 return
             raise
         self._usage_by_node[node_id] = outcome.usage
+        self._usage_revision_by_node[node_id] = outcome.snapshot_revision
         if self._stopping:
             return
         self._gate.record_usage(outcome.usage)
@@ -494,6 +579,7 @@ class TaskGraphEngine:
                 owner=active.owner,
                 fence=active.fence,
                 result=outcome.result,
+                snapshot_revision=outcome.snapshot_revision,
                 usage=outcome.usage,
             )
         elif outcome.status is TaskStatus.FAILED:
@@ -502,6 +588,7 @@ class TaskGraphEngine:
                 owner=active.owner,
                 fence=active.fence,
                 error=outcome.error or RunError("node_failed", "node failed"),
+                snapshot_revision=outcome.snapshot_revision,
                 usage=outcome.usage,
             )
         elif outcome.status is TaskStatus.CANCELLED:
@@ -510,12 +597,30 @@ class TaskGraphEngine:
                 owner=active.owner,
                 fence=active.fence,
                 reason=outcome.reason or "cancelled",
+                snapshot_revision=outcome.snapshot_revision,
                 usage=outcome.usage,
             )
         else:
             raise TaskGraphInvariantError("node runner returned unsupported status")
-        if self._on_node_terminal is not None:
+        await self._publish_node_terminal_once(node_id, outcome)
+
+    async def _publish_node_terminal_once(
+        self, node_id: str, outcome: NodeRunResult
+    ) -> None:
+        if node_id in self._terminal_event_nodes:
+            return
+        self._terminal_event_nodes.add(node_id)
+        if self._on_node_terminal is None:
+            return
+        try:
             await self._on_node_terminal(node_id, outcome)
+        except Exception as exc:
+            if self._logger is not None:
+                self._logger.warning(
+                    "task graph terminal event degraded node=%s error_type=%s",
+                    node_id,
+                    type(exc).__name__,
+                )
 
     async def _reap_completed_tasks(self) -> None:
         for active in tuple(self._active_by_node.values()):
@@ -538,6 +643,7 @@ class TaskGraphEngine:
             del self._active_by_task[active.task]
         self._requests_by_node.pop(active.node_id, None)
         self._usage_by_node.pop(active.node_id, None)
+        self._usage_revision_by_node.pop(active.node_id, None)
 
     async def _propagate_skips_to_fixpoint(
         self,
@@ -640,8 +746,12 @@ class TaskGraphEngine:
         if not parent_lease_lost:
             for active in active_nodes:
                 try:
-                    self._usage_by_node[active.node_id] = await self._runner.read_usage(
+                    snapshot = await self._runner.read_usage(
                         child_run_id=active.child_run_id
+                    )
+                    self._usage_by_node[active.node_id] = snapshot.usage
+                    self._usage_revision_by_node[active.node_id] = (
+                        snapshot.snapshot_revision
                     )
                 except BaseException as exc:
                     storage_errors.append(exc)
@@ -667,17 +777,30 @@ class TaskGraphEngine:
                             and active.node_id not in cancel_failed_nodes
                             and active.node_id not in usage_failed_nodes
                         ):
-                            await self._store.cancel_claimed(
+                            observed = self._usage_by_node.get(
+                                active.node_id, execution.usage
+                            )
+                            merged = merge_newer_cumulative_usage(
+                                previous=execution.usage,
+                                newer=observed,
+                            )
+                            cancelled = await self._store.cancel_claimed(
                                 execution.id,
                                 owner=active.owner,
                                 fence=active.fence,
                                 reason=reason,
-                                usage=_merge_cleanup_usage(
-                                    execution.usage,
-                                    self._usage_by_node.get(
-                                        active.node_id,
-                                        execution.usage,
-                                    ),
+                                snapshot_revision=self._usage_revision_by_node.get(
+                                    active.node_id, execution.usage_revision
+                                ),
+                                usage=merged,
+                            )
+                            await self._publish_node_terminal_once(
+                                active.node_id,
+                                NodeRunResult(
+                                    status=TaskStatus.CANCELLED,
+                                    reason=reason,
+                                    usage=cancelled.usage,
+                                    snapshot_revision=cancelled.usage_revision,
                                 ),
                             )
                     elif not execution.terminal:
@@ -758,28 +881,6 @@ class TaskGraphEngine:
         return total.freeze()
 
 
-def _merge_cleanup_usage(previous: TaskUsage, observed: TaskUsage) -> TaskUsage:
-    if previous.total_cost is None:
-        total_cost = observed.total_cost
-    elif observed.total_cost is None:
-        total_cost = previous.total_cost
-    else:
-        total_cost = max(previous.total_cost, observed.total_cost)
-    return TaskUsage(
-        input_tokens=max(previous.input_tokens, observed.input_tokens),
-        output_tokens=max(previous.output_tokens, observed.output_tokens),
-        total_cost=total_cost,
-        cache_write_tokens=max(
-            previous.cache_write_tokens,
-            observed.cache_write_tokens,
-        ),
-        cache_read_tokens=max(
-            previous.cache_read_tokens,
-            observed.cache_read_tokens,
-        ),
-    )
-
-
 __all__ = [
     "ActiveNode",
     "ControlGate",
@@ -787,6 +888,7 @@ __all__ = [
     "DEFAULT_LEASE_DURATION",
     "NodeRunRequest",
     "NodeRunResult",
+    "NodeUsageSnapshot",
     "NodeRunner",
     "StopReason",
     "TaskGraphEngine",

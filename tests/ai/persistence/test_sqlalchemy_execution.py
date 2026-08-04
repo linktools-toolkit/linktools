@@ -32,7 +32,7 @@ async def test_sqlalchemy_execution_pages_in_database(tmp_path):
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
     definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
     run = await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "p"))
-    assert run.input == "p"
+    assert run.record.input == "p"
     claimed = await store.claim_run(ClaimExecution("r", "w", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
     snapshot = RunSnapshot("run-snapshot.v1", "r", 1, ({"role": "user", "content": "p"},), "done", RunStatus.COMPLETED, RunUsage(), 0, datetime.now(timezone.utc))
     async with factory() as session:

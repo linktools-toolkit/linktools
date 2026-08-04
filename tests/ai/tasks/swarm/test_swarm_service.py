@@ -16,6 +16,7 @@ from linktools.ai.errors import InvalidSpecError, StorageConflictError
 from linktools.ai.execution.domain import RunError, RunKind, RunStatus, RunnableType
 from linktools.ai.execution.live_events import NoopRunLiveEventSink
 from linktools.ai.execution.service import ChildRunResult, PreparedAgentExecution
+from linktools.ai.execution.commands import StartRunResult
 from linktools.ai.execution.swarm_service import SwarmExecutionService
 from linktools.ai.governance.authorization import (
     AuthorizationPolicy,
@@ -38,6 +39,7 @@ from linktools.ai.tasks.models import (
 )
 from linktools.ai.tasks.persistence.local import LocalTaskBackend
 from linktools.ai.tasks.swarm.aggregation import AggregationMode, AggregationPolicy
+from linktools.ai.tasks.swarm.engine import NodeUsageSnapshot
 from linktools.ai.tasks.swarm.limits import SwarmLimits
 from linktools.ai.tasks.swarm.models import AgentRef, SwarmCompleted, SwarmFailed
 from linktools.ai.tasks.swarm.spec import SwarmSpec, SwarmStrategySpec, SwarmContextPolicy
@@ -119,6 +121,7 @@ class FakeExecutionService:
                     output={"agent": agent_id},
                     error=None,
                     usage=TaskUsage(input_tokens=10, output_tokens=5),
+                    snapshot_revision=1,
                 ),
             )
             store = self.execution_store
@@ -135,24 +138,27 @@ class FakeExecutionService:
                 from linktools.ai.execution.snapshots import AgentSnapshotData, RunSnapshot
 
                 parent = await store.get_run(parent_execution_id)
-                child = await store.start_run(
-                    StartExecution(
-                        execution_id,
-                        session_id,
-                        RunKind.TASK,
-                        parent.definition,
-                        {"prompt": prompt},
-                        root_execution_id=root_execution_id,
-                        parent_execution_id=parent_execution_id,
-                        parent_guard=parent_guard,
+                child = (
+                    await store.start_run(
+                        StartExecution(
+                            execution_id,
+                            session_id,
+                            RunKind.TASK,
+                            parent.definition,
+                            {"prompt": prompt},
+                            root_execution_id=root_execution_id,
+                            parent_execution_id=parent_execution_id,
+                            parent_guard=parent_guard,
+                        )
                     )
-                )
+                ).record
                 claimed = await store.claim_run(
                     ClaimExecution(
                         child.id,
                         "swarm",
                         datetime.now(timezone.utc),
                         timedelta(minutes=5),
+                        parent_guard=parent_guard,
                     )
                 )
                 snapshot = AgentSnapshotData(
@@ -244,8 +250,8 @@ class FakeExecutionService:
     async def cancel(self, run_id: str, *, principal) -> None:
         return None
 
-    async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-        return TaskUsage()
+    async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
 
 
 class _RecordingAuth(OwnershipAuthorizationPolicy):
@@ -345,7 +351,7 @@ class _MemoryExecutionStore:
             updated_at=now,
         )
         self._runs[record.id] = record
-        return record
+        return StartRunResult(record=record, created=True)
 
     async def claim_run(self, command) -> "RunRecord":
         record = self._runs.get(command.run_id)
@@ -565,6 +571,7 @@ async def test_run_swarm_skip_propagates():
                 output=None,
                 error=RunError("boom", "a failed"),
                 usage=TaskUsage(),
+                snapshot_revision=1,
             )
         }
     )
@@ -589,6 +596,7 @@ async def test_run_swarm_collect_preserves_all_terminal_statuses():
                 output={"r": 1},
                 error=None,
                 usage=TaskUsage(10, 5, Decimal("0.01")),
+                snapshot_revision=1,
             ),
             "boom": ChildRunResult(
                 run_id="2",
@@ -596,6 +604,7 @@ async def test_run_swarm_collect_preserves_all_terminal_statuses():
                 output=None,
                 error=RunError("x", "boom"),
                 usage=TaskUsage(3, 1),
+                snapshot_revision=1,
             ),
         }
     )
@@ -868,6 +877,7 @@ async def test_cost_usage_unavailable_fails_when_cost_unknown():
                 output={"r": 1},
                 error=None,
                 usage=TaskUsage(10, 5, None),  # cost unknown
+                snapshot_revision=1,
             )
         }
     )
@@ -986,7 +996,7 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
                 datetime.now(timezone.utc),
             )
             return ChildRunResult(
-                parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
+                parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage(), 1
             )
 
         async def prepare_agent_execution(self, agent_spec, **kwargs):
@@ -1000,8 +1010,8 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
         async def cancel(self, run_id: str, *, principal) -> None:
             return None
 
-        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-            return TaskUsage()
+        async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
 
     fake = _CancelMidRunExec()
     tasks = LocalTaskBackend()
@@ -1071,7 +1081,7 @@ async def test_run_swarm_rejects_mutating_tool_before_any_persistence():
 
         async def run_child(self, spec, prompt, **kwargs):
             return ChildRunResult(
-                spec.id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
+                spec.id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage(), 1
             )
 
         async def prepare_agent_execution(self, agent_spec, **kwargs):
@@ -1080,8 +1090,8 @@ async def test_run_swarm_rejects_mutating_tool_before_any_persistence():
         async def cancel(self, run_id: str, *, principal) -> None:
             return None
 
-        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-            return TaskUsage()
+        async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
 
     fake_exec = _FakeExecWithAssembler()
     tasks = LocalTaskBackend()
@@ -1249,7 +1259,7 @@ async def test_swarm_fails_when_parent_lease_reclaimed_by_another_worker():
                     ),
                 )
             return ChildRunResult(
-                parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
+                parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage(), 1
             )
 
         async def prepare_agent_execution(self, agent_spec, **kwargs):
@@ -1263,8 +1273,8 @@ async def test_swarm_fails_when_parent_lease_reclaimed_by_another_worker():
         async def cancel(self, run_id: str, *, principal) -> None:
             return None
 
-        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-            return TaskUsage()
+        async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
 
     fake = _StealLeaseExec()
     tasks = LocalTaskBackend()

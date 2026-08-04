@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..storage.database import CoordinationScope
-    from .models import TaskExecution, TaskPlan, TaskStatus, TaskUsage
+    from .models import TaskExecution, TaskPlan, TaskUsage
     from ..execution.domain import RunErrorInfo
     from ..json import JsonValue
 
@@ -83,6 +83,7 @@ class TaskStore(Protocol):
         *,
         owner: str,
         fence: int,
+        snapshot_revision: int,
         usage: "TaskUsage",
     ) -> "TaskExecution":
         """Persist monotonic usage without changing any task lifecycle field."""
@@ -95,6 +96,7 @@ class TaskStore(Protocol):
         owner: str,
         fence: int,
         result: "JsonValue",
+        snapshot_revision: int,
         usage: "TaskUsage",
     ) -> "TaskExecution":
         """CLAIMED -> COMPLETED with the child's structured result and usage.
@@ -108,6 +110,7 @@ class TaskStore(Protocol):
         owner: str,
         fence: int,
         error: "RunErrorInfo",
+        snapshot_revision: int,
         usage: "TaskUsage",
     ) -> "TaskExecution":
         """CLAIMED -> FAILED with a structured error and the real usage produced
@@ -144,6 +147,7 @@ class TaskStore(Protocol):
         owner: str,
         fence: int,
         reason: str,
+        snapshot_revision: int,
         usage: "TaskUsage",
     ) -> "TaskExecution":
         """CLAIMED -> CANCELLED with the reason and the real usage produced so

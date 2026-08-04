@@ -29,16 +29,17 @@ BIGSERIAL = BigInteger().with_variant(Integer(), "sqlite")
 
 @compiles(CreateIndex, "sqlite")
 def _sqlite_unique_index_name(element, compiler, **kw):
-    """SQLite's index namespace is database-global, so the lint's short per-table
-    index names (``ix_key``, ``ix_updated_at`` repeated across every table) collide
-    under SQLite. MySQL/Postgres scope index names per-table and keep the short
-    names (matching init_schema.sql). This rewrite prefixes the index name with
-    its table ONLY in the emitted SQLite DDL; the in-memory Index.name stays the
-    short lint-conformant name."""
+    """SQLite's index namespace is database-global, so short per-table index
+    names collide under SQLite. Auto-named indexes already carry their table name;
+    this rewrite prefixes only deliberately short names in emitted SQLite DDL."""
     index = element.element
     table = index.table
     short = index.name
-    unique_name = f"{table.name}_{short}" if short else short
+    unique_name = (
+        short
+        if short is None or short.startswith(f"{table.name}_")
+        else f"{table.name}_{short}"
+    )
     cols = ", ".join(compiler.preparer.quote(c.name) for c in index.columns)
     unique_kw = "UNIQUE " if index.unique else ""
     return (
@@ -62,12 +63,12 @@ def as_utc(value: "datetime | None") -> "datetime | None":
 
 
 def timestamp_indexes() -> tuple:
-    """A fresh ``(ix_updated_at, ix_created_at)`` pair for a table's
-    ``__table_args__``. Returns new Index instances on each call so they bind
-    to the calling table (an Index object cannot be shared across tables)."""
+    """A fresh auto-named timestamp-index pair for a table's ``__table_args__``.
+    SQLAlchemy includes the table name in each generated name, keeping indexes
+    unique in PostgreSQL's schema-wide namespace."""
     return (
-        Index("ix_updated_at", "updated_at"),
-        Index("ix_created_at", "created_at"),
+        Index(None, "updated_at"),
+        Index(None, "created_at"),
     )
 
 
@@ -80,8 +81,13 @@ class OnUpdateDateTime(DateTime):
 
 @compiles(OnUpdateDateTime)
 def _onupdate_datetime_default(element, compiler, **kw):  # noqa: D401
-    # SQLite / Postgres / others: plain DATETIME -- no ON UPDATE clause.
+    # SQLite / other non-MySQL dialects: plain DATETIME -- no ON UPDATE clause.
     return compiler.visit_DATETIME(element, **kw)
+
+
+@compiles(OnUpdateDateTime, "postgresql")
+def _onupdate_datetime_postgresql(element, compiler, **kw):  # noqa: D401
+    return compiler.visit_TIMESTAMP(element, **kw)
 
 
 @compiles(OnUpdateDateTime, "mysql")

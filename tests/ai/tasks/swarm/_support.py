@@ -23,6 +23,7 @@ from linktools.ai.tasks.swarm.engine import (
     NodeRunRequest,
     NodeRunResult,
     NodeRunner,
+    NodeUsageSnapshot,
 )
 
 
@@ -62,12 +63,14 @@ class RecordingRunner:
                     status=TaskStatus.FAILED,
                     error=self._failures[node_id],
                     usage=usage,
+                    snapshot_revision=1,
                 )
             result = self._results.get(node_id)
             return NodeRunResult(
                 status=TaskStatus.COMPLETED,
                 result=result,
                 usage=usage,
+                snapshot_revision=1,
             )
         finally:
             self.in_flight -= 1
@@ -77,8 +80,8 @@ class RecordingRunner:
     ) -> None:
         return None
 
-    async def read_usage(self, *, child_run_id: str) -> TaskUsage:
-        return TaskUsage()
+    async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
+        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
 
 
 class NoopGate:

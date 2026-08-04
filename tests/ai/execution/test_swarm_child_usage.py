@@ -132,4 +132,6 @@ async def test_child_runner_reads_usage_without_task_store_access():
         prepared_agents={},
     )
 
-    assert await runner.read_usage(child_run_id=child_id) == TaskUsage(3, 2)
+    snapshot = await runner.read_usage(child_run_id=child_id)
+    assert snapshot.usage == TaskUsage(3, 2)
+    assert snapshot.snapshot_revision == 1

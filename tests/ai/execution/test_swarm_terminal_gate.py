@@ -7,9 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.errors import ParentTerminalGateError
+from linktools.ai.errors import ParentTerminalGateError, RunDefinitionIntegrityError
 from linktools.ai.execution.domain import RunDefinition, RunKind, RunStatus, RunnableType
 from linktools.ai.execution.swarm_service import SwarmExecutionService
+from linktools.ai.execution.identifiers import child_run_id
 from linktools.ai.json import canonical_json_bytes
 from linktools.ai.storage.coordination.lease import Lease
 from linktools.ai.tasks.codec import encode_plan
@@ -50,7 +51,14 @@ def _plan() -> TaskPlan:
 
 
 def _parent(plan: TaskPlan):
-    value = {"task_plan_hash": sha256(canonical_json_bytes(encode_plan(plan))).hexdigest()}
+    snapshot = []
+    snapshot_hash = sha256(canonical_json_bytes(snapshot)).hexdigest()
+    value = {
+        "task_plan_id": plan.id,
+        "task_plan_hash": sha256(canonical_json_bytes(encode_plan(plan))).hexdigest(),
+        "session_snapshot_hash": snapshot_hash,
+        "agent_fingerprints": {"agent-a": "fingerprint:agent-a"},
+    }
     definition = RunDefinition(
         "swarm",
         RunnableType.TASK,
@@ -58,7 +66,14 @@ def _parent(plan: TaskPlan):
         value,
         sha256(canonical_json_bytes(value)).hexdigest(),
     )
-    return SimpleNamespace(definition=definition)
+    return SimpleNamespace(
+        definition=definition,
+        input={
+            "task_plan_id": plan.id,
+            "session_snapshot": snapshot,
+            "session_snapshot_hash": snapshot_hash,
+        },
+    )
 
 
 def _service(store, tasks):
@@ -111,13 +126,13 @@ async def test_parent_gate_checks_public_child_records_before_terminal_write(chi
         plan.id,
         "a",
         TaskStatus.COMPLETED,
-        active_run_id="child",
+        active_run_id=child_run_id("parent", "a"),
     )
     tasks = LocalTaskBackend()
     await tasks.create_plan(plan, (execution,))
     store = _GateExecutionStore(
         _parent(plan),
-        children=(("child", SimpleNamespace(status=child_status)),),
+        children=((child_run_id("parent", "a"), SimpleNamespace(status=child_status)),),
     )
 
     with pytest.raises(ParentTerminalGateError):
@@ -139,7 +154,7 @@ async def test_parent_gate_rejects_missing_child_record():
     tasks = LocalTaskBackend()
     await tasks.create_plan(plan, (execution,))
 
-    with pytest.raises(ParentTerminalGateError):
+    with pytest.raises(RunDefinitionIntegrityError):
         await _service(
             _GateExecutionStore(_parent(plan)), tasks
         )._assert_parent_terminal_gate("parent", "owner", 1, plan)

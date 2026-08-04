@@ -100,6 +100,7 @@ async def assert_stale_fence_cannot_complete(store) -> None:
             owner="owner",
             fence=claimed.fence + 99,
             result={"x": 1},
+            snapshot_revision=1,
             usage=TaskUsage(),
         )
     with pytest.raises(StorageConflictError):
@@ -108,6 +109,7 @@ async def assert_stale_fence_cannot_complete(store) -> None:
             owner="intruder",
             fence=claimed.fence,
             result={"x": 1},
+            snapshot_revision=1,
             usage=TaskUsage(),
         )
 
@@ -139,18 +141,20 @@ async def assert_terminals_are_frozen(store) -> None:
         owner="w",
         fence=claimed.fence,
         result={"done": True},
+        snapshot_revision=1,
         usage=TaskUsage(7, 3),
     )
     assert done.status is TaskStatus.COMPLETED
     # every transition off COMPLETED is rejected.
     with pytest.raises(StorageConflictError):
-        await store.complete("e-term", owner="w", fence=claimed.fence, result={}, usage=TaskUsage())
+        await store.complete("e-term", owner="w", fence=claimed.fence, result={}, snapshot_revision=1, usage=TaskUsage())
     with pytest.raises(StorageConflictError):
         await store.fail(
             "e-term",
             owner="w",
             fence=claimed.fence,
             error=RunError("e", "x"),
+            snapshot_revision=1,
             usage=TaskUsage(),
         )
     with pytest.raises(StorageConflictError):
@@ -179,6 +183,7 @@ async def assert_usage_round_trips_through_complete(store) -> None:
         owner="w",
         fence=claimed.fence,
         result={"ok": True},
+        snapshot_revision=1,
         usage=TaskUsage(input_tokens=12, output_tokens=8, total_cost=Decimal("0.0042")),
     )
     assert done.usage.input_tokens == 12

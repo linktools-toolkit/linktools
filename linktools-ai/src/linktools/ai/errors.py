@@ -189,6 +189,14 @@ class RunConflictError(RunError):
     pass
 
 
+class RunIdentityConflictError(RunConflictError):
+    """A run id was reused with a different complete start identity."""
+
+
+class ChildRunAlreadyActiveError(RunConflictError):
+    """A persisted child is already being driven by another execution."""
+
+
 class RunCancelledError(RunError):
     pass
 
@@ -220,6 +228,10 @@ class RunInvariantError(RunError):
     """A run completed without the authoritative state the runtime contract
     requires (e.g. no terminal RunResult after a non-pausing execute). Raised
     instead of fabricating an empty success result that would mask the bug."""
+
+
+class RunStateError(RunError):
+    """A persisted run state cannot be driven by the requested operation."""
 
 
 class RunDefinitionError(RunError):
@@ -553,6 +565,10 @@ class SwarmConvergenceError(SwarmError):
 
 class UsageRegressionError(SwarmError):
     """An authoritative cumulative usage snapshot moved backwards."""
+
+
+class UsageObservationConflictError(SwarmError):
+    """The same usage revision or request key carried different data."""
 
 
 class TaskGraphInvariantError(SwarmError):

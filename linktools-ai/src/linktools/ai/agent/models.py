@@ -24,6 +24,9 @@ class ModelStreamSupport(Protocol):
 
 
 def model_supports_streaming(model: object) -> bool:
+    candidates = getattr(model, "models", None)
+    if isinstance(candidates, (list, tuple)) and candidates:
+        return all(model_supports_streaming(candidate) for candidate in candidates)
     # Explicit flag for custom model wrappers that declare streaming support.
     if getattr(model, "supports_streaming", False) is True:
         return True
