@@ -18,7 +18,6 @@ def test_two_streaming_rounds_do_not_replace_cumulative_usage_with_request_delta
             provider_name=None,
             response_model_name=None,
         ),
-        pricing_id=None,
         pricing=None,
     )
     capture.observe_request(
@@ -28,7 +27,6 @@ def test_two_streaming_rounds_do_not_replace_cumulative_usage_with_request_delta
             provider_name=None,
             response_model_name=None,
         ),
-        pricing_id=None,
         pricing=None,
     )
 
@@ -45,7 +43,6 @@ def test_interrupted_stream_observes_prior_plus_request_local_usage():
             provider_name=None,
             response_model_name=None,
         ),
-        pricing_id=None,
         pricing=None,
     )
 

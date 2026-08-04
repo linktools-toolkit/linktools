@@ -108,7 +108,7 @@ if TYPE_CHECKING:
     from ..execution.live_events import RunLiveEventSink, SecurityEventSink
     from ..execution.trace_collector import SemanticTraceCollector
     from ..governance.security.pipeline import SecurityPipeline
-    from ..model.pricing import ModelPricingProvider
+    from ..model.pricing import ModelPricing, ModelPricingProvider
 
 
 logger = environ.get_logger("ai.agent.engine")
@@ -159,10 +159,6 @@ def _provider_response_id(response: object) -> "str | None":
     return value if isinstance(value, str) and value else None
 
 
-def _provider_request_cost(response: object) -> "object | None":
-    return getattr(response, "provider_request_cost", None)
-
-
 def _latest_model_response(
     state: object, *, after_count: "int | None" = None
 ) -> "object | None":
@@ -206,13 +202,12 @@ async def _noop_span():
 
 
 class RunUsageSink(Protocol):
-    def observe_request(
+    async def observe_request(
         self,
         observation: ModelRequestUsageObservation,
         *,
-        pricing_id: "str | None",
-        pricing: object | None,
-    ) -> None: ...
+        pricing: "ModelPricing | None",
+    ) -> "ExecutionRunUsage": ...
 
     def snapshot(self) -> "ExecutionRunUsage": ...
 
@@ -729,7 +724,7 @@ class AgentEngine:
             )
 
         request_sequence = 0
-        pricing_cache: "dict[str, object | None]" = {}
+        pricing_cache: "dict[str, ModelPricing | None]" = {}
 
         def _next_request_key() -> str:
             nonlocal request_sequence
@@ -766,15 +761,14 @@ class AgentEngine:
                         pricing_cache[pricing_id] = None
                 pricing = pricing_cache[pricing_id]
             observed_key = _provider_response_id(response) or request_key
-            usage_sink.observe_request(
-                ModelRequestUsageObservation(
-                    request_key=observed_key,
-                    usage=request_usage,
-                    provider_name=provider_name,
-                    response_model_name=response_model_name,
-                    provider_request_cost=_provider_request_cost(response),
-                ),
-                pricing_id=pricing_id,
+            observation = ModelRequestUsageObservation(
+                request_key=observed_key,
+                usage=request_usage,
+                provider_name=provider_name,
+                response_model_name=response_model_name,
+            )
+            await usage_sink.observe_request(
+                observation,
                 pricing=pricing,
             )
 

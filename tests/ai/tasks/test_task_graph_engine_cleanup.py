@@ -43,7 +43,9 @@ class _PlatformFailureRunner:
 
     async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
         return NodeUsageSnapshot(
-            usage=TaskUsage(input_tokens=7, output_tokens=3), snapshot_revision=1
+            usage=TaskUsage(input_tokens=7, output_tokens=3),
+            snapshot_revision=1,
+            terminal=True,
         )
 
 

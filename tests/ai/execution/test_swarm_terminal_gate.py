@@ -8,7 +8,13 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.errors import ParentTerminalGateError, RunDefinitionIntegrityError
-from linktools.ai.execution.domain import RunDefinition, RunKind, RunStatus, RunnableType
+from linktools.ai.execution.domain import (
+    RunDefinition,
+    RunKind,
+    RunStatus,
+    RunnableType,
+    compute_run_definition_hash,
+)
 from linktools.ai.execution.swarm_service import SwarmExecutionService
 from linktools.ai.execution.identifiers import child_run_id
 from linktools.ai.json import canonical_json_bytes
@@ -42,6 +48,9 @@ class _GateExecutionStore:
             if run_id in self.children
         )
 
+    async def list_all_runs(self):
+        return tuple(self.children.values())
+
 
 def _plan() -> TaskPlan:
     return TaskPlan(
@@ -64,9 +73,15 @@ def _parent(plan: TaskPlan):
         RunnableType.TASK,
         "swarm-task-graph.v1",
         value,
-        sha256(canonical_json_bytes(value)).hexdigest(),
+        compute_run_definition_hash(schema="swarm-task-graph.v1", spec=value),
     )
     return SimpleNamespace(
+        id="parent",
+        root_execution_id="parent",
+        session_id="session",
+        tenant_id=None,
+        user_id=None,
+        snapshot_revision=0,
         definition=definition,
         input={
             "task_plan_id": plan.id,
@@ -132,7 +147,30 @@ async def test_parent_gate_checks_public_child_records_before_terminal_write(chi
     await tasks.create_plan(plan, (execution,))
     store = _GateExecutionStore(
         _parent(plan),
-        children=((child_run_id("parent", "a"), SimpleNamespace(status=child_status)),),
+        children=(
+            (
+                child_run_id("parent", "a"),
+                SimpleNamespace(
+                    id=child_run_id("parent", "a"),
+                    kind=RunKind.TASK,
+                    status=child_status,
+                    runnable_id="agent-a",
+                    runnable_type=RunnableType.AGENT,
+                    parent_execution_id="parent",
+                    root_execution_id="parent",
+                    session_id="session",
+                    tenant_id=None,
+                    user_id=None,
+                    definition=RunDefinition(
+                        "agent-a",
+                        RunnableType.AGENT,
+                        "agent-spec.v1",
+                        {},
+                        compute_run_definition_hash(schema="agent-spec.v1", spec={}),
+                    ),
+                ),
+            ),
+        ),
     )
 
     with pytest.raises(ParentTerminalGateError):

@@ -31,12 +31,15 @@ def test_usage_capture_preserves_unknown_cost_and_accepts_authoritative_recovery
     capture.observe_request(
         ModelRequestUsageObservation(
             "request-1",
-            RequestUsage(input_tokens=10, output_tokens=4, total_tokens=14),
+            RequestUsage(
+                input_tokens=10,
+                output_tokens=4,
+                total_tokens=14,
+                total_cost=Decimal("0.3"),
+            ),
             None,
             None,
-            provider_request_cost=Decimal("0.3"),
         ),
-        pricing_id=None,
         pricing=None,
     )
     capture.observe_request(
@@ -46,7 +49,6 @@ def test_usage_capture_preserves_unknown_cost_and_accepts_authoritative_recovery
             None,
             None,
         ),
-        pricing_id=None,
         pricing=None,
     )
     assert capture.snapshot().total_cost is None
@@ -54,12 +56,10 @@ def test_usage_capture_preserves_unknown_cost_and_accepts_authoritative_recovery
     capture.observe_request(
         ModelRequestUsageObservation(
             "request-3",
-            RequestUsage(),
+            RequestUsage(total_cost=Decimal("0.4")),
             None,
             None,
-            provider_request_cost=Decimal("0.4"),
         ),
-        pricing_id=None,
         pricing=None,
     )
     assert capture.snapshot().total_cost is None
@@ -79,7 +79,6 @@ def test_usage_capture_rejects_duplicate_request_with_different_observation():
             None,
             None,
         ),
-        pricing_id=None,
         pricing=None,
     )
     with pytest.raises(UsageObservationConflictError):
@@ -93,7 +92,6 @@ def test_usage_capture_rejects_duplicate_request_with_different_observation():
                 None,
                 None,
             ),
-            pricing_id=None,
             pricing=None,
         )
 

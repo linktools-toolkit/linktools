@@ -19,10 +19,8 @@ from linktools.ai.tasks.models import (
 )
 from linktools.ai.execution.identifiers import task_execution_id
 from linktools.ai.tasks.swarm.engine import (
-    ControlGate,
     NodeRunRequest,
     NodeRunResult,
-    NodeRunner,
     NodeUsageSnapshot,
 )
 
@@ -81,7 +79,7 @@ class RecordingRunner:
         return None
 
     async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
-        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
+        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1, terminal=True)
 
 
 class NoopGate:

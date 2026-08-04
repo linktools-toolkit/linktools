@@ -65,6 +65,7 @@ class NodeRunRequest:
 class NodeUsageSnapshot:
     usage: TaskUsage
     snapshot_revision: int
+    terminal: bool
 
 
 class StopReason(StrEnum):
@@ -753,6 +754,10 @@ class TaskGraphEngine:
                     self._usage_revision_by_node[active.node_id] = (
                         snapshot.snapshot_revision
                     )
+                    if not snapshot.terminal:
+                        raise StorageError(
+                            f"child {active.child_run_id!r} is not terminal"
+                        )
                 except BaseException as exc:
                     storage_errors.append(exc)
                     usage_failed_nodes.add(active.node_id)

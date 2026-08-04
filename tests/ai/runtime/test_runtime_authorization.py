@@ -8,7 +8,6 @@ since only the ownership check on resume/cancel/decide_approval is under
 test here."""
 
 from datetime import datetime, timedelta, timezone
-from hashlib import sha256
 
 import pytest
 
@@ -16,9 +15,8 @@ from linktools.ai.agent.codec import AgentSpecCodec
 from linktools.ai.agent.spec import AgentSpec, PromptSpec
 from linktools.ai.errors import PrincipalAccessDeniedError
 from linktools.ai.execution.commands import ClaimExecution, PauseExecution, StartExecution
-from linktools.ai.execution.domain import ApprovalDecision, RunApproval, RunDefinition, RunKind, RunStatus, RunUsage, RunnableType
+from linktools.ai.execution.domain import ApprovalDecision, RunApproval, RunDefinition, RunKind, RunStatus, RunUsage, RunnableType, compute_run_definition_hash
 from linktools.ai.execution.snapshots import AgentSnapshotData
-from linktools.ai.json import canonical_json_bytes
 from linktools.ai.model.policy import ModelPolicy
 from linktools.ai.runtime import LocalDirectoryStorage, build_runtime
 from linktools.ai.governance.identity import trusted_local_principal
@@ -38,17 +36,16 @@ async def _start_claimed_run(store, *, run_id: str, tenant_id: str):
         RunnableType.AGENT,
         "agent-spec.v1",
         value,
-        sha256(canonical_json_bytes(value)).hexdigest(),
+        compute_run_definition_hash(schema="agent-spec.v1", spec=value),
     )
     await store.start_run(StartExecution(run_id, "s", RunKind.USER_TURN, definition, "hi"))
     return await store.claim_run(ClaimExecution(run_id, "worker", datetime.now(timezone.utc), timedelta(minutes=5)))
 
 
 async def _pause_run(store, claimed, *, approval_id: str):
-    now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)
     approval = RunApproval(approval_id, "tc-1", "some-tool", "binding")
-    return await store.pause_run(PauseExecution(claimed.id, claimed.lease.owner, claimed.lease.fence, snapshot, approval))
+    return await store.pause_run(PauseExecution(claimed.id, claimed.lease.owner, claimed.lease.fence, snapshot, approval, 0))
 
 
 @pytest.mark.asyncio

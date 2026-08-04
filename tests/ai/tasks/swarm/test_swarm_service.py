@@ -13,7 +13,13 @@ from decimal import Decimal
 import pytest
 
 from linktools.ai.errors import InvalidSpecError, StorageConflictError
-from linktools.ai.execution.domain import RunError, RunKind, RunStatus, RunnableType
+from linktools.ai.execution.domain import (
+    RunError,
+    RunKind,
+    RunRecord,
+    RunStatus,
+    RunnableType,
+)
 from linktools.ai.execution.live_events import NoopRunLiveEventSink
 from linktools.ai.execution.service import ChildRunResult, PreparedAgentExecution
 from linktools.ai.execution.commands import StartRunResult
@@ -125,42 +131,52 @@ class FakeExecutionService:
                 ),
             )
             store = self.execution_store
-            if store is not None and hasattr(store, "start_run"):
+            if store is not None and hasattr(store, "start_claimed_child"):
                 from linktools.ai.execution.commands import (
                     AcknowledgeCancellation,
-                    ClaimExecution,
                     CompleteExecution,
                     FailExecution,
                     RequestCancellation,
+                    StartClaimedChildExecution,
                     StartExecution,
                 )
-                from linktools.ai.execution.domain import RunUsage
+                from linktools.ai.execution.domain import (
+                    RunDefinition,
+                    RunUsage,
+                    RunnableType,
+                    compute_run_definition_hash,
+                )
                 from linktools.ai.execution.snapshots import AgentSnapshotData, RunSnapshot
 
-                parent = await store.get_run(parent_execution_id)
-                child = (
-                    await store.start_run(
+                definition_spec = {"id": spec.id}
+                definition = RunDefinition(
+                    spec.id,
+                    RunnableType.AGENT,
+                    "agent-spec.v1",
+                    definition_spec,
+                    compute_run_definition_hash(
+                        schema="agent-spec.v1", spec=definition_spec
+                    ),
+                )
+                started = await store.start_claimed_child(
+                    StartClaimedChildExecution(
                         StartExecution(
                             execution_id,
                             session_id,
                             RunKind.TASK,
-                            parent.definition,
+                            definition,
                             {"prompt": prompt},
                             root_execution_id=root_execution_id,
                             parent_execution_id=parent_execution_id,
                             parent_guard=parent_guard,
-                        )
-                    )
-                ).record
-                claimed = await store.claim_run(
-                    ClaimExecution(
-                        child.id,
+                        ),
                         "swarm",
                         datetime.now(timezone.utc),
                         timedelta(minutes=5),
-                        parent_guard=parent_guard,
                     )
                 )
+                child = started.record
+                claimed = child
                 snapshot = AgentSnapshotData(
                     (),
                     result.output,
@@ -188,7 +204,7 @@ class FakeExecutionService:
                     )
                 if result.status is RunStatus.COMPLETED:
                     await store.complete_run(
-                        CompleteExecution(child.id, "swarm", claimed.lease.fence, snapshot)
+                        CompleteExecution(child.id, "swarm", claimed.lease.fence, snapshot, 0)
                     )
                 elif result.status is RunStatus.FAILED:
                     await store.fail_run(
@@ -198,6 +214,7 @@ class FakeExecutionService:
                             claimed.lease.fence,
                             snapshot,
                             result.error,
+                            0,
                         )
                     )
                 else:
@@ -211,7 +228,7 @@ class FakeExecutionService:
                     )
                     await store.acknowledge_cancel(
                         AcknowledgeCancellation(
-                            child.id, "swarm", claimed.lease.fence, snapshot
+                            child.id, "swarm", claimed.lease.fence, snapshot, 0
                         )
                     )
             elif store is not None and hasattr(store, "_runs"):
@@ -251,7 +268,7 @@ class FakeExecutionService:
         return None
 
     async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
-        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
+        return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1, terminal=True)
 
 
 class _RecordingAuth(OwnershipAuthorizationPolicy):
@@ -322,7 +339,7 @@ class _MemoryExecutionStore:
         return None
 
     async def start_run(self, command):
-        from linktools.ai.execution.domain import RunDefinition, RunRecord
+        from linktools.ai.execution.domain import RunRecord
         from linktools.ai.storage.coordination.lease import Lease
 
         now = datetime.now(timezone.utc)
@@ -352,6 +369,56 @@ class _MemoryExecutionStore:
         )
         self._runs[record.id] = record
         return StartRunResult(record=record, created=True)
+
+    async def start_claimed_child(self, command):
+        """Persist a child directly in RUNNING with its own identity."""
+        from linktools.ai.execution.commands import StartClaimedChildResult
+        from linktools.ai.storage.coordination.lease import Lease
+
+        start = command.start
+        parent = self._runs.get(start.parent_execution_id)
+        if parent is None:
+            raise KeyError(start.parent_execution_id)
+        existing = self._runs.get(start.run_id)
+        if existing is not None:
+            if existing.status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                return StartClaimedChildResult(existing, created=False, terminal=True)
+            raise StorageConflictError("child run is already active")
+        now = command.now
+        record = RunRecord(
+            id=start.run_id,
+            session_id=start.session_id,
+            kind=RunKind.TASK,
+            runnable_id=start.definition.runnable_id,
+            runnable_type=start.definition.runnable_type,
+            input=start.input,
+            definition=start.definition,
+            status=RunStatus.RUNNING,
+            session_turn_sequence=None,
+            parent_execution_id=start.parent_execution_id,
+            root_execution_id=start.root_execution_id or start.run_id,
+            approval=None,
+            lease=Lease(
+                owner=command.child_owner,
+                fence=1,
+                expires_at=now + command.lease_duration,
+            ),
+            cancel_requested_at=None,
+            snapshot_revision=0,
+            trace_sequence=0,
+            event_sequence=2,
+            tenant_id=parent.tenant_id,
+            user_id=parent.user_id,
+            error=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._runs[record.id] = record
+        return StartClaimedChildResult(record, created=True, terminal=False)
 
     async def claim_run(self, command) -> "RunRecord":
         record = self._runs.get(command.run_id)
@@ -405,6 +472,9 @@ class _MemoryExecutionStore:
             for run_id in dict.fromkeys(run_ids)
             if run_id in self._runs
         )
+
+    async def list_all_runs(self):
+        return tuple(self._runs.values())
 
     async def assert_active_lease(self, run_id: str, *, owner: str, fence: int):
         record = self._runs.get(run_id)
@@ -654,9 +724,6 @@ async def test_run_swarm_persists_parent_run_record_lifecycle():
 
 @pytest.mark.asyncio
 async def test_recover_swarm_decodes_persisted_swarm_spec():
-    from linktools.ai.tasks.swarm.codec import encode_swarm_spec
-    from linktools.ai.execution.domain import RunDefinition
-
     fake = FakeExecutionService()
     tasks = LocalTaskBackend()
     svc, store = _service(fake_exec=fake, tasks=tasks)
@@ -669,10 +736,14 @@ async def test_recover_swarm_decodes_persisted_swarm_spec():
     assert isinstance(outcome, SwarmCompleted)
 
 
-def _persisted_swarm_run(run_id, spec, task_plan):
+def _persisted_swarm_run(run_id, spec, task_plan, *, child=False):
     from datetime import datetime, timezone
     from hashlib import sha256
-    from linktools.ai.execution.domain import RunDefinition, RunRecord
+    from linktools.ai.execution.domain import (
+        RunDefinition,
+        RunRecord,
+        compute_run_definition_hash,
+    )
     from linktools.ai.json import canonical_json_bytes
     from linktools.ai.storage.coordination.lease import Lease
     from linktools.ai.tasks.codec import encode_plan
@@ -692,14 +763,31 @@ def _persisted_swarm_run(run_id, spec, task_plan):
         },
         "deadline_at": None,
     }
-    definition = RunDefinition(
-        spec.id, RunnableType.TASK, "swarm-task-graph.v1", value,
-        sha256(canonical_json_bytes(value)).hexdigest(),
-    )
+    runnable_id = spec.id
+    runnable_type = RunnableType.TASK
+    if child:
+        runnable_id = task_plan.nodes[0].payload.agent_id
+        runnable_type = RunnableType.AGENT
+        value = {"id": runnable_id}
+        definition = RunDefinition(
+            runnable_id,
+            runnable_type,
+            "agent-spec.v1",
+            value,
+            compute_run_definition_hash(schema="agent-spec.v1", spec=value),
+        )
+    else:
+        definition = RunDefinition(
+            spec.id,
+            runnable_type,
+            "swarm-task-graph.v1",
+            value,
+            compute_run_definition_hash(schema="swarm-task-graph.v1", spec=value),
+        )
     now = datetime.now(timezone.utc)
     return RunRecord(
         id=run_id, session_id="s", kind=RunKind.TASK,
-        runnable_id=spec.id, runnable_type=RunnableType.TASK,
+        runnable_id=runnable_id, runnable_type=runnable_type,
         input={
             "task_plan_id": task_plan.id,
             "session_snapshot": [],
@@ -731,7 +819,7 @@ async def test_reconcile_claimed_backfills_orphaned_claim_without_bind():
         active_run_id=None,
     )
     await tasks.create_plan(task_plan, (orphan,))
-    outcome = await svc.recover_swarm("parent-3", principal=_principal())
+    await svc.recover_swarm("parent-3", principal=_principal())
     execs = {e.node_id: e for e in await tasks.list_executions(task_plan.id)}
     assert execs["a"].status is TaskStatus.FAILED
     assert execs["a"].error.error_type == "orphaned_before_child_start"
@@ -749,7 +837,7 @@ async def test_reconcile_claimed_backfills_from_child_completed():
     child_id = child_run_id("parent-4", "a")
     store._runs["parent-4"] = _persisted_swarm_run("parent-4", spec, task_plan)
     # child run already COMPLETED but node still CLAIMED
-    child = _persisted_swarm_run(child_id, spec, task_plan)
+    child = _persisted_swarm_run(child_id, spec, task_plan, child=True)
     child = replace(
         child,
         parent_execution_id="parent-4",
@@ -788,8 +876,6 @@ async def test_reconcile_claimed_backfills_from_child_completed():
 @pytest.mark.asyncio
 async def test_reconcile_claimed_backfills_from_child_terminal_branches():
     # Exercise the FAILED / CANCELLED / PAUSED / RUNNING child reconcile branches.
-    from linktools.ai.tasks.models import TaskStatus as TS
-
     fake = FakeExecutionService()
     spec = _spec(agents=("a",))
 
@@ -802,7 +888,7 @@ async def test_reconcile_claimed_backfills_from_child_terminal_branches():
 
         child_id = child_run_id(plan_id, "a")
         store._runs[plan_id] = _persisted_swarm_run(plan_id, spec, plan)
-        child = _persisted_swarm_run(child_id, spec, plan)
+        child = _persisted_swarm_run(child_id, spec, plan, child=True)
         child = replace(
             child,
             parent_execution_id=plan_id,
@@ -861,7 +947,7 @@ async def test_cancel_swarm_persists_cancelling_and_converges():
     store._runs["parent-5"] = _persisted_swarm_run("parent-5", spec, task_plan)
     await tasks.create_plan(task_plan, ready_executions(task_plan))
     await svc.cancel_swarm("parent-5", principal=_principal())
-    record = await store.get_run("parent-5")
+    assert await store.get_run("parent-5") is not None
     # request_cancel transitions RUNNING -> CANCELLING in the real store; the
     # memory store's request_cancel is a no-op, so verify it did not raise and
     # the call is authorized (no exception). A real ExecutionStore converges.
@@ -973,9 +1059,28 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
                 )
             child_id = kwargs["execution_id"]
             parent = store._runs[parent_run_id]
+            from linktools.ai.execution.domain import (
+                RunDefinition,
+                RunnableType,
+                compute_run_definition_hash,
+            )
+
+            definition_spec = {"id": "a"}
+            definition = RunDefinition(
+                "a",
+                RunnableType.AGENT,
+                "agent-spec.v1",
+                definition_spec,
+                compute_run_definition_hash(
+                    schema="agent-spec.v1", spec=definition_spec
+                ),
+            )
             store._runs[child_id] = replace(
                 parent,
                 id=child_id,
+                definition=definition,
+                runnable_id="a",
+                runnable_type=RunnableType.AGENT,
                 status=RunStatus.COMPLETED,
                 parent_execution_id=parent_run_id,
                 root_execution_id=kwargs["root_execution_id"],
@@ -1011,7 +1116,7 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
             return None
 
         async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
-            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1, terminal=True)
 
     fake = _CancelMidRunExec()
     tasks = LocalTaskBackend()
@@ -1026,7 +1131,7 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
         agent_provider=_FakeAgentProvider(),
     )
     task_plan = make_plan(("a",))
-    outcome = await svc.run_swarm(
+    await svc.run_swarm(
         _spec(agents=("a",)), task_plan, principal=_principal(),
         session_id="s", execution_id=parent_run_id,
     )
@@ -1091,7 +1196,7 @@ async def test_run_swarm_rejects_mutating_tool_before_any_persistence():
             return None
 
         async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
-            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1, terminal=True)
 
     fake_exec = _FakeExecWithAssembler()
     tasks = LocalTaskBackend()
@@ -1191,7 +1296,11 @@ async def test_run_swarm_completes_parent_run_against_real_execution_store(tmp_p
 async def test_inspect_swarm_requires_authorized_principal():
     from datetime import datetime, timezone
 
-    from linktools.ai.execution.domain import RunDefinition, RunRecord
+    from linktools.ai.execution.domain import (
+        RunDefinition,
+        RunRecord,
+        compute_run_definition_hash,
+    )
     from linktools.ai.storage.coordination.lease import Lease
 
     fake = FakeExecutionService()
@@ -1207,7 +1316,13 @@ async def test_inspect_swarm_requires_authorized_principal():
         runnable_id="ws",
         runnable_type=RunnableType.AGENT,
         input={"plan_id": task_plan.id},
-        definition=RunDefinition("ws", RunnableType.AGENT, "agent-spec.v1", {}, "hash"),
+        definition=RunDefinition(
+            "ws",
+            RunnableType.AGENT,
+            "agent-spec.v1",
+            {},
+            compute_run_definition_hash(schema="agent-spec.v1", spec={}),
+        ),
         status=RunStatus.COMPLETED,
         session_turn_sequence=None,
         parent_execution_id=None,
@@ -1274,7 +1389,7 @@ async def test_swarm_fails_when_parent_lease_reclaimed_by_another_worker():
             return None
 
         async def read_usage(self, *, child_run_id: str) -> NodeUsageSnapshot:
-            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1)
+            return NodeUsageSnapshot(usage=TaskUsage(), snapshot_revision=1, terminal=True)
 
     fake = _StealLeaseExec()
     tasks = LocalTaskBackend()

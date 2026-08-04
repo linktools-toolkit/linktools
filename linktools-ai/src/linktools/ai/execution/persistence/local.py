@@ -7,6 +7,7 @@ import asyncio
 import os
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,11 +16,13 @@ from linktools.core import environ
 from ...storage.coordination.lease import Lease, claim, is_expired, release, renew
 from ...storage.database import CoordinationScope
 from ...errors import (
+    ChildRunAlreadyActiveError,
     ParentLeaseGuardError,
     RunIdentityConflictError,
     StorageConflictError,
     StorageCorruptionError,
     StorageError,
+    UsageObservationConflictError,
 )
 from ...storage.local.files import (
     atomic_write_bytes,
@@ -51,9 +54,10 @@ from ..domain import (
 from ..domain import Page
 from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
-from ..snapshots import RunSnapshot
+from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from ..commands import (
+    StartClaimedChildResult,
     StartRunResult,
     run_record_identity,
     start_execution_identity,
@@ -66,6 +70,7 @@ if TYPE_CHECKING:
         AbortExecution,
         AcknowledgeCancellation,
         ClaimExecution,
+        CheckpointExecutionUsage,
         CompleteExecution,
         DecideApproval,
         FailExecution,
@@ -74,6 +79,7 @@ if TYPE_CHECKING:
         RequestCancellation,
         ResumeExecution,
         StartExecution,
+        StartClaimedChildExecution,
     )
     from ..snapshots import AgentSnapshotData
     from ...json import JsonValue
@@ -91,6 +97,7 @@ def _run(raw: dict) -> RunRecord:
     lease_raw = raw.pop("lease", {})
     raw["kind"] = RunKind(raw["kind"])
     raw["status"] = RunStatus(raw["status"])
+    raw["runnable_type"] = RunnableType(raw["runnable_type"])
     definition = raw["definition"]
     definition["runnable_type"] = RunnableType(definition["runnable_type"])
     raw["definition"] = RunDefinition(**definition)
@@ -476,8 +483,10 @@ class LocalExecutionBackend:
                     continue
                 try:
                     out.append(_run(dict(read_json(path))))
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise StorageCorruptionError(
+                        f"invalid persisted run: {path}"
+                    ) from exc
             return out
 
         return tuple(await asyncio.to_thread(_scan))
@@ -499,12 +508,10 @@ class LocalExecutionBackend:
             session = await self._read_session(command.session_id)
             if session is None:
                 raise StorageError("unknown session")
-            if (
-                command.kind is RunKind.TASK
-                and command.parent_execution_id is not None
-                and command.parent_guard is None
-            ):
-                raise ParentLeaseGuardError("task_graph child requires parent guard")
+            if command.kind is RunKind.TASK and command.parent_execution_id is not None:
+                raise ParentLeaseGuardError(
+                    "task_graph child must use atomic child start"
+                )
             if (
                 command.parent_guard is not None
                 and command.parent_execution_id != command.parent_guard.run_id
@@ -600,6 +607,151 @@ class LocalExecutionBackend:
                 )
             await asyncio.to_thread(self._commit_files, command.run_id, tuple(writes))
             return StartRunResult(record, created=True)
+
+    async def start_claimed_child(
+        self, command: "StartClaimedChildExecution"
+    ) -> "StartClaimedChildResult":
+        start = command.start
+        if start.kind is not RunKind.TASK or start.parent_guard is None:
+            raise ParentLeaseGuardError("task child requires parent lease guard")
+        journal_runs = await self._session_journal_runs(start.session_id)
+        lock_keys = tuple(("run", run_id) for run_id in journal_runs)
+        lock_keys += (("run", start.parent_guard.run_id), ("run", start.run_id))
+        async with self._locks.acquire(("session", start.session_id), *lock_keys):
+            await self._recover_session(start.session_id)
+            await self._recover_run(start.run_id)
+            await self._recover_run(start.parent_guard.run_id)
+            session = await self._read_session(start.session_id)
+            if session is None:
+                raise StorageError("unknown session")
+            if start.parent_execution_id != start.parent_guard.run_id:
+                raise ParentLeaseGuardError(
+                    "parent lease guard does not match child parent"
+                )
+            parent = await self._read_run(start.parent_guard.run_id)
+            if parent is None:
+                raise ParentLeaseGuardError("parent run does not exist")
+            if (
+                parent.session_id != start.session_id
+                or parent.root_execution_id != start.root_execution_id
+                or parent.tenant_id != session.tenant_id
+                or parent.user_id != session.user_id
+            ):
+                raise ParentLeaseGuardError("child context does not match parent")
+            if (
+                parent.status is not RunStatus.RUNNING
+                or parent.lease.owner != start.parent_guard.owner
+                or parent.lease.fence != start.parent_guard.fence
+                or is_expired(parent.lease, command.now)
+            ):
+                raise ParentLeaseGuardError("parent lease guard rejected child")
+            identity = start_execution_identity(
+                start, tenant_id=session.tenant_id, user_id=session.user_id
+            )
+            existing = await self._read_run(start.run_id)
+            if existing is not None:
+                if run_record_identity(existing) != identity:
+                    raise RunIdentityConflictError(
+                        "run id reused with a different start identity"
+                    )
+                if existing.status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                }:
+                    return StartClaimedChildResult(
+                        existing, created=False, terminal=True
+                    )
+                if existing.status is not RunStatus.PENDING:
+                    raise ChildRunAlreadyActiveError(existing.id)
+                leased = claim(
+                    existing.lease,
+                    owner=command.child_owner,
+                    now=command.now,
+                    duration=command.lease_duration,
+                )
+                updated = replace(
+                    existing,
+                    status=RunStatus.RUNNING,
+                    lease=leased,
+                    event_sequence=existing.event_sequence + 1,
+                    updated_at=command.now,
+                )
+                await asyncio.to_thread(
+                    self._commit_files,
+                    start.run_id,
+                    (
+                        (
+                            self._numbered(
+                                start.run_id, "events", updated.event_sequence
+                            ),
+                            asdict(
+                                RunEvent(
+                                    start.run_id,
+                                    updated.event_sequence,
+                                    "run.claimed",
+                                    {},
+                                    command.now,
+                                )
+                            ),
+                            False,
+                        ),
+                        (self._run_path(start.run_id), asdict(updated), True),
+                    ),
+                )
+                return StartClaimedChildResult(updated, created=False, terminal=False)
+            now = command.now
+            leased = claim(
+                Lease(),
+                owner=command.child_owner,
+                now=now,
+                duration=command.lease_duration,
+            )
+            record = RunRecord(
+                id=start.run_id,
+                session_id=start.session_id,
+                kind=RunKind.TASK,
+                runnable_id=start.definition.runnable_id,
+                runnable_type=start.definition.runnable_type,
+                definition=start.definition,
+                status=RunStatus.RUNNING,
+                session_turn_sequence=None,
+                parent_execution_id=start.parent_execution_id,
+                root_execution_id=start.root_execution_id or start.run_id,
+                approval=None,
+                lease=leased,
+                cancel_requested_at=None,
+                snapshot_revision=0,
+                trace_sequence=0,
+                event_sequence=2,
+                tenant_id=session.tenant_id,
+                user_id=session.user_id,
+                error=None,
+                created_at=now,
+                updated_at=now,
+                input=start.input,
+            )
+            writes = (
+                (
+                    self._numbered(start.run_id, "events", 1),
+                    asdict(RunEvent(start.run_id, 1, "run.started", {}, now)),
+                    False,
+                ),
+                (
+                    self._numbered(start.run_id, "events", 2),
+                    asdict(RunEvent(start.run_id, 2, "run.claimed", {}, now)),
+                    False,
+                ),
+                (self._run_path(start.run_id), asdict(record), True),
+            )
+            await asyncio.to_thread(self._commit_files, start.run_id, writes)
+            logger.debug(
+                "child %s started directly RUNNING owner=%s fence=%s",
+                start.run_id,
+                command.child_owner,
+                leased.fence,
+            )
+            return StartClaimedChildResult(record, created=True, terminal=False)
 
     async def get_run(self, run_id: str) -> "RunRecord | None":
         sessions = await self._run_journal_sessions(run_id)
@@ -826,7 +978,8 @@ class LocalExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.PAUSED,
-            command.pending_approval,
+            expected_snapshot_revision=command.expected_snapshot_revision,
+            pending_approval=command.pending_approval,
         )
 
     async def resume_run(self, command: "ResumeExecution") -> RunRecord:
@@ -948,6 +1101,7 @@ class LocalExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.COMPLETED,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
 
     async def fail_run(self, command: "FailExecution") -> RunRecord:
@@ -958,6 +1112,7 @@ class LocalExecutionBackend:
             command.snapshot,
             RunStatus.FAILED,
             error=command.error,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
 
     async def acknowledge_cancel(self, command: "AcknowledgeCancellation") -> RunRecord:
@@ -967,6 +1122,7 @@ class LocalExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.CANCELLED,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
 
     async def abort_run(self, command: "AbortExecution") -> RunRecord:
@@ -977,9 +1133,16 @@ class LocalExecutionBackend:
             ("session", current.session_id), ("run", command.run_id)
         ):
             record = await self._required_run(command.run_id)
+            if record.snapshot_revision != command.expected_snapshot_revision:
+                raise StorageConflictError("run snapshot revision changed")
             if record.status is not RunStatus.PENDING:
                 assert_owner(record, command.owner, command.fence, _now())
             assert_transition(record.status, RunStatus.FAILED)
+            previous = await self._read_snapshot_locked(record)
+            if previous is not None and not is_run_usage_monotonic(
+                previous.usage, command.snapshot.usage
+            ):
+                raise StorageConflictError("run usage regressed")
             now = _now()
             snapshot_revision = record.snapshot_revision + 1
             updated = replace(
@@ -1041,6 +1204,82 @@ class LocalExecutionBackend:
             )
             return updated
 
+    async def checkpoint_run_usage(
+        self, command: "CheckpointExecutionUsage"
+    ) -> RunSnapshot:
+        current = await self.get_run(command.run_id)
+        if current is None:
+            raise StorageError(f"unknown run: {command.run_id}")
+        async with self._locks.acquire(("session", current.session_id), ("run", command.run_id)):
+            record = await self._required_run(command.run_id)
+            assert_owner(record, command.owner, command.fence, _now())
+            if record.status not in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+                raise StorageConflictError("run is not checkpointable")
+            if record.snapshot_revision != command.expected_snapshot_revision:
+                latest = await self._read_snapshot_locked(record)
+                if latest is not None and (
+                    latest.usage == command.usage
+                    or is_run_usage_monotonic(command.usage, latest.usage)
+                ):
+                    return latest
+                raise UsageObservationConflictError(
+                    "usage checkpoint revision carries a conflicting usage"
+                )
+            previous = await self._read_snapshot_locked(record)
+            previous_usage = (
+                previous.usage
+                if previous is not None
+                else RunUsage(total_cost=Decimal("0"))
+            )
+            if not is_run_usage_monotonic(previous_usage, command.usage):
+                raise StorageConflictError("run usage regressed")
+            now = _now()
+            revision = record.snapshot_revision + 1
+            event_sequence = record.event_sequence + 1
+            snapshot = RunSnapshot(
+                "run-snapshot.v1",
+                record.id,
+                revision,
+                (),
+                None,
+                record.status,
+                command.usage,
+                command.trace_end_sequence,
+                now,
+            )
+            updated = replace(
+                record,
+                snapshot_revision=revision,
+                trace_sequence=command.trace_end_sequence,
+                event_sequence=event_sequence,
+                updated_at=now,
+            )
+            writes = (
+                (self._snapshot_path(record.id), _snapshot_json(snapshot), False),
+                (
+                    self._numbered(record.id, "events", event_sequence),
+                    asdict(
+                        RunEvent(
+                            record.id,
+                            event_sequence,
+                            "run.usage_checkpoint",
+                            {},
+                            now,
+                        )
+                    ),
+                    False,
+                ),
+                (self._run_path(record.id), asdict(updated), True),
+            )
+            await asyncio.to_thread(self._commit_files, record.id, writes)
+            logger.debug(
+                "run %s usage checkpoint revision=%s trace=%s",
+                record.id,
+                revision,
+                command.trace_end_sequence,
+            )
+            return snapshot
+
     async def _finish(
         self,
         run_id: str,
@@ -1048,6 +1287,7 @@ class LocalExecutionBackend:
         fence: int,
         snapshot: "AgentSnapshotData",
         status: RunStatus,
+        expected_snapshot_revision: int,
         pending_approval: "RunApproval | None" = None,
         error: "RunError | None" = None,
     ) -> RunRecord:
@@ -1057,8 +1297,15 @@ class LocalExecutionBackend:
         session_id = record.session_id
         async with self._locks.acquire(("session", session_id), ("run", run_id)):
             record = await self._required_run(run_id)
+            if record.snapshot_revision != expected_snapshot_revision:
+                raise StorageConflictError("run snapshot revision changed")
             assert_owner(record, owner, fence, _now())
             assert_transition(record.status, status)
+            previous = await self._read_snapshot_locked(record)
+            if previous is not None and not is_run_usage_monotonic(
+                previous.usage, snapshot.usage
+            ):
+                raise StorageConflictError("run usage regressed")
             # The store allocates the snapshot revision (expected + 1); the
             # write lock serializes concurrent commits within this process.
             new_revision = record.snapshot_revision + 1
@@ -1175,6 +1422,18 @@ class LocalExecutionBackend:
         if record is None:
             raise StorageError(f"unknown run: {run_id}")
         return record
+
+    async def _read_snapshot_locked(
+        self, record: RunRecord
+    ) -> "RunSnapshot | None":
+        path = self._snapshot_path(record.id)
+        if not await self._exists(path):
+            if record.snapshot_revision > 0:
+                raise StorageCorruptionError(
+                    f"missing snapshot declared by run manifest: {path}"
+                )
+            return None
+        return _snapshot(dict(await asyncio.to_thread(read_json, path)))
 
     async def _write_run_event(
         self,

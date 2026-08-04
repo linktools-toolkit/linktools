@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 
 from ..json import canonical_json_bytes
+from .domain import compute_run_definition_hash
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,9 +21,10 @@ if TYPE_CHECKING:
         RunError,
         RunKind,
         RunRecord,
+        RunUsage,
         RunnableType,
     )
-    from .snapshots import AgentSnapshotData
+from .snapshots import AgentSnapshotData
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +64,9 @@ def start_execution_identity(
         kind=command.kind,
         runnable_id=command.definition.runnable_id,
         runnable_type=command.definition.runnable_type,
-        definition_hash=command.definition.spec_hash,
+        definition_hash=compute_run_definition_hash(
+            schema=command.definition.schema, spec=command.definition.spec
+        ),
         input_hash=sha256(canonical_json_bytes(command.input)).hexdigest(),
         parent_execution_id=command.parent_execution_id,
         root_execution_id=command.root_execution_id or command.run_id,
@@ -78,7 +82,9 @@ def run_record_identity(record: "RunRecord") -> StartExecutionIdentity:
         kind=record.kind,
         runnable_id=record.runnable_id,
         runnable_type=record.runnable_type,
-        definition_hash=record.definition.spec_hash,
+        definition_hash=compute_run_definition_hash(
+            schema=record.definition.schema, spec=record.definition.spec
+        ),
         input_hash=sha256(canonical_json_bytes(record.input)).hexdigest(),
         parent_execution_id=record.parent_execution_id,
         root_execution_id=record.root_execution_id,
@@ -116,6 +122,21 @@ class ClaimExecution:
 
 
 @dataclass(frozen=True, slots=True)
+class StartClaimedChildExecution:
+    start: "StartExecution"
+    child_owner: str
+    now: "datetime"
+    lease_duration: "timedelta"
+
+
+@dataclass(frozen=True, slots=True)
+class StartClaimedChildResult:
+    record: "RunRecord"
+    created: bool
+    terminal: bool
+
+
+@dataclass(frozen=True, slots=True)
 class HeartbeatExecution:
     run_id: str
     owner: str
@@ -131,6 +152,7 @@ class PauseExecution:
     fence: int
     snapshot: "AgentSnapshotData"
     pending_approval: "RunApproval"
+    expected_snapshot_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +182,7 @@ class CompleteExecution:
     owner: str
     fence: int
     snapshot: "AgentSnapshotData"
+    expected_snapshot_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,7 +191,8 @@ class FailExecution:
     owner: str
     fence: int
     snapshot: "AgentSnapshotData"
-    error: "RunError | None" = None
+    error: "RunError | None"
+    expected_snapshot_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +201,7 @@ class AcknowledgeCancellation:
     owner: str
     fence: int
     snapshot: "AgentSnapshotData"
+    expected_snapshot_revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +211,7 @@ class AbortExecution:
     fence: int
     snapshot: "AgentSnapshotData"
     error: "RunError"
+    expected_snapshot_revision: int
 
     def __post_init__(self) -> None:
         from .domain import RunError
@@ -201,10 +227,21 @@ class AbortExecution:
         return self.snapshot.trace_end_sequence
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointExecutionUsage:
+    run_id: str
+    owner: str
+    fence: int
+    expected_snapshot_revision: int
+    usage: "RunUsage"
+    trace_end_sequence: int
+
+
 __all__ = [
     "AbortExecution",
     "AcknowledgeCancellation",
     "ClaimExecution",
+    "CheckpointExecutionUsage",
     "CompleteExecution",
     "CreateSession",
     "DecideApproval",
@@ -215,6 +252,8 @@ __all__ = [
     "RequestCancellation",
     "ResumeExecution",
     "StartExecution",
+    "StartClaimedChildExecution",
+    "StartClaimedChildResult",
     "StartExecutionIdentity",
     "StartRunResult",
     "run_record_identity",

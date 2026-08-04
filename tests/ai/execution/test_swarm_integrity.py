@@ -29,13 +29,12 @@ async def test_validate_rejects_definition_hash_tampering():
     plan = make_plan(("a",))
     spec = _spec(agents=("a",))
     record = _persisted_swarm_run("parent", spec, plan)
-    store._runs[record.id] = replace(
-        record,
-        definition=replace(
-            record.definition,
-            spec={**record.definition.spec, "task_plan_id": "tampered"},
-        ),
+    object.__setattr__(
+        record.definition,
+        "spec",
+        {**record.definition.spec, "task_plan_id": "tampered"},
     )
+    store._runs[record.id] = record
     await tasks.create_plan(plan, ready_executions(plan))
 
     with pytest.raises(InvalidSpecError, match="definition_integrity"):

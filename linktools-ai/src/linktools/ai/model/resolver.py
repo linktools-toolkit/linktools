@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class ResolvedModelCandidate:
     pricing_id: str
-    provider_name: "str | None"
+    provider_name: str
     model_name: str
     model: "Model"
 
@@ -108,10 +108,19 @@ def _candidate_identity(
     bundle: ModelBundle, model: "Model"
 ) -> ResolvedModelCandidate:
     pricing_id = bundle.config.model or bundle.config.model_type
-    if ":" in pricing_id:
+    provider_name = getattr(model, "provider_name", None)
+    if not isinstance(provider_name, str):
+        provider = getattr(model, "provider", None)
+        provider_name = getattr(provider, "name", None)
+    model_name = bundle.config.model or pricing_id
+    if bundle.config.protocol == "prebuilt":
+        model_identity = getattr(model, "model_name", None)
+        if isinstance(model_identity, str) and model_identity:
+            model_name = model_identity
+    if not isinstance(provider_name, str) and ":" in pricing_id:
         provider_name, model_name = pricing_id.split(":", maxsplit=1)
-    else:
-        provider_name, model_name = None, pricing_id
+    if not isinstance(provider_name, str):
+        provider_name = ""
     return ResolvedModelCandidate(
         pricing_id=pricing_id,
         provider_name=provider_name,
@@ -126,17 +135,14 @@ def resolve_pricing_id(
     response_model_name: "str | None",
     candidates: "tuple[ResolvedModelCandidate, ...]",
 ) -> "str | None":
+    if response_model_name is None:
+        return None
     matches = [
         candidate
         for candidate in candidates
-        if response_model_name in {
-            candidate.model_name,
-            getattr(candidate.model, "model_name", None),
-        }
+        if candidate.model_name == response_model_name
         and (
-            provider_name is None
-            or candidate.provider_name is None
-            or candidate.provider_name == provider_name
+            provider_name is None or candidate.provider_name == provider_name
         )
     ]
     return matches[0].pricing_id if len(matches) == 1 else None

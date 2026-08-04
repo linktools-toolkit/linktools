@@ -12,11 +12,10 @@ tools, middleware, output type -- round-trips across pause/resume.
 
 
 import asyncio
-import hmac
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from linktools.core import environ
@@ -31,26 +30,21 @@ from ..agent.models import (
 )
 from ..agent.sandbox.protocols import Sandbox
 from ..errors import (
-    ChildRunAlreadyActiveError,
     ChildSnapshotError,
-    ParentLeaseGuardError,
     RunDefinitionError,
-    RunDefinitionIntegrityError,
-    RunIdentityConflictError,
-    RunStateError,
     RuntimeInitializationError,
     StorageError,
 )
 from ..governance.authorization import ExecutionAction
 from ..governance.identity import PrincipalContext
 from ..json import canonical_json_bytes
-from ..storage.coordination.lease import is_expired
 from ..observability.events.payloads import SecurityDegraded
 from .cancellation import CancellationToken
 from .commands import (
     AbortExecution,
     AcknowledgeCancellation,
     ClaimExecution,
+    CheckpointExecutionUsage,
     CompleteExecution,
     DecideApproval,
     FailExecution,
@@ -58,9 +52,8 @@ from .commands import (
     ParentLeaseGuard,
     PauseExecution,
     RequestCancellation,
-    run_record_identity,
-    start_execution_identity,
     ResumeExecution,
+    StartClaimedChildExecution,
     StartExecution,
 )
 from .controller import ExecutionControllerRegistry
@@ -74,10 +67,15 @@ from .domain import (
     RunStatus,
     RunnableType,
     RunUsage,
+    compute_run_definition_hash,
     sanitize_run_error,
 )
 from .query import ExecutionResultView
-from .snapshots import AgentSnapshotData, RunUsageCapture
+from .snapshots import (
+    AgentSnapshotData,
+    ModelRequestUsageObservation,
+    RunUsageCapture,
+)
 from . import trace_codec
 from .trace_collector import SemanticTraceCollector
 
@@ -91,6 +89,7 @@ if TYPE_CHECKING:
     from ..agent.assembly.models import AgentAssembly
     from ..agent.spec import AgentSpec
     from ..governance.authorization import AuthorizationPolicy
+    from ..model.pricing import ModelPricing
     from ..tasks.models import TaskUsage
     from .domain import ApprovalDecision, RunRecord
     from .live_events import RunLiveEventSink, SecurityEventSink
@@ -101,7 +100,14 @@ logger = environ.get_logger("ai.execution.service")
 
 def _definition(spec: "AgentSpec", codec: "AgentSpecCodec") -> RunDefinition:
     value = codec.encode(spec)
-    return RunDefinition(spec.id, RunnableType.AGENT, "agent-spec.v1", value, sha256(canonical_json_bytes(value)).hexdigest())
+    schema = "agent-spec.v1"
+    return RunDefinition(
+        spec.id,
+        RunnableType.AGENT,
+        schema,
+        value,
+        compute_run_definition_hash(schema=schema, spec=value),
+    )
 
 
 def _decode_definition(
@@ -110,9 +116,6 @@ def _decode_definition(
 ) -> "AgentSpec":
     if definition.schema != "agent-spec.v1":
         raise RunDefinitionError("unsupported definition schema")
-    actual = sha256(canonical_json_bytes(definition.spec)).hexdigest()
-    if not hmac.compare_digest(actual, definition.spec_hash):
-        raise RunDefinitionIntegrityError("definition hash mismatch")
     return codec.decode(definition.spec)
 
 
@@ -154,6 +157,60 @@ class PreparedAgentExecution:
     assembled_agent: object
     tool_descriptors: "tuple[object, ...]"
     fingerprint: str
+
+
+@dataclass(slots=True)
+class PersistedRunUsageSink:
+    """Persist each new model-request usage before downstream work continues."""
+
+    capture: RunUsageCapture
+    store: "ExecutionStore"
+    run_id: str
+    owner: str
+    fence: int
+    snapshot_revision: int
+    trace_sequence: "Callable[[], int]"
+
+    async def observe_request(
+        self,
+        observation: ModelRequestUsageObservation,
+        *,
+        pricing: "ModelPricing | None",
+    ) -> RunUsage:
+        if self.capture.has_observation(observation.request_key):
+            record = await self.store.get_run(self.run_id)
+            if record is None:
+                raise StorageError(f"unknown run: {self.run_id}")
+            self.snapshot_revision = record.snapshot_revision
+            return self.capture.observe_request(observation, pricing=pricing)
+        usage = self.capture.observe_request(observation, pricing=pricing)
+        snapshot = await self.store.checkpoint_run_usage(
+            CheckpointExecutionUsage(
+                run_id=self.run_id,
+                owner=self.owner,
+                fence=self.fence,
+                expected_snapshot_revision=self.snapshot_revision,
+                usage=usage,
+                trace_end_sequence=self.trace_sequence(),
+            )
+        )
+        self.snapshot_revision = snapshot.revision
+        if environ.debug:
+            logger.debug(
+                "run %s persisted usage revision=%s tokens=%s cost=%s",
+                self.run_id,
+                self.snapshot_revision,
+                usage.total_tokens,
+                usage.total_cost,
+            )
+        return usage
+
+    def snapshot(self) -> RunUsage:
+        return self.capture.snapshot()
+
+    @property
+    def last_snapshot_revision(self) -> int:
+        return self.snapshot_revision
 
 
 def _outcome_usage(outcome: "object | None", record: "RunRecord | None") -> "TaskUsage":
@@ -394,76 +451,19 @@ class ExecutionService:
             parent_execution_id=parent_execution_id,
             parent_guard=parent_guard,
         )
-        if parent_guard is not None:
-            parent = await self._store.get_run(parent_guard.run_id)
-            if parent is None:
-                raise ParentLeaseGuardError("parent run does not exist")
-            if parent.status is RunStatus.CANCELLING:
-                if parent_execution_id != parent_guard.run_id:
-                    raise ParentLeaseGuardError(
-                        "parent lease guard does not match child parent"
-                    )
-                if (
-                    parent.lease.owner != parent_guard.owner
-                    or parent.lease.fence != parent_guard.fence
-                    or is_expired(parent.lease, datetime.now(timezone.utc))
-                ):
-                    raise ParentLeaseGuardError("parent lease guard rejected child")
-                # CANCELLING may only read and converge an existing child; its
-                # terminal snapshot is never reached through start_run.
-                existing = await self._store.get_run(execution_id)
-                if existing is None:
-                    raise ParentLeaseGuardError(
-                        "parent is cancelling; child does not exist"
-                    )
-                identity = start_execution_identity(
-                    start_command,
-                    tenant_id=existing.tenant_id,
-                    user_id=existing.user_id,
-                )
-                if run_record_identity(existing) != identity:
-                    raise RunIdentityConflictError(
-                        "run id reused with a different start identity"
-                    )
-                if existing.status in {
-                    RunStatus.COMPLETED,
-                    RunStatus.FAILED,
-                    RunStatus.CANCELLED,
-                }:
-                    return await _child_result_from_persistence(
-                        self._store, existing.id, None, existing
-                    )
-                raise ParentLeaseGuardError(
-                    "parent is cancelling; child cannot be started"
-                )
-        start = await self._store.start_run(start_command)
-        record = start.record
-        if record.status is RunStatus.PENDING:
-            claimed = await self._store.claim_run(
-                ClaimExecution(
-                    record.id,
-                    "swarm",
-                    datetime.now(timezone.utc),
-                    _LEASE_DURATION,
-                    parent_guard=parent_guard,
-                )
+        started = await self._store.start_claimed_child(
+            StartClaimedChildExecution(
+                start=start_command,
+                child_owner="swarm",
+                now=datetime.now(timezone.utc),
+                lease_duration=_LEASE_DURATION,
             )
-        elif record.status in {
-            RunStatus.COMPLETED,
-            RunStatus.FAILED,
-            RunStatus.CANCELLED,
-        }:
+        )
+        if started.terminal:
             return await _child_result_from_persistence(
-                self._store, record.id, None, record
+                self._store, started.record.id, None, started.record
             )
-        elif record.status in {
-            RunStatus.RUNNING,
-            RunStatus.CANCELLING,
-            RunStatus.PAUSED,
-        }:
-            raise ChildRunAlreadyActiveError(record.id)
-        else:
-            raise RunStateError(f"child {record.id!r} has unsupported state")
+        claimed = started.record
         assembly = (
             prepared_execution.assembled_agent
             if prepared_execution is not None
@@ -490,11 +490,20 @@ class ExecutionService:
             metadata=metadata or {},
         )
         collector = SemanticTraceCollector(claimed.id, self._store, claimed.trace_sequence)
-        usage_capture = RunUsageCapture()
+        usage_capture = await self._usage_capture(claimed)
+        owner = claimed.lease.owner or "swarm"
+        usage_sink = PersistedRunUsageSink(
+            capture=usage_capture,
+            store=self._store,
+            run_id=claimed.id,
+            owner=owner,
+            fence=claimed.lease.fence,
+            snapshot_revision=claimed.snapshot_revision,
+            trace_sequence=lambda: collector.next_sequence,
+        )
         decoded_history = decode_model_messages(message_history) if message_history else ()
         token = CancellationToken()
         agent_input = AgentInput(prompt=prompt, message_history=decoded_history, metadata=metadata or {})
-        owner = claimed.lease.owner or "swarm"
         task = await self._controller.start(
             claimed.id,
             self._engine.execute_pure(
@@ -507,7 +516,7 @@ class ExecutionService:
                 assembly=assembly,
                 trace_sequence=claimed.trace_sequence,
                 trace_collector=collector,
-                usage_sink=usage_capture,
+                usage_sink=usage_sink,
             ),
             token,
         )
@@ -537,7 +546,9 @@ class ExecutionService:
                     pass
             latest = await self._required(execution_id)
             await self._converge_child_cancel(
-                claimed, owner, _task_usage_from_run_usage(usage_capture.snapshot())
+                claimed,
+                owner,
+                _task_usage_from_run_usage(usage_sink.snapshot()),
             )
             latest = await self._required(execution_id)
             return ChildRunResult(
@@ -545,7 +556,7 @@ class ExecutionService:
                 status=RunStatus.CANCELLED,
                 output=None,
                 error=latest.error,
-                usage=_task_usage_from_run_usage(usage_capture.snapshot()),
+                usage=_task_usage_from_run_usage(usage_sink.snapshot()),
                 snapshot_revision=latest.snapshot_revision,
             )
         except BaseException as exc:
@@ -558,11 +569,12 @@ class ExecutionService:
                     AgentSnapshotData(
                         delta_messages=(),
                         final_output=None,
-                        usage=usage_capture.snapshot(),
+                        usage=usage_sink.snapshot(),
                         trace_end_sequence=trace_end,
                         capture_state=MessageCaptureState.PARTIAL,
                     ),
                     sanitize_run_error(exc),
+                    usage_sink.last_snapshot_revision,
                 )
             )
             raise
@@ -574,6 +586,8 @@ class ExecutionService:
                 pass
             await self._controller.unregister(claimed.id, task=task)
         snapshot = _snapshot(outcome) if outcome is not None else None
+        if snapshot is not None:
+            snapshot = replace(snapshot, usage=usage_sink.snapshot())
         latest = await self._required(execution_id)
         if latest.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
             return await _child_result_from_persistence(
@@ -581,7 +595,13 @@ class ExecutionService:
             )
         if isinstance(outcome, AgentCompleted):
             await self._store.complete_run(
-                CompleteExecution(claimed.id, owner, claimed.lease.fence, snapshot)
+                CompleteExecution(
+                    claimed.id,
+                    owner,
+                    claimed.lease.fence,
+                    snapshot,
+                    usage_sink.last_snapshot_revision,
+                )
             )
         elif isinstance(outcome, AgentPaused):
             # task_graph does not support approval: a paused child is a failure.
@@ -592,6 +612,7 @@ class ExecutionService:
                     claimed.lease.fence,
                     snapshot,
                     RunError("approval_not_supported", "task_graph child paused for approval"),
+                    usage_sink.last_snapshot_revision,
                 )
             )
             latest = await self._required(execution_id)
@@ -600,11 +621,24 @@ class ExecutionService:
             )
         elif isinstance(outcome, AgentCancelled):
             await self._store.acknowledge_cancel(
-                AcknowledgeCancellation(claimed.id, owner, claimed.lease.fence, snapshot)
+                AcknowledgeCancellation(
+                    claimed.id,
+                    owner,
+                    claimed.lease.fence,
+                    snapshot,
+                    usage_sink.last_snapshot_revision,
+                )
             )
         elif isinstance(outcome, AgentFailed):
             await self._store.fail_run(
-                FailExecution(claimed.id, owner, claimed.lease.fence, snapshot, outcome.error)
+                FailExecution(
+                    claimed.id,
+                    owner,
+                    claimed.lease.fence,
+                    snapshot,
+                    outcome.error,
+                    usage_sink.last_snapshot_revision,
+                )
             )
         latest = await self._required(execution_id)
         return await _child_result_from_persistence(
@@ -634,6 +668,7 @@ class ExecutionService:
                             cache_read_tokens=usage.cache_read_tokens,
                         ), record.trace_sequence, MessageCaptureState.PARTIAL
                     ),
+                    latest.snapshot_revision,
                 )
             )
 
@@ -774,12 +809,21 @@ class ExecutionService:
         compiled = await self._compiler.compile(spec)
         context = RunContext(record.id, record.root_execution_id, record.parent_execution_id, record.session_id, record.runnable_id, record.definition.runnable_type, record.user_id, record.tenant_id, None)
         collector = SemanticTraceCollector(record.id, self._store, record.trace_sequence)
+        usage_sink = PersistedRunUsageSink(
+            capture=await self._usage_capture(record),
+            store=self._store,
+            run_id=record.id,
+            owner=owner,
+            fence=record.lease.fence,
+            snapshot_revision=record.snapshot_revision,
+            trace_sequence=lambda: collector.next_sequence,
+        )
         decoded_history = decode_model_messages(message_history) if message_history else ()
         token = CancellationToken()
         approved = record.approval if resuming else None
         task = await self._controller.start(
             record.id,
-            self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector),
+            self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector, usage_sink=usage_sink),
             token,
         )
         heartbeat = asyncio.ensure_future(self._heartbeat(record.id, owner, record.lease.fence, token))
@@ -832,10 +876,11 @@ class ExecutionService:
                             AgentSnapshotData(
                                 delta_messages=(),
                                 final_output=None,
-                                usage=RunUsage(),
+                                usage=usage_sink.snapshot(),
                                 trace_end_sequence=trace_end,
                                 capture_state=MessageCaptureState.PARTIAL,
                             ),
+                            usage_sink.last_snapshot_revision,
                         )
                     )
             except Exception as cleanup_error:
@@ -872,11 +917,12 @@ class ExecutionService:
                         AgentSnapshotData(
                             delta_messages=(),
                             final_output=None,
-                            usage=RunUsage(),
+                            usage=usage_sink.snapshot(),
                             trace_end_sequence=trace_end,
                             capture_state=MessageCaptureState.PARTIAL,
                         ),
                         sanitize_run_error(exc),
+                        usage_sink.last_snapshot_revision,
                     )
                 )
             except Exception as abort_exc:
@@ -894,6 +940,7 @@ class ExecutionService:
                 pass
             await self._controller.unregister(record.id, task=task)
         snapshot = _snapshot(outcome)
+        snapshot = replace(snapshot, usage=usage_sink.snapshot())
         latest = await self._required(record.id)
         if latest.status in {
             RunStatus.COMPLETED,
@@ -911,11 +958,20 @@ class ExecutionService:
                     owner,
                     record.lease.fence,
                     snapshot,
+                    usage_sink.last_snapshot_revision,
                 )
             )
             return None
         if isinstance(outcome, AgentCompleted):
-            await self._store.complete_run(CompleteExecution(record.id, owner, record.lease.fence, snapshot))
+            await self._store.complete_run(
+                CompleteExecution(
+                    record.id,
+                    owner,
+                    record.lease.fence,
+                    snapshot,
+                    usage_sink.last_snapshot_revision,
+                )
+            )
             return ExecutionResultView(record.id, outcome.result.output)
         if isinstance(outcome, AgentPaused):
             approval = outcome.request
@@ -936,14 +992,32 @@ class ExecutionService:
                         approval.tool_name or "",
                         binding_fingerprint,
                     ),
+                    usage_sink.last_snapshot_revision,
                 )
             )
             return None
         if isinstance(outcome, AgentCancelled):
-            await self._store.acknowledge_cancel(AcknowledgeCancellation(record.id, owner, record.lease.fence, snapshot))
+            await self._store.acknowledge_cancel(
+                AcknowledgeCancellation(
+                    record.id,
+                    owner,
+                    record.lease.fence,
+                    snapshot,
+                    usage_sink.last_snapshot_revision,
+                )
+            )
             return None
         if isinstance(outcome, AgentFailed):
-            await self._store.fail_run(FailExecution(record.id, owner, record.lease.fence, snapshot, outcome.error))
+            await self._store.fail_run(
+                FailExecution(
+                    record.id,
+                    owner,
+                    record.lease.fence,
+                    snapshot,
+                    outcome.error,
+                    usage_sink.last_snapshot_revision,
+                )
+            )
             raise RuntimeError(outcome.error.message)
         raise AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
 
@@ -952,6 +1026,14 @@ class ExecutionService:
         if record is None:
             raise KeyError(run_id)
         return record
+
+    async def _usage_capture(self, record: "RunRecord") -> RunUsageCapture:
+        if record.snapshot_revision == 0:
+            return RunUsageCapture()
+        snapshot = await self._store.get_snapshot(record.id)
+        if snapshot is None:
+            raise StorageError("run snapshot is missing")
+        return RunUsageCapture.from_usage(snapshot.usage)
 
     def _authorize(
         self,

@@ -8,13 +8,19 @@ from uuid import uuid4
 
 import pytest
 
-from linktools.ai.errors import ParentLeaseGuardError
+from linktools.ai.errors import ChildRunAlreadyActiveError, ParentLeaseGuardError
 from linktools.ai.execution.commands import (
     ClaimExecution,
     ParentLeaseGuard,
     StartExecution,
+    StartClaimedChildExecution,
 )
-from linktools.ai.execution.domain import RunDefinition, RunKind, RunnableType
+from linktools.ai.execution.domain import (
+    RunDefinition,
+    RunKind,
+    RunnableType,
+    compute_run_definition_hash,
+)
 
 
 def _definition(runnable_id: str) -> RunDefinition:
@@ -23,7 +29,7 @@ def _definition(runnable_id: str) -> RunDefinition:
         RunnableType.TASK,
         "swarm-task-graph.v1",
         {},
-        f"hash-{runnable_id}",
+        compute_run_definition_hash(schema="swarm-task-graph.v1", spec={}),
     )
 
 
@@ -92,11 +98,19 @@ async def test_postgresql_parent_guard_and_child_insert_are_transactional():
             parent_guard=guard,
         )
 
-        results = await asyncio.gather(
-            store_one.start_run(child_command),
-            store_two.start_run(child_command),
+        claimed_command = StartClaimedChildExecution(
+            child_command,
+            "swarm",
+            now,
+            timedelta(minutes=5),
         )
-        assert sorted(result.created for result in results) == [False, True]
+        results = await asyncio.gather(
+            store_one.start_claimed_child(claimed_command),
+            store_two.start_claimed_child(claimed_command),
+            return_exceptions=True,
+        )
+        assert sum(result.created for result in results if not isinstance(result, Exception)) == 1
+        assert sum(isinstance(result, ChildRunAlreadyActiveError) for result in results) == 1
         assert len(await store_one.list_runs_by_ids((child_id,))) == 1
 
         async with store_two.session_factory() as session:
@@ -112,16 +126,21 @@ async def test_postgresql_parent_guard_and_child_insert_are_transactional():
                     .with_for_update()
                 )
                 blocked_start = asyncio.create_task(
-                    store_one.start_run(
-                        StartExecution(
-                            stale_child_id,
-                            session_id,
-                            RunKind.TASK,
-                            definition,
-                            {},
-                            root_execution_id=parent.id,
-                            parent_execution_id=parent.id,
-                            parent_guard=guard,
+                    store_one.start_claimed_child(
+                        StartClaimedChildExecution(
+                            StartExecution(
+                                stale_child_id,
+                                session_id,
+                                RunKind.TASK,
+                                definition,
+                                {},
+                                root_execution_id=parent.id,
+                                parent_execution_id=parent.id,
+                                parent_guard=guard,
+                            ),
+                            "swarm",
+                            now,
+                            timedelta(minutes=5),
                         )
                     )
                 )

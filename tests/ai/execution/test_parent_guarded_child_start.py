@@ -10,13 +10,28 @@ from linktools.ai.execution.commands import (
     ClaimExecution,
     ParentLeaseGuard,
     StartExecution,
+    StartClaimedChildExecution,
 )
-from linktools.ai.execution.domain import RunDefinition, RunKind, RunnableType
+from linktools.ai.execution.domain import (
+    RunDefinition,
+    RunKind,
+    RunStatus,
+    RunnableType,
+    compute_run_definition_hash,
+)
 from linktools.ai.execution.persistence.local import LocalExecutionBackend
 
 
 def _definition() -> RunDefinition:
-    return RunDefinition("child", RunnableType.TASK, "swarm-task-graph.v1", {}, "hash")
+    schema = "swarm-task-graph.v1"
+    spec = {}
+    return RunDefinition(
+        "child",
+        RunnableType.TASK,
+        schema,
+        spec,
+        compute_run_definition_hash(schema=schema, spec=spec),
+    )
 
 
 async def _assert_guarded_start(store) -> None:
@@ -34,94 +49,122 @@ async def _assert_guarded_start(store) -> None:
         )
     )
     guard = ParentLeaseGuard(parent.id, "scheduler", parent.lease.fence)
-    child = await store.start_run(
-        StartExecution(
-            "child",
-            "s",
-            RunKind.TASK,
-            definition,
-            {},
-            root_execution_id=parent.id,
-            parent_execution_id=parent.id,
-            parent_guard=guard,
-        )
-    )
-    assert child.record.id == "child"
-    with pytest.raises(ParentLeaseGuardError):
-        await store.start_run(
+    child = await store.start_claimed_child(
+        StartClaimedChildExecution(
             StartExecution(
                 "child",
                 "s",
                 RunKind.TASK,
                 definition,
-                {},
-                root_execution_id=parent.id,
-                parent_execution_id=parent.id,
-                parent_guard=ParentLeaseGuard(parent.id, "stale", 0),
-            )
-        )
-    with pytest.raises(ParentLeaseGuardError):
-        await store.start_run(
-            StartExecution(
-                "stale-child",
-                "s",
-                RunKind.TASK,
-                definition,
-                {},
-                root_execution_id=parent.id,
-                parent_execution_id=parent.id,
-                parent_guard=ParentLeaseGuard(
-                    parent.id, "scheduler", parent.lease.fence - 1
-                ),
-            )
-        )
-    assert await store.get_run("stale-child") is None
-    with pytest.raises(ParentLeaseGuardError):
-        await store.start_run(
-            StartExecution(
-                "missing-guard",
-                "s",
-                RunKind.TASK,
-                definition,
-                {},
-                root_execution_id=parent.id,
-                parent_execution_id=parent.id,
-            )
-        )
-    assert await store.get_run("missing-guard") is None
-    with pytest.raises(ParentLeaseGuardError):
-        await store.start_run(
-            StartExecution(
-                "mismatched-guard",
-                "s",
-                RunKind.TASK,
-                definition,
-                {},
-                root_execution_id=parent.id,
-                parent_execution_id=parent.id,
-                parent_guard=ParentLeaseGuard(
-                    "other-parent", "scheduler", parent.lease.fence
-                ),
-            )
-        )
-    assert await store.get_run("mismatched-guard") is None
-    with pytest.raises(RunIdentityConflictError):
-        await store.start_run(
-            StartExecution(
-                "child",
-                "s",
-                RunKind.TASK,
-                RunDefinition(
-                    "different",
-                    RunnableType.TASK,
-                    "swarm-task-graph.v1",
-                    {},
-                    "different",
-                ),
                 {},
                 root_execution_id=parent.id,
                 parent_execution_id=parent.id,
                 parent_guard=guard,
+            ),
+            "swarm",
+            datetime.now(timezone.utc),
+            timedelta(minutes=5),
+        )
+    )
+    assert child.record.id == "child"
+    assert child.record.status is RunStatus.RUNNING
+    assert child.record.lease.owner == "swarm"
+    assert child.record.lease.fence == 1
+    with pytest.raises(ParentLeaseGuardError):
+        await store.start_run(
+            StartExecution(
+                "pending-child",
+                "s",
+                RunKind.TASK,
+                definition,
+                {},
+                root_execution_id=parent.id,
+                parent_execution_id=parent.id,
+                parent_guard=guard,
+            )
+        )
+    assert await store.get_run("pending-child") is None
+    with pytest.raises(ParentLeaseGuardError):
+        await store.start_claimed_child(
+            StartClaimedChildExecution(
+                StartExecution(
+                    "child", "s", RunKind.TASK, definition, {},
+                    root_execution_id=parent.id,
+                    parent_execution_id=parent.id,
+                    parent_guard=ParentLeaseGuard(parent.id, "stale", 0),
+                ),
+                "swarm",
+                datetime.now(timezone.utc),
+                timedelta(minutes=5),
+            )
+        )
+    with pytest.raises(ParentLeaseGuardError):
+        await store.start_claimed_child(
+            StartClaimedChildExecution(
+                StartExecution(
+                    "stale-child", "s", RunKind.TASK, definition, {},
+                    root_execution_id=parent.id,
+                    parent_execution_id=parent.id,
+                    parent_guard=ParentLeaseGuard(
+                        parent.id, "scheduler", parent.lease.fence - 1
+                    ),
+                ),
+                "swarm",
+                datetime.now(timezone.utc),
+                timedelta(minutes=5),
+            )
+        )
+    assert await store.get_run("stale-child") is None
+    with pytest.raises(ParentLeaseGuardError):
+        await store.start_claimed_child(
+            StartClaimedChildExecution(
+                StartExecution(
+                    "missing-guard", "s", RunKind.TASK, definition, {},
+                    root_execution_id=parent.id,
+                    parent_execution_id=parent.id,
+                ),
+                "swarm",
+                datetime.now(timezone.utc),
+                timedelta(minutes=5),
+            )
+        )
+    assert await store.get_run("missing-guard") is None
+    with pytest.raises(ParentLeaseGuardError):
+        await store.start_claimed_child(
+            StartClaimedChildExecution(
+                StartExecution(
+                    "mismatched-guard", "s", RunKind.TASK, definition, {},
+                    root_execution_id=parent.id,
+                    parent_execution_id=parent.id,
+                    parent_guard=ParentLeaseGuard(
+                        "other-parent", "scheduler", parent.lease.fence
+                    ),
+                ),
+                "swarm",
+                datetime.now(timezone.utc),
+                timedelta(minutes=5),
+            )
+        )
+    assert await store.get_run("mismatched-guard") is None
+    with pytest.raises(RunIdentityConflictError):
+        await store.start_claimed_child(
+            StartClaimedChildExecution(
+                StartExecution(
+                    "child", "s", RunKind.TASK,
+                    RunDefinition(
+                        "different", RunnableType.TASK, "swarm-task-graph.v1", {},
+                        compute_run_definition_hash(
+                            schema="swarm-task-graph.v1", spec={}
+                        ),
+                    ),
+                    {},
+                    root_execution_id=parent.id,
+                    parent_execution_id=parent.id,
+                    parent_guard=guard,
+                ),
+                "swarm",
+                datetime.now(timezone.utc),
+                timedelta(minutes=5),
             )
         )
 
@@ -135,7 +178,7 @@ async def test_local_child_start_checks_parent_guard_atomically(tmp_path):
 
 @pytest.mark.asyncio
 async def test_sql_child_start_checks_parent_guard_atomically(tmp_path):
-    sqlalchemy = pytest.importorskip("sqlalchemy")
+    pytest.importorskip("sqlalchemy")
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from linktools.ai.execution.persistence.sqlalchemy import SqlAlchemyExecutionBackend

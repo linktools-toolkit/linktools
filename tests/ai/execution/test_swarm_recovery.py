@@ -34,7 +34,7 @@ async def test_recovery_takes_over_expired_claim_with_new_fence():
     child_id = child_run_id(parent_id, "a")
     store._runs[parent_id] = _persisted_swarm_run(parent_id, spec, plan)
     child = replace(
-        _persisted_swarm_run(child_id, spec, plan),
+        _persisted_swarm_run(child_id, spec, plan, child=True),
         parent_execution_id=parent_id,
         root_execution_id=parent_id,
         status=RunStatus.COMPLETED,
@@ -88,7 +88,7 @@ async def test_recovery_timeout_keeps_parent_and_claim_nonterminal(monkeypatch):
     child_id = child_run_id(parent_id, "a")
     store._runs[parent_id] = _persisted_swarm_run(parent_id, spec, plan)
     store._runs[child_id] = replace(
-        _persisted_swarm_run(child_id, spec, plan),
+        _persisted_swarm_run(child_id, spec, plan, child=True),
         parent_execution_id=parent_id,
         root_execution_id=parent_id,
         status=RunStatus.RUNNING,

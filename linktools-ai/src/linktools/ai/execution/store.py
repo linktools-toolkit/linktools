@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         AbortExecution,
         AcknowledgeCancellation,
         ClaimExecution,
+        CheckpointExecutionUsage,
         CompleteExecution,
         DecideApproval,
         FailExecution,
@@ -28,6 +29,8 @@ if TYPE_CHECKING:
         RequestCancellation,
         ResumeExecution,
         StartExecution,
+        StartClaimedChildExecution,
+        StartClaimedChildResult,
         StartRunResult,
     )
     from .domain import RunRecord
@@ -48,6 +51,10 @@ class ExecutionStore(Protocol):
     async def get_session(self, session_id: str) -> "SessionRecord | None": ...
 
     async def start_run(self, command: "StartExecution") -> "StartRunResult": ...
+
+    async def start_claimed_child(
+        self, command: "StartClaimedChildExecution"
+    ) -> "StartClaimedChildResult": ...
 
     async def get_run(self, run_id: str) -> "RunRecord | None": ...
 
@@ -91,6 +98,10 @@ class ExecutionStore(Protocol):
     async def acknowledge_cancel(
         self, command: "AcknowledgeCancellation"
     ) -> "RunRecord": ...
+
+    async def checkpoint_run_usage(
+        self, command: "CheckpointExecutionUsage"
+    ) -> RunSnapshot: ...
 
     async def abort_run(self, command: "AbortExecution") -> "RunRecord": ...
 

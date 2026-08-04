@@ -7,7 +7,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from linktools.ai.execution.snapshots import AgentSnapshotData, RunSnapshot
 from linktools.ai.execution.trace_models import NewRunTraceStep
 from linktools.ai.execution.persistence.sqlalchemy import SnapshotRow, SqlAlchemyExecutionBackend
-from linktools.ai.execution.store import ExecutionStore
 from linktools.ai.errors import StorageConflictError
 from linktools.ai.execution.commands import (
     AbortExecution,
@@ -20,7 +19,19 @@ from linktools.ai.execution.commands import (
     ResumeExecution,
     StartExecution,
 )
-from linktools.ai.execution.domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType
+from linktools.ai.execution.domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind, RunRecord, RunStatus, RunUsage, RunnableType, compute_run_definition_hash
+
+
+def _definition() -> RunDefinition:
+    schema = "agent-spec.v1"
+    spec = {"id": "a"}
+    return RunDefinition(
+        "a",
+        RunnableType.AGENT,
+        schema,
+        spec,
+        compute_run_definition_hash(schema=schema, spec=spec),
+    )
 
 
 @pytest.mark.asyncio
@@ -30,10 +41,10 @@ async def test_sqlalchemy_execution_pages_in_database(tmp_path):
     store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
-    definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
+    definition = _definition()
     run = await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "p"))
     assert run.record.input == "p"
-    claimed = await store.claim_run(ClaimExecution("r", "w", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
+    await store.claim_run(ClaimExecution("r", "w", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
     snapshot = RunSnapshot("run-snapshot.v1", "r", 1, ({"role": "user", "content": "p"},), "done", RunStatus.COMPLETED, RunUsage(), 0, datetime.now(timezone.utc))
     async with factory() as session:
         async with session.begin():
@@ -49,7 +60,7 @@ async def _claimed_store(tmp_path, name: str = "lifecycle"):
     store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
-    definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "p"))
     now = datetime.now(timezone.utc)
     claimed = await store.claim_run(ClaimExecution("r", "worker", now, timedelta(minutes=5)))
@@ -66,7 +77,7 @@ async def test_sqlalchemy_cancel_acknowledgement_keeps_fence_until_terminal_comm
     assert cancelling.lease.owner == "worker"
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)
     cancelled = await store.acknowledge_cancel(
-        AcknowledgeCancellation("r", "worker", claimed.lease.fence, snapshot)
+        AcknowledgeCancellation("r", "worker", claimed.lease.fence, snapshot, 0)
     )
     assert cancelled.status is RunStatus.CANCELLED
     await engine.dispose()
@@ -80,6 +91,7 @@ async def test_sqlalchemy_abort_run_persists_error_with_partial_snapshot(tmp_pat
         AbortExecution(
             "r", "worker", claimed.lease.fence, snapshot,
             RunError("RuntimeError", "boom"),
+            0,
         )
     )
     assert aborted.status is RunStatus.FAILED
@@ -93,11 +105,10 @@ async def test_sqlalchemy_abort_run_persists_error_with_partial_snapshot(tmp_pat
 @pytest.mark.asyncio
 async def test_sqlalchemy_approval_decision_is_idempotent_and_immutable(tmp_path):
     engine, store, claimed = await _claimed_store(tmp_path, "approval")
-    now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)
     approval = RunApproval("approval", "call", "tool", {})
     await store.pause_run(
-        PauseExecution("r", "worker", claimed.lease.fence, snapshot, approval)
+        PauseExecution("r", "worker", claimed.lease.fence, snapshot, approval, 0)
     )
     first = await store.decide_approval(
         DecideApproval("r", "approval", "allow", "reviewer")
@@ -118,10 +129,9 @@ async def test_sqlalchemy_approval_deny_cancels_run(tmp_path):
     """Spec 2.13: a DENY decision is terminal -- execution -> CANCELLED, lease
     released, no tools run. The decision is then immutable."""
     engine, store, claimed = await _claimed_store(tmp_path, "deny")
-    now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)
     await store.pause_run(
-        PauseExecution("r", "worker", claimed.lease.fence, snapshot, RunApproval("approval", "call", "tool", {}))
+        PauseExecution("r", "worker", claimed.lease.fence, snapshot, RunApproval("approval", "call", "tool", {}), 0)
     )
     denied = await store.decide_approval(
         DecideApproval("r", "approval", ApprovalDecision.DENY, "reviewer")
@@ -150,12 +160,12 @@ async def test_store_allocates_monotonic_snapshot_revisions(tmp_path):
     engine, store, claimed = await _claimed_store(tmp_path, "rev")
     now = datetime.now(timezone.utc)
     snapshot = AgentSnapshotData((), None, RunUsage(), 0)
-    await store.pause_run(PauseExecution("r", "worker", claimed.lease.fence, snapshot, RunApproval("a", "c", "t", {})))
+    await store.pause_run(PauseExecution("r", "worker", claimed.lease.fence, snapshot, RunApproval("a", "c", "t", {}), 0))
     assert (await store.get_snapshot("r")).revision == 1
     await store.decide_approval(DecideApproval("r", "a", ApprovalDecision.ALLOW, "reviewer"))
     await store.resume_run(ResumeExecution("r"))
     reclaimed = await store.claim_run(ClaimExecution("r", "worker", now, timedelta(minutes=5)))
-    await store.pause_run(PauseExecution("r", reclaimed.lease.owner, reclaimed.lease.fence, snapshot, RunApproval("b", "c", "t", {})))
+    await store.pause_run(PauseExecution("r", reclaimed.lease.owner, reclaimed.lease.fence, snapshot, RunApproval("b", "c", "t", {}), 1))
     assert (await store.get_snapshot("r")).revision == 2
     await engine.dispose()
 
@@ -167,7 +177,7 @@ async def test_sqlalchemy_run_allows_only_one_concurrent_claim(tmp_path):
     store = SqlAlchemyExecutionBackend(factory)
     await store.initialize_storage(engine)
     await store.create_session(session_id="s", user_id="u", tenant_id="t")
-    definition = RunDefinition("a", RunnableType.AGENT, "agent-spec.v1", {"id": "a"}, "a")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "p"))
     now = datetime.now(timezone.utc)
     results = await asyncio.gather(
@@ -183,12 +193,11 @@ async def test_sqlalchemy_run_allows_only_one_concurrent_claim(tmp_path):
 @pytest.mark.asyncio
 async def test_sqlalchemy_run_commits_terminal_snapshot_exactly_once(tmp_path):
     engine, store, claimed = await _claimed_store(tmp_path, "run-result")
-    now = datetime.now(timezone.utc)
     first = AgentSnapshotData(delta_messages=(), final_output="first", usage=RunUsage(), trace_end_sequence=0)
     second = AgentSnapshotData(delta_messages=(), final_output="second", usage=RunUsage(), trace_end_sequence=0)
     results = await asyncio.gather(
-        store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, first)),
-        store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, second)),
+        store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, first, 0)),
+        store.complete_run(CompleteExecution("r", "worker", claimed.lease.fence, second, 0)),
         return_exceptions=True,
     )
     assert sum(isinstance(result, RunRecord) for result in results) == 1

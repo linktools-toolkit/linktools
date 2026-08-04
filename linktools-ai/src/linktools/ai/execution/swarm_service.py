@@ -49,6 +49,7 @@ from ..execution.domain import (
     RunStatus,
     RunUsage,
     RunnableType,
+    compute_run_definition_hash,
     sanitize_run_error,
 )
 from ..governance.authorization import AuthorizationPolicy, ExecutionAction
@@ -131,6 +132,7 @@ class ValidatedSwarmRun:
 class _RecoveryLease:
     record: RunRecord
     next_heartbeat_at: float
+    wake_event: "asyncio.Event"
 
 
 def _initial_executions(task_plan: TaskPlan) -> "tuple[TaskExecution, ...]":
@@ -167,7 +169,7 @@ def _swarm_definition(
         RunnableType.TASK,
         "swarm-task-graph.v1",
         value,
-        sha256(canonical_json_bytes(value)).hexdigest(),
+        compute_run_definition_hash(schema="swarm-task-graph.v1", spec=value),
     )
 
 
@@ -190,6 +192,8 @@ class SwarmExecutionService:
         self._authorization = authorization
         self._live_events = live_events
         self._agent_provider = agent_provider
+        self._recovery_wake_events: "dict[str, asyncio.Event]" = {}
+        self._published_node_terminal_events: "set[str]" = set()
 
     async def run_swarm(
         self,
@@ -432,6 +436,7 @@ class SwarmExecutionService:
                             error_type,
                             error_type,
                         ),
+                        claimed.snapshot_revision,
                     )
                 )
             await self._publish(
@@ -449,17 +454,23 @@ class SwarmExecutionService:
         )
         logger.debug("recovering swarm run %s", execution_id)
         try:
+            wake_event = asyncio.Event()
+            self._recovery_wake_events[execution_id] = wake_event
             recovery_lease = _RecoveryLease(
                 record=claimed,
                 next_heartbeat_at=(
                     time.monotonic() + _LEASE_DURATION.total_seconds() / 3
                 ),
+                wake_event=wake_event,
             )
-            await self._reconcile_inflight(
-                task_plan,
-                recovery_lease,
-                principal=principal,
-            )
+            try:
+                await self._reconcile_inflight(
+                    task_plan,
+                    recovery_lease,
+                    principal=principal,
+                )
+            finally:
+                self._recovery_wake_events.pop(execution_id, None)
             gate.seed_usage(
                 tuple(
                     execution.usage
@@ -714,6 +725,9 @@ class SwarmExecutionService:
                     datetime.now(timezone.utc),
                 )
             )
+        wake_event = self._recovery_wake_events.get(execution_id)
+        if wake_event is not None:
+            wake_event.set()
 
     async def _claim_for_recovery(self, record: RunRecord, owner: str) -> RunRecord:
         now = datetime.now(timezone.utc)
@@ -760,7 +774,7 @@ class SwarmExecutionService:
             principal=principal,
             on_skip=lambda nid, blk: self._publish_skip(parent_run_id, nid, blk),
             on_node_terminal=lambda nid, outcome: self._publish_node_terminal(
-                parent_run_id, nid, outcome
+                parent_run_id, task_plan.id, nid, outcome
             ),
             logger=logger,
         )
@@ -858,7 +872,7 @@ class SwarmExecutionService:
             latest = await self._store.get_run(parent_run_id)
         if latest is not None and latest.status is RunStatus.CANCELLING:
             usage = await self._sum_task_usage(task_plan)
-            await self._assert_parent_terminal_gate(
+            parent = await self._assert_parent_terminal_gate(
                 parent_run_id,
                 owner,
                 fence,
@@ -876,6 +890,7 @@ class SwarmExecutionService:
                             task_plan.id, await self._collect_nodes(task_plan)
                         ),
                     ),
+                    parent.snapshot_revision,
                 )
             )
 
@@ -890,7 +905,7 @@ class SwarmExecutionService:
         final_output: object,
         engine: "TaskGraphEngine | None" = None,
     ) -> None:
-        await self._assert_parent_terminal_gate(
+        parent = await self._assert_parent_terminal_gate(
             parent_run_id,
             owner,
             fence,
@@ -900,7 +915,12 @@ class SwarmExecutionService:
         await self._store.complete_run(
             CompleteExecution(
                 parent_run_id, owner, fence,
-                self._snapshot(task_plan, usage, final_output=final_output),
+                self._snapshot(
+                    task_plan,
+                    await self._sum_task_usage(task_plan),
+                    final_output=final_output,
+                ),
+                parent.snapshot_revision,
             )
         )
 
@@ -916,7 +936,7 @@ class SwarmExecutionService:
     ) -> None:
         usage = await self._sum_task_usage(task_plan)
         projection = collect(task_plan.id, await self._collect_nodes(task_plan))
-        await self._assert_parent_terminal_gate(
+        parent = await self._assert_parent_terminal_gate(
             parent_run_id,
             owner,
             fence,
@@ -927,6 +947,7 @@ class SwarmExecutionService:
                 parent_run_id, owner, fence,
                 self._snapshot(task_plan, usage, final_output=projection),
                 RunError(error_type, message),
+                parent.snapshot_revision,
             )
         )
 
@@ -937,7 +958,7 @@ class SwarmExecutionService:
         fence: int,
         task_plan: TaskPlan,
         engine: "TaskGraphEngine | None" = None,
-    ) -> None:
+    ) -> "RunRecord":
         if engine is not None and engine.active_count != 0:
             raise ParentTerminalGateError("engine still has active tasks")
         try:
@@ -975,10 +996,15 @@ class SwarmExecutionService:
         children = await self._store.list_runs_by_ids(child_ids)
         if len(children) != len(set(child_ids)):
             raise RunDefinitionIntegrityError("child run record is missing")
-        children_by_id = {
-            getattr(child, "id", requested_id): child
-            for requested_id, child in zip(dict.fromkeys(child_ids), children)
+        all_children = {
+            child.id
+            for child in await self._store.list_all_runs()
+            if child.parent_execution_id == parent_run_id
+            and child.kind is RunKind.TASK
         }
+        if all_children != set(child_ids):
+            raise RunDefinitionIntegrityError("child run set is inconsistent")
+        children_by_id = {child.id: child for child in children}
         for execution in executions:
             if execution.active_run_id is None:
                 continue
@@ -988,12 +1014,32 @@ class SwarmExecutionService:
             child = children_by_id.get(execution.active_run_id)
             if child is None:
                 raise RunDefinitionIntegrityError("child run record is missing")
+            node = next(
+                (candidate for candidate in task_plan.nodes if candidate.id == execution.node_id),
+                None,
+            )
+            if node is None:
+                raise RunDefinitionIntegrityError("task node is missing")
+            if (
+                child.runnable_id != node.payload.agent_id
+                or child.runnable_type is not RunnableType.AGENT
+            ):
+                raise RunDefinitionIntegrityError("child agent identity mismatch")
+            definition = child.definition
+            if (
+                definition.schema != "agent-spec.v1"
+                or compute_run_definition_hash(
+                    schema=definition.schema, spec=definition.spec
+                )
+                != definition.spec_hash
+            ):
+                raise RunDefinitionIntegrityError("child definition integrity mismatch")
             context_fields = (
                 ("parent_execution_id", parent_run_id),
-                ("root_execution_id", getattr(record, "root_execution_id", None)),
-                ("session_id", getattr(record, "session_id", None)),
-                ("tenant_id", getattr(record, "tenant_id", None)),
-                ("user_id", getattr(record, "user_id", None)),
+                ("root_execution_id", record.root_execution_id),
+                ("session_id", record.session_id),
+                ("tenant_id", record.tenant_id),
+                ("user_id", record.user_id),
             )
             if any(
                 expected is not None
@@ -1015,7 +1061,9 @@ class SwarmExecutionService:
         if (
             not isinstance(definition, dict)
             or record.definition.schema != "swarm-task-graph.v1"
-            or sha256(canonical_json_bytes(definition)).hexdigest()
+            or compute_run_definition_hash(
+                schema=record.definition.schema, spec=definition
+            )
             != record.definition.spec_hash
         ):
             raise InvalidSpecError("definition_integrity")
@@ -1061,6 +1109,26 @@ class SwarmExecutionService:
         actual_hash = sha256(canonical_json_bytes(encode_plan(task_plan))).hexdigest()
         if expected_hash != actual_hash:
             raise InvalidSpecError("plan_integrity")
+        aggregate_usage = await self._sum_task_usage(task_plan)
+        expected_output = collect(task_plan.id, await self._collect_nodes(task_plan))
+        if record.snapshot_revision > 0:
+            snapshot = await self._store.get_snapshot(parent_run_id)
+            if snapshot is None:
+                raise ParentTerminalGateError("parent snapshot is missing")
+            if canonical_json_bytes(normalize_json(snapshot.final_output)) != (
+                canonical_json_bytes(normalize_json(expected_output))
+            ):
+                raise ParentTerminalGateError("parent snapshot output mismatch")
+            snapshot_usage = TaskUsage(
+                input_tokens=snapshot.usage.input_tokens,
+                output_tokens=snapshot.usage.output_tokens,
+                total_cost=snapshot.usage.total_cost,
+                cache_write_tokens=snapshot.usage.cache_write_tokens,
+                cache_read_tokens=snapshot.usage.cache_read_tokens,
+            )
+            if snapshot_usage != aggregate_usage:
+                raise ParentTerminalGateError("parent snapshot usage mismatch")
+        return record
 
     async def _sum_task_usage(self, task_plan: TaskPlan) -> TaskUsage:
         accumulator = UsageAccumulator()
@@ -1101,6 +1169,9 @@ class SwarmExecutionService:
         cause: BaseException,
     ) -> None:
         """Persist a failed parent snapshot when graph creation cannot start."""
+        record = await self._store.get_run(parent_run_id)
+        if record is None:
+            raise StorageError("parent run disappeared during abort")
         await self._store.abort_run(
             AbortExecution(
                 parent_run_id, owner, fence,
@@ -1112,6 +1183,7 @@ class SwarmExecutionService:
                     capture_state=MessageCaptureState.UNAVAILABLE,
                 ),
                 RunError("plan_create_failed", "task plan creation failed"),
+                record.snapshot_revision,
             )
         )
 
@@ -1139,7 +1211,7 @@ class SwarmExecutionService:
                     RECOVERY_EMPTY_SCANS_REQUIRED,
                 )
                 if stable_empty_scans < RECOVERY_EMPTY_SCANS_REQUIRED:
-                    await asyncio.sleep(RECOVERY_STABILITY_INTERVAL_SECONDS)
+                    await self._wait_recovery_tick(recovery_lease)
                 continue
             stable_empty_scans = 0
             for execution in claimed:
@@ -1148,6 +1220,20 @@ class SwarmExecutionService:
                     recovery_lease,
                     principal=principal,
                 )
+
+    async def _wait_recovery_tick(self, recovery_lease: _RecoveryLease) -> None:
+        timeout = min(
+            RECOVERY_STABILITY_INTERVAL_SECONDS,
+            max(0.0, recovery_lease.next_heartbeat_at - time.monotonic()),
+        )
+        if timeout <= 0:
+            return
+        try:
+            await asyncio.wait_for(recovery_lease.wake_event.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            recovery_lease.wake_event.clear()
 
     async def _reconcile_claimed(
         self,
@@ -1328,6 +1414,7 @@ class SwarmExecutionService:
             )
             await self._publish_node_terminal(
                 child.parent_execution_id or "",
+                execution.plan_id,
                 execution.node_id,
                 NodeRunResult(
                     status=TaskStatus.COMPLETED,
@@ -1351,6 +1438,7 @@ class SwarmExecutionService:
             )
             await self._publish_node_terminal(
                 child.parent_execution_id or "",
+                execution.plan_id,
                 execution.node_id,
                 NodeRunResult(
                     status=TaskStatus.FAILED,
@@ -1377,6 +1465,7 @@ class SwarmExecutionService:
             )
             await self._publish_node_terminal(
                 child.parent_execution_id or "",
+                execution.plan_id,
                 execution.node_id,
                 NodeRunResult(
                     status=TaskStatus.FAILED,
@@ -1406,6 +1495,7 @@ class SwarmExecutionService:
                 )
                 await self._publish_node_terminal(
                     child.parent_execution_id or "",
+                    execution.plan_id,
                     execution.node_id,
                     NodeRunResult(
                         status=TaskStatus.CANCELLED,
@@ -1425,6 +1515,7 @@ class SwarmExecutionService:
                 )
                 await self._publish_node_terminal(
                     child.parent_execution_id or "",
+                    execution.plan_id,
                     execution.node_id,
                     NodeRunResult(
                         status=TaskStatus.FAILED,
@@ -1457,33 +1548,41 @@ class SwarmExecutionService:
     async def _sync_recovered_usage(
         self, execution: TaskExecution, child_run_id: str
     ) -> TaskExecution:
-        snapshot = await self._read_child_usage(child_run_id)
+        child = await self._store.get_run(child_run_id)
+        if child is None:
+            raise ChildRunMissingError(child_run_id)
+        snapshot = await self._store.get_snapshot(child_run_id)
+        if snapshot is None:
+            if child.status not in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                logger.debug(
+                    "recovery child has no usage snapshot yet child_run_id=%s status=%s",
+                    child_run_id,
+                    child.status.value,
+                )
+                return execution
+            raise ChildSnapshotError(child_run_id)
+        try:
+            usage = snapshot.usage
+            node_usage = TaskUsage(
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                total_cost=usage.total_cost,
+                cache_write_tokens=usage.cache_write_tokens,
+                cache_read_tokens=usage.cache_read_tokens,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ChildSnapshotError(child_run_id) from exc
         return await self._tasks.record_claimed_usage(
             execution.id,
             owner=execution.owner or "",
             fence=execution.fence,
-            snapshot_revision=snapshot.snapshot_revision,
-            usage=snapshot.usage,
+            snapshot_revision=snapshot.revision,
+            usage=node_usage,
         )
-
-    async def _read_child_usage(self, child_run_id: str) -> NodeUsageSnapshot:
-        snapshot = await self._store.get_snapshot(child_run_id)
-        if snapshot is None:
-            raise ChildSnapshotError(child_run_id)
-        try:
-            usage = snapshot.usage
-            return NodeUsageSnapshot(
-                usage=TaskUsage(
-                    input_tokens=usage.input_tokens,
-                    output_tokens=usage.output_tokens,
-                    total_cost=usage.total_cost,
-                    cache_write_tokens=usage.cache_write_tokens,
-                    cache_read_tokens=usage.cache_read_tokens,
-                ),
-                snapshot_revision=snapshot.revision,
-            )
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise ChildSnapshotError(child_run_id) from exc
 
     def _authorize(
         self, principal: PrincipalContext, record: RunRecord, action: ExecutionAction
@@ -1515,15 +1614,42 @@ class SwarmExecutionService:
         )
 
     async def _publish_node_terminal(
-        self, parent_run_id: str, node_id: str, outcome: NodeRunResult
+        self,
+        parent_run_id: str,
+        plan_id: str,
+        node_id: str,
+        outcome: NodeRunResult,
     ) -> None:
+        execution = await self._tasks.get_execution(task_execution_id(plan_id, node_id))
+        if execution is None:
+            logger.warning(
+                "swarm terminal event degraded missing execution parent_run_id=%s node=%s",
+                parent_run_id,
+                node_id,
+            )
+            return
+        event_id = (
+            f"swarm:{parent_run_id}:node:{node_id}:terminal:"
+            f"{execution.fence}:{outcome.status.value}"
+        )
+        if event_id in self._published_node_terminal_events:
+            return
+        self._published_node_terminal_events.add(event_id)
         if outcome.status is TaskStatus.COMPLETED:
             await self._publish(
-                SwarmStepCompleted(swarm_run_id=parent_run_id, task_id=node_id)
+                SwarmStepCompleted(
+                    swarm_run_id=parent_run_id,
+                    task_id=node_id,
+                    event_id=event_id,
+                )
             )
         elif outcome.status is TaskStatus.CANCELLED:
             await self._publish(
-                SwarmStepCancelled(swarm_run_id=parent_run_id, task_id=node_id)
+                SwarmStepCancelled(
+                    swarm_run_id=parent_run_id,
+                    task_id=node_id,
+                    event_id=event_id,
+                )
             )
         else:
             await self._publish(
@@ -1533,6 +1659,7 @@ class SwarmExecutionService:
                     error_message=(
                         outcome.error.message if outcome.error else "failed"
                     ),
+                    event_id=event_id,
                 )
             )
 
@@ -1602,7 +1729,9 @@ def _assert_persisted_integrity(
     definition = record.definition.spec
     if not isinstance(definition, dict):
         raise InvalidSpecError("definition_integrity")
-    if sha256(canonical_json_bytes(definition)).hexdigest() != record.definition.spec_hash:
+    if compute_run_definition_hash(
+        schema=record.definition.schema, spec=definition
+    ) != record.definition.spec_hash:
         raise InvalidSpecError("definition_integrity")
     if record.definition.schema != "swarm-task-graph.v1":
         raise InvalidSpecError("definition_integrity")
@@ -1967,6 +2096,16 @@ class _ChildNodeRunner(NodeRunner):
             raise ChildRunMissingError(child_run_id)
         snapshot = await self.execution_store.get_snapshot(child.id)
         if snapshot is None:
+            if child.status not in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                return NodeUsageSnapshot(
+                    usage=TaskUsage(),
+                    snapshot_revision=child.snapshot_revision,
+                    terminal=False,
+                )
             raise ChildSnapshotError(child.id)
         try:
             usage = snapshot.usage
@@ -1979,6 +2118,13 @@ class _ChildNodeRunner(NodeRunner):
                     cache_read_tokens=usage.cache_read_tokens,
                 ),
                 snapshot_revision=snapshot.revision,
+                terminal=child.status
+                in {
+                    RunStatus.COMPLETED,
+                    RunStatus.FAILED,
+                    RunStatus.CANCELLED,
+                    RunStatus.PAUSED,
+                },
             )
         except (AttributeError, TypeError, ValueError) as exc:
             raise ChildSnapshotError(child.id) from exc

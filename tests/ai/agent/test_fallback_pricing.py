@@ -32,6 +32,17 @@ from linktools.ai.model.registry import ModelRegistry
 from linktools.ai.model.resolver import ModelResolver
 
 
+class _AsyncCaptureSink:
+    def __init__(self, capture):
+        self.capture = capture
+
+    async def observe_request(self, observation, *, pricing):
+        return self.capture.observe_request(observation, pricing=pricing)
+
+    def snapshot(self):
+        return self.capture.snapshot()
+
+
 def test_capture_prices_actual_model_without_using_primary_model():
     actual = ModelPricing(
         "provider/actual",
@@ -57,7 +68,6 @@ def test_capture_prices_actual_model_without_using_primary_model():
             provider_name="provider",
             response_model_name="actual",
         ),
-        pricing_id="provider/actual",
         pricing=actual,
     )
     second_request = RequestUsage(
@@ -72,7 +82,6 @@ def test_capture_prices_actual_model_without_using_primary_model():
             provider_name="provider",
             response_model_name="actual",
         ),
-        pricing_id="provider/actual",
         pricing=actual,
     )
 
@@ -89,19 +98,16 @@ def test_capture_keeps_cost_unknown_until_authoritative_cost_arrives():
             provider_name=None,
             response_model_name=None,
         ),
-        pricing_id=None,
         pricing=None,
     )
     assert capture.snapshot().total_cost is None
     capture.observe_request(
         ModelRequestUsageObservation(
             request_key="request-authoritative",
-            usage=RequestUsage(),
+            usage=RequestUsage(total_cost=Decimal("0.21")),
             provider_name="provider",
             response_model_name="actual",
-            provider_request_cost=Decimal("0.21"),
         ),
-        pricing_id=None,
         pricing=None,
     )
     assert capture.snapshot().total_cost is None
@@ -117,7 +123,7 @@ async def test_agent_engine_records_actual_fallback_response_usage_once():
             parts=[TextPart(content="ok")],
             usage=PydanticRequestUsage(input_tokens=4, output_tokens=2),
             model_name="fallback",
-            provider_name="provider",
+            provider_name=None,
         )
 
     registry = ModelRegistry()
@@ -133,6 +139,7 @@ async def test_agent_engine_records_actual_fallback_response_usage_once():
         model_resolver=ModelResolver(registry=registry)
     ).compile(spec)
     capture = RunUsageCapture()
+    sink = _AsyncCaptureSink(capture)
     engine = AgentEngine(
         pricing_provider=StaticModelPricingProvider(
             {
@@ -162,7 +169,7 @@ async def test_agent_engine_records_actual_fallback_response_usage_once():
             cancellation=CancellationToken(),
             live_events=NoopRunLiveEventSink(),
             security_events=NoopSecurityEventSink(),
-            usage_sink=capture,
+            usage_sink=sink,
         )
 
     assert capture.snapshot().input_tokens == 8

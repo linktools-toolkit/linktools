@@ -50,26 +50,10 @@ class ModelRequestUsageObservation:
     usage: RequestUsage
     provider_name: "str | None"
     response_model_name: "str | None"
-    provider_request_cost: "Decimal | None" = None
 
     def __post_init__(self) -> None:
         if not self.request_key:
             raise ValueError("request_key must not be empty")
-        if self.provider_request_cost is not None and not isinstance(
-            self.provider_request_cost, Decimal
-        ):
-            object.__setattr__(
-                self,
-                "provider_request_cost",
-                Decimal(str(self.provider_request_cost)),
-            )
-        if self.provider_request_cost is not None and (
-            not self.provider_request_cost.is_finite()
-            or self.provider_request_cost < 0
-        ):
-            raise ValueError(
-                "provider_request_cost must be finite and non-negative"
-            )
 
 
 @dataclass(slots=True)
@@ -86,22 +70,32 @@ class RunUsageCapture:
         default_factory=dict
     )
 
+    @classmethod
+    def from_usage(cls, usage: RunUsage) -> "RunUsageCapture":
+        return cls(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            total_cost=usage.total_cost or Decimal("0"),
+            cost_known=usage.total_cost is not None,
+        )
+
     def observe_request(
         self,
         observation: ModelRequestUsageObservation,
         *,
-        pricing_id: "str | None",
         pricing: "ModelPricing | None",
-    ) -> None:
+    ) -> "RunUsage":
         existing = self.observations.get(observation.request_key)
         if existing is not None:
             if existing != observation:
                 raise UsageObservationConflictError(
                     "request key contains a different usage observation"
                 )
-            return
-        request_cost = observation.provider_request_cost
-        if request_cost is None and pricing_id is not None and pricing is not None:
+            return self.snapshot()
+        request_cost = observation.usage.total_cost
+        if request_cost is None and pricing is not None:
             request_cost = pricing.cost(
                 input_tokens=observation.usage.input_tokens,
                 output_tokens=observation.usage.output_tokens,
@@ -110,13 +104,17 @@ class RunUsageCapture:
             )
         if request_cost is None:
             self.cost_known = False
-        else:
+        elif self.cost_known:
             self.total_cost += request_cost
         self.input_tokens += observation.usage.input_tokens
         self.output_tokens += observation.usage.output_tokens
         self.cache_read_tokens += observation.usage.cache_read_tokens
         self.cache_write_tokens += observation.usage.cache_write_tokens
         self.observations[observation.request_key] = observation
+        return self.snapshot()
+
+    def has_observation(self, request_key: str) -> bool:
+        return request_key in self.observations
 
     def snapshot(self) -> "RunUsage":
         return RunUsage(
@@ -127,6 +125,24 @@ class RunUsageCapture:
             cache_read_tokens=self.cache_read_tokens,
             total_cost=self.total_cost if self.cost_known else None,
         )
+
+
+def is_run_usage_monotonic(previous: RunUsage, current: RunUsage) -> bool:
+    if current.input_tokens < previous.input_tokens:
+        return False
+    if current.output_tokens < previous.output_tokens:
+        return False
+    if current.total_tokens < previous.total_tokens:
+        return False
+    if current.cache_write_tokens < previous.cache_write_tokens:
+        return False
+    if current.cache_read_tokens < previous.cache_read_tokens:
+        return False
+    if previous.total_cost is None:
+        return current.total_cost is None
+    if current.total_cost is not None and current.total_cost < previous.total_cost:
+        return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,4 +183,5 @@ __all__: "list[str]" = [
     "RequestUsage",
     "RunSnapshot",
     "RunUsageCapture",
+    "is_run_usage_monotonic",
 ]

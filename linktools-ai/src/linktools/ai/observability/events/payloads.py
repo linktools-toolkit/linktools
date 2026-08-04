@@ -193,6 +193,7 @@ class SwarmStepCompleted:
     criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
+    event_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +203,7 @@ class SwarmStepFailed:
     swarm_run_id: str
     task_id: str
     error_message: str
+    event_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +221,7 @@ class SwarmStepCancelled:
     criticality: "ClassVar[EventCriticality]" = EventCriticality.OBSERVABILITY
     swarm_run_id: str
     task_id: str
+    event_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

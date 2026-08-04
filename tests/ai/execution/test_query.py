@@ -1,10 +1,9 @@
 import pytest
 
 from linktools.ai.execution.commands import ClaimExecution, CompleteExecution, StartExecution
-from linktools.ai.execution.domain import ApprovalDecision, MessageCaptureState, RunApproval, RunDefinition, RunKind, RunnableType, RunStatus, RunUsage
+from linktools.ai.execution.domain import ApprovalDecision, MessageCaptureState, RunApproval, RunDefinition, RunKind, RunnableType, RunStatus, RunUsage, compute_run_definition_hash
 from linktools.ai.execution.persistence.local import LocalExecutionBackend
 from linktools.ai.execution.snapshots import AgentSnapshotData
-from linktools.ai.execution.store import ExecutionStore
 from linktools.ai.execution.query import ExecutionQueryService
 from linktools.ai.governance.identity import ActorRef, PrincipalContext, ScopeSet
 
@@ -22,11 +21,23 @@ def principal_without_inspect(user: str) -> PrincipalContext:
     )
 
 
+def _definition() -> RunDefinition:
+    schema = "agent-spec.v1"
+    spec = {"id": "agent"}
+    return RunDefinition(
+        "agent",
+        RunnableType.AGENT,
+        schema,
+        spec,
+        compute_run_definition_hash(schema=schema, spec=spec),
+    )
+
+
 @pytest.mark.asyncio
 async def test_query_service_authorizes_before_returning_turns(tmp_path):
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "secret"))
     query = ExecutionQueryService(store)
     with pytest.raises(Exception):
@@ -39,7 +50,7 @@ async def test_query_service_authorizes_before_returning_turns(tmp_path):
 async def test_run_detail_effective_input_comes_from_run_record_input(tmp_path):
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "secret"))
     query = ExecutionQueryService(store)
     detail = await query.get_run_detail(run_id="r", principal=principal("u"))
@@ -50,7 +61,7 @@ async def test_run_detail_effective_input_comes_from_run_record_input(tmp_path):
 async def test_query_requires_inspect_scope(tmp_path):
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "secret"))
     query = ExecutionQueryService(store)
     with pytest.raises(Exception):
@@ -63,14 +74,13 @@ async def test_query_requires_inspect_scope(tmp_path):
 async def _complete_run_with_messages(store, run_id, owner, fence, messages):
     # Persist a terminal snapshot carrying the given delta_messages, so a run
     # ends up with a retrievable turn delta. Mirrors what ExecutionService does.
-    from datetime import datetime, timezone, timedelta
-
     await store.complete_run(
         CompleteExecution(
             run_id,
             owner,
             fence,
             AgentSnapshotData(messages, None, RunUsage(), len(messages)),
+            0,
         )
     )
 
@@ -79,7 +89,7 @@ async def _complete_run_with_messages(store, run_id, owner, fence, messages):
 async def test_get_run_messages_returns_turn_delta(tmp_path):
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     from datetime import datetime, timezone, timedelta
 
@@ -96,7 +106,7 @@ async def test_get_run_messages_empty_for_run_without_snapshot(tmp_path):
     # A run still PENDING (never completed) has no persisted snapshot -> ().
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     query = ExecutionQueryService(store)
     assert await query.get_run_messages(run_id="r", principal=principal("u")) == ()
@@ -114,7 +124,7 @@ async def test_get_run_messages_hides_unknown_run_existence(tmp_path):
 async def test_get_run_messages_requires_inspect_scope(tmp_path):
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     query = ExecutionQueryService(store)
     with pytest.raises(Exception):
@@ -133,7 +143,7 @@ async def test_get_run_messages_round_trips_through_decode(tmp_path):
 
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     from datetime import datetime, timezone, timedelta
 
@@ -157,7 +167,7 @@ async def _run_to_paused(store, run_id, owner, fence, partial, approval):
     # Persist a PAUSED snapshot: delta = m_partial, checkpoint = all_messages.
     from linktools.ai.execution.commands import PauseExecution
     await store.pause_run(
-        PauseExecution(run_id, owner, fence, AgentSnapshotData(partial, None, RunUsage(), len(partial), MessageCaptureState.COMPLETE, partial), approval)
+        PauseExecution(run_id, owner, fence, AgentSnapshotData(partial, None, RunUsage(), len(partial), MessageCaptureState.COMPLETE, partial), approval, 0)
     )
 
 
@@ -168,11 +178,11 @@ async def test_paused_then_cancelled_keeps_delta_clears_checkpoint_excludes_from
     # the paused delta.
     from datetime import datetime, timezone, timedelta
     from linktools.ai.execution.commands import RequestCancellation
-    from linktools.ai.execution.domain import RunApproval, ApprovalDecision
+    from linktools.ai.execution.domain import RunApproval
 
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     claimed = await store.claim_run(ClaimExecution("r", "runtime", datetime.now(timezone.utc), timedelta(minutes=5)))
     m_partial = ({"kind": "request", "parts": [{"type": "user_prompt", "content": "hi"}]},)
@@ -204,7 +214,7 @@ async def test_paused_then_resumed_completed_accumulates_delta_clears_checkpoint
 
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition, "hi"))
     claimed = await store.claim_run(ClaimExecution("r", "runtime", datetime.now(timezone.utc), timedelta(minutes=5)))
     m_partial = ({"kind": "request", "parts": [{"type": "user_prompt", "content": "hi"}]},)
@@ -215,7 +225,7 @@ async def test_paused_then_resumed_completed_accumulates_delta_clears_checkpoint
     reclaimed = await store.claim_run(ClaimExecution("r", "runtime", datetime.now(timezone.utc), timedelta(minutes=5)))
     m_resume = ({"kind": "response", "parts": [{"type": "text", "content": "done"}]},)
     await store.complete_run(
-        CompleteExecution("r", reclaimed.lease.owner, reclaimed.lease.fence, AgentSnapshotData(m_resume, None, RunUsage(), len(m_partial) + len(m_resume)))
+        CompleteExecution("r", reclaimed.lease.owner, reclaimed.lease.fence, AgentSnapshotData(m_resume, None, RunUsage(), len(m_partial) + len(m_resume)), 1)
     )
     query = ExecutionQueryService(store)
     # delta = m_partial + m_resume (appended once).
@@ -237,11 +247,11 @@ async def test_get_session_messages_returns_all_turns_grouped_with_capture_state
 
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     # turn 1: COMPLETED.
     await store.start_run(StartExecution("r1", "s", RunKind.USER_TURN, definition, "q1"))
     c1 = await store.claim_run(ClaimExecution("r1", "w", datetime.now(timezone.utc), timedelta(minutes=5)))
-    await store.complete_run(CompleteExecution("r1", "w", c1.lease.fence, AgentSnapshotData(({"m": 1},), None, RunUsage(), 1)))
+    await store.complete_run(CompleteExecution("r1", "w", c1.lease.fence, AgentSnapshotData(({"m": 1},), None, RunUsage(), 1), 0))
     # turn 2: CANCELLED (direct from PENDING).
     await store.start_run(StartExecution("r2", "s", RunKind.USER_TURN, definition, "q2"))
     await store.request_cancel(RequestCancellation("r2", "runtime", 0, datetime.now(timezone.utc)))
@@ -267,7 +277,7 @@ async def test_multi_turn_session_context_reconstructs_full_history_no_redundanc
 
     store = LocalExecutionBackend(tmp_path)
     await store.create_session(session_id="s", user_id="u", tenant_id="tenant")
-    definition = RunDefinition("agent", RunnableType.AGENT, "agent-spec.v1", {"id": "agent"}, "agent")
+    definition = _definition()
     per_turn_delta = []
     run_ids = []
     for n in range(1, 4):
@@ -278,7 +288,7 @@ async def test_multi_turn_session_context_reconstructs_full_history_no_redundanc
                  {"kind": "response", "parts": [{"type": "text", "content": f"a{n}"}]})
         per_turn_delta.append(delta)
         run_ids.append(run_id)
-        await store.complete_run(CompleteExecution(run_id, "w", claimed.lease.fence, AgentSnapshotData(delta, f"out{n}", RunUsage(), len(delta))))
+        await store.complete_run(CompleteExecution(run_id, "w", claimed.lease.fence, AgentSnapshotData(delta, f"out{n}", RunUsage(), len(delta)), 0))
     query = ExecutionQueryService(store)
     # (1) full history = turn1 + turn2 + turn3 deltas, in order.
     expected_full = per_turn_delta[0] + per_turn_delta[1] + per_turn_delta[2]

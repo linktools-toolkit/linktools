@@ -7,7 +7,11 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
 from typing import Generic, Literal, TypeVar
+
+from ..errors import RunDefinitionIntegrityError
+from ..json import canonical_json_bytes
 
 from typing import TYPE_CHECKING
 
@@ -63,6 +67,11 @@ class ApprovalDecision(StrEnum):
     DENY = "deny"
 
 
+def compute_run_definition_hash(*, schema: str, spec: "JsonValue") -> str:
+    payload = {"schema": schema, "spec": spec}
+    return sha256(canonical_json_bytes(payload)).hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class RunDefinition:
     runnable_id: str
@@ -70,6 +79,11 @@ class RunDefinition:
     schema: "Literal['agent-spec.v1', 'swarm-spec.v1', 'swarm-task-graph.v1']"
     spec: "JsonValue"
     spec_hash: str
+
+    def __post_init__(self) -> None:
+        expected = compute_run_definition_hash(schema=self.schema, spec=self.spec)
+        if self.spec_hash != expected:
+            raise RunDefinitionIntegrityError("definition hash mismatch")
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +189,7 @@ ALLOWED_RUN_TRANSITIONS: "dict[RunStatus, frozenset[RunStatus]]" = {
 __all__ = [
     "ALLOWED_RUN_TRANSITIONS",
     "ApprovalDecision",
+    "compute_run_definition_hash",
     "MessageCaptureState",
     "Page",
     "RunApproval",

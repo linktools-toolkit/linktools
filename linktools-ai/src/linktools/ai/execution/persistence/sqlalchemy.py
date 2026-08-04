@@ -6,6 +6,7 @@
 import asyncio
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
@@ -28,10 +29,14 @@ from linktools.core import environ
 from ...storage.coordination.lease import Lease, claim, is_expired, renew
 from ...storage.database import CoordinationScope
 from ...errors import (
+    ChildRunAlreadyActiveError,
     ParentLeaseGuardError,
+    RunDefinitionIntegrityError,
     RunIdentityConflictError,
     StorageConflictError,
+    StorageCorruptionError,
     StorageError,
+    UsageObservationConflictError,
 )
 from ...json import JsonValue, normalize_json
 from ..lifecycle import (
@@ -58,15 +63,22 @@ from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
 from ...evaluation import RunEvaluation
 from ..session import SessionRecord, SessionTurn
-from ..snapshots import RunSnapshot
+from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
-from ..commands import StartRunResult, run_record_identity, start_execution_identity
+from ..commands import (
+    StartClaimedChildResult,
+    StartRunResult,
+    run_record_identity,
+    start_execution_identity,
+)
+from ..domain import compute_run_definition_hash
 
 if TYPE_CHECKING:
     from ..commands import (
         AbortExecution,
         AcknowledgeCancellation,
         ClaimExecution,
+        CheckpointExecutionUsage,
         CompleteExecution,
         DecideApproval,
         FailExecution,
@@ -75,6 +87,7 @@ if TYPE_CHECKING:
         RequestCancellation,
         ResumeExecution,
         StartExecution,
+        StartClaimedChildExecution,
     )
     from ..snapshots import AgentSnapshotData
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -217,13 +230,22 @@ async def _none() -> None:
 
 def _record(row: ExecutionRow) -> RunRecord:
     data = row.data or {}
+    definition_data = dict(row.definition)
+    definition_data["runnable_type"] = RunnableType(
+        definition_data["runnable_type"]
+    )
+    definition = RunDefinition(**definition_data)
+    if row.definition_hash != compute_run_definition_hash(
+        schema=definition.schema, spec=definition.spec
+    ):
+        raise RunDefinitionIntegrityError("persisted definition hash mismatch")
     return RunRecord(
         id=row.execution_id,
         session_id=row.session_id,
         kind=RunKind(row.kind),
         runnable_id=row.runnable_id,
         runnable_type=RunnableType(row.runnable_type),
-        definition=RunDefinition(**row.definition),
+        definition=definition,
         status=RunStatus(row.status),
         session_turn_sequence=row.session_turn_sequence,
         parent_execution_id=row.parent_execution_id,
@@ -271,9 +293,12 @@ class SqlAlchemyExecutionBackend:
         return await session.scalar(statement.with_for_update() if for_update else statement)
 
     @staticmethod
-    async def _snapshot_row(session, run_id: str):
+    async def _snapshot_row(
+        session, run_id: str, *, for_update: bool = False
+    ):
+        statement = select(SnapshotRow).where(SnapshotRow.execution_id == run_id)
         return await session.scalar(
-            select(SnapshotRow).where(SnapshotRow.execution_id == run_id)
+            statement.with_for_update() if for_update else statement
         )
 
     @staticmethod
@@ -475,6 +500,235 @@ class SqlAlchemyExecutionBackend:
         except IntegrityError:
             return await self._resolve_start_conflict(command)
 
+    async def start_claimed_child(
+        self, command: "StartClaimedChildExecution"
+    ) -> "StartClaimedChildResult":
+        try:
+            return await self._start_claimed_child_once(command)
+        except IntegrityError:
+            return await self._resolve_claimed_child_conflict(command)
+
+    async def _start_claimed_child_once(
+        self, command: "StartClaimedChildExecution"
+    ) -> "StartClaimedChildResult":
+        start = command.start
+        if start.kind is not RunKind.TASK or start.parent_guard is None:
+            raise ParentLeaseGuardError("task child requires parent lease guard")
+        async with self.session_factory() as session:
+            async with session.begin():
+                owner = await self._session_row(
+                    session, start.session_id, for_update=True
+                )
+                if owner is None:
+                    raise StorageError("unknown session")
+                parent = await self._run_row(
+                    session, start.parent_guard.run_id, for_update=True
+                )
+                self._assert_child_parent_guard(
+                    start,
+                    parent,
+                    command.now,
+                    session_id=owner.session_id,
+                    tenant_id=owner.tenant_id,
+                    user_id=owner.user_id,
+                )
+                existing = await self._run_row(
+                    session, start.run_id, for_update=True
+                )
+                identity = start_execution_identity(
+                    start, tenant_id=owner.tenant_id, user_id=owner.user_id
+                )
+                if existing is not None:
+                    return await self._claim_existing_child(
+                        session, existing, identity, command
+                    )
+                lease = claim(
+                    Lease(),
+                    owner=command.child_owner,
+                    now=command.now,
+                    duration=command.lease_duration,
+                )
+                row = ExecutionRow(
+                    execution_id=start.run_id,
+                    session_id=start.session_id,
+                    kind=RunKind.TASK.value,
+                    runnable_id=start.definition.runnable_id,
+                    runnable_type=start.definition.runnable_type.value,
+                    session_turn_sequence=None,
+                    parent_execution_id=start.parent_execution_id,
+                    root_execution_id=start.root_execution_id or start.run_id,
+                    status=RunStatus.RUNNING.value,
+                    definition=asdict(start.definition),
+                    definition_hash=compute_run_definition_hash(
+                        schema=start.definition.schema, spec=start.definition.spec
+                    ),
+                    data={"input": start.input},
+                    owner=lease.owner,
+                    fence=lease.fence,
+                    lease_expires_at=lease.expires_at,
+                    cancel_requested_at=None,
+                    snapshot_revision=0,
+                    trace_sequence=0,
+                    event_sequence=2,
+                    tenant_id=owner.tenant_id,
+                    user_id=owner.user_id,
+                    created_at=command.now,
+                    updated_at=command.now,
+                )
+                session.add(row)
+                session.add_all(
+                    (
+                        EventRow(
+                            execution_id=start.run_id,
+                            sequence=1,
+                            type="run.started",
+                            payload={},
+                            created_at=command.now,
+                        ),
+                        EventRow(
+                            execution_id=start.run_id,
+                            sequence=2,
+                            type="run.claimed",
+                            payload={},
+                            created_at=command.now,
+                        ),
+                    )
+                )
+                await session.flush()
+                logger.debug(
+                    "child %s started directly RUNNING owner=%s fence=%s",
+                    start.run_id,
+                    command.child_owner,
+                    lease.fence,
+                )
+                return StartClaimedChildResult(
+                    _record(row), created=True, terminal=False
+                )
+
+    @staticmethod
+    def _assert_child_parent_guard(
+        start: "StartExecution",
+        parent: "ExecutionRow | None",
+        now: datetime,
+        *,
+        session_id: str,
+        tenant_id: str | None,
+        user_id: str | None,
+    ) -> None:
+        if start.parent_execution_id != start.parent_guard.run_id:
+            raise ParentLeaseGuardError(
+                "parent lease guard does not match child parent"
+            )
+        if parent is None:
+            raise ParentLeaseGuardError("parent run does not exist")
+        if (
+            parent.session_id != session_id
+            or parent.root_execution_id != start.root_execution_id
+            or parent.tenant_id != tenant_id
+            or parent.user_id != user_id
+        ):
+            raise ParentLeaseGuardError("child context does not match parent")
+        if (
+            parent.status != RunStatus.RUNNING.value
+            or parent.owner != start.parent_guard.owner
+            or parent.fence != start.parent_guard.fence
+            or is_expired(
+                Lease(parent.owner, parent.fence, parent.lease_expires_at), now
+            )
+        ):
+            raise ParentLeaseGuardError("parent lease guard rejected child")
+
+    async def _claim_existing_child(
+        self,
+        session,
+        row: "ExecutionRow",
+        identity,
+        command: "StartClaimedChildExecution",
+    ) -> "StartClaimedChildResult":
+        record = _record(row)
+        if run_record_identity(record) != identity:
+            raise RunIdentityConflictError("run id reused with a different start identity")
+        if record.status in {
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+        }:
+            return StartClaimedChildResult(record, created=False, terminal=True)
+        if record.status is not RunStatus.PENDING:
+            raise ChildRunAlreadyActiveError(record.id)
+        lease = claim(
+            record.lease,
+            owner=command.child_owner,
+            now=command.now,
+            duration=command.lease_duration,
+        )
+        event_sequence = row.event_sequence + 1
+        result = await session.execute(
+            update(ExecutionRow)
+            .where(
+                ExecutionRow.execution_id == row.execution_id,
+                ExecutionRow.status == RunStatus.PENDING.value,
+                ExecutionRow.event_sequence == row.event_sequence,
+            )
+            .values(
+                status=RunStatus.RUNNING.value,
+                owner=lease.owner,
+                fence=lease.fence,
+                lease_expires_at=lease.expires_at,
+                event_sequence=event_sequence,
+                updated_at=command.now,
+            )
+        )
+        if result.rowcount != 1:
+            raise StorageConflictError("child claim conflict")
+        row.status = RunStatus.RUNNING.value
+        row.owner = lease.owner
+        row.fence = lease.fence
+        row.lease_expires_at = lease.expires_at
+        row.event_sequence = event_sequence
+        row.updated_at = command.now
+        session.add(
+            EventRow(
+                execution_id=row.execution_id,
+                sequence=event_sequence,
+                type="run.claimed",
+                payload={},
+                created_at=command.now,
+            )
+        )
+        await session.flush()
+        return StartClaimedChildResult(_record(row), created=False, terminal=False)
+
+    async def _resolve_claimed_child_conflict(
+        self, command: "StartClaimedChildExecution"
+    ) -> "StartClaimedChildResult":
+        start = command.start
+        async with self.session_factory() as session:
+            async with session.begin():
+                owner = await self._session_row(
+                    session, start.session_id, for_update=True
+                )
+                if owner is None:
+                    raise StorageError("unknown session")
+                parent = await self._run_row(
+                    session, start.parent_guard.run_id, for_update=True
+                )
+                self._assert_child_parent_guard(
+                    start,
+                    parent,
+                    command.now,
+                    session_id=owner.session_id,
+                    tenant_id=owner.tenant_id,
+                    user_id=owner.user_id,
+                )
+                row = await self._run_row(session, start.run_id, for_update=True)
+                if row is None:
+                    raise StorageConflictError("child start conflict")
+                identity = start_execution_identity(
+                    start, tenant_id=owner.tenant_id, user_id=owner.user_id
+                )
+                return await self._claim_existing_child(session, row, identity, command)
+
     async def _start_run_once(self, command: "StartExecution") -> StartRunResult:
         async with self.session_factory() as session:
             async with session.begin():
@@ -486,9 +740,10 @@ class SqlAlchemyExecutionBackend:
                 if (
                     command.kind is RunKind.TASK
                     and command.parent_execution_id is not None
-                    and command.parent_guard is None
                 ):
-                    raise ParentLeaseGuardError("task_graph child requires parent guard")
+                    raise ParentLeaseGuardError(
+                        "task_graph child must use atomic child start"
+                    )
                 if (
                     command.parent_guard is not None
                     and command.parent_execution_id != command.parent_guard.run_id
@@ -550,7 +805,10 @@ class SqlAlchemyExecutionBackend:
                     root_execution_id=command.root_execution_id or command.run_id,
                     status=RunStatus.PENDING.value,
                     definition=asdict(command.definition),
-                    definition_hash=command.definition.spec_hash,
+                    definition_hash=compute_run_definition_hash(
+                        schema=command.definition.schema,
+                        spec=command.definition.spec,
+                    ),
                     data={"input": command.input},
                     owner=None,
                     fence=0,
@@ -827,7 +1085,7 @@ class SqlAlchemyExecutionBackend:
     ) -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, run_id)
+                row = await self._run_row(session, run_id, for_update=True)
                 if row is None:
                     raise StorageError("unknown run")
                 if row.status not in {
@@ -877,7 +1135,9 @@ class SqlAlchemyExecutionBackend:
     async def heartbeat_run(self, command: "HeartbeatExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id)
+                row = await self._run_row(
+                    session, command.run_id, for_update=True
+                )
                 if row is None:
                     raise StorageError("unknown run")
                 lease = renew(
@@ -1187,7 +1447,7 @@ class SqlAlchemyExecutionBackend:
     ) -> int:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, run_id)
+                row = await self._run_row(session, run_id, for_update=True)
                 if row is None or row.trace_sequence != expected_sequence:
                     raise StorageConflictError("trace sequence conflict")
                 next_sequence = expected_sequence + len(steps)
@@ -1263,18 +1523,31 @@ class SqlAlchemyExecutionBackend:
         fence: int,
         snapshot: "AgentSnapshotData",
         status: RunStatus,
+        expected_snapshot_revision: int,
         pending_approval: "RunApproval | None" = None,
         error: "RunError | None" = None,
     ) -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, run_id)
+                row = await self._run_row(session, run_id, for_update=True)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
                 now = datetime.now(timezone.utc)
+                if row.snapshot_revision != expected_snapshot_revision:
+                    raise StorageConflictError("run snapshot revision changed")
                 assert_owner(record, owner, fence, now)
                 assert_transition(record.status, status)
+                current_snapshot = await self._snapshot_row(
+                    session, run_id, for_update=True
+                )
+                if row.snapshot_revision > 0 and current_snapshot is None:
+                    raise StorageCorruptionError("run snapshot is missing")
+                if current_snapshot is not None and not is_run_usage_monotonic(
+                    RunUsage(**((current_snapshot.outcome or {}).get("usage") or {})),
+                    snapshot.usage,
+                ):
+                    raise StorageConflictError("run usage regressed")
                 event_sequence = row.event_sequence + 1
                 # The store allocates the snapshot revision (expected + 1), not
                 # the engine; the CAS on the row's snapshot_revision fences out
@@ -1428,7 +1701,8 @@ class SqlAlchemyExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.PAUSED,
-            command.pending_approval,
+            expected_snapshot_revision=command.expected_snapshot_revision,
+            pending_approval=command.pending_approval,
         )
 
     async def complete_run(self, command: "CompleteExecution") -> RunRecord:
@@ -1438,6 +1712,7 @@ class SqlAlchemyExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.COMPLETED,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
 
     async def fail_run(self, command: "FailExecution") -> RunRecord:
@@ -1448,6 +1723,7 @@ class SqlAlchemyExecutionBackend:
             command.snapshot,
             RunStatus.FAILED,
             error=command.error,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
 
     async def acknowledge_cancel(self, command: "AcknowledgeCancellation") -> RunRecord:
@@ -1457,20 +1733,166 @@ class SqlAlchemyExecutionBackend:
             command.fence,
             command.snapshot,
             RunStatus.CANCELLED,
+            expected_snapshot_revision=command.expected_snapshot_revision,
         )
+
+    async def checkpoint_run_usage(
+        self, command: "CheckpointExecutionUsage"
+    ) -> RunSnapshot:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._run_row(
+                    session, command.run_id, for_update=True
+                )
+                if row is None:
+                    raise StorageError("unknown run")
+                record = _record(row)
+                if record.status not in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+                    raise StorageConflictError("run is not checkpointable")
+                assert_owner(record, command.owner, command.fence, datetime.now(timezone.utc))
+                if row.snapshot_revision != command.expected_snapshot_revision:
+                    current = await self._snapshot_row(
+                        session, command.run_id, for_update=True
+                    )
+                    if current is not None:
+                        latest = RunUsage(
+                            **((current.outcome or {}).get("usage") or {})
+                        )
+                        if latest == command.usage or is_run_usage_monotonic(
+                            command.usage, latest
+                        ):
+                            return RunSnapshot(
+                                "run-snapshot.v1",
+                                command.run_id,
+                                current.revision,
+                                tuple(current.resume_messages or ()),
+                                (current.outcome or {}).get("final_output"),
+                                RunStatus(current.status),
+                                latest,
+                                current.trace_end_sequence,
+                                current.created_at,
+                            )
+                    if row.snapshot_revision > 0:
+                        raise StorageCorruptionError("run snapshot is missing")
+                    raise UsageObservationConflictError(
+                        "usage checkpoint revision carries a conflicting usage"
+                    )
+                current = await self._snapshot_row(
+                    session, command.run_id, for_update=True
+                )
+                if row.snapshot_revision > 0 and current is None:
+                    raise StorageCorruptionError("run snapshot is missing")
+                previous_usage = RunUsage(total_cost=Decimal("0"))
+                if current is not None:
+                    previous_usage = RunUsage(
+                        **((current.outcome or {}).get("usage") or {})
+                    )
+                if not is_run_usage_monotonic(previous_usage, command.usage):
+                    raise StorageConflictError("run usage regressed")
+                now = datetime.now(timezone.utc)
+                revision = row.snapshot_revision + 1
+                event_sequence = row.event_sequence + 1
+                result = await session.execute(
+                    update(ExecutionRow)
+                    .where(
+                        ExecutionRow.execution_id == command.run_id,
+                        ExecutionRow.status == row.status,
+                        ExecutionRow.owner == command.owner,
+                        ExecutionRow.fence == command.fence,
+                        ExecutionRow.snapshot_revision
+                        == command.expected_snapshot_revision,
+                    )
+                    .values(
+                        snapshot_revision=revision,
+                        trace_sequence=command.trace_end_sequence,
+                        event_sequence=event_sequence,
+                        updated_at=now,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise StorageConflictError("run usage checkpoint conflict")
+                if current is None:
+                    session.add(
+                        SnapshotRow(
+                            execution_id=command.run_id,
+                            revision=revision,
+                            resume_messages=[],
+                            outcome={
+                                "final_output": None,
+                                "usage": _snapshot_usage_payload(command.usage),
+                            },
+                            status=record.status.value,
+                            trace_end_sequence=command.trace_end_sequence,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                    )
+                else:
+                    current.revision = revision
+                    current.resume_messages = []
+                    current.outcome = {
+                        "final_output": None,
+                        "usage": _snapshot_usage_payload(command.usage),
+                    }
+                    current.status = record.status.value
+                    current.trace_end_sequence = command.trace_end_sequence
+                    current.updated_at = now
+                row.snapshot_revision = revision
+                row.trace_sequence = command.trace_end_sequence
+                row.event_sequence = event_sequence
+                row.updated_at = now
+                session.add(
+                    EventRow(
+                        execution_id=command.run_id,
+                        sequence=event_sequence,
+                        type="run.usage_checkpoint",
+                        payload={},
+                        created_at=now,
+                    )
+                )
+                await session.flush()
+                logger.debug(
+                    "run %s usage checkpoint revision=%s trace=%s",
+                    command.run_id,
+                    revision,
+                    command.trace_end_sequence,
+                )
+                return RunSnapshot(
+                    "run-snapshot.v1",
+                    command.run_id,
+                    revision,
+                    (),
+                    None,
+                    record.status,
+                    command.usage,
+                    command.trace_end_sequence,
+                    now,
+                )
 
     async def abort_run(self, command: "AbortExecution") -> RunRecord:
         async with self.session_factory() as session:
             async with session.begin():
-                row = await self._run_row(session, command.run_id)
+                row = await self._run_row(session, command.run_id, for_update=True)
                 if row is None:
                     raise StorageError("unknown run")
                 record = _record(row)
+                if row.snapshot_revision != command.expected_snapshot_revision:
+                    raise StorageConflictError("run snapshot revision changed")
                 if record.status is not RunStatus.PENDING:
                     assert_owner(
                         record, command.owner, command.fence, datetime.now(timezone.utc)
                     )
                 assert_transition(record.status, RunStatus.FAILED)
+                current = await self._snapshot_row(
+                    session, command.run_id, for_update=True
+                )
+                if row.snapshot_revision > 0 and current is None:
+                    raise StorageCorruptionError("run snapshot is missing")
+                if current is not None and not is_run_usage_monotonic(
+                    RunUsage(**((current.outcome or {}).get("usage") or {})),
+                    command.snapshot.usage,
+                ):
+                    raise StorageConflictError("run usage regressed")
                 event_sequence = row.event_sequence + 1
                 now = datetime.now(timezone.utc)
                 snapshot_revision = row.snapshot_revision + 1
