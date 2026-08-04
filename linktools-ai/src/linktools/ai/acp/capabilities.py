@@ -25,8 +25,8 @@ class CapabilityInput:
     supports_fork: bool = True
     supports_resume: bool = True
     supports_close: bool = True
-    supports_mcp_http: bool = False
-    supports_mcp_sse: bool = False
+    supports_mcp_http: bool = True
+    supports_mcp_sse: bool = True
     supports_mcp_acp: bool = False
 
 
@@ -37,7 +37,11 @@ class CapabilityBuilder:
         import acp.schema as schema
 
         client = client_capabilities
-        additional_directories = bool(getattr(client, "fs", None))
+        fs = getattr(client, "fs", None)
+        additional_directories = bool(
+            fs is not None
+            and (getattr(fs, "read_text_file", False) or getattr(fs, "write_text_file", False))
+        )
         prompt = schema.PromptCapabilities(
             image=values.image,
             audio=values.audio,

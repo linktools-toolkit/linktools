@@ -4,6 +4,7 @@
 """ACP adapter errors and JSON-RPC mappings."""
 
 from uuid import uuid4
+from typing import Any, Mapping
 
 from linktools.errors import ConfigError
 
@@ -35,7 +36,13 @@ def require_sdk() -> object:
     return acp
 
 
-def request_error(reason: str, *, session_id: "str | None" = None, execution_id: "str | None" = None) -> Exception:
+def request_error(
+    reason: str,
+    *,
+    session_id: "str | None" = None,
+    execution_id: "str | None" = None,
+    details: "Mapping[str, Any] | None" = None,
+) -> Exception:
     import acp
 
     data = {"errorId": uuid4().hex, "reason": reason}
@@ -43,10 +50,18 @@ def request_error(reason: str, *, session_id: "str | None" = None, execution_id:
         data["sessionId"] = session_id
     if execution_id is not None:
         data["executionId"] = execution_id
+    if details:
+        data.update(details)
     return acp.RequestError.invalid_params(data)
 
 
-def internal_error(reason: str, *, session_id: "str | None" = None, execution_id: "str | None" = None) -> Exception:
+def internal_error(
+    reason: str,
+    *,
+    session_id: "str | None" = None,
+    execution_id: "str | None" = None,
+    details: "Mapping[str, Any] | None" = None,
+) -> Exception:
     import acp
 
     data = {"errorId": uuid4().hex, "reason": reason}
@@ -54,6 +69,8 @@ def internal_error(reason: str, *, session_id: "str | None" = None, execution_id
         data["sessionId"] = session_id
     if execution_id is not None:
         data["executionId"] = execution_id
+    if details:
+        data.update(details)
     return acp.RequestError.internal_error(data)
 
 

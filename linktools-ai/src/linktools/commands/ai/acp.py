@@ -39,8 +39,10 @@ async def _run(args: "Namespace") -> int:
     require_sdk()
     from linktools.ai.acp.agent import LinktoolsAcpAgent
     from linktools.ai.acp.capabilities import AcpMode, CapabilityInput
-    from linktools.ai.acp.persistence import ProjectProcessLock
+    from linktools.ai.acp.client_services import AcpClientServices
+    from linktools.ai.acp.persistence import AcpSessionRepository, ProjectProcessLock
     from linktools.ai.acp.server import serve_stdio
+    from linktools.ai.acp.sessions import AcpSessionService
     from linktools.ai.cli.project import load_project
     from linktools.ai.cli.runtime import build_cli_runtime, load_agent_spec
     from linktools.ai.cli.client import trusted_local_principal
@@ -72,11 +74,21 @@ async def _run(args: "Namespace") -> int:
         return await load_agent_spec(bundle, mode_id)
 
     modes = tuple(AcpMode(mode_id, mode_id) for mode_id in mode_ids)
+    client_services = AcpClientServices(project_root=project.root)
+    session_service = AcpSessionService(
+        runtime=bundle.runtime,
+        repository=AcpSessionRepository(project.state_root),
+        project_root=project.root,
+        principal=trusted_local_principal(),
+        default_mode_id=modes[0].id,
+        mode_ids=tuple(mode.id for mode in modes),
+        client_services=client_services,
+    )
     agent = LinktoolsAcpAgent(
         runtime=bundle.runtime,
-        state_root=str(project.state_root),
+        event_hub=hub,
+        session_service=session_service,
         project_root=str(project.root),
-        principal=trusted_local_principal(),
         spec_resolver=resolve,
         modes=modes,
         capability_input=CapabilityInput(modes=modes),

@@ -53,4 +53,4 @@ class Command(BaseCommandGroup):
 
 command = Command()
 if __name__ == '__main__':
-    command.main()
+    raise SystemExit(command.main())

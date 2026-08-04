@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 from ..agent.sandbox.protocols import Sandbox
 from ..agent.mcp.connection import MCPConnectionPool
+from ..execution.live_events import ExecutionEventHub
 from ..errors import PrincipalAccessDeniedError
 from ..governance.identity import PrincipalContext
 
@@ -43,6 +44,7 @@ class Runtime:
     tool_execution_ready: bool
     sandbox: "Sandbox | None" = None
     mcp_connections: "MCPConnectionPool | None" = None
+    execution_event_hub: "ExecutionEventHub | None" = None
     swarm: "SwarmExecutionService | None" = None
 
     async def run(

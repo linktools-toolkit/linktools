@@ -38,6 +38,7 @@ from ..agent.tool.persistence import LocalToolStateBackend
 from ..agent.tool.policy import ResolvedToolPolicy
 from ..execution.commands import ParentLeaseGuard
 from ..execution.domain import RunStatus
+from ..execution.live_events import ExecutionEventHub
 from ..governance.identity import trusted_local_principal
 from ..runtime import (
     LocalDirectoryStorage,
@@ -274,6 +275,7 @@ def build_cli_runtime(
             tools=True,
             tool_exposure=ToolExposurePolicy(expose_execution_tools=True),
         ),
+        event_hub=live_events if isinstance(live_events, ExecutionEventHub) else None,
     )
     subagent_provider.executor = _LocalSubagentExecutor(
         runtime=runtime,

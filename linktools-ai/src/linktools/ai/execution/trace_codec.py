@@ -11,7 +11,7 @@ shape for human-readable inspection but do not affect resume fidelity.
 
 
 from datetime import datetime, timezone
-from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart, ModelMessagesTypeAdapter
+from pydantic_ai.messages import ModelRequest, ModelResponse, SystemPromptPart, TextPart, ThinkingPart, ToolCallPart, ToolReturnPart, UserPromptPart, ModelMessagesTypeAdapter
 from ..json import normalize_json
 
 from typing import TYPE_CHECKING
@@ -35,6 +35,8 @@ def _part(value: object) -> "JsonValue":
         return {"type": "user_prompt", "content": normalize_json(value.content)}
     if isinstance(value, TextPart):
         return {"type": "text", "content": value.content}
+    if isinstance(value, ThinkingPart):
+        return {"type": "thinking", "content": value.content}
     if isinstance(value, ToolCallPart):
         return {"type": "tool_call", "call_id": value.tool_call_id, "tool_name": value.tool_name, "arguments": normalize_json(value.args)}
     if isinstance(value, ToolReturnPart):

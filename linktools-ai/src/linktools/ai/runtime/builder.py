@@ -15,7 +15,7 @@ from ..agent.tool.service import ToolExecutionService
 from ..agent.tool.exposure import ToolAssembler
 from ..agent.builtin import BuiltinToolProvider
 from ..errors import RuntimeInitializationError, StorageFeatureSupportError
-from ..execution.live_events import NoopRunLiveEventSink, NoopSecurityEventSink
+from ..execution.live_events import ExecutionEventHub, NoopRunLiveEventSink, NoopSecurityEventSink
 from ..execution.query import ExecutionQueryService
 from ..execution.service import ExecutionService
 from ..execution import trace_codec
@@ -39,6 +39,7 @@ def build_runtime(
     dependencies: "RuntimeDependencies | None" = None,
     requirements: RuntimeRequirements = RuntimeRequirements(),
     model_resolver: "ModelResolver | None" = None,
+    event_hub: "ExecutionEventHub | None" = None,
 ) -> Runtime:
     if requirements.topology is RuntimeTopology.MULTI_PROCESS:
         coordinated = {
@@ -132,7 +133,11 @@ def build_runtime(
         trace_codec=trace_codec,
     )
     codec = AgentSpecCodec(output_types=dependencies.output_types)
-    live_events = dependencies.live_events or NoopRunLiveEventSink()
+    if event_hub is not None and dependencies.live_events not in (None, event_hub):
+        raise RuntimeInitializationError(
+            "event_hub conflicts with the configured live event sink"
+        )
+    live_events = event_hub or dependencies.live_events or NoopRunLiveEventSink()
     execution = ExecutionService(
         storage.execution,
         compiler,
@@ -173,6 +178,13 @@ def build_runtime(
         mcp_connections=(
             dependencies.mcp_provider.connections
             if dependencies.mcp_provider is not None
+            else None
+        ),
+        execution_event_hub=(
+            event_hub
+            if event_hub is not None
+            else live_events
+            if isinstance(live_events, ExecutionEventHub)
             else None
         ),
         swarm=swarm,

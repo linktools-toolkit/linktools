@@ -18,7 +18,6 @@ from ..execution.live_events import (
     ExecutionFailed,
     ExecutionPaused,
 )
-from ..governance.identity import PrincipalContext
 from ..runtime.facade import Runtime
 from .capabilities import AcpMode, CapabilityBuilder, CapabilityInput
 from .client_services import AcpClientServices
@@ -26,8 +25,12 @@ from .content_mapper import AcpContentMapper
 from .errors import internal_error, request_error
 from .event_mapper import AcpEventMapper
 from .execution import AcpExecutionAdapter
-from .persistence import AcpSessionRepository
-from .sessions import AcpSessionService, ActiveAcpSession
+from .history_mapper import AcpHistoryMapper
+from .sessions import (
+    AcpSessionService,
+    ActiveAcpSession,
+    PendingPermissionToken,
+)
 
 logger = logging.getLogger("linktools.ai.acp.agent")
 
@@ -72,9 +75,9 @@ class LinktoolsAcpAgent:
         self,
         *,
         runtime: Runtime,
-        state_root: str,
+        event_hub: ExecutionEventHub,
+        session_service: AcpSessionService,
         project_root: str,
-        principal: PrincipalContext,
         spec_resolver: Callable[[str], Awaitable[Any]],
         modes: "tuple[AcpMode, ...]" = (),
         capability_input: "CapabilityInput | None" = None,
@@ -92,17 +95,17 @@ class LinktoolsAcpAgent:
                 modes=(AcpMode("default", "Default"),),
             )
         self.capability_builder = CapabilityBuilder()
-        self.event_hub = ExecutionEventHub()
+        if runtime.execution_event_hub is not event_hub:
+            raise ValueError("ACP Agent and Runtime must share one ExecutionEventHub")
+        if session_service.runtime is not runtime:
+            raise ValueError("ACP Agent and SessionService must share one Runtime")
+        self.event_hub = event_hub
         self.event_mapper = AcpEventMapper()
-        self.client_services = AcpClientServices(project_root=project_root)
-        self.sessions = AcpSessionService(
-            runtime=runtime,
-            repository=AcpSessionRepository(state_root),
-            project_root=project_root,
-            principal=principal,
-            default_mode_id=self.capability_input.modes[0].id,
-            mode_ids=tuple(mode.id for mode in self.capability_input.modes),
+        self.client_services = session_service.client_services or AcpClientServices(
+            project_root=project_root
         )
+        session_service.client_services = self.client_services
+        self.sessions = session_service
         self._initialized = False
         self._client_capabilities: Any = None
         self._connection: Any = None
@@ -117,7 +120,7 @@ class LinktoolsAcpAgent:
                     logger.debug("ACP event consumer cancellation failed execution=%s", execution_id)
                 return
 
-    def handler_registry(self) -> dict[str, Callable[..., Any]]:
+    def handler_registry(self) -> "dict[str, Callable[..., Any]]":
         return {method: getattr(self, name) for method, name in STANDARD_AGENT_METHODS.items()}
 
     def on_connect(self, connection: Any) -> None:
@@ -197,6 +200,11 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
+        views = await self.runtime.get_session_messages(
+            session_id=session_id,
+            principal=self.sessions.principal,
+        )
+        history_updates = AcpHistoryMapper().preflight(session_id, views)
         active = await self.sessions.load_or_resume(
             session_id=session_id,
             cwd=cwd,
@@ -204,7 +212,7 @@ class LinktoolsAcpAgent:
             mcp_servers=mcp_servers,
             replay=True,
         )
-        await self._replay_history(active)
+        await self._replay_history(active, history_updates)
         return schema.LoadSessionResponse(modes=self._mode_state(active.record.mode_id), configOptions=[])
 
     @_protocol_handler
@@ -243,7 +251,16 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        await self.sessions.close(session_id)
+        result = await self.sessions.close_session_resources(session_id, reason="client")
+        if not result.closed:
+            raise internal_error(
+                "session_cleanup_failed",
+                session_id=session_id,
+                details={
+                    "errorIds": [failure.error_id for failure in result.failures],
+                    "remainingResourceCount": len(result.failures),
+                },
+            )
         return schema.CloseSessionResponse()
 
     @_protocol_handler
@@ -272,22 +289,40 @@ class LinktoolsAcpAgent:
             raise
         async with active.lock:
             if active.active_execution_id is not None:
-                try:
-                    await self.runtime.cancel(active.active_execution_id, principal=self.sessions.principal)
-                except (KeyError, ValueError):
-                    logger.debug("ACP cancel raced execution creation session=%s", session_id)
+                active.operation_epoch += 1
+                active.pending_permission = None
+                execution_id = active.active_execution_id
+            else:
+                execution_id = None
+        if execution_id is not None:
+            try:
+                await self.runtime.cancel(execution_id, principal=self.sessions.principal)
+                current = await self.runtime.get_execution_record(
+                    execution_id,
+                    principal=self.sessions.principal,
+                )
+                if current is not None and current.status in {
+                    RunStatus.COMPLETED,
+                    RunStatus.CANCELLED,
+                    RunStatus.FAILED,
+                }:
+                    async with active.lock:
+                        if active.active_execution_id == execution_id:
+                            active.active_execution_id = None
+            except (KeyError, ValueError):
+                logger.debug("ACP cancel raced execution creation session=%s", session_id)
 
-    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def ext_method(self, method: str, params: "dict[str, Any]") -> "dict[str, Any]":
         from .errors import require_sdk
 
         acp = require_sdk()
         raise acp.RequestError.method_not_found(method)
 
-    async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
+    async def ext_notification(self, method: str, params: "dict[str, Any]") -> None:
         return None
 
     @_protocol_handler
-    async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> Any:
+    async def prompt(self, session_id: str, prompt: "list[Any]", **kwargs: Any) -> Any:
         self._require_initialized()
         active = await self.sessions.get(session_id)
         async with active.lock:
@@ -302,188 +337,208 @@ class LinktoolsAcpAgent:
             ).map(prompt)
             execution_id = uuid4().hex
             active.active_execution_id = execution_id
-            logger.info("ACP prompt started session=%s execution=%s", session_id, execution_id)
+            logger.info(
+                "event=acp.prompt.started session_id=%s execution_id=%s",
+                session_id,
+                execution_id,
+            )
         try:
             spec = await self.spec_resolver(active.record.mode_id)
-            subscription = await self.event_hub.subscribe(execution_id)
-            return await self._run_and_stream(
+            return await self._execute_prompt_until_terminal(
                 active,
                 execution_id,
-                subscription,
                 spec,
                 mapped,
             )
         finally:
             async with active.lock:
-                active.active_execution_id = None
+                if active.active_execution_id == execution_id:
+                    active.active_execution_id = None
+                if active.pending_permission is not None and active.pending_permission.execution_id == execution_id:
+                    active.pending_permission = None
             logger.info("ACP prompt detached session=%s execution=%s", session_id, execution_id)
 
-    async def _run_and_stream(self, active: ActiveAcpSession, execution_id: str, subscription: Any, spec: Any, prompt: Any) -> Any:
+    async def _execute_prompt_until_terminal(
+        self,
+        active: ActiveAcpSession,
+        execution_id: str,
+        spec: Any,
+        prompt: Any,
+    ) -> Any:
         import acp.schema as schema
-
-        task = asyncio.create_task(
-            self.runtime.run(
-                spec,
-                prompt,
-                principal=self.sessions.principal,
-                session_id=active.record.session_id,
-                execution_id=execution_id,
-                extra_toolsets=await active.mcp_resources.toolsets(),
-            )
-        )
-        try:
-            await self._drain_until_done(active, execution_id, subscription, task)
-            await task
-        except asyncio.CancelledError:
-            if not task.done():
-                task.cancel()
-            raise
-        record = await self.runtime.get_execution_record(execution_id, principal=self.sessions.principal)
-        if record is None:
-            raise internal_error("execution_record_missing", session_id=active.record.session_id, execution_id=execution_id)
-        if record.status is RunStatus.PAUSED:
-            await subscription.release()
-            await self._request_permission(active, record)
-            return await self._resume_after_permission(active, execution_id, spec)
-        if record.status is RunStatus.CANCELLED:
-            return schema.PromptResponse(stopReason="cancelled")
-        if record.status is RunStatus.FAILED:
-            raise internal_error("execution_failed", session_id=active.record.session_id, execution_id=execution_id)
-        return schema.PromptResponse(
-            stopReason=AcpExecutionAdapter.stop_reason(record.status)
-        )
-
-    async def _drain_until_done(self, active: ActiveAcpSession, execution_id: str, subscription: Any, task: asyncio.Task) -> None:
-        connection = self._connection
+        operation = "run"
         while True:
-            event_task = asyncio.create_task(subscription.__anext__())
-            done, _ = await asyncio.wait({task, event_task}, return_when=asyncio.FIRST_COMPLETED)
-            if event_task in done:
-                event = event_task.result()
+            subscription = await self.event_hub.subscribe(execution_id)
+            task: "asyncio.Task[Any] | None" = None
+            try:
+                toolsets = await active.mcp_resources.toolsets()
+                task = asyncio.create_task(
+                    self.runtime.run(
+                        spec,
+                        prompt,
+                        principal=self.sessions.principal,
+                        session_id=active.record.session_id,
+                        execution_id=execution_id,
+                        extra_toolsets=toolsets,
+                    )
+                    if operation == "run"
+                    else self.runtime.resume(
+                        execution_id,
+                        principal=self.sessions.principal,
+                        extra_toolsets=toolsets,
+                    )
+                )
+                await self._drain_operation(active, execution_id, subscription, task)
+                await task
+            finally:
+                if task is not None and not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+                await subscription.release()
+            record = await self.runtime.get_execution_record(
+                execution_id,
+                principal=self.sessions.principal,
+            )
+            if record is None:
+                raise internal_error("execution_record_missing", session_id=active.record.session_id, execution_id=execution_id)
+            if record.status is RunStatus.PAUSED:
+                decision = await self._request_permission(active, record)
+                if decision == ApprovalDecision.ALLOW:
+                    operation = "resume"
+                    continue
+                return schema.PromptResponse(stopReason="cancelled")
+            if record.status is RunStatus.CANCELLED:
+                return schema.PromptResponse(stopReason="cancelled")
+            if record.status is RunStatus.FAILED:
+                raise internal_error("execution_failed", session_id=active.record.session_id, execution_id=execution_id)
+            return schema.PromptResponse(stopReason=AcpExecutionAdapter.stop_reason(record.status))
+
+    async def _drain_operation(self, active: ActiveAcpSession, execution_id: str, subscription: Any, task: "asyncio.Task[Any]") -> None:
+        connection = self._connection
+        event_task = asyncio.create_task(subscription.__anext__())
+        try:
+            while True:
+                done, _ = await asyncio.wait({task, event_task}, return_when=asyncio.FIRST_COMPLETED)
+                if event_task in done:
+                    event = event_task.result()
+                    update = self.event_mapper.map(event)
+                    if update is not None and connection is not None:
+                        await connection.session_update(active.record.session_id, update)
+                    if isinstance(event, ExecutionPaused | ExecutionCompleted | ExecutionFailed | ExecutionCancelled):
+                        return
+                    event_task = asyncio.create_task(subscription.__anext__())
+                    continue
+                if task.exception() is not None:
+                    raise task.exception()
+                try:
+                    event = await asyncio.wait_for(event_task, timeout=5)
+                except asyncio.TimeoutError as exc:
+                    raise internal_error("execution_event_missing", session_id=active.record.session_id, execution_id=execution_id) from exc
                 update = self.event_mapper.map(event)
                 if update is not None and connection is not None:
                     await connection.session_update(active.record.session_id, update)
-                if isinstance(
-                    event,
-                    (ExecutionPaused, ExecutionCompleted, ExecutionFailed, ExecutionCancelled),
-                ):
-                    break
-                continue
-            event_task.cancel()
-            try:
-                await event_task
-            except asyncio.CancelledError:
-                pass
-            if task.exception() is not None:
-                await self.event_hub.close(execution_id, ExecutionFailed(execution_id=execution_id, error_id=uuid4().hex, error_type=type(task.exception()).__name__))
-                raise internal_error("execution_failed", session_id=active.record.session_id, execution_id=execution_id)
-            record = await self.runtime.get_execution_record(execution_id, principal=self.sessions.principal)
-            if record is not None and record.status is RunStatus.PAUSED:
-                await self.event_hub.publish(
-                    execution_id,
-                    ExecutionPaused(execution_id=execution_id),
-                )
-                return
-            terminal: Any = ExecutionCompleted(execution_id=execution_id)
-            if record is not None and record.status is RunStatus.CANCELLED:
-                terminal = ExecutionCancelled(execution_id=execution_id)
-            await self.event_hub.close(execution_id, terminal)
+                if isinstance(event, ExecutionPaused | ExecutionCompleted | ExecutionFailed | ExecutionCancelled):
+                    return
+                event_task = asyncio.create_task(subscription.__anext__())
+        finally:
+            if not event_task.done():
+                event_task.cancel()
+                await asyncio.gather(event_task, return_exceptions=True)
 
-    async def _request_permission(self, active: ActiveAcpSession, record: Any) -> None:
+    async def _request_permission(self, active: ActiveAcpSession, record: Any) -> "ApprovalDecision | None":
         if self._connection is None:
             raise internal_error("client_connection_missing", session_id=active.record.session_id, execution_id=record.id)
         import acp.schema as schema
 
+        detail = await self.runtime.inspect(run_id=record.id, principal=self.sessions.principal)
+        tool = detail.tool_calls[-1] if detail is not None and detail.tool_calls else None
+        tool_call = schema.ToolCallUpdate(
+            toolCallId=record.approval.tool_call_id if record.approval else "",
+            title=record.approval.tool_name if record.approval else "approval",
+            status="pending",
+            rawInput=tool.arguments if tool is not None else None,
+        )
+        options = [
+            schema.PermissionOption(optionId="allow_once", name="Allow once", kind="allow_once"),
+            schema.PermissionOption(optionId="reject_once", name="Reject once", kind="reject_once"),
+        ]
         async with active.lock:
-            if active.active_execution_id != record.id:
-                return
-            detail = await self.runtime.inspect(
-                run_id=record.id,
-                principal=self.sessions.principal,
-            )
-            tool = detail.tool_calls[-1] if detail is not None and detail.tool_calls else None
-            tool_call = schema.ToolCallUpdate(
-                toolCallId=record.approval.tool_call_id if record.approval else "",
-                title=record.approval.tool_name if record.approval else "approval",
-                status="pending",
-                rawInput=tool.arguments if tool is not None else None,
-            )
-            options = [
-                schema.PermissionOption(
-                    optionId="allow_once",
-                    name="Allow once",
-                    kind="allow_once",
-                ),
-                schema.PermissionOption(
-                    optionId="reject_once",
-                    name="Reject once",
-                    kind="reject_once",
-                ),
-            ]
-            response = await self._connection.request_permission(
-                active.record.session_id,
-                tool_call,
-                options,
-            )
-            outcome = response.outcome
-            active.pending_elicitation_ids.discard(record.id)
-            if getattr(outcome, "outcome", None) != "selected":
-                await self.runtime.cancel(record.id, principal=self.sessions.principal)
-                return
-            decision = (
-                ApprovalDecision.ALLOW
-                if outcome.option_id == "allow_once"
-                else ApprovalDecision.DENY
-            )
-            await self.runtime.decide_approval(
-                record.id,
+            if active.active_execution_id != record.id or active.closing or record.approval is None:
+                return None
+            active.operation_epoch += 1
+            token = PendingPermissionToken(
+                session_id=active.record.session_id,
+                execution_id=record.id,
                 approval_id=record.approval.approval_id,
-                decision=decision,
-                principal=self.sessions.principal,
+                tool_call_id=record.approval.tool_call_id,
+                epoch=active.operation_epoch,
             )
-
-    async def _resume_after_permission(self, active: ActiveAcpSession, execution_id: str, spec: Any) -> Any:
-        import acp.schema as schema
-
-        record = await self.runtime.get_execution_record(execution_id, principal=self.sessions.principal)
-        if record is None or record.status is RunStatus.CANCELLED:
-            return schema.PromptResponse(stopReason="cancelled")
-        subscription = await self.event_hub.subscribe(execution_id)
-        task = asyncio.create_task(
-            self.runtime.resume(
-                execution_id,
-                principal=self.sessions.principal,
-                extra_toolsets=await active.mcp_resources.toolsets(),
+            active.pending_permission = token
+        try:
+            response = await self._connection.request_permission(active.record.session_id, tool_call, options)
+        except Exception:
+            await self._cancel_permission_token(active, token)
+            return None
+        outcome = response.outcome
+        option_id = getattr(outcome, "option_id", None)
+        decision = ApprovalDecision.ALLOW if option_id == "allow_once" else ApprovalDecision.DENY if option_id == "reject_once" else None
+        current = await self.runtime.get_execution_record(
+            token.execution_id,
+            principal=self.sessions.principal,
+        )
+        async with active.lock:
+            valid = (
+                not active.closing
+                and active.active_execution_id == token.execution_id
+                and active.pending_permission == token
+                and active.operation_epoch == token.epoch
+                and current is not None
+                and current.status is RunStatus.PAUSED
+                and current.approval is not None
+                and current.approval.approval_id == token.approval_id
             )
+            if valid:
+                active.pending_permission = None
+        if not valid:
+            logger.info(
+                "event=acp.permission.stale_result session_id=%s execution_id=%s approval_id=%s operation_epoch=%s",
+                token.session_id,
+                token.execution_id,
+                token.approval_id,
+                token.epoch,
+            )
+            return None
+        if decision is None:
+            await self.runtime.cancel(record.id, principal=self.sessions.principal)
+            return None
+        await self.runtime.decide_approval(
+            record.id,
+            approval_id=token.approval_id,
+            decision=decision,
+            principal=self.sessions.principal,
         )
-        await self._drain_until_done(active, execution_id, subscription, task)
-        await task
-        final = await self.runtime.get_execution_record(execution_id, principal=self.sessions.principal)
-        if final is None or final.status is RunStatus.FAILED:
-            raise internal_error("execution_failed", session_id=active.record.session_id, execution_id=execution_id)
-        return schema.PromptResponse(
-            stopReason=AcpExecutionAdapter.stop_reason(final.status)
-        )
+        return decision
 
-    async def _replay_history(self, active: ActiveAcpSession) -> None:
+    async def _cancel_permission_token(self, active: ActiveAcpSession, token: PendingPermissionToken) -> None:
+        async with active.lock:
+            if active.pending_permission != token or active.active_execution_id != token.execution_id:
+                return
+            active.operation_epoch += 1
+            active.pending_permission = None
+            execution_id = active.active_execution_id
+        try:
+            await self.runtime.cancel(execution_id, principal=self.sessions.principal)
+        except Exception:
+            logger.debug("ACP permission cancellation failed execution=%s", execution_id)
+
+    async def _replay_history(self, active: ActiveAcpSession, updates: "tuple[Any, ...] | None" = None) -> None:
         if self._connection is None:
             return
-        views = await self.runtime.get_session_messages(session_id=active.record.session_id, principal=self.sessions.principal)
-        import acp.schema as schema
-
-        for view in views:
-            for message in view.messages:
-                if not isinstance(message, dict):
-                    continue
-                for part in message.get("parts", ()):
-                    if part.get("type") == "text":
-                        await self._connection.session_update(
-                            active.record.session_id,
-                            schema.AgentMessageChunk(
-                                content=schema.TextContentBlock(type="text", text=part.get("content", "")),
-                                sessionUpdate="agent_message_chunk",
-                            ),
-                        )
+        if updates is None:
+            views = await self.runtime.get_session_messages(session_id=active.record.session_id, principal=self.sessions.principal)
+            updates = AcpHistoryMapper().preflight(active.record.session_id, views)
+        for update in updates:
+            await self._connection.session_update(active.record.session_id, update)
 
     def _mode_state(self, current_mode_id: str) -> Any:
         return self.capability_builder.modes(self.capability_input, current_mode_id)
