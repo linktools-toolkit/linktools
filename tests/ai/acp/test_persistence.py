@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 import os
 from datetime import datetime, timezone
@@ -5,9 +8,9 @@ from datetime import datetime, timezone
 from linktools.ai.acp.persistence import (
     AcpSessionRecord,
     AcpSessionRepository,
-    ProjectProcessLock,
-    mcp_descriptor_fingerprint,
 )
+from linktools.ai.acp.mcp import mcp_descriptor_fingerprint
+from linktools.ai.acp.process_lock import ProjectProcessLock
 
 
 def test_sidecar_is_private_atomic_and_secret_free(tmp_path) -> None:

@@ -40,7 +40,8 @@ async def _run(args: "Namespace") -> int:
     from linktools.ai.acp.agent import LinktoolsAcpAgent
     from linktools.ai.acp.capabilities import AcpMode, CapabilityInput
     from linktools.ai.acp.client_services import AcpClientServices
-    from linktools.ai.acp.persistence import AcpSessionRepository, ProjectProcessLock
+    from linktools.ai.acp.persistence import AcpSessionRepository
+    from linktools.ai.acp.process_lock import ProjectProcessLock
     from linktools.ai.acp.server import serve_stdio
     from linktools.ai.acp.sessions import AcpSessionService
     from linktools.ai.cli.project import load_project

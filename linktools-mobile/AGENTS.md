@@ -1,8 +1,8 @@
-# CLAUDE.md (linktools-mobile)
+# AGENTS.md (linktools-mobile)
 
 Architecture guidance for the mobile-tools sub-package. Shared concerns (monorepo
 structure, `manage.py`, config system, code style) live in the
-[repo-root CLAUDE.md](../CLAUDE.md).
+[repo-root AGENTS.md](../AGENTS.md).
 
 ## Mobile Sub-package (`linktools-mobile/src/linktools/mobile/`)
 

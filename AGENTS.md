@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to coding agents when working with code in this repository.
 
 ## Monorepo Structure
 
@@ -8,13 +8,13 @@ This is a Python monorepo for mobile security research tools, split into five in
 
 | Package | Description | Command Prefix | Architecture doc |
 |---------|-------------|----------------|------------------|
-| `linktools/` | Core framework: CLI infrastructure, environ, config, tool management | (base) | [CLAUDE.md](linktools/CLAUDE.md) |
-| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools` | `ct-` | [CLAUDE.md](linktools-common/CLAUDE.md) |
-| `linktools-mobile/` | Android (`at-*`) and iOS (`it-*`) device tools | `at-`, `it-` | [CLAUDE.md](linktools-mobile/CLAUDE.md) |
-| `linktools-cntr/` | Docker/Podman container management (`ct-cntr`) | `ct-cntr` | [CLAUDE.md](linktools-cntr/CLAUDE.md) |
-| `linktools-ai/` | AI agent runtime: session/execution/swarm on pydantic-ai | — | [CLAUDE.md](linktools-ai/CLAUDE.md) |
+| `linktools/` | Core framework: CLI infrastructure, environ, config, tool management | (base) | [AGENTS.md](linktools/AGENTS.md) |
+| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools` | `ct-` | [AGENTS.md](linktools-common/AGENTS.md) |
+| `linktools-mobile/` | Android (`at-*`) and iOS (`it-*`) device tools | `at-`, `it-` | [AGENTS.md](linktools-mobile/AGENTS.md) |
+| `linktools-cntr/` | Docker/Podman container management (`ct-cntr`) | `ct-cntr` | [AGENTS.md](linktools-cntr/AGENTS.md) |
+| `linktools-ai/` | AI agent runtime: session/execution/swarm on pydantic-ai | — | [AGENTS.md](linktools-ai/AGENTS.md) |
 
-Each sub-package lives under `{name}/src/linktools/` and extends the core framework through Python entry points. Each has its own `CLAUDE.md` covering its architecture; this file covers the shared concerns below.
+Each sub-package lives under `{name}/src/linktools/` and extends the core framework through Python entry points. Each has its own `AGENTS.md` covering its architecture; this file covers the shared concerns below.
 
 ## Development Commands
 
@@ -55,7 +55,7 @@ at-frida --help
 ct-tools apktool -h
 ```
 
-Sub-package-specific build steps (Frida TypeScript, Android APK) are documented in each sub-package's `CLAUDE.md`.
+Sub-package-specific build steps (Frida TypeScript, Android APK) are documented in each sub-package's `AGENTS.md`.
 
 ### `manage.py` (Monorepo Management Script)
 

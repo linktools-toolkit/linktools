@@ -1,8 +1,8 @@
-# CLAUDE.md (linktools-common)
+# AGENTS.md (linktools-common)
 
 Architecture guidance for the common-tools sub-package. Shared concerns (monorepo
 structure, `manage.py`, config system, code style) live in the
-[repo-root CLAUDE.md](../CLAUDE.md).
+[repo-root AGENTS.md](../AGENTS.md).
 
 ## Commands (`linktools-common/src/linktools/commands/common/`)
 

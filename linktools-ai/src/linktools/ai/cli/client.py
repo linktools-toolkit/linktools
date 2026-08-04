@@ -426,7 +426,8 @@ class LocalRuntimeClient:
         except Exception as exc:
             fail("ACP SDK exact version", str(exc))
         try:
-            from ..acp.persistence import AcpSessionRepository, ProjectProcessLock
+            from ..acp.persistence import AcpSessionRepository
+            from ..acp.process_lock import ProjectProcessLock
 
             repository = AcpSessionRepository(project.state_root)
             repository.root.mkdir(parents=True, exist_ok=True)

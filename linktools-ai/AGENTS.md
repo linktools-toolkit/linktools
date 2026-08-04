@@ -1,7 +1,7 @@
-# CLAUDE.md (linktools-ai)
+# AGENTS.md (linktools-ai)
 
-This file provides guidance to Claude Code (claude.ai/code) when working with
-the `linktools-ai` sub-package. It complements the repo-root `CLAUDE.md`
+This file provides guidance to coding agents when working with
+the `linktools-ai` sub-package. It complements the repo-root `AGENTS.md`
 (which covers the core framework and the shared Python code style).
 
 ## What this sub-package is
@@ -107,7 +107,7 @@ stay free of env-specific drivers/clients (a gate test enforces this).
 
 ## Python code style
 
-Follows the repo-root `CLAUDE.md` rules exactly: Python ≥3.10, no
+Follows the repo-root `AGENTS.md` rules exactly: Python ≥3.10, no
 `from __future__ import annotations`, uniform file headers
 (`#!/usr/bin/env python3` + `# -*- coding: utf-8 -*-`), public API annotated,
 quote annotations containing `|` / `[...]`, annotation-only imports under

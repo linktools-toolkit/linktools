@@ -7,13 +7,13 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 from uuid import uuid4
 
 from .errors import internal_error, request_error
 
 if TYPE_CHECKING:
-    from .sessions import ActiveAcpSession
+    from .session_models import ActiveAcpSession
 
 
 logger = logging.getLogger("linktools.ai.acp.session_state")

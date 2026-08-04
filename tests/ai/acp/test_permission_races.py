@@ -12,7 +12,8 @@ from linktools.ai.acp.agent import LinktoolsAcpAgent
 from linktools.ai.acp.capabilities import AcpMode
 from linktools.ai.acp.client_services import AcpClientServices
 from linktools.ai.acp.persistence import AcpSessionRecord, AcpSessionRepository
-from linktools.ai.acp.sessions import AcpSessionService, ActiveAcpSession
+from linktools.ai.acp.session_models import ActiveAcpSession
+from linktools.ai.acp.sessions import AcpSessionService
 from linktools.ai.execution.domain import ApprovalDecision, RunStatus
 from linktools.ai.execution.live_events import ExecutionCompleted, ExecutionEventHub, ExecutionPaused
 from linktools.ai.governance.identity import trusted_local_principal
@@ -118,8 +119,10 @@ async def test_cancel_interrupts_pending_permission_and_ignores_late_allow(tmp_p
         active = _active(tmp_path, runtime, "session-1")
         service.active_sessions.clear()
         service.active_sessions[active.record.session_id] = active
-        agent._connection = Connection()
-        permission = asyncio.create_task(agent._request_permission(active, runtime.current))
+        agent.on_connect(Connection())
+        permission = asyncio.create_task(
+            agent.prompt_service.request_permission(active, runtime.current)
+        )
         await started.wait()
         await asyncio.wait_for(agent.cancel(active.record.session_id), timeout=0.1)
         release.set()
@@ -233,7 +236,7 @@ async def test_prompt_handles_two_sequential_permissions(tmp_path) -> None:
                 )
             )
 
-    agent._connection = Connection()
+    agent.on_connect(Connection())
     active = await session_service.create(cwd=str(tmp_path))
 
     response = await agent.prompt(
@@ -245,3 +248,50 @@ async def test_prompt_handles_two_sequential_permissions(tmp_path) -> None:
     assert permission_count == 2
     assert runtime.decide_count == 2
     assert runtime.resume_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancel_bounds_permission_callback_that_ignores_cancellation(tmp_path) -> None:
+    hub = ExecutionEventHub()
+    runtime = _Runtime(hub)
+    service = AcpSessionService(
+        runtime=runtime,
+        repository=AcpSessionRepository(tmp_path / "state"),
+        project_root=tmp_path,
+        principal=trusted_local_principal(),
+        default_mode_id="default",
+        client_services=AcpClientServices(project_root=tmp_path),
+    )
+    active = _active(tmp_path, runtime, "session-1")
+    service.active_sessions[active.record.session_id] = active
+    callback_started = asyncio.Event()
+    force_finish = asyncio.Event()
+
+    class Connection:
+        async def request_permission(self, session_id, tool_call, options):
+            callback_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await force_finish.wait()
+                raise
+
+    agent = LinktoolsAcpAgent(
+        runtime=runtime,
+        event_hub=hub,
+        session_service=service,
+        project_root=str(tmp_path),
+        spec_resolver=lambda mode: None,
+        modes=(AcpMode("default", "Default"),),
+    )
+    agent._initialized = True
+    agent.on_connect(Connection())
+    permission = asyncio.create_task(
+        agent.prompt_service.request_permission(active, runtime.current)
+    )
+    await callback_started.wait()
+
+    await asyncio.wait_for(agent.cancel(active.record.session_id), timeout=2)
+    assert runtime.cancel_count == 1
+    force_finish.set()
+    assert await permission is None

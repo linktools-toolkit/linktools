@@ -9,7 +9,7 @@ import signal
 
 from .agent import LinktoolsAcpAgent
 from .errors import require_sdk
-from .sessions import CloseReason
+from .session_models import CloseReason
 
 logger = logging.getLogger("linktools.ai.acp.server")
 

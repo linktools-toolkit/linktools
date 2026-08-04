@@ -1,8 +1,8 @@
-# CLAUDE.md (linktools-cntr)
+# AGENTS.md (linktools-cntr)
 
 Architecture guidance for the container-management sub-package. Shared concerns
 (monorepo structure, `manage.py`, config system, code style) live in the
-[repo-root CLAUDE.md](../CLAUDE.md). User-facing usage is in
+[repo-root AGENTS.md](../AGENTS.md). User-facing usage is in
 [README.md](README.md).
 
 ## Container Sub-package (`linktools-cntr/src/linktools/cntr/`)

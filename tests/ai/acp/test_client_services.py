@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -6,7 +9,8 @@ import pytest
 
 from linktools.ai.acp.client_services import AcpClientServices
 from linktools.ai.acp.persistence import AcpSessionRecord
-from linktools.ai.acp.sessions import ActiveAcpSession
+from linktools.ai.acp.session_models import ActiveAcpSession
+from linktools.ai.acp.session_state import SessionOperationCoordinator, SessionOperationKind
 
 
 def _session(tmp_path):
@@ -75,3 +79,43 @@ async def test_client_file_capability_is_required(tmp_path) -> None:
 
     with pytest.raises(Exception):
         await services.read_text_file(_session(tmp_path), "file.txt")
+
+
+@pytest.mark.asyncio
+async def test_terminal_create_after_prompt_cancel_is_compensated(tmp_path) -> None:
+    session = _session(tmp_path)
+    session.active_execution_id = "execution-1"
+    coordinator = SessionOperationCoordinator()
+    operation = await coordinator.reserve(
+        session,
+        SessionOperationKind.PROMPT,
+        execution_id="execution-1",
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    class Connection:
+        async def create_terminal(self, session_id, **kwargs):
+            started.set()
+            await release.wait()
+            return SimpleNamespace(terminal_id="terminal-1")
+
+        async def kill_terminal(self, session_id, terminal_id):
+            calls.append(("kill", terminal_id))
+
+        async def release_terminal(self, session_id, terminal_id):
+            calls.append(("release", terminal_id))
+
+    services = AcpClientServices(project_root=tmp_path)
+    services.set_connection(Connection(), SimpleNamespace(terminal=True))
+    task = asyncio.create_task(services.create_terminal(session))
+    await started.wait()
+    session.active_execution_id = None
+    release.set()
+
+    with pytest.raises(Exception):
+        await task
+    assert calls == [("kill", "terminal-1"), ("release", "terminal-1")]
+    assert not session.terminal_handles
+    await coordinator.release(session, operation)

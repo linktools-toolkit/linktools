@@ -28,7 +28,7 @@ def _resolved_tool_prefix(spec: "MCPServerSpec") -> "str | None":
 
 
 def build_mcp_server(spec: "MCPServerSpec") -> Any:
-    from pydantic_ai.mcp import MCPServerHTTP, MCPServerSSE, MCPServerStdio
+    from pydantic_ai.mcp import MCPServerSSE, MCPServerStdio, MCPServerStreamableHTTP
 
     prefix = _resolved_tool_prefix(spec)
     if spec.transport == "stdio":
@@ -54,7 +54,7 @@ def build_mcp_server(spec: "MCPServerSpec") -> Any:
     if spec.transport == "http":
         if not spec.url:
             raise MCPConnectionError(f"mcp {spec.id}: http requires a url")
-        return MCPServerHTTP(
+        return MCPServerStreamableHTTP(
             url=spec.url,
             headers=dict(spec.headers),
             timeout=spec.timeout_seconds,

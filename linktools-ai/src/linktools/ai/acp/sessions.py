@@ -8,217 +8,38 @@ import base64
 import json
 import logging
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timezone
-from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
 
 from ..execution.domain import RunStatus
 from ..governance.identity import PrincipalContext
 from ..runtime.facade import Runtime
 from .errors import request_error
-from .persistence import AcpSessionRecord, AcpSessionRepository, mcp_descriptor_fingerprint
+from .mcp import mcp_descriptor_fingerprint, validate_mcp_descriptors
+from .mcp_resources import SessionMcpResources
+from .persistence import AcpSessionRecord, AcpSessionRepository
 from .session_state import (
     SessionOperationCoordinator,
     SessionOperationKind,
     SessionOperationToken,
     assert_session_invariants,
 )
+from .session_models import (
+    ActiveAcpSession,
+    CloseReason,
+    SessionCloseFailure,
+    SessionCloseResult,
+)
+from .session_paths import validate_session_paths
+from .task_utils import cancel_and_wait, wait_and_observe
 
 logger = logging.getLogger("linktools.ai.acp.sessions")
 
-
-@dataclass(slots=True)
-class SessionMcpResources:
-    descriptors: "tuple[Any, ...]" = ()
-    state: "McpResourceState" = field(default_factory=lambda: McpResourceState.NEW)
-    lock: "asyncio.Lock" = field(default_factory=asyncio.Lock)
-    connect_task: "asyncio.Task[tuple[Any, ...]] | None" = None
-    close_task: "asyncio.Task[None] | None" = None
-    pool: Any = None
-    _toolsets: "tuple[Any, ...] | None" = None
-
-    async def toolsets(self) -> "tuple[Any, ...]":
-        async with self.lock:
-            if self.state is McpResourceState.CLOSED:
-                raise request_error("session_closed")
-            if self.state is McpResourceState.CLOSING:
-                raise request_error("session_closing")
-            if self.state is McpResourceState.OPEN:
-                return self._toolsets or ()
-            if self.connect_task is None:
-                self.state = McpResourceState.CONNECTING
-                self.connect_task = asyncio.create_task(self._connect_once())
-            task = self.connect_task
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await asyncio.gather(task, return_exceptions=True)
-            raise
-
-    async def _connect_once(self) -> "tuple[Any, ...]":
-        from ..agent.mcp.connection import MCPConnectionPool
-
-        pool = MCPConnectionPool()
-        try:
-            values = [
-                await pool.get_toolset(mcp_spec(descriptor))
-                for descriptor in self.descriptors
-            ]
-            toolsets = tuple(handle.toolset for handle in values)
-        except asyncio.CancelledError:
-            await pool.close()
-            async with self.lock:
-                if self.connect_task is asyncio.current_task():
-                    self.connect_task = None
-                    self.state = McpResourceState.NEW
-            raise
-        except Exception as exc:
-            await pool.close()
-            async with self.lock:
-                if self.connect_task is asyncio.current_task():
-                    self.connect_task = None
-                    self.state = McpResourceState.NEW
-            raise request_error("mcp_connection_failed") from exc
-        async with self.lock:
-            stale = self.state is not McpResourceState.CONNECTING
-            if not stale:
-                self.pool = pool
-                self._toolsets = toolsets
-                self.connect_task = None
-                self.state = McpResourceState.OPEN
-        if stale:
-            await pool.close()
-            async with self.lock:
-                self.connect_task = None
-            return ()
-        return toolsets
-
-    async def close(self) -> None:
-        async with self.lock:
-            if self.state is McpResourceState.CLOSED:
-                return
-            if self.close_task is not None:
-                task = self.close_task
-            else:
-                self.state = McpResourceState.CLOSING
-                task = asyncio.create_task(self._close_once())
-                self.close_task = task
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await asyncio.gather(task, return_exceptions=True)
-            raise
-
-    async def _close_once(self) -> None:
-        async with self.lock:
-            connect_task = self.connect_task
-            pool = self.pool
-        if connect_task is not None and not connect_task.done():
-            connect_task.cancel()
-            await asyncio.gather(connect_task, return_exceptions=True)
-            logger.info(
-                "event=acp.mcp.connect_cancelled pending_task_count=0 state=closing"
-            )
-        if pool is not None:
-            try:
-                await asyncio.wait_for(pool.close(), timeout=10)
-            except Exception:
-                async with self.lock:
-                    self.state = McpResourceState.OPEN
-                    self.close_task = None
-                raise
-        async with self.lock:
-            self.pool = None
-            self._toolsets = None
-            self.connect_task = None
-            self.state = McpResourceState.CLOSED
-            self.descriptors = ()
-            self.close_task = None
-
-
-class McpResourceState(str, Enum):
-    NEW = "new"
-    CONNECTING = "connecting"
-    OPEN = "open"
-    CLOSING = "closing"
-    CLOSED = "closed"
-
-
-@dataclass(slots=True)
-class ActiveAcpSession:
-    record: AcpSessionRecord
-    lock: asyncio.Lock
-    active_execution_id: "str | None"
-    mcp_resources: SessionMcpResources
-    terminal_handles: "set[str]"
-    pending_elicitation_ids: "set[str]"
-    operation_epoch: int = 0
-    operation: "SessionOperationToken | None" = None
-    closing_requested: bool = False
-    cleanup_required: bool = False
-    close_task: "asyncio.Task[SessionCloseResult] | None" = None
-    pending_permission: "PendingPermissionToken | None" = None
-    pending_permission_task: "asyncio.Task[Any] | None" = None
-    pending_elicitation_tasks: "dict[str, asyncio.Task[Any]]" = field(default_factory=dict)
-    terminal_create_tasks: "set[asyncio.Task[Any]]" = field(default_factory=set)
-    terminal_release_tasks: "dict[str, asyncio.Task[Any]]" = field(default_factory=dict)
-
-    @property
-    def closing(self) -> bool:
-        """Deprecated read-only view retained for local callers during cleanup."""
-        return self.closing_requested or self.cleanup_required
-
-
-@dataclass(frozen=True, slots=True)
-class PendingPermissionToken:
-    session_id: str
-    execution_id: str
-    approval_id: str
-    tool_call_id: str
-    epoch: int
-
-
-@dataclass(frozen=True, slots=True)
-class SessionCloseFailure:
-    resource_type: "Literal['operation', 'execution', 'permission', 'elicitation', 'terminal', 'mcp', 'persistence']"
-    resource_id: "str | None"
-    error_id: str
-
-
-@dataclass(frozen=True, slots=True)
-class SessionCloseResult:
-    closed: bool
-    failures: "tuple[SessionCloseFailure, ...]"
-
-
-CloseReason = Literal["client", "eof", "signal", "error"]
-
-
-def validate_session_paths(
-    *, project_root: "str | Path", cwd: str, additional_directories: "list[str] | None"
-) -> "tuple[str, tuple[str, ...]]":
-    project = Path(os.path.normcase(str(Path(project_root).resolve(strict=True))))
-    target = Path(os.path.normcase(str(Path(cwd).resolve(strict=True))))
-    if not target.is_dir() or not _contained(target, project):
-        raise request_error("invalid_cwd")
-    additional = []
-    for value in additional_directories or ():
-        path = Path(os.path.normcase(str(Path(value).resolve(strict=True))))
-        if not path.is_dir():
-            raise request_error("invalid_additional_directory")
-        additional.append(str(path))
-    return str(target), tuple(sorted(set(additional)))
-
-
-def _contained(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
+if TYPE_CHECKING:
+    from .client_services import AcpClientServices
 
 
 class AcpSessionService:
@@ -232,7 +53,7 @@ class AcpSessionService:
         default_mode_id: str,
         mode_ids: "tuple[str, ...]" = (),
         config_defaults: "Mapping[str, Any] | None" = None,
-        client_services: Any = None,
+        client_services: "AcpClientServices | None" = None,
     ) -> None:
         self.runtime = runtime
         self.repository = repository
@@ -256,7 +77,7 @@ class AcpSessionService:
         additional_directories: "list[str] | None" = None,
         mcp_servers: "list[Any] | None" = None,
     ) -> ActiveAcpSession:
-        _validate_mcp_descriptors(mcp_servers or ())
+        validate_mcp_descriptors(mcp_servers or ())
         normalized_cwd, directories = validate_session_paths(
             project_root=self.project_root,
             cwd=cwd,
@@ -306,7 +127,7 @@ class AcpSessionService:
         replay: bool,
     ) -> ActiveAcpSession:
         active = await self.get(session_id)
-        _validate_mcp_descriptors(mcp_servers or ())
+        validate_mcp_descriptors(mcp_servers or ())
         normalized_cwd, directories = validate_session_paths(
             project_root=self.project_root,
             cwd=cwd,
@@ -370,7 +191,7 @@ class AcpSessionService:
             cwd=cwd,
             additional_directories=additional_directories,
         )
-        _validate_mcp_descriptors(mcp_servers or ())
+        validate_mcp_descriptors(mcp_servers or ())
         fingerprints = tuple(sorted(mcp_descriptor_fingerprint(server) for server in (mcp_servers or ())))
         operation = await self.coordinator.reserve(source, SessionOperationKind.FORK)
         try:
@@ -433,9 +254,12 @@ class AcpSessionService:
                 and active.active_execution_id is None
                 and active.operation is None
                 and not active.terminal_handles
+                and not active.terminal_create_tasks
+                and not active.terminal_release_tasks
                 and not active.pending_elicitation_ids
                 and not active.pending_elicitation_tasks
-                and not active.mcp_resources.descriptors
+                and active.pending_permission_task is None
+                and active.pending_permission is None
             ):
                 return SessionCloseResult(True, ())
         task = await self.coordinator.request_close(
@@ -445,7 +269,7 @@ class AcpSessionService:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await asyncio.gather(task, return_exceptions=True)
+            await wait_and_observe(task, timeout=20)
             raise
 
     async def _run_close_once(
@@ -472,13 +296,10 @@ class AcpSessionService:
             permission_task = active.pending_permission_task
             active.pending_permission_task = None
             active.pending_permission = None
-            active.operation_epoch += 1
             execution_id = active.active_execution_id
-            if operation is None:
-                active.active_execution_id = None
+            active.active_execution_id = None
         if permission_task is not None:
-            permission_task.cancel()
-            await asyncio.gather(permission_task, return_exceptions=True)
+            await cancel_and_wait(permission_task, timeout=1)
         if execution_id is not None:
             await asyncio.wait_for(
                 self.runtime.cancel(execution_id, principal=self.principal),
@@ -518,7 +339,9 @@ class AcpSessionService:
             failures.append(self._close_failure("operation", None, exc))
             return await self._finish_close_failure(active, failures, reason)
         try:
-            await self._cancel_pending_tasks(active)
+            task_failures = await self._cancel_pending_tasks(active)
+            for resource_type, resource_id, error in task_failures:
+                failures.append(self._close_failure(resource_type, resource_id, error))
             if self.client_services is not None:
                 try:
                     resource_failures = await self.client_services.close_session_resources(active)
@@ -555,6 +378,8 @@ class AcpSessionService:
                     failures.append(self._close_failure("terminal", None, RuntimeError("terminal create task remains")))
                 if active.terminal_handles:
                     failures.append(self._close_failure("terminal", None, RuntimeError("terminal resources remain")))
+                if active.terminal_release_tasks:
+                    failures.append(self._close_failure("terminal", None, RuntimeError("terminal release task remains")))
                 if active.pending_elicitation_ids:
                     failures.append(self._close_failure("elicitation", None, RuntimeError("elicitation resources remain")))
                 if failures:
@@ -609,27 +434,38 @@ class AcpSessionService:
         )
         return SessionCloseResult(False, tuple(failures))
 
-    async def _cancel_pending_tasks(self, active: ActiveAcpSession) -> None:
+    async def _cancel_pending_tasks(
+        self,
+        active: ActiveAcpSession,
+    ) -> "tuple[tuple[str, str | None, BaseException], ...]":
         async with active.lock:
             permission_task = active.pending_permission_task
+            permission_token = active.pending_permission
             active.pending_permission_task = None
             active.pending_permission = None
-            tasks = tuple(active.pending_elicitation_tasks.values())
+            elicitation_tasks = tuple(active.pending_elicitation_tasks.items())
             create_tasks = tuple(active.terminal_create_tasks)
-            release_tasks = tuple(active.terminal_release_tasks.values())
-        owned = tuple(
-            task
-            for task in (permission_task, *tasks, *create_tasks, *release_tasks)
-            if task is not None
-        )
-        for task in owned:
-            if not task.done():
-                task.cancel()
-        if owned:
-            await asyncio.gather(*owned, return_exceptions=True)
+            release_tasks = tuple(active.terminal_release_tasks.items())
+        failures: list[tuple[str, str | None, BaseException]] = []
+        if permission_task is not None and not await cancel_and_wait(permission_task, timeout=1):
+            async with active.lock:
+                if active.pending_permission_task is None:
+                    active.pending_permission_task = permission_task
+                    active.pending_permission = permission_token
+            failures.append(("permission", None, TimeoutError("permission task ignored cancellation")))
+        for task_id, task in elicitation_tasks:
+            if not await cancel_and_wait(task, timeout=10):
+                failures.append(("elicitation", task_id, TimeoutError("elicitation task ignored cancellation")))
+        for task in create_tasks:
+            if not await cancel_and_wait(task, timeout=5):
+                failures.append(("terminal", None, TimeoutError("terminal create task ignored cancellation")))
+        for terminal_id, task in release_tasks:
+            if not await cancel_and_wait(task, timeout=5):
+                failures.append(("terminal", terminal_id, TimeoutError("terminal release task ignored cancellation")))
+        return tuple(failures)
 
     @staticmethod
-    def _close_failure(resource_type: Any, resource_id: "str | None", error: BaseException) -> SessionCloseFailure:
+    def _close_failure(resource_type: str, resource_id: "str | None", error: BaseException) -> SessionCloseFailure:
         return SessionCloseFailure(resource_type, resource_id, uuid4().hex)
 
     async def set_mode(self, session_id: str, mode_id: str) -> ActiveAcpSession:
@@ -719,75 +555,5 @@ class AcpSessionService:
 
 
 __all__ = [
-    "ActiveAcpSession",
     "AcpSessionService",
-    "CloseReason",
-    "PendingPermissionToken",
-    "SessionCloseFailure",
-    "SessionCloseResult",
-    "SessionMcpResources",
-    "McpResourceState",
-    "mcp_spec",
-    "validate_session_paths",
 ]
-
-
-def mcp_spec(descriptor: Any) -> Any:
-    """Convert one official ACP descriptor to the existing MCP domain type."""
-    from ..agent.mcp.spec import MCPServerSpec
-
-    kind = _mcp_transport(descriptor)
-    name = getattr(descriptor, "name", "")
-    if not name:
-        raise request_error("invalid_mcp_descriptor")
-    if kind == "stdio":
-        env = {
-            item.name: item.value
-            for item in getattr(descriptor, "env", ())
-        }
-        command = (descriptor.command, *tuple(getattr(descriptor, "args", ())))
-        return MCPServerSpec(
-            id=name,
-            name=name,
-            transport="stdio",
-            command=command,
-            env=env,
-        )
-    if kind in {"http", "sse"}:
-        headers = {
-            item.name: item.value
-            for item in getattr(descriptor, "headers", ())
-        }
-        return MCPServerSpec(
-            id=name,
-            name=name,
-            transport=kind,
-            url=descriptor.url,
-            headers=headers,
-        )
-    raise request_error(
-        "unsupported_mcp_transport",
-        details={"transport": kind},
-    )
-
-
-def _mcp_transport(descriptor: Any) -> str:
-    kind = getattr(descriptor, "type", None)
-    if kind is not None:
-        return str(kind)
-    return {
-        "McpServerStdio": "stdio",
-        "McpServerHttp": "http",
-        "McpServerSse": "sse",
-        "McpServerAcp": "acp",
-    }.get(type(descriptor).__name__, "unknown")
-
-
-def _validate_mcp_descriptors(descriptors: Any) -> None:
-    try:
-        for descriptor in descriptors:
-            mcp_spec(descriptor)
-    except Exception as exc:
-        if getattr(exc, "code", None) == -32602:
-            raise
-        raise request_error("invalid_mcp_descriptor") from exc

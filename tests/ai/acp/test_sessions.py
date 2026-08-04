@@ -1,9 +1,13 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from types import SimpleNamespace
 
 import pytest
 
 from linktools.ai.acp.persistence import AcpSessionRepository
-from linktools.ai.acp.sessions import AcpSessionService, validate_session_paths
+from linktools.ai.acp.session_paths import validate_session_paths
+from linktools.ai.acp.sessions import AcpSessionService
 from linktools.ai.execution.domain import RunStatus
 from linktools.ai.governance.identity import trusted_local_principal
 
