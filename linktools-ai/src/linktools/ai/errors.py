@@ -3,7 +3,12 @@
 """errors.py: stable domain error hierarchy. Never identify an error by string
 matching -- always by type."""
 
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .tasks.models import TaskUsage
 
 
 class LinktoolsAIError(Exception):
@@ -478,6 +483,51 @@ class SwarmLimitExceededError(SwarmError):
     def __init__(self, message: str, *, kind: str) -> None:
         super().__init__(message)
         self.kind = kind
+
+
+@dataclass(frozen=True, slots=True)
+class ChildExecutionPlatformError(SwarmError):
+    """A child execution raised outside the expected Agent outcome path."""
+
+    child_run_id: str
+    usage: "TaskUsage"
+    error_type: str
+    safe_message: str
+    cause: BaseException = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        Exception.__init__(self, self.safe_message)
+
+    def add_note(self, note: str) -> None:
+        """Keep BaseException note semantics compatible with frozen dataclasses."""
+        if not isinstance(note, str):
+            raise TypeError("note must be a str")
+        notes = getattr(self, "__notes__", ())
+        object.__setattr__(self, "__notes__", [*notes, note])
+
+
+class ChildRunMissingError(SwarmError):
+    """The deterministic child record was not present after execution failed."""
+
+
+class ChildSnapshotError(SwarmError):
+    """The child record had no decodable persisted snapshot."""
+
+
+class ChildCancelNotConvergedError(SwarmError):
+    """A recovery cancellation did not reach a child terminal state in time."""
+
+
+class NodeLeaseLostError(SwarmError):
+    """The scheduler lost ownership of a claimed task execution."""
+
+
+class ParentLeaseLostError(SwarmError):
+    """The scheduler lost ownership of the parent run lease."""
+
+
+class UsageRegressionError(SwarmError):
+    """An authoritative cumulative usage snapshot moved backwards."""
 
 
 class TaskGraphInvariantError(SwarmError):

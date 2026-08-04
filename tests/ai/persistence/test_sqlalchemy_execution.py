@@ -73,14 +73,20 @@ async def test_sqlalchemy_cancel_acknowledgement_keeps_fence_until_terminal_comm
 
 
 @pytest.mark.asyncio
-async def test_sqlalchemy_abort_run_persists_error_without_a_snapshot(tmp_path):
+async def test_sqlalchemy_abort_run_persists_error_with_partial_snapshot(tmp_path):
     engine, store, claimed = await _claimed_store(tmp_path, "abort")
-    aborted = await store.abort_run(AbortExecution("r", "worker", claimed.lease.fence, RunError("RuntimeError", "boom"), 3))
+    snapshot = AgentSnapshotData((), None, RunUsage(), 3)
+    aborted = await store.abort_run(
+        AbortExecution(
+            "r", "worker", claimed.lease.fence, snapshot,
+            RunError("RuntimeError", "boom"),
+        )
+    )
     assert aborted.status is RunStatus.FAILED
     assert aborted.error == RunError("RuntimeError", "boom")
     assert aborted.lease.owner is None
     assert aborted.trace_sequence == 3
-    assert await store.get_snapshot("r") is None
+    assert (await store.get_snapshot("r")).trace_end_sequence == 3
     await engine.dispose()
 
 

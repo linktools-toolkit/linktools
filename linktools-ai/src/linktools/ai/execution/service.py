@@ -387,7 +387,6 @@ class ExecutionService:
             self._heartbeat(claimed.id, owner, claimed.lease.fence, token)
         )
         outcome: "object | None" = None
-        run_error: "RunError | None" = None
         try:
             done, _ = await asyncio.wait({task, heartbeat}, return_when=asyncio.FIRST_COMPLETED)
             if heartbeat in done:
@@ -419,7 +418,7 @@ class ExecutionService:
                 error=latest.error,
                 usage=_task_usage_from_run_usage(usage_capture.snapshot()),
             )
-        except Exception as exc:
+        except BaseException as exc:
             trace_end = await collector.flush()
             await self._store.abort_run(
                 AbortExecution(
@@ -433,7 +432,7 @@ class ExecutionService:
                         trace_end_sequence=trace_end,
                         capture_state=MessageCaptureState.PARTIAL,
                     ),
-                    RunError(type(exc).__name__, "child execution failed"),
+                    sanitize_run_error(exc),
                 )
             )
             raise
@@ -730,11 +729,9 @@ class ExecutionService:
             raise
         except Exception as exc:
             # A programming/config/protocol error (as opposed to a modeled
-            # AgentFailed) must not strand the run in RUNNING: persist a
-            # minimal FAILED state -- no snapshot, since the engine never
-            # produced a coherent outcome -- then re-raise the original
-            # exception. A failure here is secondary -- the original error is
-            # what the caller must see.
+            # AgentFailed) must not strand the run in RUNNING: persist the
+            # partial snapshot, then re-raise the original exception. A failure
+            # here is secondary -- the original error is what the caller sees.
             try:
                 trace_end = await collector.flush()
                 await self._store.abort_run(

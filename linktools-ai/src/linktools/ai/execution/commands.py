@@ -4,7 +4,7 @@
 """Validated commands accepted by the execution lifecycle port."""
 
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from typing import TYPE_CHECKING
 
@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ..json import JsonValue
     from .domain import ApprovalDecision, RunApproval, RunDefinition, RunError, RunKind
     from .snapshots import AgentSnapshotData
+
 
 @dataclass(frozen=True, slots=True)
 class CreateSession:
@@ -104,44 +105,22 @@ class AcknowledgeCancellation:
     snapshot: "AgentSnapshotData"
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
 class AbortExecution:
     run_id: str
     owner: str
     fence: int
     snapshot: "AgentSnapshotData"
     error: "RunError"
-    persist_snapshot: bool = field(init=False, repr=False)
 
-    def __init__(
-        self,
-        run_id: str,
-        owner: str,
-        fence: int,
-        snapshot: "AgentSnapshotData | RunError",
-        error: "RunError | int",
-    ) -> None:
-        legacy_without_snapshot = isinstance(error, int)
-        if legacy_without_snapshot:
-            from .domain import MessageCaptureState, RunUsage
-            from .snapshots import AgentSnapshotData
+    def __post_init__(self) -> None:
+        from .domain import RunError
+        from .snapshots import AgentSnapshotData
 
-            snapshot, error = (
-                AgentSnapshotData(
-                    delta_messages=(),
-                    final_output=None,
-                    usage=RunUsage(),
-                    trace_end_sequence=error,
-                    capture_state=MessageCaptureState.UNAVAILABLE,
-                ),
-                snapshot,
-            )
-        object.__setattr__(self, "run_id", run_id)
-        object.__setattr__(self, "owner", owner)
-        object.__setattr__(self, "fence", fence)
-        object.__setattr__(self, "snapshot", snapshot)
-        object.__setattr__(self, "error", error)
-        object.__setattr__(self, "persist_snapshot", not legacy_without_snapshot)
+        if not isinstance(self.snapshot, AgentSnapshotData):
+            raise TypeError("AbortExecution.snapshot must be AgentSnapshotData")
+        if not isinstance(self.error, RunError):
+            raise TypeError("AbortExecution.error must be RunError")
 
     @property
     def trace_end_sequence(self) -> int:

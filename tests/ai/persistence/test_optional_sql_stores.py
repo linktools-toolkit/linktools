@@ -71,7 +71,7 @@ async def test_sql_task_store_concurrent_complete_has_one_winner(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sql_task_store_reclaims_expired_lease_and_rejects_stale_fence(tmp_path):
+async def test_sql_task_store_requires_reconcile_for_expired_claim(tmp_path):
     from linktools.ai.tasks.models import TaskExecution, TaskPlan, TaskStatus, TaskUsage
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'tasks-reclaim.db'}")
@@ -83,7 +83,12 @@ async def test_sql_task_store_reclaims_expired_lease_and_rejects_stale_fence(tmp
         (TaskExecution("e", "reclaim", "n", TaskStatus.READY),),
     )
     stale = await store.claim_ready("e", owner="w-a", duration=timedelta(seconds=-1))
-    current = await store.claim_ready("e", owner="w-b", duration=timedelta(seconds=30))
+    current = await store.take_over_expired_claim_for_reconcile(
+        "e",
+        owner="w-b",
+        now=stale.lease.expires_at,
+        duration=timedelta(seconds=30),
+    )
     assert current.fence == stale.fence + 1
     with pytest.raises(StorageConflictError):
         await store.complete(

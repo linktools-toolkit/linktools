@@ -1280,9 +1280,6 @@ class SqlAlchemyExecutionBackend:
         )
 
     async def abort_run(self, command: "AbortExecution") -> RunRecord:
-        # Unlike fail_run, there is no snapshot to persist here -- an
-        # AbortExecution fires on a programming/config/protocol error, before
-        # the engine ever produced a coherent outcome to snapshot.
         async with self.session_factory() as session:
             async with session.begin():
                 row = await self._run_row(session, command.run_id)
@@ -1296,7 +1293,7 @@ class SqlAlchemyExecutionBackend:
                 assert_transition(record.status, RunStatus.FAILED)
                 event_sequence = row.event_sequence + 1
                 now = datetime.now(timezone.utc)
-                snapshot_revision = row.snapshot_revision + (1 if command.persist_snapshot else 0)
+                snapshot_revision = row.snapshot_revision + 1
                 result = await session.execute(
                     update(ExecutionRow)
                     .where(
@@ -1333,22 +1330,21 @@ class SqlAlchemyExecutionBackend:
                 row.snapshot_revision = snapshot_revision
                 row.updated_at = now
                 row.event_sequence = event_sequence
-                if command.persist_snapshot:
-                    session.add(
-                        SnapshotRow(
-                            execution_id=command.run_id,
-                            revision=snapshot_revision,
-                            resume_messages=[],
-                            outcome={
-                                "final_output": command.snapshot.final_output,
-                                "usage": _snapshot_usage_payload(command.snapshot.usage),
-                            },
-                            status=RunStatus.FAILED.value,
-                            trace_end_sequence=command.snapshot.trace_end_sequence,
-                            created_at=now,
-                            updated_at=now,
-                        )
+                session.add(
+                    SnapshotRow(
+                        execution_id=command.run_id,
+                        revision=snapshot_revision,
+                        resume_messages=[],
+                        outcome={
+                            "final_output": command.snapshot.final_output,
+                            "usage": _snapshot_usage_payload(command.snapshot.usage),
+                        },
+                        status=RunStatus.FAILED.value,
+                        trace_end_sequence=command.snapshot.trace_end_sequence,
+                        created_at=now,
+                        updated_at=now,
                     )
+                )
                 session.add(
                     EventRow(
                         execution_id=row.execution_id,
@@ -1363,10 +1359,7 @@ class SqlAlchemyExecutionBackend:
                         session, row.session_id, row.session_turn_sequence
                     )
                     if turn is not None:
-                        # abort_run fires before the engine produced a snapshot,
-                        # so this turn has no trustworthy delta -> UNAVAILABLE
-                        # (distinct from fail_run, whose PARTIAL delta the
-                        # engine salvaged via _finish).
+                        # The partial snapshot has no trustworthy turn delta.
                         turn.status = RunStatus.FAILED.value
                         turn.capture_state = MessageCaptureState.UNAVAILABLE.value
                         turn.completed_at = now

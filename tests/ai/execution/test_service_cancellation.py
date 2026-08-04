@@ -60,7 +60,7 @@ async def test_unexpected_model_error_aborts_the_run_with_persisted_error(tmp_pa
     record = await storage.execution.get_run("r1")
     assert record.status is RunStatus.FAILED
     assert record.error.error_type == "RuntimeError"
-    assert record.error.message == "boom"
+    assert record.error.message == "execution failed"
     assert record.lease.owner is None
     await runtime.aclose()
 

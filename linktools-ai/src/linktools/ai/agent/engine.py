@@ -44,7 +44,7 @@ import asyncio
 import contextlib
 import dataclasses
 import time
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Protocol
 
 from linktools.core import environ
 
@@ -204,6 +204,7 @@ class AgentEngine:
         *,
         cancellation: "CancellationToken",
         live_events: "RunLiveEventSink",
+        observe_usage: "Callable[[object], Awaitable[None]] | None",
     ) -> str:
         """Stream one model-request node, publishing text/thinking chunks to
         ``live_events`` as they arrive. Returns the concatenated text delta so
@@ -248,6 +249,10 @@ class AgentEngine:
                         accumulated += chunk
                     await live_events.publish({"type": kind, "text": chunk})
                     await cancellation.raise_if_cancelled()
+            if observe_usage is not None:
+                await observe_usage(request_stream.usage)
+        if observe_usage is not None:
+            await observe_usage(run_ctx.state.usage)
         return accumulated
 
     async def _forward_tool_stream(
@@ -634,6 +639,58 @@ class AgentEngine:
                 total_cost=captured.total_cost,
             )
 
+        async def _observe_model_usage(usage: object) -> None:
+            if usage_sink is None:
+                return
+            usage_sink.observe_absolute(usage)
+            if (
+                getattr(usage, "total_cost", None) is not None
+                or self._pricing_provider is None
+            ):
+                return
+            try:
+                pricing = await self._pricing_provider.get_pricing(
+                    agent.spec.model.primary
+                )
+            except Exception as exc:
+                logger.debug(
+                    "usage pricing unavailable for run %s: %s: %s",
+                    context.run_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+            if pricing is None:
+                return
+            usage_sink.observe_absolute(
+                ExecutionRunUsage(
+                    input_tokens=int(getattr(usage, "input_tokens", 0)),
+                    output_tokens=int(getattr(usage, "output_tokens", 0)),
+                    total_tokens=int(
+                        getattr(
+                            usage,
+                            "total_tokens",
+                            int(getattr(usage, "input_tokens", 0))
+                            + int(getattr(usage, "output_tokens", 0)),
+                        )
+                    ),
+                    cache_write_tokens=int(
+                        getattr(usage, "cache_write_tokens", 0)
+                    ),
+                    cache_read_tokens=int(getattr(usage, "cache_read_tokens", 0)),
+                    total_cost=pricing.cost(
+                        input_tokens=int(getattr(usage, "input_tokens", 0)),
+                        output_tokens=int(getattr(usage, "output_tokens", 0)),
+                        cache_read_tokens=int(
+                            getattr(usage, "cache_read_tokens", 0)
+                        ),
+                        cache_write_tokens=int(
+                            getattr(usage, "cache_write_tokens", 0)
+                        ),
+                    ),
+                )
+            )
+
         try:
             async with self._span("agent.run", attrs=run_attrs):
                 if environ.debug:
@@ -751,7 +808,13 @@ class AgentEngine:
                                     if not model_supports_streaming(
                                         model
                                     ) and PydanticAgent.is_model_request_node(node):
-                                        node = await node.run(run.ctx)
+                                        try:
+                                            node = await node.run(run.ctx)
+                                        finally:
+                                            if usage_sink is not None:
+                                                await _observe_model_usage(
+                                                    run.ctx.state.usage
+                                                )
                                         continue
 
                                     if PydanticAgent.is_model_request_node(node):
@@ -761,6 +824,7 @@ class AgentEngine:
                                                 run.ctx,
                                                 cancellation=cancellation,
                                                 live_events=live_events,
+                                                observe_usage=_observe_model_usage,
                                             )
                                         )
                                     elif PydanticAgent.is_call_tools_node(node):
@@ -808,6 +872,7 @@ class AgentEngine:
                                     usage=AgentUsage(
                                         input_tokens=_captured_usage().input_tokens,
                                         output_tokens=_captured_usage().output_tokens,
+                                        total_tokens=_captured_usage().total_tokens,
                                         cache_write_tokens=_captured_usage().cache_write_tokens,
                                         cache_read_tokens=_captured_usage().cache_read_tokens,
                                         total_cost=_captured_usage().total_cost,
@@ -851,16 +916,17 @@ class AgentEngine:
                     raise ModelRoutingError("model timeout")
 
                 usage = result.usage if result is not None else None
-                if usage is not None and usage_sink is not None:
-                    usage_sink.observe_absolute(usage)
+                if usage is not None:
+                    await _observe_model_usage(usage)
+                captured = _captured_usage()
                 output = result.output if result is not None else accumulated_text
                 await self._enforce_usage_policy(agent.spec.model, usage)
 
                 run_result = RunResult(
                     output=output,
                     token_usage={
-                        "input_tokens": usage.input_tokens if usage else 0,
-                        "output_tokens": usage.output_tokens if usage else 0,
+                        "input_tokens": captured.input_tokens,
+                        "output_tokens": captured.output_tokens,
                     },
                 )
                 snapshot = None
@@ -869,14 +935,12 @@ class AgentEngine:
                         ExecutionRunStatus.COMPLETED,
                         final_output=output,
                         usage=ExecutionRunUsage(
-                            input_tokens=usage.input_tokens if usage else 0,
-                            output_tokens=usage.output_tokens if usage else 0,
-                            total_tokens=(usage.input_tokens + usage.output_tokens)
-                            if usage
-                            else 0,
-                            cache_write_tokens=usage.cache_write_tokens if usage else 0,
-                            cache_read_tokens=usage.cache_read_tokens if usage else 0,
-                            total_cost=getattr(usage, "total_cost", None) if usage else None,
+                            input_tokens=captured.input_tokens,
+                            output_tokens=captured.output_tokens,
+                            total_tokens=captured.total_tokens,
+                            cache_write_tokens=captured.cache_write_tokens,
+                            cache_read_tokens=captured.cache_read_tokens,
+                            total_cost=captured.total_cost,
                         ),
                     )
 
@@ -907,11 +971,12 @@ class AgentEngine:
                 return AgentCompleted(
                     result=run_result,
                     usage=AgentUsage(
-                        input_tokens=usage.input_tokens if usage else 0,
-                        output_tokens=usage.output_tokens if usage else 0,
-                        total_cost=getattr(usage, "total_cost", None) if usage else None,
-                        cache_write_tokens=usage.cache_write_tokens if usage else 0,
-                        cache_read_tokens=usage.cache_read_tokens if usage else 0,
+                        input_tokens=captured.input_tokens,
+                        output_tokens=captured.output_tokens,
+                        total_tokens=captured.total_tokens,
+                        total_cost=captured.total_cost,
+                        cache_write_tokens=captured.cache_write_tokens,
+                        cache_read_tokens=captured.cache_read_tokens,
                     ),
                     snapshot=snapshot,
                 )
@@ -931,6 +996,7 @@ class AgentEngine:
                     usage=AgentUsage(
                         input_tokens=_captured_usage().input_tokens,
                         output_tokens=_captured_usage().output_tokens,
+                        total_tokens=_captured_usage().total_tokens,
                         total_cost=_captured_usage().total_cost,
                         cache_write_tokens=_captured_usage().cache_write_tokens,
                         cache_read_tokens=_captured_usage().cache_read_tokens,
@@ -978,6 +1044,7 @@ class AgentEngine:
                 usage=AgentUsage(
                     input_tokens=_captured_usage().input_tokens,
                     output_tokens=_captured_usage().output_tokens,
+                    total_tokens=_captured_usage().total_tokens,
                     total_cost=_captured_usage().total_cost,
                     cache_write_tokens=_captured_usage().cache_write_tokens,
                     cache_read_tokens=_captured_usage().cache_read_tokens,

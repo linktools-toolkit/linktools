@@ -15,7 +15,7 @@ import pytest
 from linktools.ai.errors import InvalidSpecError, StorageConflictError
 from linktools.ai.execution.domain import RunError, RunKind, RunStatus, RunnableType
 from linktools.ai.execution.live_events import NoopRunLiveEventSink
-from linktools.ai.execution.service import ChildRunResult
+from linktools.ai.execution.service import ChildRunResult, PreparedAgentExecution
 from linktools.ai.execution.swarm_service import SwarmExecutionService
 from linktools.ai.governance.authorization import (
     AuthorizationPolicy,
@@ -102,6 +102,7 @@ class FakeExecutionService:
         parent_execution_id: str,
         message_history=(),
         metadata=None,
+        prepared_execution=None,
     ) -> ChildRunResult:
         agent_id = spec.id
         self.in_flight += 1
@@ -120,6 +121,29 @@ class FakeExecutionService:
             )
         finally:
             self.in_flight -= 1
+
+    async def prepare_agent_execution(
+        self,
+        agent_spec,
+        *,
+        principal,
+        session_id,
+        execution_id,
+        root_execution_id,
+        parent_execution_id,
+    ) -> PreparedAgentExecution:
+        return PreparedAgentExecution(
+            agent_spec=agent_spec,
+            assembled_agent=object(),
+            tool_descriptors=(),
+            fingerprint=f"fingerprint:{agent_spec.id}",
+        )
+
+    async def cancel(self, run_id: str, *, principal) -> None:
+        return None
+
+    async def read_usage(self, *, child_run_id: str) -> TaskUsage:
+        return TaskUsage()
 
 
 class _RecordingAuth(OwnershipAuthorizationPolicy):
@@ -235,6 +259,32 @@ class _MemoryExecutionStore:
             ),
         )
         self._runs[command.run_id] = claimed
+        return claimed
+
+    async def claim_run_for_recovery(
+        self, run_id, *, owner, now, duration
+    ) -> "RunRecord":
+        record = self._runs.get(run_id)
+        if record is None:
+            raise KeyError(run_id)
+        if record.status is RunStatus.PENDING:
+            target = RunStatus.RUNNING
+        elif record.status in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+            if record.lease.expires_at is not None and record.lease.expires_at > now:
+                raise StorageConflictError("active recovery lease")
+            target = record.status
+        else:
+            raise StorageConflictError("run is not recoverable")
+        claimed = replace(
+            record,
+            status=target,
+            lease=Lease(
+                owner=owner,
+                fence=record.lease.fence + 1,
+                expires_at=now + duration,
+            ),
+        )
+        self._runs[run_id] = claimed
         return claimed
 
     async def get_run(self, run_id: str):
@@ -482,30 +532,48 @@ async def test_recover_swarm_decodes_persisted_swarm_spec():
     task_plan = make_plan(("a",))
     # Seed a persisted parent run carrying the encoded swarm spec.
     spec = _spec(agents=("a",))
-    store._runs["parent-2"] = _persisted_swarm_run("parent-2", spec, task_plan.id)
+    store._runs["parent-2"] = _persisted_swarm_run("parent-2", spec, task_plan)
     await tasks.create_plan(task_plan, ready_executions(task_plan))
     outcome = await svc.recover_swarm("parent-2", principal=_principal())
     assert isinstance(outcome, SwarmCompleted)
 
 
-def _persisted_swarm_run(run_id, spec, plan_id):
+def _persisted_swarm_run(run_id, spec, task_plan):
     from datetime import datetime, timezone
     from hashlib import sha256
     from linktools.ai.execution.domain import RunDefinition, RunRecord
     from linktools.ai.json import canonical_json_bytes
     from linktools.ai.storage.coordination.lease import Lease
+    from linktools.ai.tasks.codec import encode_plan
     from linktools.ai.tasks.swarm.codec import encode_swarm_spec
 
-    value = encode_swarm_spec(spec)
+    snapshot_hash = sha256(canonical_json_bytes([])).hexdigest()
+    value = {
+        "swarm_spec": encode_swarm_spec(spec),
+        "task_plan_id": task_plan.id,
+        "task_plan_hash": sha256(
+            canonical_json_bytes(encode_plan(task_plan))
+        ).hexdigest(),
+        "session_snapshot_hash": snapshot_hash,
+        "agent_fingerprints": {
+            node.payload.agent_id: f"fingerprint:{node.payload.agent_id}"
+            for node in task_plan.nodes
+        },
+        "deadline_at": None,
+    }
     definition = RunDefinition(
-        spec.id, RunnableType.TASK, "swarm-spec.v1", value,
+        spec.id, RunnableType.TASK, "swarm-task-graph.v1", value,
         sha256(canonical_json_bytes(value)).hexdigest(),
     )
     now = datetime.now(timezone.utc)
     return RunRecord(
         id=run_id, session_id="s", kind=RunKind.TASK,
         runnable_id=spec.id, runnable_type=RunnableType.TASK,
-        input={"plan_id": plan_id}, definition=definition,
+        input={
+            "task_plan_id": task_plan.id,
+            "session_snapshot": [],
+            "session_snapshot_hash": snapshot_hash,
+        }, definition=definition,
         status=RunStatus.RUNNING, session_turn_sequence=None,
         parent_execution_id=None, root_execution_id=run_id,
         approval=None, lease=Lease(owner=f"swarm:{run_id}", fence=1, expires_at=None),
@@ -523,12 +591,12 @@ async def test_reconcile_claimed_backfills_orphaned_claim_without_bind():
     svc, store = _service(fake_exec=fake, tasks=tasks)
     task_plan = make_plan(("a",))
     spec = _spec(agents=("a",))
-    store._runs["parent-3"] = _persisted_swarm_run("parent-3", spec, task_plan.id)
+    store._runs["parent-3"] = _persisted_swarm_run("parent-3", spec, task_plan)
     orphan = replace(
         ready_executions(task_plan)[0],
         status=TaskStatus.CLAIMED,
         attempt=1,
-        lease=Lease(owner="swarm:parent-3", fence=1, expires_at=datetime.now(timezone.utc) + timedelta(hours=1)),
+        lease=Lease(owner="swarm:parent-3", fence=1, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)),
         active_run_id=None,
     )
     await tasks.create_plan(task_plan, (orphan,))
@@ -545,18 +613,26 @@ async def test_reconcile_claimed_backfills_from_child_completed():
     svc, store = _service(fake_exec=fake, tasks=tasks)
     task_plan = make_plan(("a",))
     spec = _spec(agents=("a",))
-    store._runs["parent-4"] = _persisted_swarm_run("parent-4", spec, task_plan.id)
+    from linktools.ai.execution.identifiers import child_run_id
+
+    child_id = child_run_id("parent-4", "a")
+    store._runs["parent-4"] = _persisted_swarm_run("parent-4", spec, task_plan)
     # child run already COMPLETED but node still CLAIMED
-    child = _persisted_swarm_run("child-done", spec, task_plan.id)
+    child = _persisted_swarm_run(child_id, spec, task_plan)
+    child = replace(
+        child,
+        parent_execution_id="parent-4",
+        root_execution_id="parent-4",
+    )
     child = replace(child, status=RunStatus.COMPLETED)
-    store._runs["child-done"] = child
+    store._runs[child_id] = child
     # seed a snapshot so recovery can reclaim output + usage
     from linktools.ai.execution.snapshots import RunSnapshot
     from linktools.ai.execution.domain import RunUsage
 
     now = datetime.now(timezone.utc)
-    store._snapshots["child-done"] = RunSnapshot(
-        schema="run-snapshot.v1", run_id="child-done", revision=1,
+    store._snapshots[child_id] = RunSnapshot(
+        schema="run-snapshot.v1", run_id=child_id, revision=1,
         resume_messages=(), final_output={"recovered": True},
         status=RunStatus.COMPLETED, usage=RunUsage(input_tokens=42, output_tokens=7),
         trace_end_sequence=0, created_at=now,
@@ -565,8 +641,8 @@ async def test_reconcile_claimed_backfills_from_child_completed():
         ready_executions(task_plan)[0],
         status=TaskStatus.CLAIMED,
         attempt=1,
-        lease=Lease(owner="swarm:parent-4", fence=1, expires_at=datetime.now(timezone.utc) + timedelta(hours=1)),
-        active_run_id="child-done",
+        lease=Lease(owner="swarm:parent-4", fence=1, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)),
+        active_run_id=child_id,
     )
     await tasks.create_plan(task_plan, (claimed,))
     await svc.recover_swarm("parent-4", principal=_principal())
@@ -591,15 +667,38 @@ async def test_reconcile_claimed_backfills_from_child_terminal_branches():
         svc, store = _service(fake_exec=fake, tasks=tasks)
         plan = make_plan(("a",))
         plan_id = plan.id
-        store._runs[plan_id] = _persisted_swarm_run(plan_id, spec, plan_id)
-        child = _persisted_swarm_run(f"child-{plan_id}", spec, plan_id)
-        store._runs[f"child-{plan_id}"] = replace(child, status=child_status)
+        from linktools.ai.execution.identifiers import child_run_id
+
+        child_id = child_run_id(plan_id, "a")
+        store._runs[plan_id] = _persisted_swarm_run(plan_id, spec, plan)
+        child = _persisted_swarm_run(child_id, spec, plan)
+        child = replace(
+            child,
+            parent_execution_id=plan_id,
+            root_execution_id=plan_id,
+            status=child_status,
+        )
+        store._runs[child_id] = child
+        from linktools.ai.execution.domain import RunUsage
+        from linktools.ai.execution.snapshots import RunSnapshot
+
+        store._snapshots[child_id] = RunSnapshot(
+            schema="run-snapshot.v1",
+            run_id=child_id,
+            revision=1,
+            resume_messages=(),
+            final_output={"status": child_status.value},
+            status=child_status,
+            usage=RunUsage(input_tokens=1, output_tokens=1),
+            trace_end_sequence=0,
+            created_at=datetime.now(timezone.utc),
+        )
         claimed = replace(
             ready_executions(plan)[0],
             status=TaskStatus.CLAIMED,
             attempt=1,
-            lease=Lease(owner=f"swarm:{plan_id}", fence=1, expires_at=datetime.now(timezone.utc) + timedelta(hours=1)),
-            active_run_id=f"child-{plan_id}",
+            lease=Lease(owner=f"swarm:{plan_id}", fence=1, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)),
+            active_run_id=child_id,
         )
         await tasks.create_plan(plan, (claimed,))
         await svc.recover_swarm(plan_id, principal=_principal())
@@ -609,9 +708,8 @@ async def test_reconcile_claimed_backfills_from_child_terminal_branches():
             assert execs["a"].error.error_type == expect_error_type
 
     await _run_case(RunStatus.FAILED, TaskStatus.FAILED)
-    await _run_case(RunStatus.CANCELLED, TaskStatus.CANCELLED)
+    await _run_case(RunStatus.CANCELLED, TaskStatus.FAILED, "interrupted_execution")
     await _run_case(RunStatus.PAUSED, TaskStatus.FAILED, "approval_not_supported")
-    await _run_case(RunStatus.RUNNING, TaskStatus.FAILED, "interrupted_execution")
 
 
 @pytest.mark.asyncio
@@ -623,7 +721,7 @@ async def test_cancel_swarm_persists_cancelling_and_converges():
     svc, store = _service(fake_exec=fake, tasks=tasks)
     task_plan = make_plan(("a",))
     spec = _spec(agents=("a",))
-    store._runs["parent-5"] = _persisted_swarm_run("parent-5", spec, task_plan.id)
+    store._runs["parent-5"] = _persisted_swarm_run("parent-5", spec, task_plan)
     await tasks.create_plan(task_plan, ready_executions(task_plan))
     await svc.cancel_swarm("parent-5", principal=_principal())
     record = await store.get_run("parent-5")
@@ -738,6 +836,20 @@ async def test_mid_run_cancel_routes_parent_to_cancelled_not_completed():
                 parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
             )
 
+        async def prepare_agent_execution(self, agent_spec, **kwargs):
+            return PreparedAgentExecution(
+                agent_spec=agent_spec,
+                assembled_agent=object(),
+                tool_descriptors=(),
+                fingerprint=f"fingerprint:{agent_spec.id}",
+            )
+
+        async def cancel(self, run_id: str, *, principal) -> None:
+            return None
+
+        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
+            return TaskUsage()
+
     fake = _CancelMidRunExec()
     tasks = LocalTaskBackend()
     store = _MemoryExecutionStore()
@@ -808,6 +920,15 @@ async def test_run_swarm_rejects_mutating_tool_before_any_persistence():
                 spec.id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
             )
 
+        async def prepare_agent_execution(self, agent_spec, **kwargs):
+            raise InvalidSpecError("mutating_tool_not_allowed")
+
+        async def cancel(self, run_id: str, *, principal) -> None:
+            return None
+
+        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
+            return TaskUsage()
+
     fake_exec = _FakeExecWithAssembler()
     tasks = LocalTaskBackend()
     store = _MemoryExecutionStore()
@@ -837,7 +958,7 @@ async def test_inspect_swarm_denies_cross_tenant_principal():
     tasks = LocalTaskBackend()
     svc, store = _service(fake_exec=fake, tasks=tasks)
     task_plan = make_plan(("a",))
-    store._runs["run-xt"] = _persisted_swarm_run("run-xt", _spec(agents=("a",)), task_plan.id)
+    store._runs["run-xt"] = _persisted_swarm_run("run-xt", _spec(agents=("a",)), task_plan)
     await tasks.create_plan(task_plan, ready_executions(task_plan))
     other_principal = PrincipalContext(
         tenant_id="OTHER-tenant",
@@ -858,7 +979,7 @@ async def test_recover_swarm_denies_cross_tenant_principal():
     tasks = LocalTaskBackend()
     svc, store = _service(fake_exec=fake, tasks=tasks)
     task_plan = make_plan(("a",))
-    store._runs["run-xt2"] = _persisted_swarm_run("run-xt2", _spec(agents=("a",)), task_plan.id)
+    store._runs["run-xt2"] = _persisted_swarm_run("run-xt2", _spec(agents=("a",)), task_plan)
     await tasks.create_plan(task_plan, ready_executions(task_plan))
     other_principal = PrincipalContext(
         tenant_id="OTHER-tenant",
@@ -976,6 +1097,20 @@ async def test_swarm_fails_when_parent_lease_reclaimed_by_another_worker():
                 parent_run_id, RunStatus.COMPLETED, {"ok": True}, None, TaskUsage()
             )
 
+        async def prepare_agent_execution(self, agent_spec, **kwargs):
+            return PreparedAgentExecution(
+                agent_spec=agent_spec,
+                assembled_agent=object(),
+                tool_descriptors=(),
+                fingerprint=f"fingerprint:{agent_spec.id}",
+            )
+
+        async def cancel(self, run_id: str, *, principal) -> None:
+            return None
+
+        async def read_usage(self, *, child_run_id: str) -> TaskUsage:
+            return TaskUsage()
+
     fake = _StealLeaseExec()
     tasks = LocalTaskBackend()
     store = _MemoryExecutionStore()
@@ -994,4 +1129,3 @@ async def test_swarm_fails_when_parent_lease_reclaimed_by_another_worker():
     )
     # The gate detects the reclaimed lease and fails the swarm.
     assert isinstance(outcome, SwarmFailed)
-

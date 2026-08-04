@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import Literal
 from ..json import JsonValue
 
+from ..errors import UsageRegressionError
 from .domain import MessageCaptureState, RunUsage
 
 from typing import TYPE_CHECKING
@@ -19,39 +20,52 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class RunUsageCapture:
-    """Per-run usage sink that preserves the latest confirmed model usage."""
+    """Per-run sink for authoritative cumulative model usage snapshots."""
 
-    latest: "RunUsage" = field(default_factory=lambda: RunUsage())
-    cost_known: bool = True
+    current: "RunUsage" = field(default_factory=RunUsage)
 
     def observe_absolute(self, usage: object) -> None:
         input_tokens = int(getattr(usage, "input_tokens", 0))
         output_tokens = int(getattr(usage, "output_tokens", 0))
+        raw_total_tokens = getattr(usage, "total_tokens", None)
+        total_tokens = (
+            input_tokens + output_tokens
+            if raw_total_tokens is None
+            or (int(raw_total_tokens) == 0 and input_tokens + output_tokens > 0)
+            else int(raw_total_tokens)
+        )
         cache_write = int(getattr(usage, "cache_write_tokens", 0))
         cache_read = int(getattr(usage, "cache_read_tokens", 0))
         raw_cost = getattr(usage, "total_cost", None)
-        if raw_cost is None:
-            self.cost_known = False
-        self.latest = RunUsage(
+        if input_tokens < self.current.input_tokens:
+            raise UsageRegressionError("input_tokens decreased")
+        if output_tokens < self.current.output_tokens:
+            raise UsageRegressionError("output_tokens decreased")
+        if total_tokens < self.current.total_tokens:
+            raise UsageRegressionError("total_tokens decreased")
+        if cache_write < self.current.cache_write_tokens:
+            raise UsageRegressionError("cache_write_tokens decreased")
+        if cache_read < self.current.cache_read_tokens:
+            raise UsageRegressionError("cache_read_tokens decreased")
+        total_cost = Decimal(str(raw_cost)) if raw_cost is not None else None
+        if (
+            total_cost is not None
+            and self.current.total_cost is not None
+            and total_cost < self.current.total_cost
+        ):
+            raise UsageRegressionError("total_cost decreased")
+        self.current = RunUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
+            total_tokens=total_tokens,
             cache_write_tokens=cache_write,
             cache_read_tokens=cache_read,
-            total_cost=Decimal(str(raw_cost)) if raw_cost is not None else None,
+            total_cost=total_cost,
         )
 
     def snapshot(self) -> "RunUsage":
-        if self.cost_known:
-            return self.latest
-        return RunUsage(
-            input_tokens=self.latest.input_tokens,
-            output_tokens=self.latest.output_tokens,
-            total_tokens=self.latest.total_tokens,
-            cache_write_tokens=self.latest.cache_write_tokens,
-            cache_read_tokens=self.latest.cache_read_tokens,
-            total_cost=None,
-        )
+        return self.current
+
 
 @dataclass(frozen=True, slots=True)
 class AgentSnapshotData:

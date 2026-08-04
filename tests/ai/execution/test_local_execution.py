@@ -142,17 +142,23 @@ async def test_pause_and_approval_decision_share_execution_record(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_abort_run_persists_error_without_a_snapshot(tmp_path):
+async def test_abort_run_persists_error_with_partial_snapshot(tmp_path):
     store = LocalExecutionBackend(tmp_path / "data")
     await store.create_session(session_id="s", user_id=None, tenant_id=None)
     await store.start_run(StartExecution("r", "s", RunKind.USER_TURN, definition("agent"), "p"))
     claimed = await store.claim_run(ClaimExecution("r", "worker", datetime.now(timezone.utc), __import__("datetime").timedelta(minutes=5)))
-    aborted = await store.abort_run(AbortExecution("r", "worker", claimed.lease.fence, RunError("RuntimeError", "boom"), 3))
+    snapshot = AgentSnapshotData((), None, RunUsage(), 3)
+    aborted = await store.abort_run(
+        AbortExecution(
+            "r", "worker", claimed.lease.fence, snapshot,
+            RunError("RuntimeError", "boom"),
+        )
+    )
     assert aborted.status is RunStatus.FAILED
     assert aborted.error == RunError("RuntimeError", "boom")
     assert aborted.lease.owner is None
     assert aborted.trace_sequence == 3
-    assert await store.get_snapshot("r") is None
+    assert (await store.get_snapshot("r")).trace_end_sequence == 3
     # abort fires before the engine produced a snapshot, so the turn has no
     # trustworthy delta -> capture_state UNAVAILABLE (not the default COMPLETE).
     turn = await store.get_turn("s", 1)

@@ -874,9 +874,6 @@ class LocalExecutionBackend:
         )
 
     async def abort_run(self, command: "AbortExecution") -> RunRecord:
-        # Unlike fail_run, there is no snapshot to persist here -- an
-        # AbortExecution fires on a programming/config/protocol error, before
-        # the engine ever produced a coherent outcome to snapshot.
         current = await self.get_run(command.run_id)
         if current is None:
             raise StorageError(f"unknown run: {command.run_id}")
@@ -888,9 +885,7 @@ class LocalExecutionBackend:
                 assert_owner(record, command.owner, command.fence, _now())
             assert_transition(record.status, RunStatus.FAILED)
             now = _now()
-            snapshot_revision = record.snapshot_revision
-            if command.persist_snapshot:
-                snapshot_revision += 1
+            snapshot_revision = record.snapshot_revision + 1
             updated = replace(
                 record,
                 status=RunStatus.FAILED,
@@ -901,22 +896,20 @@ class LocalExecutionBackend:
                 event_sequence=record.event_sequence + 1,
                 updated_at=now,
             )
-            additional = ()
-            if command.persist_snapshot:
-                stored_snapshot = RunSnapshot(
-                    "run-snapshot.v1",
-                    command.run_id,
-                    snapshot_revision,
-                    (),
-                    command.snapshot.final_output,
-                    RunStatus.FAILED,
-                    command.snapshot.usage,
-                    command.snapshot.trace_end_sequence,
-                    now,
-                )
-                additional = (
-                    (self._snapshot_path(command.run_id), _snapshot_json(stored_snapshot)),
-                )
+            stored_snapshot = RunSnapshot(
+                "run-snapshot.v1",
+                command.run_id,
+                snapshot_revision,
+                (),
+                command.snapshot.final_output,
+                RunStatus.FAILED,
+                command.snapshot.usage,
+                command.snapshot.trace_end_sequence,
+                now,
+            )
+            additional = (
+                (self._snapshot_path(command.run_id), _snapshot_json(stored_snapshot)),
+            )
             if record.session_turn_sequence is not None:
                 turn = _turn(
                     dict(
@@ -928,8 +921,7 @@ class LocalExecutionBackend:
                         )
                     )
                 )
-                # abort_run fires before the engine produced a snapshot, so this
-                # turn has no trustworthy delta -> UNAVAILABLE.
+                # The partial snapshot has no trustworthy turn delta.
                 additional = additional + (
                     (
                         self._turn_path(

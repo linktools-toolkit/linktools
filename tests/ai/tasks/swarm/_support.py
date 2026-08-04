@@ -17,6 +17,7 @@ from linktools.ai.tasks.models import (
     TaskStatus,
     TaskUsage,
 )
+from linktools.ai.execution.identifiers import task_execution_id
 from linktools.ai.tasks.swarm.engine import (
     ControlGate,
     NodeRunRequest,
@@ -71,14 +72,28 @@ class RecordingRunner:
         finally:
             self.in_flight -= 1
 
+    async def request_cancel(
+        self, *, child_run_id: str, principal=None, reason: str
+    ) -> None:
+        return None
+
+    async def read_usage(self, *, child_run_id: str) -> TaskUsage:
+        return TaskUsage()
+
 
 class NoopGate:
     """ControlGate that never aborts and never reports cancellation."""
 
     cancel_requested = False
 
-    async def check(self, *, now: float) -> None:
+    async def check(self) -> None:
         return None
+
+    async def check_before_launch(self) -> None:
+        return None
+
+    def next_wake_delay(self, *, now_monotonic: float) -> float:
+        return 1.0
 
     def record_usage(self, usage: TaskUsage) -> None:
         return None
@@ -95,11 +110,20 @@ class LimitGate:
     def record_usage(self, usage: TaskUsage) -> None:
         self._spent += usage.input_tokens + usage.output_tokens
 
-    async def check(self, *, now: float) -> None:
+    async def check(self) -> None:
         from linktools.ai.errors import SwarmLimitExceededError
 
         if self._spent > self._max:
             raise SwarmLimitExceededError("token cap", kind="max_total_tokens")
+
+    async def check_before_launch(self) -> None:
+        if self._spent >= self._max:
+            from linktools.ai.errors import SwarmLimitExceededError
+
+            raise SwarmLimitExceededError("token cap", kind="token_limit_reached")
+
+    def next_wake_delay(self, *, now_monotonic: float) -> float:
+        return 1.0
 
 
 def make_plan(
@@ -130,7 +154,7 @@ def make_plan(
 def ready_executions(plan: TaskPlan) -> "tuple[TaskExecution, ...]":
     return tuple(
         TaskExecution(
-            id=f"exec-{plan.id}-{node.id}",
+            id=task_execution_id(plan.id, node.id),
             plan_id=plan.id,
             node_id=node.id,
             status=TaskStatus.READY,

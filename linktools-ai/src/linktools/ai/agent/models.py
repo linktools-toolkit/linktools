@@ -76,13 +76,13 @@ class AgentInput:
 @dataclass(frozen=True, slots=True)
 class AgentUsage:
     """Token/cost usage summary an agent execution produced. Distinct from the
-    persisted ``execution.domain.RunUsage`` (which carries token counts for
-    snapshots): the agent outcome reports input/output tokens plus an optional
-    total cost, and the execution service converts it to the snapshot's
-    ``RunUsage`` when it commits."""
+    persisted ``execution.domain.RunUsage``: the agent outcome carries the
+    cumulative model usage observed at the response boundary, and the
+    execution service converts it to the snapshot's ``RunUsage``."""
 
     input_tokens: int = 0
     output_tokens: int = 0
+    total_tokens: int = 0
     cache_write_tokens: int = 0
     cache_read_tokens: int = 0
     total_cost: "float | None" = None
