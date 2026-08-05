@@ -13,6 +13,8 @@ from linktools.cli import BaseCommand
 from linktools.core import environ
 from linktools.ai.acp.protocol import AcpDependencyError, require_sdk
 
+logger = environ.get_logger("commands.ai.acp")
+
 if TYPE_CHECKING:
     from argparse import Namespace
     from linktools.cli import CommandParser
@@ -91,13 +93,59 @@ async def _run(args: "Namespace") -> int:
         client=AcpClient(project_root=project.root),
         protocol=protocol,
     )
-    close_result = None
+    transport_error: "BaseException | None" = None
+    preclose_results = ()
+    client_failures = ()
+    client_cleanup_error = False
+    runtime_result = None
+    runtime_error: "BaseException | None" = None
     try:
         await run_acp_server(agent)
+    except BaseException as error:
+        transport_error = error
     finally:
-        close_result = await bundle.runtime.aclose()
-        lock.release()
-    return 0 if close_result.closed else 4
+        try:
+            preclose_results = await bundle.runtime.shutdown_sessions()
+        except BaseException as error:
+            logger.error(
+                "event=ai.acp.preclose_failed session_count=0 error_id=%s",
+                type(error).__name__,
+                exc_info=environ.debug,
+            )
+        try:
+            client_failures = await agent.client.close()
+        except BaseException as error:
+            client_failures = ()
+            client_cleanup_error = True
+            logger.error(
+                "event=ai.acp.client_close_failed client_failure_count=1 error_id=%s",
+                type(error).__name__,
+                exc_info=environ.debug,
+            )
+        try:
+            runtime_result = await bundle.runtime.aclose()
+        except BaseException as error:
+            runtime_error = error
+            logger.error(
+                "event=ai.acp.runtime_close_failed runtime_closed=False error_id=%s",
+                type(error).__name__,
+                exc_info=environ.debug,
+            )
+        finally:
+            lock.release()
+    runtime_closed = runtime_result is not None and runtime_result.closed and runtime_error is None
+    logger.info(
+        "event=ai.acp.shutdown_complete client_failure_count=%s runtime_closed=%s transport_error_id=%s preclose_failure_count=%s",
+        len(client_failures),
+        runtime_closed,
+        type(transport_error).__name__ if transport_error is not None else None,
+        sum(len(result.failures) for result in preclose_results),
+    )
+    if transport_error is not None:
+        raise transport_error
+    if not runtime_closed or client_cleanup_error or client_failures:
+        return 4
+    return 0
 
 
 command = Command()

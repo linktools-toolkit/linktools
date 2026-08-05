@@ -31,6 +31,7 @@ from ..execution.session import (
     SessionWorkspace,
     UpdateSession,
 )
+from ..execution.domain import RunStatus
 from ..execution.store import ExecutionStore
 
 if TYPE_CHECKING:
@@ -181,6 +182,8 @@ class ActiveRuntimeSession:
     active_execution_id: "str | None" = None
     closing_requested: bool = False
     cleanup_required: bool = False
+    cleanup_error_id: "str | None" = None
+    cleanup_execution_id: "str | None" = None
     owners: "dict[str, SessionResourceOwner]" = None  # type: ignore[assignment]
     lock: asyncio.Lock = None  # type: ignore[assignment]
     close_task: "asyncio.Task[SessionCloseResult] | None" = None
@@ -389,6 +392,29 @@ class RuntimeSessionService:
 
     def set_interaction_owner(self, owner: SessionResourceOwner) -> None:
         self._interaction_owner = owner
+
+    async def mark_cleanup_required(
+        self,
+        session_id: str,
+        *,
+        principal: "PrincipalContext",
+        error_id: str,
+    ) -> None:
+        active = self._active.get(session_id)
+        if active is None:
+            raise UnknownSessionError(session_id)
+        self._authorize(principal, active.record)
+        async with active.lock:
+            active.cleanup_required = True
+            active.cleanup_error_id = error_id
+            active.cleanup_execution_id = active.active_execution_id
+        logger.error(
+            "event=runtime.session.cleanup_required session_id=%s cleanup_required=%s cleanup_execution_id=%s cleanup_error_id=%s",
+            session_id,
+            True,
+            active.cleanup_execution_id,
+            error_id,
+        )
 
     async def create(
         self,
@@ -831,11 +857,54 @@ class RuntimeSessionService:
                 return SessionCloseResult(True)
             active.closing_requested = True
             execution_id = active.active_execution_id
+            cleanup_required = active.cleanup_required
+            cleanup_execution_id = active.cleanup_execution_id
             operation = active.operation
         if execution_id is not None and self._interaction_cancel is not None:
             await self._interaction_cancel(session_id)
         if operation is not None and operation.kind is not SessionOperationKind.CLOSE:
             await operation.done.wait()
+        async with active.lock:
+            cleanup_required = active.cleanup_required
+            cleanup_execution_id = active.cleanup_execution_id
+        if cleanup_required and cleanup_execution_id is not None:
+            if execution_id is None and self._interaction_cancel is not None:
+                try:
+                    await self._interaction_cancel(session_id)
+                except Exception as exc:
+                    logger.warning(
+                        "event=runtime.session.execution_cancel_failed session_id=%s cleanup_execution_id=%s error_id=%s",
+                        session_id,
+                        cleanup_execution_id,
+                        type(exc).__name__,
+                    )
+            latest = await self._store.get_run(cleanup_execution_id)
+            if latest is not None and latest.status in {
+                RunStatus.PENDING,
+                RunStatus.RUNNING,
+                RunStatus.PAUSED,
+                RunStatus.CANCELLING,
+            }:
+                async with active.lock:
+                    active.cleanup_required = True
+                    active.closing_requested = False
+                    active.close_task = None
+                logger.error(
+                    "event=runtime.session.execution_not_terminal session_id=%s cleanup_required=%s cleanup_execution_id=%s",
+                    session_id,
+                    True,
+                    cleanup_execution_id,
+                )
+                return SessionCloseResult(
+                    False,
+                    (
+                        ResourceFailure(
+                            "execution",
+                            cleanup_execution_id,
+                            "non_terminal_execution",
+                        ),
+                    ),
+                )
         async with active.lock:
             owners_by_name = dict(active.owners)
         if self._interaction_owner is not None:

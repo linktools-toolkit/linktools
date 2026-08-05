@@ -120,6 +120,8 @@ class AcpClientSessionResources:
         completion: "Callable[[Any, bool], Awaitable[Any]] | None" = None,
         terminal_id: "str | None" = None,
     ) -> _OutboundRequest:
+        if self.client._closing and not self.closing:
+            raise request_error("client_closing", session_id=self.session_id)
         operation: _OutboundRequest
 
         async def run_request() -> Any:
@@ -339,8 +341,12 @@ class AcpClient:
         self._client_capabilities: Any = None
         self._resources: "dict[str, AcpClientSessionResources]" = {}
         self._owners: "dict[str, AcpClientSessionOwner]" = {}
+        self._closing = False
+        self._close_task: "asyncio.Task[tuple[ResourceFailure, ...]] | None" = None
 
     def set_connection(self, connection: Any, client_capabilities: Any = None) -> None:
+        if self._closing:
+            raise request_error("client_closing")
         self._connection = connection
         self._client_capabilities = client_capabilities
 
@@ -375,11 +381,15 @@ class AcpClient:
         )
 
     def resources(self, session_id: str) -> AcpClientSessionResources:
+        if self._closing and session_id not in self._resources:
+            raise request_error("client_closing", session_id=session_id)
         return self._resources.setdefault(
             session_id, AcpClientSessionResources(self, session_id)
         )
 
     def resource_owner(self, session_id: str) -> AcpClientSessionOwner:
+        if self._closing and session_id not in self._resources:
+            raise request_error("client_closing", session_id=session_id)
         resources = self.resources(session_id)
         owner = self._owners.get(session_id)
         if owner is not None and owner._resources is resources:
@@ -407,6 +417,20 @@ class AcpClient:
         return await owner.close(session_id)
 
     async def close(self) -> "tuple[ResourceFailure, ...]":
+        task = self._close_task
+        if task is None:
+            task = asyncio.create_task(self._close_once())
+            self._close_task = task
+        else:
+            logger.info("event=acp.client.close_joined")
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _close_once(self) -> "tuple[ResourceFailure, ...]":
+        self._closing = True
         connection = self._connection
         failures: "list[ResourceFailure]" = []
         if connection is not None:
@@ -420,8 +444,15 @@ class AcpClient:
                     failures.append(
                         ResourceFailure("acp.client.connection", None, type(exc).__name__)
                     )
+        self._connection = None
         for session_id in tuple(self._resources):
             failures.extend(await self.close_resources(session_id))
+        logger.info(
+            "event=acp.client.closed client_failure_count=%s resource_count=%s owner_count=%s",
+            len(failures),
+            len(self._resources),
+            len(self._owners),
+        )
         return tuple(failures)
 
     def _owner_for_existing(self, session_id: str) -> "AcpClientSessionOwner | None":
@@ -431,6 +462,8 @@ class AcpClient:
         return self.resource_owner(session_id)
 
     async def session_update(self, session_id: str, update: Any) -> None:
+        if self._closing:
+            raise request_error("client_closing", session_id=session_id)
         if self._connection is None:
             raise request_error("client_not_connected", session_id=session_id)
         await self._connection.session_update(session_id, update)

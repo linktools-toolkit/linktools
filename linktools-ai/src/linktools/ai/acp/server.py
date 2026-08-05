@@ -6,12 +6,8 @@
 import asyncio
 import signal
 
-from linktools.core import environ
-
 from .agent import LinktoolsAcpAgent
 from .protocol import require_sdk
-
-logger = environ.get_logger("ai.acp.server")
 
 
 async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
@@ -37,16 +33,8 @@ async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
     try:
         await acp.run_agent(agent, use_unstable_protocol=True)
     finally:
-        try:
-            failures = await agent.client.close()
-            if failures:
-                logger.error(
-                    "event=acp.server.client_cleanup_failed failure_count=%s",
-                    len(failures),
-                )
-        finally:
-            for signum in installed:
-                loop.remove_signal_handler(signum)
+        for signum in installed:
+            loop.remove_signal_handler(signum)
 
 
 async def serve_stdio(agent: LinktoolsAcpAgent) -> None:

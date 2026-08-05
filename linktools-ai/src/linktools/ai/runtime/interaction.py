@@ -13,6 +13,7 @@ from linktools.core import environ
 
 from ..errors import (
     ExecutionLifecycleDeliveryError,
+    ExecutionLifecyclePersistenceError,
     ExecutionTerminalEventMissingError,
     ExecutionTerminalMismatchError,
 )
@@ -227,7 +228,31 @@ class InteractiveRunService:
         execution_outcome: "BaseException | object | None" = None
         task_done = False
         terminal_event: "ExecutionTerminalEvent | None" = None
+        cleanup_marked = False
         paused = False
+
+        async def mark_lifecycle_cleanup() -> None:
+            nonlocal cleanup_marked
+            if cleanup_marked or not isinstance(execution_outcome, ExecutionLifecyclePersistenceError):
+                return
+            if not isinstance(terminal_event, ExecutionFailed):
+                return
+            if terminal_event.error_id != "lifecycle_persistence_failed":
+                return
+            await self._sessions.mark_cleanup_required(
+                session_id,
+                principal=principal,
+                error_id=execution_outcome.error_id,
+            )
+            cleanup_marked = True
+            logger.error(
+                "event=runtime.interaction.lifecycle_persistence_failed session_id=%s execution_id=%s cleanup_required=%s persistence_error_id=%s",
+                session_id,
+                execution_id,
+                True,
+                execution_outcome.error_id,
+            )
+
         try:
             while True:
                 waiters: "set[asyncio.Task[Any]]" = {cancel_task_wait}
@@ -275,6 +300,7 @@ class InteractiveRunService:
                                 execution_id,
                                 type(event).__name__,
                             )
+                            await mark_lifecycle_cleanup()
                         else:
                             # task-owner: interaction.event
                             event_task = asyncio.create_task(subscription.__anext__())
@@ -290,7 +316,12 @@ class InteractiveRunService:
                         execution_id,
                         type(execution_outcome).__name__,
                     )
+                    await mark_lifecycle_cleanup()
                     if isinstance(execution_outcome, ExecutionLifecycleDeliveryError):
+                        raise execution_outcome
+                    if isinstance(execution_outcome, ExecutionLifecyclePersistenceError):
+                        if not cleanup_marked:
+                            continue
                         raise execution_outcome
                     if not paused and terminal_event is None and event_task is not None:
                         await asyncio.sleep(0)
@@ -301,6 +332,10 @@ class InteractiveRunService:
                                 execution_id,
                             )
                             raise ExecutionTerminalEventMissingError(execution_id)
+                if task_done and isinstance(execution_outcome, ExecutionLifecyclePersistenceError):
+                    await mark_lifecycle_cleanup()
+                    if cleanup_marked:
+                        raise execution_outcome
                 if task_done and paused and terminal_event is None:
                     logger.info(
                         "event=runtime.interaction.pause_cycle_completed session_id=%s execution_id=%s",

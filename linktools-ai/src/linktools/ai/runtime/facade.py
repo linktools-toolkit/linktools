@@ -64,6 +64,9 @@ class Runtime:
     _close_task: "asyncio.Task[RuntimeCloseResult] | None" = field(
         default=None, init=False, repr=False, compare=False
     )
+    _session_shutdown_task: "asyncio.Task[tuple[SessionCloseResult, ...]] | None" = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     async def run(
         self,
@@ -247,17 +250,48 @@ class Runtime:
         if joined:
             logger.info("event=runtime.close_joined")
         try:
-            return await asyncio.shield(task)
+            result = await asyncio.shield(task)
         except asyncio.CancelledError:
             try:
                 await task
             except BaseException:
                 pass
             raise
+        finally:
+            if task.done() and self._close_task is task:
+                try:
+                    retry = not task.result().closed
+                except BaseException:
+                    retry = True
+                if retry:
+                    object.__setattr__(self, "_close_task", None)
+        return result
 
     async def shutdown(self) -> "tuple[SessionCloseResult, ...]":
-        result = await self.aclose()
-        return result.session_results
+        return await self.shutdown_sessions()
+
+    async def shutdown_sessions(self) -> "tuple[SessionCloseResult, ...]":
+        if self.sessions is None:
+            return ()
+        task = self._session_shutdown_task
+        if task is None:
+            task = asyncio.create_task(self.sessions.shutdown())
+            object.__setattr__(self, "_session_shutdown_task", task)
+        else:
+            logger.info("event=runtime.sessions_shutdown_joined")
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+        finally:
+            if task.done() and self._session_shutdown_task is task:
+                object.__setattr__(self, "_session_shutdown_task", None)
+        logger.info(
+            "event=runtime.sessions_shutdown_completed failure_count=%s",
+            sum(len(item.failures) for item in result),
+        )
+        return result
 
     async def _close_once(self) -> RuntimeCloseResult:
         results: "tuple[SessionCloseResult, ...]" = ()
@@ -299,8 +333,9 @@ class Runtime:
                         False, (ResourceFailure("sandbox", None, type(exc).__name__),)
                     ),
                 )
-        logger.info("event=runtime.closed")
-        return RuntimeCloseResult(all(item.closed for item in results), results)
+        result = RuntimeCloseResult(all(item.closed for item in results), results)
+        logger.info("event=runtime.closed runtime_closed=%s", result.closed)
+        return result
 
     async def __aenter__(self) -> "Runtime":
         return self

@@ -252,6 +252,19 @@ class ExecutionLifecycleDeliveryError(RunError):
     """The canonical execution boundary could not be delivered."""
 
 
+class ExecutionLifecyclePersistenceError(RunError):
+    """A lifecycle terminal transition could not be persisted."""
+
+    def __init__(self, execution_id: str, target_status: str, error_id: str) -> None:
+        super().__init__(
+            f"execution lifecycle persistence failed: {execution_id} "
+            f"{target_status} ({error_id})"
+        )
+        self.execution_id = execution_id
+        self.target_status = target_status
+        self.error_id = error_id
+
+
 class RunNotFoundError(RunError):
     pass
 
