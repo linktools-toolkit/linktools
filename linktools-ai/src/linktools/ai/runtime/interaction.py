@@ -6,10 +6,15 @@
 import asyncio
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+from uuid import uuid4
 
 from linktools.core import environ
 
+from ..errors import (
+    ExecutionTerminalEventMissingError,
+    ExecutionTerminalMismatchError,
+)
 from ..execution.cancellation import TaskTermination, cancel_task
 from ..execution.domain import ApprovalDecision, RunStatus
 from ..execution.live_events import (
@@ -19,11 +24,10 @@ from ..execution.live_events import (
     ExecutionEventHub,
     ExecutionFailed,
     ExecutionPaused,
+    ExecutionTerminalEvent,
 )
 from ..governance.identity import PrincipalContext
 from .session import ResourceFailure, RuntimeSessionService, SessionOperationKind
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..agent.spec import AgentSpec
@@ -64,7 +68,7 @@ class InteractionObserver(Protocol):
 
     async def request_approval(
         self, request: ApprovalRequest, cancellation: asyncio.Event
-    ) -> ApprovalDecision | None: ...
+    ) -> "ApprovalDecision | None": ...
 
 
 @dataclass(slots=True)
@@ -90,15 +94,14 @@ class InteractiveRunService:
 
     async def execute(
         self,
+        *,
         session_id: str,
-        execution_id: str,
         spec: "AgentSpec",
         prompt: "str | UserPrompt",
         observer: InteractionObserver,
-        *,
         principal: PrincipalContext,
-        extra_toolsets: "tuple[object, ...]" = (),
     ) -> InteractionResult:
+        execution_id = uuid4().hex
         lease = await self._sessions.reserve(
             session_id,
             SessionOperationKind.PROMPT,
@@ -108,6 +111,11 @@ class InteractiveRunService:
         state = _InteractionState(asyncio.Event())
         self._states[session_id] = state
         try:
+            extra_toolsets = await self._sessions.toolsets(
+                session_id,
+                principal=principal,
+                lease=lease,
+            )
             state.task = asyncio.current_task()
             operation = "run"
             while True:
@@ -210,44 +218,113 @@ class InteractiveRunService:
             )
         )
         # task-owner: interaction.event
-        event_task = asyncio.create_task(subscription.__anext__())
+        event_task: "asyncio.Task[ExecutionEvent] | None" = asyncio.create_task(
+            subscription.__anext__()
+        )
         # task-owner: interaction.cancellation
         cancel_task_wait = asyncio.create_task(state.cancellation.wait())
+        execution_outcome: "BaseException | object | None" = None
+        task_done = False
+        terminal_event: "ExecutionTerminalEvent | None" = None
+        terminal_deadline: "float | None" = None
+        paused = False
         try:
             while True:
+                waiters: "set[asyncio.Task[Any]]" = {cancel_task_wait}
+                if not task_done:
+                    waiters.add(task)
+                if event_task is not None:
+                    waiters.add(event_task)
+                timeout = None
+                if task_done and terminal_event is None:
+                    timeout = max(
+                        0.0,
+                        (terminal_deadline or 0.0)
+                        - asyncio.get_running_loop().time(),
+                    )
                 done, _ = await asyncio.wait(
-                    {task, event_task, cancel_task_wait},
+                    waiters,
+                    timeout=timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                if not done:
+                    logger.error(
+                        "event=runtime.interaction.terminal_event_missing session_id=%s execution_id=%s",
+                        session_id,
+                        execution_id,
+                    )
+                    raise ExecutionTerminalEventMissingError(execution_id)
                 if cancel_task_wait in done:
                     await self._cancel_execution(execution_id, principal)
-                    termination = await cancel_task(task, 1.0)
+                    termination = None
+                    if not task_done:
+                        termination = await cancel_task(task, 1.0)
                     if termination is TaskTermination.TIMED_OUT:
                         self._register_orphan(session_id, task)
                     return InteractionResult(
                         execution_id, RunStatus.CANCELLED, InteractionStopReason.CANCELLED
                     )
-                if event_task in done:
+                if event_task is not None and event_task in done:
                     try:
                         event = event_task.result()
                     except StopAsyncIteration:
-                        # task-owner: interaction.event
-                        event_task = asyncio.create_task(subscription.__anext__())
-                        continue
-                    await observer.publish(event)
-                    if isinstance(event, ExecutionTerminalEventTypes):
-                        return await self._result_from_execution(
-                            execution_id, principal
-                        )
-                    # task-owner: interaction.event
-                    event_task = asyncio.create_task(subscription.__anext__())
-                if task in done:
-                    error = task.exception()
-                    if error is not None:
-                        raise error
+                        event_task = None
+                        if not task_done and terminal_event is None:
+                            raise ExecutionTerminalEventMissingError(execution_id)
+                    else:
+                        await observer.publish(event)
+                        if isinstance(event, ExecutionPaused):
+                            paused = True
+                        elif isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+                            terminal_event = event
+                            event_task = None
+                            logger.info(
+                                "event=runtime.interaction.terminal_event_received session_id=%s execution_id=%s event_type=%s",
+                                session_id,
+                                execution_id,
+                                type(event).__name__,
+                            )
+                        else:
+                            # task-owner: interaction.event
+                            event_task = asyncio.create_task(subscription.__anext__())
+                if task in done and not task_done:
+                    task_done = True
+                    try:
+                        execution_outcome = task.result()
+                    except BaseException as exc:
+                        execution_outcome = exc
+                    terminal_deadline = asyncio.get_running_loop().time() + 5.0
+                    logger.info(
+                        "event=runtime.interaction.execution_task_completed session_id=%s execution_id=%s outcome=%s",
+                        session_id,
+                        execution_id,
+                        type(execution_outcome).__name__,
+                    )
+                if task_done and paused and terminal_event is None:
                     return await self._result_from_execution(execution_id, principal)
+                if task_done and terminal_event is not None:
+                    result = await self._result_from_execution(execution_id, principal)
+                    expected = (
+                        RunStatus.COMPLETED
+                        if isinstance(terminal_event, ExecutionCompleted)
+                        else RunStatus.FAILED
+                        if isinstance(terminal_event, ExecutionFailed)
+                        else RunStatus.CANCELLED
+                    )
+                    if result.status is not expected:
+                        raise ExecutionTerminalMismatchError(execution_id)
+                    if isinstance(execution_outcome, BaseException) and not isinstance(
+                        terminal_event, ExecutionFailed
+                    ):
+                        raise ExecutionTerminalMismatchError(execution_id)
+                    return result
         finally:
-            await cancel_task(event_task, 1.0)
+            if not task.done():
+                termination = await cancel_task(task, 1.0)
+                if termination is TaskTermination.TIMED_OUT:
+                    self._register_orphan(session_id, task)
+            if event_task is not None:
+                await cancel_task(event_task, 1.0)
             await cancel_task(cancel_task_wait, 1.0)
             await subscription.release()
 
@@ -258,7 +335,7 @@ class InteractiveRunService:
         state: _InteractionState,
         session_id: str,
         principal: PrincipalContext,
-    ) -> ApprovalDecision | None:
+    ) -> "ApprovalDecision | None":
         approval = record.approval
         request = ApprovalRequest(
             session_id=session_id,

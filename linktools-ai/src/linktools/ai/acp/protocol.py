@@ -8,16 +8,20 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from linktools.errors import ConfigError
+
 from ..errors import (
+    ExecutionTerminalEventMissingError,
+    ExecutionTerminalMismatchError,
+    InvalidSessionConfigValueError,
+    McpCleanupRequiredError,
+    McpReplacementError,
     SessionBusyError,
     SessionCleanupRequiredError,
     SessionConflictError,
     SessionClosedError,
     SessionInvariantError,
-    UnknownSessionConfigOptionError,
-    InvalidSessionConfigValueError,
-    McpReplacementError,
     UnknownSessionError,
+    UnknownSessionConfigOptionError,
 )
 from ..governance.identity import PrincipalContext
 
@@ -227,6 +231,12 @@ class AcpProtocol:
             reason = "invalid_config_value"
         elif isinstance(error, SessionInvariantError):
             return internal_error("session_invariant_violation", session_id=session_id)
+        elif isinstance(error, McpCleanupRequiredError):
+            return internal_error("mcp_cleanup_required", session_id=session_id)
+        elif isinstance(error, ExecutionTerminalEventMissingError):
+            return internal_error("execution_terminal_event_missing", session_id=session_id)
+        elif isinstance(error, ExecutionTerminalMismatchError):
+            return internal_error("execution_terminal_mismatch", session_id=session_id)
         elif isinstance(error, McpReplacementError):
             return internal_error("mcp_replacement_failed", session_id=session_id)
         else:
@@ -278,6 +288,12 @@ def protocol_handler(function: Callable[..., Any]) -> Callable[..., Any]:
                 raise request_error("invalid_config_value") from exc
             if isinstance(exc, SessionInvariantError):
                 raise internal_error("session_invariant_violation") from exc
+            if isinstance(exc, McpCleanupRequiredError):
+                raise internal_error("mcp_cleanup_required") from exc
+            if isinstance(exc, ExecutionTerminalEventMissingError):
+                raise internal_error("execution_terminal_event_missing") from exc
+            if isinstance(exc, ExecutionTerminalMismatchError):
+                raise internal_error("execution_terminal_mismatch") from exc
             if isinstance(exc, McpReplacementError):
                 raise internal_error("mcp_replacement_failed") from exc
             raise internal_error("internal_error") from exc

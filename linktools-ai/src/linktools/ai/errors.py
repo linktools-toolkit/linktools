@@ -118,11 +118,30 @@ class SessionInvariantError(StorageError):
     """The in-memory and persisted session state violated its contract."""
 
 
+class SessionOperationError(StorageError):
+    """A session operation was invoked outside its owned lifecycle lease."""
+
+
 class McpReplacementError(StorageError):
     """MCP resource replacement could not complete atomically."""
 
     def __init__(self, message: str, failures: tuple[object, ...] = ()) -> None:
         super().__init__(message)
+        self.failures = failures
+
+
+class McpCleanupRequiredError(StorageError, RuntimeError):
+    """MCP rollback left resources that must be retried by close."""
+
+    def __init__(
+        self,
+        message: "str | None" = None,
+        failures: tuple[object, ...] = (),
+        *,
+        connect_error: "BaseException | None" = None,
+    ) -> None:
+        super().__init__(message or "MCP cleanup is required")
+        self.connect_error = connect_error
         self.failures = failures
 
 
@@ -219,6 +238,14 @@ class IdempotencyConfigurationError(LinktoolsAIError):
 
 class RunError(LinktoolsAIError):
     """Base class for Run-related errors."""
+
+
+class ExecutionTerminalEventMissingError(RunError):
+    """An execution ended without publishing its terminal event."""
+
+
+class ExecutionTerminalMismatchError(RunError):
+    """The persisted execution result disagreed with its terminal event."""
 
 
 class RunNotFoundError(RunError):

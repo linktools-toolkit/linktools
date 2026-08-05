@@ -5,19 +5,20 @@
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 from uuid import uuid4
+
 from linktools.core import environ
-from ..agent.sandbox.protocols import Sandbox
+
 from ..agent.mcp.client import MCPConnectionPool
-from ..execution.live_events import ExecutionEventHub
+from ..agent.sandbox.protocols import Sandbox
 from ..errors import PrincipalAccessDeniedError
+from ..execution.live_events import ExecutionEventHub
 from ..governance.identity import PrincipalContext
 from .interaction import InteractiveRunService
 from .session import ResourceFailure, RuntimeSessionService, SessionCloseResult
 
 logger = environ.get_logger("ai.runtime.facade")
-
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Any, Mapping
@@ -261,21 +262,43 @@ class Runtime:
     async def _close_once(self) -> RuntimeCloseResult:
         results: "tuple[SessionCloseResult, ...]" = ()
         if self.sessions is not None:
-            results = await self.sessions.shutdown()
-        if self.mcp_connections is not None:
-            mcp_result = await self.mcp_connections.close()
-            if mcp_result is not None and not mcp_result.closed:
-                results += (
+            try:
+                results = await self.sessions.shutdown()
+            except BaseException as exc:
+                results = (
                     SessionCloseResult(
-                        False,
-                        tuple(
-                            ResourceFailure("mcp", item.server_id, item.error_id)
-                            for item in mcp_result.failures
-                        ),
+                        False, (ResourceFailure("session", None, type(exc).__name__),)
                     ),
                 )
+        if self.mcp_connections is not None:
+            try:
+                mcp_result = await self.mcp_connections.close()
+            except BaseException as exc:
+                results += (
+                    SessionCloseResult(
+                        False, (ResourceFailure("mcp", None, type(exc).__name__),)
+                    ),
+                )
+            else:
+                if mcp_result is not None and not mcp_result.closed:
+                    results += (
+                        SessionCloseResult(
+                            False,
+                            tuple(
+                                ResourceFailure("mcp", item.server_id, item.error_id)
+                                for item in mcp_result.failures
+                            ),
+                        ),
+                    )
         if self.sandbox is not None:
-            await self.sandbox.terminate()
+            try:
+                await self.sandbox.terminate()
+            except BaseException as exc:
+                results += (
+                    SessionCloseResult(
+                        False, (ResourceFailure("sandbox", None, type(exc).__name__),)
+                    ),
+                )
         logger.info("event=runtime.closed")
         return RuntimeCloseResult(all(item.closed for item in results), results)
 

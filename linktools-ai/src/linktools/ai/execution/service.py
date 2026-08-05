@@ -31,6 +31,7 @@ from ..agent.models import (
 from ..agent.sandbox.protocols import Sandbox
 from ..errors import (
     ChildSnapshotError,
+    ExecutionTerminalMismatchError,
     RunDefinitionError,
     RuntimeInitializationError,
     StorageError,
@@ -1197,6 +1198,8 @@ class ExecutionService:
         try:
             await publish_execution_event(self._live_events, event.execution_id, event)
         except LiveEventConsumerSlowError:
+            raise
+        except ExecutionTerminalMismatchError:
             raise
         except Exception as exc:
             logger.warning(

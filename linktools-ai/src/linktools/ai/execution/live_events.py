@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypeAlias
 
+from ..errors import ExecutionTerminalMismatchError
+
 logger = logging.getLogger("linktools.ai.execution.live_events")
 
 
@@ -52,7 +54,7 @@ class ToolCallProgress(ExecutionEvent):
     arguments: Any = None
     status: str = "in_progress"
     result: Any = None
-    error: str | None = None
+    error: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +85,7 @@ class UsageUpdated(ExecutionEvent):
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
-    total_cost: str | None = None
+    total_cost: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +93,7 @@ class ExecutionPaused(ExecutionEvent):
     approval_id: str = ""
     tool_call_id: str = ""
     tool_name: str = ""
-    approval_reason: str | None = None
+    approval_reason: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +109,7 @@ class ExecutionFailed(ExecutionEvent):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionCancelled(ExecutionEvent):
-    reason: str | None = None
+    reason: "str | None" = None
 
 
 ExecutionTerminalEvent: TypeAlias = (
@@ -165,6 +167,8 @@ class ExecutionEventHub:
         self._subscriptions: dict[str, ExecutionEventSubscription] = {}
         self._queues: dict[str, asyncio.Queue] = {}
         self._sequences: dict[str, int] = {}
+        self._terminal_executions: set[str] = set()
+        self._publish_locks: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
         self._cancel_callback: Any = None
 
@@ -180,30 +184,45 @@ class ExecutionEventHub:
             if execution_id in self._subscriptions:
                 raise ExecutionAlreadySubscribedError(execution_id)
             queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_size)
+            self._terminal_executions.discard(execution_id)
             subscription = ExecutionEventSubscription(self, execution_id, queue)
             self._subscriptions[execution_id] = subscription
             self._queues[execution_id] = queue
             self._sequences[execution_id] = 0
+            self._publish_locks[execution_id] = asyncio.Lock()
             logger.debug("execution event subscription attached execution=%s", execution_id)
             return subscription
 
     async def publish(self, execution_id: str, event: ExecutionEvent) -> None:
-        subscription = self._subscriptions.get(execution_id)
-        queue = self._queues.get(execution_id)
-        if subscription is None or queue is None:
+        publish_lock = self._publish_locks.get(execution_id)
+        if publish_lock is None:
+            if execution_id in self._terminal_executions:
+                raise ExecutionTerminalMismatchError(execution_id)
             return
-        sequence = self._sequences[execution_id] + 1
-        self._sequences[execution_id] = sequence
-        if event.sequence != sequence or event.execution_id != execution_id:
-            event = _with_event_identity(event, execution_id, sequence)
-        try:
-            await asyncio.wait_for(queue.put(event), self._publish_timeout)
-            if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+        async with publish_lock:
+            if execution_id in self._terminal_executions:
+                raise ExecutionTerminalMismatchError(execution_id)
+            subscription = self._subscriptions.get(execution_id)
+            queue = self._queues.get(execution_id)
+            if subscription is None or queue is None:
+                return
+            sequence = self._sequences[execution_id] + 1
+            self._sequences[execution_id] = sequence
+            if event.execution_id != execution_id:
+                raise ExecutionTerminalMismatchError(execution_id)
+            if event.sequence not in (0, sequence):
+                raise ExecutionTerminalMismatchError(execution_id)
+            if event.sequence == 0:
+                event = _with_event_identity(event, execution_id, sequence)
+            try:
+                await asyncio.wait_for(queue.put(event), self._publish_timeout)
+                if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+                    self._terminal_executions.add(execution_id)
+                    await self._discard(execution_id, subscription)
+            except asyncio.TimeoutError as exc:
                 await self._discard(execution_id, subscription)
-        except asyncio.TimeoutError as exc:
-            await self._discard(execution_id, subscription)
-            logger.warning("execution event consumer slow execution=%s", execution_id)
-            raise LiveEventConsumerSlowError(execution_id) from exc
+                logger.warning("execution event consumer slow execution=%s", execution_id)
+                raise LiveEventConsumerSlowError(execution_id) from exc
 
     async def close(self, execution_id: str, terminal_event: ExecutionTerminalEvent) -> None:
         subscription = self._subscriptions.get(execution_id)
@@ -235,6 +254,7 @@ class ExecutionEventHub:
                 self._subscriptions.pop(execution_id, None)
                 self._queues.pop(execution_id, None)
                 self._sequences.pop(execution_id, None)
+                self._publish_locks.pop(execution_id, None)
                 logger.debug("execution event subscription detached execution=%s", execution_id)
 
 
@@ -293,22 +313,127 @@ class StreamingRunLiveSink:
 
 
 class CompositeRunLiveSink:
-    """Deliver events to the canonical hub and an optional external sink."""
+    """Deliver canonical events and isolate best-effort observers."""
 
-    def __init__(self, canonical: ExecutionEventHub, extra: RunLiveEventSink) -> None:
+    def __init__(
+        self,
+        canonical: ExecutionEventHub,
+        extra: RunLiveEventSink,
+        *,
+        queue_size: int = 256,
+    ) -> None:
+        if queue_size <= 0:
+            raise ValueError("queue_size must be positive")
         self._canonical = canonical
         self._extra = extra
+        self._queue_size = queue_size
+        self._queues: "dict[str, asyncio.Queue[Any]]" = {}
+        self._workers: "dict[str, asyncio.Task[None]]" = {}
+        self._disabled: set[str] = set()
 
     async def publish_execution(self, execution_id: str, event: Any) -> None:
         await publish_execution_event(self._canonical, execution_id, event)
+        if execution_id in self._disabled:
+            if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+                self._disabled.discard(execution_id)
+            return
+        queue = self._queues.get(execution_id)
+        if queue is None:
+            queue = asyncio.Queue(maxsize=self._queue_size)
+            self._queues[execution_id] = queue
+            # task-owner: execution.extra_sink
+            worker = asyncio.create_task(self._run_worker(execution_id, queue))
+            self._workers[execution_id] = worker
+            worker.add_done_callback(self._observe_worker)
         try:
-            await publish_execution_event(self._extra, execution_id, event)
-        except Exception as exc:
-            logger.warning(
-                "event=runtime.event_sink_extra_failed execution_id=%s error_id=%s",
-                execution_id,
-                type(exc).__name__,
-            )
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            await self._disable(execution_id, "queue_full")
+
+    async def close_execution(self, execution_id: str) -> None:
+        worker = self._workers.get(execution_id)
+        if worker is None:
+            self._queues.pop(execution_id, None)
+            self._disabled.discard(execution_id)
+            return
+        if not worker.done():
+            worker.cancel()
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if worker.cancelled():
+                return
+            try:
+                await worker
+            except BaseException:
+                pass
+            raise
+        finally:
+            self._workers.pop(execution_id, None)
+            self._queues.pop(execution_id, None)
+            self._disabled.discard(execution_id)
+
+    async def _run_worker(
+        self, execution_id: str, queue: "asyncio.Queue[Any]"
+    ) -> None:
+        try:
+            while True:
+                event = await queue.get()
+                try:
+                    await asyncio.wait_for(
+                        publish_execution_event(self._extra, execution_id, event),
+                        timeout=1.0,
+                    )
+                except BaseException as exc:
+                    await self._disable(execution_id, type(exc).__name__, current=asyncio.current_task())
+                    return
+                if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+                    while not queue.empty():
+                        pending = queue.get_nowait()
+                        try:
+                            await asyncio.wait_for(
+                                publish_execution_event(self._extra, execution_id, pending),
+                                timeout=1.0,
+                            )
+                        except BaseException as exc:
+                            await self._disable(
+                                execution_id,
+                                type(exc).__name__,
+                                current=asyncio.current_task(),
+                            )
+                            return
+                    return
+        finally:
+            if self._workers.get(execution_id) is asyncio.current_task():
+                self._workers.pop(execution_id, None)
+                self._queues.pop(execution_id, None)
+
+    async def _disable(
+        self,
+        execution_id: str,
+        reason: str,
+        *,
+        current: "asyncio.Task[None] | None" = None,
+    ) -> None:
+        self._disabled.add(execution_id)
+        self._queues.pop(execution_id, None)
+        worker = self._workers.pop(execution_id, None)
+        if worker is not None and worker is not current and not worker.done():
+            worker.cancel()
+        logger.warning(
+            "event=runtime.event_sink_extra_disabled execution_id=%s reason=%s",
+            execution_id,
+            reason,
+        )
+
+    @staticmethod
+    def _observe_worker(task: "asyncio.Task[None]") -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
 
     async def publish(self, event: Any) -> None:
         await self.publish_execution(

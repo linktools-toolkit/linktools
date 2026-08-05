@@ -28,9 +28,9 @@ class AcpClientSessionResources:
     client: "AcpClient"
     session_id: str
     terminal_handles: "set[str]" = field(default_factory=set)
-    terminal_create_tasks: set["asyncio.Task[Any]"] = field(default_factory=set)
-    terminal_release_tasks: dict[str, "asyncio.Task[Any]"] = field(default_factory=dict)
-    elicitation_tasks: dict[str, "asyncio.Task[Any]"] = field(default_factory=dict)
+    terminal_create_tasks: "set[asyncio.Task[Any]]" = field(default_factory=set)
+    terminal_release_tasks: "dict[str, asyncio.Task[Any]]" = field(default_factory=dict)
+    elicitation_tasks: "dict[str, asyncio.Task[Any]]" = field(default_factory=dict)
     accepted_elicitations: "set[str]" = field(default_factory=set)
 
     async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
@@ -77,6 +77,15 @@ class AcpClientSessionResources:
             request.close()
         try:
             response = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                response = await task
+            except BaseException:
+                self.terminal_release_tasks.pop(terminal_id, None)
+                raise
+            self.terminal_release_tasks.pop(terminal_id, None)
+            self.terminal_handles.discard(terminal_id)
+            raise
         except BaseException:
             self.terminal_release_tasks.pop(terminal_id, None)
             raise
@@ -92,6 +101,32 @@ class AcpClientSessionResources:
             or self.elicitation_tasks
             or self.accepted_elicitations
         )
+
+
+class AcpClientSessionOwner:
+    def __init__(
+        self,
+        parent: "AcpClient",
+        session_id: str,
+        resources: AcpClientSessionResources,
+    ) -> None:
+        self._parent = parent
+        self._session_id = session_id
+        self._resources = resources
+
+    async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
+        failures = await self._resources.close(session_id)
+        if not failures and self._resources.is_empty(session_id):
+            self._parent._remove_resources(session_id, expected=self._resources)
+            logger.info(
+                "event=acp.client.resources_removed session_id=%s resource_count=%s",
+                session_id,
+                len(self._parent._resources),
+            )
+        return failures
+
+    def is_empty(self, session_id: str) -> bool:
+        return self._resources.is_empty(session_id)
 
 
 class AcpClient:
@@ -110,14 +145,30 @@ class AcpClient:
             session_id, AcpClientSessionResources(self, session_id)
         )
 
+    def resource_owner(self, session_id: str) -> AcpClientSessionOwner:
+        resources = self.resources(session_id)
+        return AcpClientSessionOwner(self, session_id, resources)
+
+    def _remove_resources(
+        self,
+        session_id: str,
+        *,
+        expected: AcpClientSessionResources,
+    ) -> None:
+        if self._resources.get(session_id) is expected:
+            self._resources.pop(session_id, None)
+
     async def close_resources(self, session_id: str) -> "tuple[ResourceFailure, ...]":
+        owner = self._owner_for_existing(session_id)
+        if owner is None:
+            return ()
+        return await owner.close(session_id)
+
+    def _owner_for_existing(self, session_id: str) -> "AcpClientSessionOwner | None":
         resources = self._resources.get(session_id)
         if resources is None:
-            return ()
-        failures = await resources.close(session_id)
-        if resources.is_empty(session_id):
-            self._resources.pop(session_id, None)
-        return failures
+            return None
+        return AcpClientSessionOwner(self, session_id, resources)
 
     async def session_update(self, session_id: str, update: Any) -> None:
         if self._connection is None:
@@ -170,17 +221,29 @@ class AcpClient:
         # task-owner: acp.client.terminal_create
         task = asyncio.create_task(request)
         resources.terminal_create_tasks.add(task)
+        cancelled = False
         try:
-            response = await asyncio.shield(task)
+            try:
+                response = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                response = await task
             terminal_id = response.terminal_id
             resources.terminal_handles.add(terminal_id)
-            stale = session.closing_requested or session.record.state.value != "open" or session.active_execution_id is None
+            stale = (
+                cancelled
+                or session.closing_requested
+                or session.record.state.value != "open"
+                or session.active_execution_id is None
+            )
             if stale:
                 try:
                     await self._compensate_terminal(session.record.id, resources, terminal_id)
                 except Exception as exc:
                     logger.error("event=acp.terminal.compensation_failed session_id=%s resource_count=%s", session.record.id, len(resources.terminal_handles))
                     raise request_error("terminal_compensation_failed", session_id=session.record.id) from exc
+                if cancelled:
+                    raise asyncio.CancelledError
                 raise request_error("session_closing", session_id=session.record.id)
             return response
         finally:
@@ -226,17 +289,26 @@ class AcpClient:
         # task-owner: acp.client.elicitation
         task = asyncio.create_task(self._connection_or_error().create_elicitation(message, mode))
         resources.elicitation_tasks[elicitation_id] = task
+        cancelled = False
         try:
-            response = await asyncio.shield(task)
+            try:
+                response = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+                response = await task
             outcome = getattr(response, "outcome", None)
             accepted = getattr(response, "action", None) == "accept" or type(outcome).__name__ == "ElicitationAcceptAction"
             if is_url and accepted:
                 resources.accepted_elicitations.add(elicitation_id)
+            if cancelled:
+                raise asyncio.CancelledError
             return response
         finally:
             resources.elicitation_tasks.pop(elicitation_id, None)
 
-    async def request_approval(self, request: Any, cancellation: asyncio.Event) -> ApprovalDecision | None:
+    async def request_approval(
+        self, request: Any, cancellation: asyncio.Event
+    ) -> "ApprovalDecision | None":
         if self._connection is None:
             raise request_error("client_not_connected", session_id=request.session_id)
         if cancellation.is_set():
@@ -304,4 +376,10 @@ class AcpClient:
         return self._connection
 
 
-__all__ = ["AcpClient", "AcpClientSessionResources", "MAX_FILE_BYTES", "MAX_TERMINAL_OUTPUT_LIMIT"]
+__all__ = [
+    "AcpClient",
+    "AcpClientSessionOwner",
+    "AcpClientSessionResources",
+    "MAX_FILE_BYTES",
+    "MAX_TERMINAL_OUTPUT_LIMIT",
+]

@@ -3,25 +3,33 @@
 
 """Construct MCP clients and own session-scoped MCP resources."""
 
-
 import asyncio
 import hashlib
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Mapping
-from linktools.core import environ
-from ...errors import MCPAuthenticationError, MCPConnectionError, MCPConnectionUnavailableError, MCPDiscoveryError, MCPDiscoveryUnsupportedError, MCPToolDefinitionError
-from ...json import canonical_json_bytes
-from ...execution.cancellation import TaskTermination, cancel_task
-from .models import MCPConnectionRef, MCPDiscoveryResult, MCPToolInfo
+from typing import TYPE_CHECKING, Any, Mapping
 
-from typing import TYPE_CHECKING
+from linktools.core import environ
+
+from ...errors import (
+    McpCleanupRequiredError,
+    MCPAuthenticationError,
+    MCPConnectionError,
+    MCPConnectionUnavailableError,
+    MCPDiscoveryError,
+    MCPDiscoveryUnsupportedError,
+    MCPToolDefinitionError,
+)
+from ...execution.cancellation import TaskTermination, cancel_task
+from ...json import canonical_json_bytes
+from .models import MCPConnectionRef, MCPDiscoveryResult, MCPToolInfo
 
 logger = environ.get_logger("ai.agent.mcp.client")
 
 if TYPE_CHECKING:
     from .spec import MCPServerSpec
+
 
 def _resolved_tool_prefix(spec: "MCPServerSpec") -> "str | None":
     value = spec.tool_prefix
@@ -299,6 +307,7 @@ class McpResourceState(StrEnum):
     CONNECTING = "connecting"
     OPEN = "open"
     CLOSING = "closing"
+    CLEANUP_REQUIRED = "cleanup_required"
     CLOSED = "closed"
 
 
@@ -322,6 +331,13 @@ class McpCloseResult:
     failures: "tuple[McpCloseFailure, ...]" = ()
 
 
+@dataclass(frozen=True, slots=True)
+class McpCleanupFailure:
+    server_id: str
+    fingerprint: str
+    error_id: str
+
+
 @dataclass(slots=True)
 class McpSessionResources:
     """Session owner for domain MCP specs; ACP schemas never enter here."""
@@ -332,14 +348,18 @@ class McpSessionResources:
     connect_task: "asyncio.Task[tuple[Any, ...]] | None" = None
     close_task: "asyncio.Task[tuple[McpResourceFailure, ...]] | None" = None
     _toolsets: "tuple[Any, ...] | None" = None
+    last_close_failures: "tuple[McpCloseFailure, ...]" = ()
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def toolsets(self) -> "tuple[Any, ...]":
         async with self._lock:
             if self.state is McpResourceState.CLOSED:
                 raise RuntimeError("MCP session resources are closed")
-            if self.state is McpResourceState.CLOSING:
-                raise RuntimeError("MCP session resources are closing")
+            if self.state in {
+                McpResourceState.CLOSING,
+                McpResourceState.CLEANUP_REQUIRED,
+            }:
+                raise RuntimeError("MCP session resources require cleanup")
             if self.state is McpResourceState.OPEN:
                 return self._toolsets or ()
             if self.connect_task is None:
@@ -355,13 +375,37 @@ class McpSessionResources:
             handles = tuple(
                 [await pool.get_toolset(spec) for spec in self.specs]
             )
-        except BaseException:
-            await pool.close()
+        except BaseException as connect_error:
+            try:
+                close_result = await asyncio.shield(pool.close())
+            except BaseException as close_error:
+                close_result = McpCloseResult(
+                    False,
+                    (McpCloseFailure("unknown", "unknown", type(close_error).__name__),),
+                )
             async with self._lock:
-                if self.state is McpResourceState.CONNECTING:
-                    self.connect_task = None
-                    self.state = McpResourceState.NEW
-            raise
+                self.connect_task = None
+                if close_result.closed:
+                    if self.state is McpResourceState.CONNECTING:
+                        self.state = McpResourceState.NEW
+                else:
+                    self.pool = pool
+                    self.last_close_failures = close_result.failures
+                    self.state = McpResourceState.CLEANUP_REQUIRED
+            if close_result.closed:
+                raise connect_error
+            failures = tuple(
+                McpCleanupFailure(item.server_id, item.fingerprint, item.error_id)
+                for item in close_result.failures
+            )
+            logger.error(
+                "event=agent.mcp.connect_rollback_failed failure_count=%s",
+                len(failures),
+            )
+            raise McpCleanupRequiredError(
+                failures=failures,
+                connect_error=connect_error,
+            ) from connect_error
         async with self._lock:
             stale = self.state is not McpResourceState.CONNECTING
             if not stale:
@@ -371,16 +415,32 @@ class McpSessionResources:
                 self.state = McpResourceState.OPEN
                 toolsets = self._toolsets
             else:
+                self.connect_task = None
                 toolsets = ()
         if stale:
-            await pool.close()
+            close_result = await asyncio.shield(pool.close())
+            if not close_result.closed:
+                async with self._lock:
+                    self.pool = pool
+                    self.last_close_failures = close_result.failures
+                    self.connect_task = None
+                    self.state = McpResourceState.CLEANUP_REQUIRED
+                failures = tuple(
+                    McpCleanupFailure(item.server_id, item.fingerprint, item.error_id)
+                    for item in close_result.failures
+                )
+                raise McpCleanupRequiredError(
+                    "stale MCP connect requires cleanup", failures
+                )
             return ()
         logger.info("event=agent.mcp.connected resource_count=%s", len(handles))
         return toolsets
 
     async def close(self, session_id: str) -> "tuple[McpResourceFailure, ...]":
         async with self._lock:
-            retry = self.state is McpResourceState.OPEN and self.close_task is None
+            if self.state is McpResourceState.CLOSED:
+                return ()
+            retry = self.state is McpResourceState.CLEANUP_REQUIRED
             if self.close_task is None:
                 self.state = McpResourceState.CLOSING
                 # task-owner: mcp.close
@@ -388,7 +448,7 @@ class McpSessionResources:
             task = self.close_task
         if retry:
             logger.info(
-                "event=agent.mcp.close_retried session_id=%s resource_count=%s",
+                "event=agent.mcp.cleanup_retry session_id=%s resource_count=%s",
                 session_id,
                 len(self.specs),
             )
@@ -396,6 +456,7 @@ class McpSessionResources:
 
     async def _close_once(self) -> "tuple[McpResourceFailure, ...]":
         failures: "list[McpResourceFailure]" = []
+        close_failures: "tuple[McpCloseFailure, ...]" = ()
         async with self._lock:
             connect_task = self.connect_task
             pool = self.pool
@@ -403,12 +464,22 @@ class McpSessionResources:
             termination = await cancel_task(connect_task, 10.0)
             if termination is TaskTermination.TIMED_OUT:
                 failures.append(McpResourceFailure("mcp", None, "connect_timeout"))
+            async with self._lock:
+                if self.state is McpResourceState.CLEANUP_REQUIRED:
+                    failures.extend(
+                        McpResourceFailure("mcp", item.server_id, item.error_id)
+                        for item in self.last_close_failures
+                    )
+                    pool = None
+                else:
+                    pool = self.pool
         if pool is not None:
             try:
                 result = await asyncio.wait_for(pool.close(), 10.0)
             except Exception as exc:
                 failures.append(McpResourceFailure("mcp", None, type(exc).__name__))
             else:
+                close_failures = result.failures
                 failures.extend(
                     McpResourceFailure("mcp", item.server_id, item.error_id)
                     for item in result.failures
@@ -417,12 +488,15 @@ class McpSessionResources:
             if not failures:
                 self.pool = None
                 self._toolsets = None
+                self.specs = ()
                 self.connect_task = None
+                self.last_close_failures = ()
                 self.state = McpResourceState.CLOSED
                 self.close_task = None
                 logger.info("event=agent.mcp.closed resource_count=0")
             else:
-                self.state = McpResourceState.OPEN
+                self.state = McpResourceState.CLEANUP_REQUIRED
+                self.last_close_failures = close_failures
                 self.close_task = None
         return tuple(failures)
 
@@ -436,6 +510,7 @@ __all__ = [
     "MCPClient",
     "McpCloseFailure",
     "McpCloseResult",
+    "McpCleanupFailure",
     "McpResourceFailure",
     "McpResourceState",
     "McpSessionResources",

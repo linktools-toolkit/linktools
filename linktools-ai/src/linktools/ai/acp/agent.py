@@ -40,7 +40,7 @@ class _ClientObserver(InteractionObserver):
 
     async def request_approval(
         self, request: ApprovalRequest, cancellation: Any
-    ) -> ApprovalDecision | None:
+    ) -> "ApprovalDecision | None":
         return await self._agent.client.request_approval(request, cancellation)
 
 
@@ -119,9 +119,8 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
-            owner=self.client.resources(session_id),
-            owner_name="acp.client",
         )
+        await self._register_client_resources(session_id)
         return schema.NewSessionResponse(
             sessionId=active.record.id,
             modes=self.protocol.mode_state(active.record.settings.agent_id),
@@ -176,7 +175,7 @@ class LinktoolsAcpAgent:
                 await self.runtime.sessions.register_owner(
                     session_id,
                     "acp.client",
-                    self.client.resources(session_id),
+                    self.client.resource_owner(session_id),
                     lease=load.lease,
                 )
             except Exception as exc:
@@ -223,9 +222,8 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
-            owner=self.client.resources(session_id),
-            owner_name="acp.client",
         )
+        await self._register_client_resources(session_id)
         return schema.ResumeSessionResponse(
             modes=self.protocol.mode_state(active.record.settings.agent_id),
             configOptions=list(self.protocol.config_registry.response_state()),
@@ -258,9 +256,8 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
-            owner=self.client.resources(target_session_id),
-            owner_name="acp.client",
         )
+        await self._register_client_resources(target_session_id)
         return schema.ForkSessionResponse(
             sessionId=active.record.id,
             modes=self.protocol.mode_state(active.record.settings.agent_id),
@@ -321,22 +318,20 @@ class LinktoolsAcpAgent:
 
         active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
         mapped = self.codec.decode_prompt(prompt)
-        execution_id = uuid4().hex
         spec = await self.protocol.resolve_spec(active.record.settings.agent_id)
-        toolsets = await self.runtime.sessions.toolsets(
-            session_id, principal=self.protocol.principal
-        )
         result = await self.runtime.interactions.execute(
-            session_id,
-            execution_id,
-            spec,
-            mapped,
-            _ClientObserver(self, session_id),
+            session_id=session_id,
+            spec=spec,
+            prompt=mapped,
+            observer=_ClientObserver(self, session_id),
             principal=self.protocol.principal,
-            extra_toolsets=toolsets,
         )
         if result.status.value == "failed":
-            raise internal_error("execution_failed", session_id=session_id, execution_id=execution_id)
+            raise internal_error(
+                "execution_failed",
+                session_id=session_id,
+                execution_id=result.execution_id,
+            )
         return schema.PromptResponse(stopReason=result.stop_reason.value)
 
     async def ext_method(self, method: str, params: "dict[str, Any]") -> Any:
@@ -346,9 +341,17 @@ class LinktoolsAcpAgent:
         return None
 
     async def _register_client_resources(self, session_id: str) -> None:
-        await self.runtime.sessions.register_owner(
-            session_id, "acp.client", self.client.resources(session_id)
-        )
+        try:
+            await self.runtime.sessions.register_owner(
+                session_id, "acp.client", self.client.resource_owner(session_id)
+            )
+        except BaseException:
+            await self.runtime.sessions.close(
+                session_id,
+                principal=self.protocol.principal,
+                reason="owner_registration",
+            )
+            raise
 
     def _require_initialized(self) -> None:
         if not self._initialized:

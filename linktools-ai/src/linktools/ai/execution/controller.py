@@ -3,17 +3,16 @@
 
 """In-process ownership and cancellation of active executions."""
 
-
 import asyncio
 from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import Any
-from ..errors import ExecutionAlreadyActiveError
+from typing import TYPE_CHECKING, Any
 
-from typing import TYPE_CHECKING
+from ..errors import ExecutionAlreadyActiveError
 
 if TYPE_CHECKING:
     from .cancellation import CancellationToken
+
 
 @dataclass(slots=True)
 class ActiveExecution:
@@ -53,6 +52,7 @@ class ExecutionControllerRegistry:
                 raise ExecutionAlreadyActiveError(
                     f"execution {execution_id!r} is already active"
                 )
+            # task-owner: execution.controller
             task = asyncio.create_task(coroutine)
             self._active[execution_id] = ActiveExecution(task, token)
             return task
