@@ -10,11 +10,13 @@ from uuid import uuid4
 from linktools.errors import ConfigError
 
 from ..errors import (
+    ExecutionInvocationRejectedError,
     ExecutionTerminalEventMissingError,
     ExecutionTerminalMismatchError,
     InvalidSessionConfigValueError,
     McpCleanupRequiredError,
     McpReplacementError,
+    PrincipalAccessDeniedError,
     SessionBusyError,
     SessionCleanupRequiredError,
     SessionConflictError,
@@ -28,6 +30,10 @@ from ..governance.identity import PrincipalContext
 
 class AcpDependencyError(ConfigError):
     """The optional ACP SDK is unavailable or has the wrong version."""
+
+
+class AcpTransportError(RuntimeError):
+    """ACP stdio transport or framing failed outside a request handler."""
 
 
 def require_sdk() -> object:
@@ -237,6 +243,13 @@ class AcpProtocol:
             return internal_error("execution_terminal_event_missing", session_id=session_id)
         elif isinstance(error, ExecutionTerminalMismatchError):
             return internal_error("execution_terminal_mismatch", session_id=session_id)
+        elif isinstance(error, ExecutionInvocationRejectedError):
+            reason = (
+                "permission_denied"
+                if error.error_id == PrincipalAccessDeniedError.__name__
+                else "execution_rejected"
+            )
+            return request_error(reason, session_id=session_id)
         elif isinstance(error, McpReplacementError):
             return internal_error("mcp_replacement_failed", session_id=session_id)
         else:
@@ -294,6 +307,15 @@ def protocol_handler(function: Callable[..., Any]) -> Callable[..., Any]:
                 raise internal_error("execution_terminal_event_missing") from exc
             if isinstance(exc, ExecutionTerminalMismatchError):
                 raise internal_error("execution_terminal_mismatch") from exc
+            if isinstance(exc, ExecutionInvocationRejectedError):
+                reason = (
+                    "permission_denied"
+                    if exc.error_id == PrincipalAccessDeniedError.__name__
+                    else "execution_rejected"
+                )
+                raise request_error(reason) from exc
+            if isinstance(exc, PrincipalAccessDeniedError):
+                raise request_error("permission_denied") from exc
             if isinstance(exc, McpReplacementError):
                 raise internal_error("mcp_replacement_failed") from exc
             raise internal_error("internal_error") from exc
@@ -303,6 +325,7 @@ def protocol_handler(function: Callable[..., Any]) -> Callable[..., Any]:
 
 __all__ = [
     "AcpDependencyError",
+    "AcpTransportError",
     "AcpMode",
     "CapabilityBuilder",
     "CapabilityInput",

@@ -248,6 +248,16 @@ class ExecutionTerminalMismatchError(RunError):
     """The persisted execution result disagreed with its terminal event."""
 
 
+class ExecutionInvocationRejectedError(RunError, PrincipalAccessDeniedError):
+    """An execution invocation was rejected before it owned a lifecycle."""
+
+    def __init__(self, execution_id: str, reason: str, error_id: str) -> None:
+        super().__init__(f"execution invocation rejected: {execution_id} ({reason})")
+        self.execution_id = execution_id
+        self.reason = reason
+        self.error_id = error_id
+
+
 class ExecutionLifecycleDeliveryError(RunError):
     """The canonical execution boundary could not be delivered."""
 

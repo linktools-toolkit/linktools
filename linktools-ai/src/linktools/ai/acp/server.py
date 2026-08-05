@@ -7,7 +7,7 @@ import asyncio
 import signal
 
 from .agent import LinktoolsAcpAgent
-from .protocol import require_sdk
+from .protocol import AcpTransportError, require_sdk
 
 
 async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
@@ -32,6 +32,12 @@ async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
                 pass
     try:
         await acp.run_agent(agent, use_unstable_protocol=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        raise AcpTransportError(
+            f"ACP transport failed: {type(error).__name__}"
+        ) from error
     finally:
         for signum in installed:
             loop.remove_signal_handler(signum)

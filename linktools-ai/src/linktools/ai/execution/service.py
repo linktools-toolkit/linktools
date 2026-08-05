@@ -31,6 +31,7 @@ from ..agent.models import (
 from ..agent.sandbox.protocols import Sandbox
 from ..errors import (
     ChildSnapshotError,
+    ExecutionInvocationRejectedError,
     ExecutionLifecycleDeliveryError,
     ExecutionLifecyclePersistenceError,
     ExecutionTerminalMismatchError,
@@ -88,6 +89,7 @@ from .live_events import (
     ExecutionCompleted,
     ExecutionFailed,
     ExecutionPaused,
+    ExecutionTerminalEvent,
     UsageUpdated,
     publish_execution_event,
 )
@@ -168,11 +170,31 @@ class ChildRunResult:
 class _InvocationEnvelope:
     execution_id: str
     record: "RunRecord | None" = None
+    admitted: bool = False
     boundary: "object | None" = None
     boundary_published: bool = False
     persistence_error: "ExecutionLifecyclePersistenceError | None" = None
     original_error: "BaseException | None" = None
     finalizer_task: "asyncio.Task[None] | None" = None
+
+
+def _boundary_from_terminal_record(
+    record: "RunRecord",
+    *,
+    fallback_error_type: str,
+) -> ExecutionTerminalEvent:
+    if record.status is RunStatus.COMPLETED:
+        return ExecutionCompleted(execution_id=record.id)
+    if record.status is RunStatus.CANCELLED:
+        return ExecutionCancelled(execution_id=record.id)
+    if record.status is RunStatus.FAILED:
+        error_id = record.error.error_type if record.error is not None else fallback_error_type
+        return ExecutionFailed(
+            execution_id=record.id,
+            error_id=error_id,
+            error_type=error_id,
+        )
+    raise ExecutionTerminalMismatchError(record.id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,6 +448,13 @@ class ExecutionService:
                     )
                 )
             ).record
+            scope.admitted = True
+            logger.info(
+                "event=execution.invocation_admitted execution_id=%s admitted=%s persisted_status=%s",
+                scope.record.id,
+                scope.admitted,
+                scope.record.status.value,
+            )
             assembly = await self._preflight(
                 spec,
                 execution_id=execution_id,
@@ -546,8 +575,21 @@ class ExecutionService:
 
         async def body(scope: _InvocationEnvelope) -> object:
             record = await self._required(run_id)
-            scope.record = record
             self._authorize(principal, record, ExecutionAction.RESUME)
+            if record.status is not RunStatus.PAUSED:
+                raise ExecutionInvocationRejectedError(
+                    run_id,
+                    "invalid_resume_status",
+                    "invalid_resume_status",
+                )
+            scope.record = record
+            scope.admitted = True
+            logger.info(
+                "event=execution.invocation_admitted execution_id=%s admitted=%s persisted_status=%s",
+                record.id,
+                scope.admitted,
+                record.status.value,
+            )
             spec = _decode_definition(record.definition, self._codec)
             assembly = await self._preflight(
                 spec,
@@ -1009,14 +1051,32 @@ class ExecutionService:
             return await body(envelope)
         except asyncio.CancelledError as error:
             envelope.original_error = error
+            if not envelope.admitted:
+                raise
             await self._prepare_cancel_boundary(envelope)
             raise
         except BaseException as error:
             envelope.original_error = error
+            if not envelope.admitted:
+                if isinstance(
+                    error,
+                    (
+                        PrincipalAccessDeniedError,
+                        KeyError,
+                        ExecutionInvocationRejectedError,
+                    ),
+                ):
+                    raise ExecutionInvocationRejectedError(
+                        envelope.execution_id,
+                        "invocation_rejected",
+                        type(error).__name__,
+                    ) from error
+                raise
             await self._prepare_failure_boundary(envelope, error)
             raise
         finally:
-            await self._finalize_envelope(envelope)
+            if envelope.admitted:
+                await self._finalize_envelope(envelope)
 
     async def _prepare_failure_boundary(
         self,
@@ -1026,27 +1086,7 @@ class ExecutionService:
         if envelope.boundary is not None:
             return
         if envelope.record is None:
-            sanitized = sanitize_run_error(error)
-            envelope.boundary = ExecutionFailed(
-                execution_id=envelope.execution_id,
-                error_id=sanitized.error_type,
-                error_type=type(error).__name__,
-            )
-            logger.info(
-                "event=execution.invocation_boundary_prepared execution_id=%s invocation_stage=transport boundary_type=ExecutionFailed boundary_published=%s error_id=%s",
-                envelope.execution_id,
-                envelope.boundary_published,
-                sanitized.error_type,
-            )
-            return
-        if isinstance(error, PrincipalAccessDeniedError):
-            sanitized = sanitize_run_error(error)
-            envelope.boundary = ExecutionFailed(
-                execution_id=envelope.execution_id,
-                error_id=sanitized.error_type,
-                error_type=type(error).__name__,
-            )
-            return
+            raise ExecutionTerminalMismatchError(envelope.execution_id)
         try:
             record = await self._persist_invocation_failure(envelope.record, error)
         except ExecutionLifecyclePersistenceError as persistence_error:
@@ -1064,23 +1104,16 @@ class ExecutionService:
                 exc_info=environ.debug,
             )
             return
-        error_id = record.error.error_type if record.error is not None else type(error).__name__
-        envelope.boundary = ExecutionFailed(
-            execution_id=envelope.execution_id,
-            error_id=error_id,
-            error_type=type(error).__name__,
+        envelope.boundary = _boundary_from_terminal_record(
+            record,
+            fallback_error_type=type(error).__name__,
         )
 
     async def _prepare_cancel_boundary(self, envelope: _InvocationEnvelope) -> None:
         if envelope.boundary is not None:
             return
         if envelope.record is None:
-            envelope.boundary = ExecutionFailed(
-                execution_id=envelope.execution_id,
-                error_id="cancelled_before_run_record",
-                error_type="CancelledError",
-            )
-            return
+            raise ExecutionTerminalMismatchError(envelope.execution_id)
         try:
             record = await self._persist_invocation_cancel(envelope.record)
         except ExecutionLifecyclePersistenceError as persistence_error:
@@ -1098,17 +1131,10 @@ class ExecutionService:
                 exc_info=environ.debug,
             )
             return
-        if record.status is RunStatus.FAILED:
-            error = record.error
-            envelope.boundary = ExecutionFailed(
-                execution_id=envelope.execution_id,
-                error_id=error.error_type if error is not None else "",
-                error_type=error.error_type if error is not None else "",
-            )
-        elif record.status is RunStatus.COMPLETED:
-            envelope.boundary = ExecutionCompleted(execution_id=envelope.execution_id)
-        else:
-            envelope.boundary = ExecutionCancelled(execution_id=envelope.execution_id)
+        envelope.boundary = _boundary_from_terminal_record(
+            record,
+            fallback_error_type="cancelled",
+        )
 
     async def _persist_invocation_failure(
         self, record: "RunRecord", error: BaseException
@@ -1295,24 +1321,17 @@ class ExecutionService:
             RunStatus.FAILED,
             RunStatus.CANCELLED,
         }:
-            if latest.status is RunStatus.COMPLETED:
-                terminal_event: object = ExecutionCompleted(execution_id=record.id)
-            elif latest.status is RunStatus.FAILED:
-                error = latest.error
-                terminal_event = ExecutionFailed(
-                    execution_id=record.id,
-                    error_id=error.error_type if error is not None else "",
-                    error_type=error.error_type if error is not None else "",
-                )
-            else:
-                terminal_event = ExecutionCancelled(execution_id=record.id)
+            terminal_event = _boundary_from_terminal_record(
+                latest,
+                fallback_error_type="terminal_record_failed",
+            )
             await publish_boundary(terminal_event)
             return None
         if (
             latest.status is RunStatus.CANCELLING
             and not isinstance(outcome, AgentFailed)
         ):
-            await self._store.acknowledge_cancel(
+            cancelled = await self._store.acknowledge_cancel(
                 AcknowledgeCancellation(
                     record.id,
                     owner,
@@ -1337,11 +1356,14 @@ class ExecutionService:
                     )
                 )
             await publish_boundary(
-                ExecutionCancelled(execution_id=record.id)
+                _boundary_from_terminal_record(
+                    cancelled,
+                    fallback_error_type="cancelled",
+                )
             )
             return None
         if isinstance(outcome, AgentCompleted):
-            await self._store.complete_run(
+            completed = await self._store.complete_run(
                 CompleteExecution(
                     record.id,
                     owner,
@@ -1351,7 +1373,10 @@ class ExecutionService:
                 )
             )
             await publish_boundary(
-                ExecutionCompleted(execution_id=record.id)
+                _boundary_from_terminal_record(
+                    completed,
+                    fallback_error_type="completed",
+                )
             )
             return ExecutionResultView(record.id, outcome.result.output)
         if isinstance(outcome, AgentPaused):
@@ -1386,7 +1411,7 @@ class ExecutionService:
             )
             return None
         if isinstance(outcome, AgentCancelled):
-            await self._store.acknowledge_cancel(
+            cancelled = await self._store.acknowledge_cancel(
                 AcknowledgeCancellation(
                     record.id,
                     owner,
@@ -1396,12 +1421,15 @@ class ExecutionService:
                 )
             )
             await publish_boundary(
-                ExecutionCancelled(execution_id=record.id)
+                _boundary_from_terminal_record(
+                    cancelled,
+                    fallback_error_type="cancelled",
+                )
             )
             return None
         if isinstance(outcome, AgentFailed):
             error = outcome.error or RunError("AgentFailed", "execution failed")
-            await self._store.fail_run(
+            failed = await self._store.fail_run(
                 FailExecution(
                     record.id,
                     owner,
@@ -1412,10 +1440,9 @@ class ExecutionService:
                 )
             )
             await publish_boundary(
-                ExecutionFailed(
-                    execution_id=record.id,
-                    error_id=error.error_type,
-                    error_type=error.error_type,
+                _boundary_from_terminal_record(
+                    failed,
+                    fallback_error_type=error.error_type,
                 )
             )
             raise RuntimeError(error.message)

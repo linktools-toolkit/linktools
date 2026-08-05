@@ -14,6 +14,7 @@ from linktools.core import environ
 from ..errors import (
     ExecutionLifecycleDeliveryError,
     ExecutionLifecyclePersistenceError,
+    ExecutionInvocationRejectedError,
     ExecutionTerminalEventMissingError,
     ExecutionTerminalMismatchError,
 )
@@ -79,6 +80,22 @@ class _InteractionState:
     task: "asyncio.Task[InteractionResult] | None" = None
 
 
+@dataclass(slots=True, eq=False)
+class _OrphanExecution:
+    session_id: str
+    execution_id: str
+    principal: PrincipalContext
+    task: "asyncio.Task[object]"
+    reconciliation_task: "asyncio.Task[None] | None" = None
+
+
+def _task_outcome(task: "asyncio.Task[object]") -> "object | BaseException":
+    try:
+        return task.result()
+    except BaseException as error:
+        return error
+
+
 class InteractiveRunService:
     def __init__(
         self,
@@ -90,7 +107,8 @@ class InteractiveRunService:
         self._event_hub = event_hub
         self._sessions = sessions
         self._states: "dict[str, _InteractionState]" = {}
-        self._orphan_tasks: "dict[str, set[asyncio.Task[Any]]]" = {}
+        self._orphan_executions: "dict[str, set[_OrphanExecution]]" = {}
+        self._orphan_callbacks: "dict[str, set[asyncio.Task[object]]]" = {}
         sessions.set_interaction_canceller(self.cancel)
         sessions.set_interaction_owner(self)
 
@@ -146,7 +164,9 @@ class InteractiveRunService:
                         record, observer, state, session_id, principal
                     )
                     if decision is None:
-                        await self._cancel_execution(execution_id, principal)
+                        await self._cancel_execution(
+                            execution_id, principal, session_id=session_id
+                        )
                         return InteractionResult(
                             execution_id, RunStatus.CANCELLED, InteractionStopReason.CANCELLED
                         )
@@ -173,20 +193,35 @@ class InteractiveRunService:
 
     async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
         state = self._states.get(session_id)
-        if state is None and not self._orphan_tasks.get(session_id):
+        executions = self._orphan_executions.get(session_id, set())
+        callbacks = self._orphan_callbacks.get(session_id, set())
+        if state is None and not executions and not callbacks:
             return ()
         if state is not None:
             state.cancellation.set()
-        failures = []
-        tasks = set(self._orphan_tasks.get(session_id, ()))
-        for task in tasks:
-            if not task.done():
-                failures.append(ResourceFailure("interaction", None, "orphan_task"))
+        failures = [
+            ResourceFailure("interaction", orphan.execution_id, "orphan_reconciliation_pending")
+            for orphan in executions
+        ]
+        failures.extend(
+            ResourceFailure("interaction", None, "orphan_callback")
+            for _ in callbacks
+        )
+        if failures:
+            logger.warning(
+                "event=runtime.interaction.close_orphan_failure session_id=%s orphan_count=%s reconciliation_status=pending",
+                session_id,
+                len(failures),
+            )
         return tuple(failures)
 
     def is_empty(self, session_id: str) -> bool:
         state = self._states.get(session_id)
-        return state is None and not self._orphan_tasks.get(session_id)
+        return (
+            state is None
+            and not self._orphan_executions.get(session_id)
+            and not self._orphan_callbacks.get(session_id)
+        )
 
     async def _run_once(
         self,
@@ -230,6 +265,7 @@ class InteractiveRunService:
         terminal_event: "ExecutionTerminalEvent | None" = None
         cleanup_marked = False
         paused = False
+        orphan_registered = False
 
         async def mark_lifecycle_cleanup() -> None:
             nonlocal cleanup_marked
@@ -265,12 +301,37 @@ class InteractiveRunService:
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if cancel_task_wait in done:
-                    await self._cancel_execution(execution_id, principal)
-                    termination = None
-                    if not task_done:
-                        termination = await cancel_task(task, 1.0)
+                    await self._cancel_execution(
+                        execution_id, principal, session_id=session_id
+                    )
+                    termination = (
+                        TaskTermination.COMPLETED
+                        if task_done
+                        else await cancel_task(task, 1.0)
+                    )
                     if termination is TaskTermination.TIMED_OUT:
-                        self._register_orphan(session_id, task)
+                        self._register_orphan_execution(
+                            session_id=session_id,
+                            execution_id=execution_id,
+                            principal=principal,
+                            task=task,
+                        )
+                        orphan_registered = True
+                        logger.info(
+                            "event=runtime.interaction.cancel_settled session_id=%s execution_id=%s reconciliation_status=scheduled",
+                            session_id,
+                            execution_id,
+                        )
+                    else:
+                        outcome = _task_outcome(task)
+                        await self._reconcile_execution_outcome(
+                            session_id=session_id,
+                            execution_id=execution_id,
+                            principal=principal,
+                            outcome=outcome,
+                        )
+                        if isinstance(outcome, ExecutionLifecyclePersistenceError):
+                            raise outcome
                     return InteractionResult(
                         execution_id, RunStatus.CANCELLED, InteractionStopReason.CANCELLED
                     )
@@ -319,6 +380,10 @@ class InteractiveRunService:
                     await mark_lifecycle_cleanup()
                     if isinstance(execution_outcome, ExecutionLifecycleDeliveryError):
                         raise execution_outcome
+                    if isinstance(execution_outcome, ExecutionInvocationRejectedError):
+                        if terminal_event is not None:
+                            raise ExecutionTerminalMismatchError(execution_id)
+                        raise execution_outcome
                     if isinstance(execution_outcome, ExecutionLifecyclePersistenceError):
                         if not cleanup_marked:
                             continue
@@ -360,10 +425,15 @@ class InteractiveRunService:
                         raise ExecutionTerminalMismatchError(execution_id)
                     return result
         finally:
-            if not task.done():
+            if not task.done() and not orphan_registered:
                 termination = await cancel_task(task, 1.0)
                 if termination is TaskTermination.TIMED_OUT:
-                    self._register_orphan(session_id, task)
+                    self._register_orphan_execution(
+                        session_id=session_id,
+                        execution_id=execution_id,
+                        principal=principal,
+                        task=task,
+                    )
             if event_task is not None:
                 await cancel_task(event_task, 1.0)
             await cancel_task(cancel_task_wait, 1.0)
@@ -396,7 +466,7 @@ class InteractiveRunService:
             if cancel_wait in done:
                 termination = await cancel_task(callback, 1.0)
                 if termination is TaskTermination.TIMED_OUT:
-                    self._register_orphan(session_id, callback)
+                    self._register_orphan_callback(session_id, callback)
                 logger.info(
                     "event=runtime.interaction.cancelled session_id=%s execution_id=%s",
                     session_id,
@@ -412,12 +482,58 @@ class InteractiveRunService:
             await cancel_task(cancel_wait, 1.0)
 
     async def _cancel_execution(
-        self, execution_id: str, principal: PrincipalContext
+        self,
+        execution_id: str,
+        principal: PrincipalContext,
+        *,
+        session_id: str,
     ) -> None:
         try:
             await self._execution.cancel(execution_id, principal=principal)
-        except Exception:
-            logger.debug("execution cancellation failed execution_id=%s", execution_id)
+        except Exception as error:
+            error_id = type(error).__name__
+            try:
+                latest = await self._execution.get_execution_record(
+                    execution_id,
+                    principal=principal,
+                )
+            except Exception:
+                latest = None
+            if latest is not None and latest.status in {
+                RunStatus.COMPLETED,
+                RunStatus.FAILED,
+                RunStatus.CANCELLED,
+            }:
+                logger.info(
+                    "event=runtime.interaction.cancel_race_terminal session_id=%s execution_id=%s persisted_status=%s",
+                    session_id,
+                    execution_id,
+                    latest.status.value,
+                )
+                return
+            try:
+                await self._sessions.mark_cleanup_required(
+                    session_id,
+                    principal=principal,
+                    error_id=error_id,
+                )
+            except Exception as cleanup_error:
+                logger.error(
+                    "event=runtime.interaction.cancel_persistence_failed execution_id=%s cleanup_required=%s persistence_error_id=%s cleanup_error_id=%s",
+                    execution_id,
+                    False,
+                    error_id,
+                    type(cleanup_error).__name__,
+                    exc_info=environ.debug,
+                )
+            else:
+                logger.error(
+                    "event=runtime.interaction.cancel_persistence_failed execution_id=%s cleanup_required=%s persistence_error_id=%s",
+                    execution_id,
+                    True,
+                    error_id,
+                )
+
 
     async def _result_from_execution(
         self, execution_id: str, principal: PrincipalContext
@@ -436,34 +552,127 @@ class InteractiveRunService:
         )
         return InteractionResult(execution_id, record.status, reason)
 
-    def _register_orphan(self, session_id: str, task: "asyncio.Task[Any]") -> None:
-        self._orphan_tasks.setdefault(session_id, set()).add(task)
-        task.add_done_callback(
-            lambda completed: self._finish_orphan(session_id, completed)
-        )
+    async def _reconcile_execution_outcome(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        principal: PrincipalContext,
+        outcome: "object | BaseException",
+    ) -> None:
+        if isinstance(outcome, ExecutionLifecyclePersistenceError):
+            await self._sessions.mark_cleanup_required(
+                session_id,
+                principal=principal,
+                error_id=outcome.error_id,
+            )
+            logger.error(
+                "event=runtime.interaction.execution_reconciled session_id=%s execution_id=%s reconciliation_status=cleanup_required cleanup_required=%s cleanup_execution_id=%s persistence_error_id=%s",
+                session_id,
+                execution_id,
+                True,
+                execution_id,
+                outcome.error_id,
+            )
+        elif isinstance(outcome, ExecutionLifecycleDeliveryError):
+            logger.error(
+                "event=runtime.interaction.execution_reconciled session_id=%s execution_id=%s reconciliation_status=delivery_failed error_id=%s",
+                session_id,
+                execution_id,
+                type(outcome).__name__,
+            )
+        elif isinstance(outcome, BaseException) and not isinstance(
+            outcome, (asyncio.CancelledError,)
+        ):
+            logger.error(
+                "event=runtime.interaction.execution_reconciled session_id=%s execution_id=%s reconciliation_status=unexpected_failure error_id=%s",
+                session_id,
+                execution_id,
+                type(outcome).__name__,
+                exc_info=environ.debug,
+            )
+
+    def _register_orphan_execution(
+        self,
+        *,
+        session_id: str,
+        execution_id: str,
+        principal: PrincipalContext,
+        task: "asyncio.Task[object]",
+    ) -> None:
+        orphan = _OrphanExecution(session_id, execution_id, principal, task)
+        self._orphan_executions.setdefault(session_id, set()).add(orphan)
+        reconciliation = asyncio.create_task(self._reconcile_orphan(orphan))
+        orphan.reconciliation_task = reconciliation
+        reconciliation.add_done_callback(self._observe_reconciliation)
         logger.warning(
-            "event=runtime.interaction.orphan_registered session_id=%s orphan_task_count=%s",
+            "event=runtime.interaction.orphan_registered session_id=%s execution_id=%s orphan_kind=execution orphan_count=%s reconciliation_status=scheduled",
             session_id,
-            len(self._orphan_tasks[session_id]),
+            execution_id,
+            len(self._orphan_executions[session_id]),
         )
 
-    def _finish_orphan(self, session_id: str, task: "asyncio.Task[Any]") -> None:
+    async def _reconcile_orphan(self, orphan: _OrphanExecution) -> None:
         try:
-            task.exception()
-        except asyncio.CancelledError:
+            await asyncio.shield(orphan.task)
+        except BaseException:
             pass
-        except Exception as exc:
-            logger.warning(
-                "event=runtime.interaction.orphan_finished session_id=%s error_id=%s",
-                session_id,
+        outcome = _task_outcome(orphan.task)
+        await self._reconcile_execution_outcome(
+            session_id=orphan.session_id,
+            execution_id=orphan.execution_id,
+            principal=orphan.principal,
+            outcome=outcome,
+        )
+        executions = self._orphan_executions.get(orphan.session_id)
+        if executions is not None:
+            executions.discard(orphan)
+            if not executions:
+                self._orphan_executions.pop(orphan.session_id, None)
+        logger.info(
+            "event=runtime.interaction.orphan_reconciled session_id=%s execution_id=%s orphan_kind=execution orphan_count=%s reconciliation_status=complete cleanup_required=%s",
+            orphan.session_id,
+            orphan.execution_id,
+            len(self._orphan_executions.get(orphan.session_id, ())),
+            isinstance(outcome, ExecutionLifecyclePersistenceError),
+        )
+
+    def _observe_reconciliation(self, task: "asyncio.Task[None]") -> None:
+        try:
+            task.result()
+        except BaseException as exc:
+            logger.error(
+                "event=runtime.interaction.orphan_reconciliation_failed reconciliation_status=failed error_id=%s",
                 type(exc).__name__,
+                exc_info=environ.debug,
             )
-        finally:
-            tasks = self._orphan_tasks.get(session_id)
-            if tasks is not None:
-                tasks.discard(task)
-                if not tasks:
-                    self._orphan_tasks.pop(session_id, None)
+
+    def _register_orphan_callback(
+        self, session_id: str, task: "asyncio.Task[object]"
+    ) -> None:
+        callbacks = self._orphan_callbacks.setdefault(session_id, set())
+        callbacks.add(task)
+        task.add_done_callback(
+            lambda completed: self._finish_orphan_callback(session_id, completed)
+        )
+        logger.warning(
+            "event=runtime.interaction.orphan_registered session_id=%s orphan_kind=callback orphan_count=%s reconciliation_status=scheduled",
+            session_id,
+            len(callbacks),
+        )
+
+    def _finish_orphan_callback(
+        self, session_id: str, task: "asyncio.Task[object]"
+    ) -> None:
+        _task_outcome(task)
+        callbacks = self._orphan_callbacks.get(session_id)
+        if callbacks is not None:
+            callbacks.discard(task)
+            if not callbacks:
+                self._orphan_callbacks.pop(session_id, None)
+
+    def _register_orphan(self, session_id: str, task: "asyncio.Task[Any]") -> None:
+        self._register_orphan_callback(session_id, task)
 
 
 ExecutionTerminalEventTypes = (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)
