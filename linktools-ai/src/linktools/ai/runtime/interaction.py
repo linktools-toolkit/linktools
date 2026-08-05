@@ -12,6 +12,7 @@ from uuid import uuid4
 from linktools.core import environ
 
 from ..errors import (
+    ExecutionLifecycleDeliveryError,
     ExecutionTerminalEventMissingError,
     ExecutionTerminalMismatchError,
 )
@@ -226,7 +227,6 @@ class InteractiveRunService:
         execution_outcome: "BaseException | object | None" = None
         task_done = False
         terminal_event: "ExecutionTerminalEvent | None" = None
-        terminal_deadline: "float | None" = None
         paused = False
         try:
             while True:
@@ -235,25 +235,10 @@ class InteractiveRunService:
                     waiters.add(task)
                 if event_task is not None:
                     waiters.add(event_task)
-                timeout = None
-                if task_done and terminal_event is None:
-                    timeout = max(
-                        0.0,
-                        (terminal_deadline or 0.0)
-                        - asyncio.get_running_loop().time(),
-                    )
                 done, _ = await asyncio.wait(
                     waiters,
-                    timeout=timeout,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if not done:
-                    logger.error(
-                        "event=runtime.interaction.terminal_event_missing session_id=%s execution_id=%s",
-                        session_id,
-                        execution_id,
-                    )
-                    raise ExecutionTerminalEventMissingError(execution_id)
                 if cancel_task_wait in done:
                     await self._cancel_execution(execution_id, principal)
                     termination = None
@@ -299,13 +284,23 @@ class InteractiveRunService:
                         execution_outcome = task.result()
                     except BaseException as exc:
                         execution_outcome = exc
-                    terminal_deadline = asyncio.get_running_loop().time() + 5.0
                     logger.info(
                         "event=runtime.interaction.execution_task_completed session_id=%s execution_id=%s outcome=%s",
                         session_id,
                         execution_id,
                         type(execution_outcome).__name__,
                     )
+                    if isinstance(execution_outcome, ExecutionLifecycleDeliveryError):
+                        raise execution_outcome
+                    if not paused and terminal_event is None and event_task is not None:
+                        await asyncio.sleep(0)
+                        if not event_task.done():
+                            logger.error(
+                                "event=runtime.interaction.terminal_event_missing session_id=%s execution_id=%s",
+                                session_id,
+                                execution_id,
+                            )
+                            raise ExecutionTerminalEventMissingError(execution_id)
                 if task_done and paused and terminal_event is None:
                     logger.info(
                         "event=runtime.interaction.pause_cycle_completed session_id=%s execution_id=%s",

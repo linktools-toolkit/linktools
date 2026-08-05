@@ -159,8 +159,10 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
-        settings = active.record.settings
+        record = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
+        settings = record.settings
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
         settings = replace(
             settings,
@@ -218,7 +220,9 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        source = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
+        source = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
         owner = self.client.resource_owner(session_id)
         try:
@@ -226,7 +230,7 @@ class LinktoolsAcpAgent:
                 session_id,
                 workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
                 settings=replace(
-                    source.record.settings,
+                    source.settings,
                     tool_source_fingerprints=tuple(
                         self.codec.mcp_server_fingerprint(item) for item in tool_sources
                     ),
@@ -256,7 +260,9 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        source = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
+        source = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
         target_session_id = uuid4().hex
         owner = self.client.resource_owner(target_session_id)
@@ -266,7 +272,7 @@ class LinktoolsAcpAgent:
                 target_session_id,
                 workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
                 settings=replace(
-                    source.record.settings,
+                    source.settings,
                     tool_source_fingerprints=tuple(
                         self.codec.mcp_server_fingerprint(item) for item in tool_sources
                     ),
@@ -300,17 +306,25 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         if mode_id not in {mode.id for mode in self.protocol.modes}:
             raise request_error("unknown_mode", session_id=session_id)
-        active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
-        await self.runtime.sessions.update(session_id, settings=replace(active.record.settings, agent_id=mode_id), principal=self.protocol.principal)
+        record = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
+        await self.runtime.sessions.update(
+            session_id,
+            settings=replace(record.settings, agent_id=mode_id),
+            principal=self.protocol.principal,
+        )
         return None
 
     @protocol_handler
     async def set_config_option(self, config_id: str, session_id: str, value: "str | bool", **kwargs: Any) -> Any:
         self._require_initialized()
-        active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
+        record = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
         try:
             settings = self.protocol.config_registry.update(
-                active.record.settings, config_id, value
+                record.settings, config_id, value
             )
         except UnknownSessionConfigOptionError as exc:
             logger.info(
@@ -337,9 +351,11 @@ class LinktoolsAcpAgent:
         self._require_initialized()
         import acp.schema as schema
 
-        active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
+        record = await self.runtime.sessions.get_record(
+            session_id, principal=self.protocol.principal
+        )
         mapped = self.codec.decode_prompt(prompt)
-        spec = await self.protocol.resolve_spec(active.record.settings.agent_id)
+        spec = await self.protocol.resolve_spec(record.settings.agent_id)
         result = await self.runtime.interactions.execute(
             session_id=session_id,
             spec=spec,

@@ -61,6 +61,12 @@ class ResourceFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class ActiveLookup:
+    active: "ActiveRuntimeSession"
+    created: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SessionCloseResult:
     closed: bool
     failures: "tuple[ResourceFailure, ...]" = ()
@@ -405,9 +411,15 @@ class RuntimeSessionService:
         )
         record = await self._store.create_session(command)
         self._authorize(principal, record)
-        active = await self._activate_record(record, tool_sources=tool_sources)
+        lookup = await self._activate_record(record, tool_sources=tool_sources)
+        active = lookup.active
         if owner is not None:
-            lease = await self._coordinator.reserve(active, SessionOperationKind.CREATE)
+            try:
+                lease = await self._coordinator.reserve(active, SessionOperationKind.CREATE)
+            except BaseException:
+                if lookup.created:
+                    await self._evict_if_idle(active)
+                raise
             try:
                 await self.register_owner(record.id, owner_name, owner, lease=lease)
             except BaseException:
@@ -422,17 +434,49 @@ class RuntimeSessionService:
         self, session_id: str, *, principal: "PrincipalContext"
     ) -> ActiveRuntimeSession:
         active = self._active.get(session_id)
-        if active is not None:
-            self._authorize(principal, active.record)
-            logger.debug(
-                "event=runtime.session.active_cache_hit session_id=%s", session_id
-            )
-            return active
+        if active is None:
+            raise UnknownSessionError(session_id)
+        self._authorize(principal, active.record)
+        logger.debug(
+            "event=runtime.session.active_cache_hit session_id=%s", session_id
+        )
+        return active
+
+    async def get_record(
+        self, session_id: str, *, principal: "PrincipalContext"
+    ) -> SessionRecord:
         record = await self._store.get_session(session_id)
         if record is None:
             raise UnknownSessionError(session_id)
         self._authorize(principal, record)
-        return await self._activate_record(record)
+        return record
+
+    async def activate_for_operation(
+        self,
+        session_id: str,
+        kind: SessionOperationKind,
+        *,
+        principal: "PrincipalContext",
+        tool_sources: "tuple[MCPServerSpec, ...]" = (),
+    ) -> ActiveRuntimeSession:
+        return (await self._activate_for_operation(
+            session_id,
+            kind,
+            principal=principal,
+            tool_sources=tool_sources,
+        )).active
+
+    async def _activate_for_operation(
+        self,
+        session_id: str,
+        kind: SessionOperationKind,
+        *,
+        principal: "PrincipalContext",
+        tool_sources: "tuple[MCPServerSpec, ...]" = (),
+    ) -> ActiveLookup:
+        record = await self.get_record(session_id, principal=principal)
+        self._validate_state_for_operation(record.state, kind)
+        return await self._activate_record(record, tool_sources=tool_sources)
 
     async def list(
         self, *, principal: "PrincipalContext"
@@ -455,8 +499,19 @@ class RuntimeSessionService:
         principal: "PrincipalContext",
         tool_sources: "tuple[MCPServerSpec, ...]" = (),
     ) -> SessionLoadTransaction:
-        active = await self.get(session_id, principal=principal)
-        lease = await self._coordinator.reserve(active, SessionOperationKind.LOAD)
+        lookup = await self._activate_for_operation(
+            session_id,
+            SessionOperationKind.LOAD,
+            principal=principal,
+            tool_sources=tool_sources,
+        )
+        active = lookup.active
+        try:
+            lease = await self._coordinator.reserve(active, SessionOperationKind.LOAD)
+        except BaseException:
+            if lookup.created:
+                await self._evict_if_idle(active)
+            raise
         try:
             history = await self._store.get_session_messages(session_id)
             replacement = await self._prepare_mcp_replacement(active, tool_sources)
@@ -465,6 +520,8 @@ class RuntimeSessionService:
             )
         except BaseException:
             await lease.release()
+            if lookup.created:
+                await self._evict_if_idle(active)
             raise
 
     async def resume(
@@ -479,8 +536,19 @@ class RuntimeSessionService:
         owner_name: str = "",
     ) -> ActiveRuntimeSession:
         self._validate_owner(owner, owner_name)
-        active = await self.get(session_id, principal=principal)
-        lease = await self._coordinator.reserve(active, SessionOperationKind.RESUME)
+        lookup = await self._activate_for_operation(
+            session_id,
+            SessionOperationKind.RESUME,
+            principal=principal,
+            tool_sources=tool_sources,
+        )
+        active = lookup.active
+        try:
+            lease = await self._coordinator.reserve(active, SessionOperationKind.RESUME)
+        except BaseException:
+            if lookup.created:
+                await self._evict_if_idle(active)
+            raise
         try:
             replacement = await self._prepare_mcp_replacement(active, tool_sources)
             await self._commit_replacement(
@@ -492,6 +560,8 @@ class RuntimeSessionService:
             )
         except BaseException:
             await lease.release()
+            if lookup.created:
+                await self._evict_if_idle(active)
             raise
         if owner is not None:
             try:
@@ -517,25 +587,38 @@ class RuntimeSessionService:
         owner_name: str = "",
     ) -> ActiveRuntimeSession:
         self._validate_owner(owner, owner_name)
-        source = await self.get(source_session_id, principal=principal)
-        async with await self._coordinator.reserve(source, SessionOperationKind.FORK):
-            if any(
-                run.session_id == source_session_id
-                and run.status.value in {"pending", "running", "paused", "cancelling"}
-                for run in await self._store.list_all_runs()
-            ):
-                raise SessionBusyError(source_session_id)
-            record = await self._store.fork_session(
-                ForkSession(
-                    source_session_id=source_session_id,
-                    target_session_id=target_session_id,
-                    user_id=principal.user_id,
-                    tenant_id=principal.tenant_id,
-                    workspace=workspace,
-                    settings=settings,
+        source_lookup = await self._activate_for_operation(
+            source_session_id,
+            SessionOperationKind.FORK,
+            principal=principal,
+        )
+        source = source_lookup.active
+        try:
+            async with await self._coordinator.reserve(source, SessionOperationKind.FORK):
+                if any(
+                    run.session_id == source_session_id
+                    and run.status.value in {"pending", "running", "paused", "cancelling"}
+                    for run in await self._store.list_all_runs()
+                ):
+                    raise SessionBusyError(source_session_id)
+                record = await self._store.fork_session(
+                    ForkSession(
+                        source_session_id=source_session_id,
+                        target_session_id=target_session_id,
+                        user_id=principal.user_id,
+                        tenant_id=principal.tenant_id,
+                        workspace=workspace,
+                        settings=settings,
+                    )
                 )
-            )
-        active = await self._activate_record(record, tool_sources=tool_sources)
+        except BaseException:
+            if source_lookup.created:
+                await self._evict_if_idle(source)
+            raise
+        if source_lookup.created:
+            await self._evict_if_idle(source)
+        lookup = await self._activate_record(record, tool_sources=tool_sources)
+        active = lookup.active
         if owner is not None:
             lease = await self._coordinator.reserve(active, SessionOperationKind.CREATE)
             try:
@@ -556,14 +639,26 @@ class RuntimeSessionService:
         settings: "SessionSettings | None" = None,
         principal: "PrincipalContext",
     ) -> SessionRecord:
-        active = await self.get(session_id, principal=principal)
-        lease = await self._coordinator.reserve(active, SessionOperationKind.UPDATE)
+        lookup = await self._activate_for_operation(
+            session_id,
+            SessionOperationKind.UPDATE,
+            principal=principal,
+        )
+        active = lookup.active
+        try:
+            lease = await self._coordinator.reserve(active, SessionOperationKind.UPDATE)
+        except BaseException:
+            if lookup.created:
+                await self._evict_if_idle(active)
+            raise
         try:
             return await self._committer.commit_update(
                 active, lease, workspace=workspace, settings=settings
             )
         finally:
             await lease.release()
+            if lookup.created:
+                await self._evict_if_idle(active)
 
     async def reserve(
         self,
@@ -573,8 +668,19 @@ class RuntimeSessionService:
         principal: "PrincipalContext",
         execution_id: "str | None" = None,
     ) -> SessionOperationLease:
-        active = await self.get(session_id, principal=principal)
-        return await self._coordinator.reserve(active, kind, execution_id=execution_id)
+        lookup = await self._activate_for_operation(
+            session_id,
+            kind,
+            principal=principal,
+        )
+        try:
+            return await self._coordinator.reserve(
+                lookup.active, kind, execution_id=execution_id
+            )
+        except BaseException:
+            if lookup.created:
+                await self._evict_if_idle(lookup.active)
+            raise
 
     async def register_owner(
         self,
@@ -617,7 +723,10 @@ class RuntimeSessionService:
         principal: "PrincipalContext",
         lease: SessionOperationLease,
     ) -> "tuple[Any, ...]":
-        active = await self.get(session_id, principal=principal)
+        active = self._active.get(session_id)
+        if active is None:
+            raise UnknownSessionError(session_id)
+        self._authorize(principal, active.record)
         async with active.lock:
             if active.operation is not lease or lease.kind is not SessionOperationKind.PROMPT:
                 raise SessionOperationError("MCP toolsets require the active PROMPT lease")
@@ -665,7 +774,16 @@ class RuntimeSessionService:
     async def close(
         self, session_id: str, *, principal: "PrincipalContext", reason: str = "client"
     ) -> SessionCloseResult:
-        active = await self.get(session_id, principal=principal)
+        record = await self.get_record(session_id, principal=principal)
+        active = self._active.get(session_id)
+        if active is None:
+            if record.state is SessionState.CLOSED:
+                return SessionCloseResult(True)
+            active = (await self._activate_for_operation(
+                session_id,
+                SessionOperationKind.CLOSE,
+                principal=principal,
+            )).active
         return await self._join_or_start_close(active, reason)
 
     async def shutdown(self) -> "tuple[SessionCloseResult, ...]":
@@ -937,19 +1055,21 @@ class RuntimeSessionService:
         record: SessionRecord,
         *,
         tool_sources: "tuple[MCPServerSpec, ...]" = (),
-    ) -> ActiveRuntimeSession:
+    ) -> ActiveLookup:
         async with self._active_lock:
             active = self._active.get(record.id)
             if active is not None:
+                if active.record.id != record.id:
+                    self._active_identity_conflict_count += 1
+                    logger.error(
+                        "event=runtime.session.active_identity_conflict session_id=%s",
+                        record.id,
+                    )
+                    raise SessionInvariantError("active session identity changed")
                 logger.debug(
                     "event=runtime.session.active_cache_hit session_id=%s", record.id
                 )
-                logger.info(
-                    "event=runtime.session.active_identity_conflict session_id=%s",
-                    record.id,
-                )
-                self._active_identity_conflict_count += 1
-                return active
+                return ActiveLookup(active, False)
             active = ActiveRuntimeSession(record, tool_sources)
             self._active[record.id] = active
             logger.info(
@@ -957,7 +1077,36 @@ class RuntimeSessionService:
                 record.id,
                 len(self._active),
             )
-            return active
+            return ActiveLookup(active, True)
+
+    async def _evict_if_idle(self, active: ActiveRuntimeSession) -> None:
+        async with active.lock:
+            if (
+                active.operation is not None
+                or active.active_execution_id is not None
+                or active.owners
+                or active.mcp_resources is not None
+                or active.close_task is not None
+                or active.cleanup_required
+            ):
+                return
+        await self._remove_active(active)
+        logger.info(
+            "event=runtime.session.active_cache_evicted session_id=%s active_count=%s",
+            active.record.id,
+            len(self._active),
+        )
+
+    @staticmethod
+    def _validate_state_for_operation(
+        state: SessionState, kind: SessionOperationKind
+    ) -> None:
+        if state is SessionState.CLOSED and kind not in {
+            SessionOperationKind.LOAD,
+            SessionOperationKind.RESUME,
+            SessionOperationKind.CLOSE,
+        }:
+            raise SessionClosedError("closed session does not allow this operation")
 
     async def _remove_active(self, active: ActiveRuntimeSession) -> None:
         async with self._active_lock:
@@ -1012,6 +1161,7 @@ class RuntimeSessionService:
 
 __all__ = [
     "ActiveRuntimeSession",
+    "ActiveLookup",
     "McpReplacement",
     "ResourceFailure",
     "RuntimeSessionService",

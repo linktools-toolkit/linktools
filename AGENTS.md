@@ -18,55 +18,36 @@ Each sub-package lives under `{name}/src/linktools/` and extends the core framew
 
 ## Development Commands
 
-### Install packages (editable mode)
+`manage.py` is the project-level build tool (not Django's). Its subcommands — `init`, `install`, `build`, `clean` — discover sub-packages by scanning `linktools-*` dirs and each take an optional package list (default: all). `VERSION` env var controls the version written to each sub-package's `.version` file at build time. Sub-package-specific build steps (Frida TypeScript, Android APK) live in each sub-package's `AGENTS.md`.
+
 ```bash
-# Install all packages in editable mode
-python manage.py install --editable
-
-# Install specific packages
-python manage.py install --editable linktools linktools-mobile
-
-# Install without build isolation (faster if dependencies already installed)
-python manage.py install --editable --no-isolation linktools-mobile
+python manage.py install --editable                              # all packages, editable
+python manage.py install --editable linktools linktools-mobile   # specific packages
+python manage.py install --editable --no-isolation linktools-mobile  # skip build isolation (faster if deps present)
+python manage.py build [linktools-mobile]                        # build to dist/ (all or one)
+python manage.py clean [linktools-mobile]                        # clean artifacts (all or one)
 ```
 
-### Build packages
+After install, the unified entry point lists all installed commands; installed CLI scripts work too:
+
 ```bash
-# Build all packages to dist/
-python manage.py build
-
-# Build specific package
-python manage.py build linktools-mobile
-```
-
-### Clean build artifacts
-```bash
-python manage.py clean
-python manage.py clean linktools-mobile
-```
-
-### Run a command after install
-```bash
-# Unified entry point (shows all installed commands)
-python3 -m linktools
-
-# Or use installed CLI scripts
-at-frida --help
+python3 -m linktools      # unified entry point
+at-frida --help           # or installed CLI scripts
 ct-tools apktool -h
 ```
 
-Sub-package-specific build steps (Frida TypeScript, Android APK) are documented in each sub-package's `AGENTS.md`.
-
-### `manage.py` (Monorepo Management Script)
-
-Project-level build tool (not a Django manage.py). Supports `init`, `install`, `build`, `clean` subcommands. Discovers sub-packages by scanning directories matching `linktools-*`. `VERSION` env var controls the version written to each sub-package's `.version` file during builds.
-
 ## Config System
 
-Config priority (highest to lowest): environment variables → cache → private config → global config → default value. Descriptors chain with `|`:
+Fields are `ConfigField`s resolved through a `ConfigSource` chain (highest priority first): `EnvironmentSource` → `RuntimeOverrideSource` → `PersistentSource` → `FileSource` → `DictSource` → `DefaultSource`. Within a field, multiple providers chain via `ChainProvider` (tried in order, first non-exception wins, else the field's `default`); `ConfigField.chain(...)` is the shorthand.
 
 ```python
-MY_KEY = Config.Alias("ALT_KEY", type=int) | Config.Prompt(cached=True) | 42
+from linktools.core import ConfigField, AliasProvider, PromptProvider, LazyProvider
+
+HOST = ConfigField.chain(
+    AliasProvider("ALT_KEY"),          # read from an alias env/config key first
+    PromptProvider(cached=True),       # then interactively prompt (and cache)
+    LazyProvider(lambda: "localhost"),  # then a computed fallback
+)                                       # name comes from the configs-dict key
 ```
 
 ## Entry Points / Plugin Discovery
@@ -91,6 +72,10 @@ On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels
 - **Respect interface boundaries**: reach an object's data only through its public API, never by reflection (`getattr(x, "_field")`, `x.__dict__`, name-mangled attrs) or by reaching across layers into another module's privates. If the public surface doesn't expose what you need, add a public method (and implement it on each backend/protocol implementer) rather than tunneling past it. Privates (`_`-prefixed) are implementation details that can change without notice.
 - **Logging via `environ`**: use `environ.get_logger(...)` (or `environ.logger`) for loggers, never `logging.getLogger(...)`. Pass a relative name like `"ai.execution.service"` — the `linktools.` prefix is added automatically. Log at key decision/transition points so behavior is observable. Wrap only expensive debug logs (heavy formatting, large payload dumps, tight loops) in `if environ.debug:`; ordinary `logger.debug(...)` calls need no guard. `exc_info` is not required on every error log — set it (`exc_info=environ.debug`, or `exc_info=True` for failures where the traceback is essential to root-cause the bug) only at points where the stack trace is genuinely needed for triage. Direct `logging.*` is reserved for the core `_logging.py` manager and CLI entry points that configure the root logger.
 
+## Module & Class Structure
+
+- **High cohesion, low coupling**: each file, class, and package owns one concern — a file holds one primary abstraction (plus its private helpers), a package holds one subsystem. But don't over-fragment: small closely-related units belong together. Merge a tiny file into its sibling/parent rather than spinning up a new module just to hold a few lines (e.g. a single Protocol, one helper function, a constants-only module). The test is cohesion, not line count: things that change together and are used together live together.
+- **No runtime circular dependencies**: applies at the module level and the package level. Module level: if A imports B (module scope), B must not import A at module scope — directly or transitively — or it will fail to load. Package level: it is just as forbidden for some files in package A to depend on package B while some files in B depend back on A, even if no single module pair is directly cyclic. `TYPE_CHECKING` references are exempt: when two objects legitimately hold each other (parent↔child, observer↔subject, coordinator↔worker), annotating each side with the other's name under `if TYPE_CHECKING:` is fine — it doesn't run at import time. Break *runtime* cycles by extracting the shared dependency into a lower layer, or by defining a Protocol/interface in a base module that both depend on (dependency inversion). When adding a runtime import, check it doesn't close a cycle.
 
 ## Comments — minimal
 

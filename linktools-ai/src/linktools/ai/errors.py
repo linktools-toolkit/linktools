@@ -248,6 +248,10 @@ class ExecutionTerminalMismatchError(RunError):
     """The persisted execution result disagreed with its terminal event."""
 
 
+class ExecutionLifecycleDeliveryError(RunError):
+    """The canonical execution boundary could not be delivered."""
+
+
 class RunNotFoundError(RunError):
     pass
 

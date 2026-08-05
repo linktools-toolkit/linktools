@@ -4,9 +4,11 @@
 """ACP Client callbacks and resources owned by one ACP connection."""
 
 import asyncio
+import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from linktools.core import environ
@@ -23,12 +25,28 @@ MAX_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
 logger = environ.get_logger("ai.acp.client")
 
 
+class _OutboundRequestKind(StrEnum):
+    PERMISSION = "permission"
+    FS_READ = "fs_read"
+    FS_WRITE = "fs_write"
+    TERMINAL_CREATE = "terminal_create"
+    TERMINAL_OUTPUT = "terminal_output"
+    TERMINAL_WAIT = "terminal_wait"
+    TERMINAL_KILL = "terminal_kill"
+    TERMINAL_RELEASE = "terminal_release"
+    ELICITATION_CREATE = "elicitation_create"
+
+
 @dataclass(slots=True, eq=False)
-class _ClientOperation:
+class _OutboundRequest:
+    id: str
+    session_id: str
+    kind: _OutboundRequestKind
     task: "asyncio.Task[Any]"
-    cancel_requested: bool = False
     detached: bool = False
+    completed: bool = False
     terminal_id: "str | None" = None
+    started_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass(slots=True)
@@ -36,37 +54,43 @@ class AcpClientSessionResources:
     client: "AcpClient"
     session_id: str
     terminal_handles: "set[str]" = field(default_factory=set)
-    terminal_create_operations: "set[_ClientOperation]" = field(default_factory=set)
-    terminal_release_operations: "dict[str, _ClientOperation]" = field(default_factory=dict)
-    terminal_kill_operations: "dict[str, _ClientOperation]" = field(default_factory=dict)
-    elicitation_operations: "dict[str, _ClientOperation]" = field(default_factory=dict)
+    _outbound: "dict[str, _OutboundRequest]" = field(default_factory=dict)
     accepted_elicitations: "set[str]" = field(default_factory=set)
     closing: bool = False
 
     async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
         failures: "list[ResourceFailure]" = []
         self.closing = True
-        connection = self.client._connection
-        for operation in tuple(self.terminal_create_operations):
-            self._detach(operation)
-            termination = await observe_task(operation.task, 1.0)
-            if termination is TaskTermination.TIMED_OUT:
-                failures.append(ResourceFailure("acp.client.terminal", None, "task_timeout"))
-        for operation in tuple(self.elicitation_operations.values()):
-            self._detach(operation)
-            termination = await observe_task(operation.task, 1.0)
-            if termination is TaskTermination.TIMED_OUT:
-                failures.append(ResourceFailure("acp.client.elicitation", None, "task_timeout"))
-        for operation in tuple(self.terminal_release_operations.values()):
-            termination = await observe_task(operation.task, 1.0)
-            if termination is TaskTermination.TIMED_OUT:
-                failures.append(ResourceFailure("acp.client.terminal", None, "task_timeout"))
-        for operation in tuple(self.terminal_kill_operations.values()):
-            termination = await observe_task(operation.task, 1.0)
-            if termination is TaskTermination.TIMED_OUT:
-                failures.append(ResourceFailure("acp.client.terminal", None, "task_timeout"))
+        deadline = asyncio.get_running_loop().time() + 1.0
+        timed_out: "dict[str, _OutboundRequest]" = {}
+        while self._outbound:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                timed_out.update(self._outbound)
+                break
+            operations = tuple(self._outbound.values())
+            for operation in operations:
+                if operation.task.done():
+                    continue
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    timed_out[operation.id] = operation
+                    break
+                termination = await observe_task(operation.task, remaining)
+                if termination is TaskTermination.TIMED_OUT:
+                    timed_out[operation.id] = operation
+                    break
+            await asyncio.sleep(0)
+        failures.extend(
+            ResourceFailure(
+                f"acp.client.{operation.kind.value}",
+                operation.id,
+                "task_timeout",
+            )
+            for operation in timed_out.values()
+        )
         self.accepted_elicitations.clear()
-        if connection is None:
+        if self.client._connection is None:
             failures.extend(
                 ResourceFailure("acp.client", terminal_id, "client_connection_missing")
                 for terminal_id in self.terminal_handles
@@ -89,164 +113,190 @@ class AcpClientSessionResources:
                 failures.append(ResourceFailure("acp.client.terminal", terminal_id, type(exc).__name__))
         return tuple(failures)
 
-    async def _release(self, session_id: str, terminal_id: str) -> Any:
-        connection = self.client._connection
-        if connection is None:
-            raise RuntimeError("client connection is unavailable")
-        operation = self.terminal_release_operations.get(terminal_id)
-        if operation is None:
-            request = connection.release_terminal(session_id, terminal_id)
-            # task-owner: acp.client.terminal_release
-            task = asyncio.create_task(request)
-            operation = _ClientOperation(task)
-            self.terminal_release_operations[terminal_id] = operation
-            task.add_done_callback(
-                lambda completed: self._finish_release(terminal_id, operation, completed)
-            )
-        try:
-            response = await asyncio.shield(operation.task)
-        except asyncio.CancelledError:
-            self._detach(operation)
-            logger.info(
-                "event=acp.client.operation_detached session_id=%s operation=terminal_release",
-                session_id,
-            )
-            raise
-        except BaseException:
-            raise
-        self.terminal_handles.discard(terminal_id)
-        return response
+    def _start_request(
+        self,
+        kind: _OutboundRequestKind,
+        factory: "Callable[[], Awaitable[Any]]",
+        completion: "Callable[[Any, bool], Awaitable[Any]] | None" = None,
+        terminal_id: "str | None" = None,
+    ) -> _OutboundRequest:
+        operation: _OutboundRequest
 
-    async def _kill(self, session_id: str, terminal_id: str) -> Any:
-        operation = self._start_kill(session_id, terminal_id)
+        async def run_request() -> Any:
+            response = await factory()
+            if completion is None:
+                return response
+            return await completion(response, operation.detached or self.closing)
+
+        # task-owner: acp.client.outbound
+        task = asyncio.create_task(run_request())
+        operation = _OutboundRequest(
+            uuid4().hex,
+            self.session_id,
+            kind,
+            task,
+            terminal_id=terminal_id,
+        )
+        self._outbound[operation.id] = operation
+        task.add_done_callback(
+            lambda completed: self._finish_request(operation, completed)
+        )
+        logger.info(
+            "event=acp.client.operation_started session_id=%s operation=%s operation_id=%s",
+            self.session_id,
+            kind.value,
+            operation.id,
+        )
+        return operation
+
+    async def _request(
+        self,
+        kind: _OutboundRequestKind,
+        factory: "Callable[[], Awaitable[Any]]",
+        completion: "Callable[[Any, bool], Awaitable[Any]] | None" = None,
+    ) -> Any:
+        operation = self._start_request(kind, factory, completion)
         try:
             return await asyncio.shield(operation.task)
         except asyncio.CancelledError:
-            self._detach(operation)
+            operation.detached = True
             logger.info(
-                "event=acp.client.operation_detached session_id=%s operation=terminal_kill",
-                session_id,
+                "event=acp.client.operation_detached session_id=%s operation=%s operation_id=%s",
+                self.session_id,
+                kind.value,
+                operation.id,
             )
+            raise
+
+    def _finish_request(
+        self,
+        operation: _OutboundRequest,
+        task: "asyncio.Task[Any]",
+    ) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+        operation.completed = True
+        if self._outbound.get(operation.id) is operation:
+            self._outbound.pop(operation.id, None)
+        logger.info(
+            "event=acp.client.operation_completed session_id=%s operation=%s operation_id=%s",
+            self.session_id,
+            operation.kind.value,
+            operation.id,
+        )
+
+    def _find_request(
+        self, kind: _OutboundRequestKind, terminal_id: "str | None" = None
+    ) -> "_OutboundRequest | None":
+        for operation in self._outbound.values():
+            if operation.kind is not kind:
+                continue
+            if terminal_id is None or getattr(operation, "terminal_id", None) == terminal_id:
+                return operation
+        return None
+
+    async def _release(self, session_id: str, terminal_id: str) -> Any:
+        operation = self._find_request(_OutboundRequestKind.TERMINAL_RELEASE, terminal_id)
+        if operation is None:
+            operation = self._start_request(
+                _OutboundRequestKind.TERMINAL_RELEASE,
+                lambda: self._connection_request().release_terminal(session_id, terminal_id),
+                self._release_completion(terminal_id),
+                terminal_id,
+            )
+        try:
+            return await asyncio.shield(operation.task)
+        except asyncio.CancelledError:
+            operation.detached = True
+            raise
+
+    async def _kill(self, session_id: str, terminal_id: str) -> Any:
+        operation = self._find_request(_OutboundRequestKind.TERMINAL_KILL, terminal_id)
+        if operation is None:
+            operation = self._start_request(
+                _OutboundRequestKind.TERMINAL_KILL,
+                lambda: self._connection_request().kill_terminal(session_id, terminal_id),
+                terminal_id=terminal_id,
+            )
+        try:
+            return await asyncio.shield(operation.task)
+        except asyncio.CancelledError:
+            operation.detached = True
             raise
 
     async def _kill_with_timeout(
         self, session_id: str, terminal_id: str, timeout: float
     ) -> Any:
-        operation = self._start_kill(session_id, terminal_id)
+        operation = self._find_request(_OutboundRequestKind.TERMINAL_KILL, terminal_id)
+        if operation is None:
+            operation = self._start_request(
+                _OutboundRequestKind.TERMINAL_KILL,
+                lambda: self._connection_request().kill_terminal(session_id, terminal_id),
+                terminal_id=terminal_id,
+            )
         return await asyncio.wait_for(asyncio.shield(operation.task), timeout)
-
-    def _start_kill(self, session_id: str, terminal_id: str) -> _ClientOperation:
-        operation = self.terminal_kill_operations.get(terminal_id)
-        if operation is not None:
-            return operation
-        connection = self.client._connection
-        if connection is None:
-            raise RuntimeError("client connection is unavailable")
-        request = connection.kill_terminal(session_id, terminal_id)
-        # task-owner: acp.client.terminal_kill
-        task = asyncio.create_task(request)
-        operation = _ClientOperation(task)
-        self.terminal_kill_operations[terminal_id] = operation
-        task.add_done_callback(
-            lambda completed: self._finish_kill(terminal_id, operation, completed)
-        )
-        return operation
-
-    def _finish_kill(
-        self,
-        terminal_id: str,
-        operation: _ClientOperation,
-        task: "asyncio.Task[Any]",
-    ) -> None:
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:
-            pass
-        if self.terminal_kill_operations.get(terminal_id) is operation:
-            self.terminal_kill_operations.pop(terminal_id, None)
-        logger.info(
-            "event=acp.client.operation_completed session_id=%s operation=terminal_kill",
-            self.session_id,
-        )
 
     async def _release_with_timeout(
         self, session_id: str, terminal_id: str, timeout: float
     ) -> Any:
-        operation = self.terminal_release_operations.get(terminal_id)
+        operation = self._find_request(_OutboundRequestKind.TERMINAL_RELEASE, terminal_id)
         if operation is None:
-            connection = self.client._connection
-            if connection is None:
-                raise RuntimeError("client connection is unavailable")
-            request = connection.release_terminal(session_id, terminal_id)
-            # task-owner: acp.client.terminal_release
-            task = asyncio.create_task(request)
-            operation = _ClientOperation(task)
-            self.terminal_release_operations[terminal_id] = operation
-            task.add_done_callback(
-                lambda completed: self._finish_release(terminal_id, operation, completed)
+            operation = self._start_request(
+                _OutboundRequestKind.TERMINAL_RELEASE,
+                lambda: self._connection_request().release_terminal(session_id, terminal_id),
+                self._release_completion(terminal_id),
+                terminal_id,
             )
-        response = await asyncio.wait_for(asyncio.shield(operation.task), timeout)
-        self.terminal_handles.discard(terminal_id)
-        return response
+        return await asyncio.wait_for(asyncio.shield(operation.task), timeout)
 
-    def _finish_release(
-        self,
-        terminal_id: str,
-        operation: _ClientOperation,
-        task: "asyncio.Task[Any]",
-    ) -> None:
-        succeeded = False
-        try:
-            succeeded = task.exception() is None
-        except asyncio.CancelledError:
-            pass
-        except BaseException:
-            pass
-        if self.terminal_release_operations.get(terminal_id) is operation:
-            self.terminal_release_operations.pop(terminal_id, None)
-        if succeeded:
+    def _release_completion(
+        self, terminal_id: str
+    ) -> "Callable[[Any, bool], Awaitable[Any]]":
+        async def complete(response: Any, detached: bool) -> Any:
             self.terminal_handles.discard(terminal_id)
-        logger.info(
-            "event=acp.client.operation_completed session_id=%s operation=terminal_release",
-            self.session_id,
-        )
+            return response
 
-    def _detach(self, operation: _ClientOperation) -> None:
-        operation.cancel_requested = True
-        operation.detached = True
-        if not operation.task.done():
-            operation.task.cancel()
+        return complete
+
+    def _connection_request(self) -> Any:
+        if self.client._connection is None:
+            raise RuntimeError("client connection is unavailable")
+        return self.client._connection
 
     def is_empty(self, session_id: str) -> bool:
         return not (
             self.terminal_handles
-            or self.terminal_create_operations
-            or self.terminal_release_operations
-            or self.terminal_kill_operations
-            or self.elicitation_operations
+            or self._outbound
             or self.accepted_elicitations
         )
 
     @property
     def operation_count(self) -> int:
-        return (
-            len(self.terminal_create_operations)
-            + len(self.terminal_release_operations)
-            + len(self.terminal_kill_operations)
-            + len(self.elicitation_operations)
-        )
+        return len(self._outbound)
+
+    @property
+    def outbound_request_count(self) -> int:
+        return self.operation_count
 
     @property
     def detached_operation_count(self) -> int:
-        operations = (
-            tuple(self.terminal_create_operations)
-            + tuple(self.terminal_release_operations.values())
-            + tuple(self.terminal_kill_operations.values())
-            + tuple(self.elicitation_operations.values())
+        return sum(1 for operation in self._outbound.values() if operation.detached)
+
+    @property
+    def detached_outbound_request_count(self) -> int:
+        return self.detached_operation_count
+
+    @property
+    def outbound_request_age_ms(self) -> float:
+        if not self._outbound:
+            return 0.0
+        return max(
+            0.0,
+            (time.monotonic() - min(item.started_at for item in self._outbound.values()))
+            * 1000,
         )
-        return sum(1 for operation in operations if operation.detached)
 
 
 class AcpClientSessionOwner:
@@ -299,9 +349,29 @@ class AcpClient:
         return sum(resource.operation_count for resource in self._resources.values())
 
     @property
+    def outbound_request_count(self) -> int:
+        return sum(
+            resource.outbound_request_count for resource in self._resources.values()
+        )
+
+    @property
     def client_detached_operation_count(self) -> int:
         return sum(
             resource.detached_operation_count for resource in self._resources.values()
+        )
+
+    @property
+    def detached_outbound_request_count(self) -> int:
+        return sum(
+            resource.detached_outbound_request_count
+            for resource in self._resources.values()
+        )
+
+    @property
+    def client_outbound_request_age_ms(self) -> float:
+        return max(
+            (resource.outbound_request_age_ms for resource in self._resources.values()),
+            default=0.0,
         )
 
     def resources(self, session_id: str) -> AcpClientSessionResources:
@@ -336,6 +406,24 @@ class AcpClient:
             return ()
         return await owner.close(session_id)
 
+    async def close(self) -> "tuple[ResourceFailure, ...]":
+        connection = self._connection
+        failures: "list[ResourceFailure]" = []
+        if connection is not None:
+            close = getattr(connection, "close", None)
+            if close is not None:
+                try:
+                    result = close()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception as exc:
+                    failures.append(
+                        ResourceFailure("acp.client.connection", None, type(exc).__name__)
+                    )
+        for session_id in tuple(self._resources):
+            failures.extend(await self.close_resources(session_id))
+        return tuple(failures)
+
     def _owner_for_existing(self, session_id: str) -> "AcpClientSessionOwner | None":
         resources = self._resources.get(session_id)
         if resources is None:
@@ -351,7 +439,13 @@ class AcpClient:
         for update in updates:
             await self.session_update(session_id, update)
 
-    async def read_text_file(self, session: Any, path: str, line: "int | None" = None, limit: "int | None" = None) -> Any:
+    async def read_text_file(
+        self,
+        session: Any,
+        path: str,
+        line: "int | None" = None,
+        limit: "int | None" = None,
+    ) -> Any:
         self._ensure_capability("fs", "read_text_file", session.record.id)
         target = self._allowed_path(session, path)
         if (line is not None and line < 0) or (limit is not None and limit < 0):
@@ -361,17 +455,38 @@ class AcpClient:
             kwargs["line"] = line
         if limit is not None:
             kwargs["limit"] = limit
-        response = await self._connection_or_error().read_text_file(session.record.id, str(target), **kwargs)
-        if not isinstance(getattr(response, "content", None), str) or len(response.content.encode()) > MAX_FILE_BYTES:
-            raise request_error("client_file_read_failed", session_id=session.record.id)
-        return response
+
+        async def complete(response: Any, detached: bool) -> Any:
+            if detached:
+                return None
+            if not isinstance(getattr(response, "content", None), str) or len(response.content.encode()) > MAX_FILE_BYTES:
+                raise request_error("client_file_read_failed", session_id=session.record.id)
+            return response
+
+        return await self.resources(session.record.id)._request(
+            _OutboundRequestKind.FS_READ,
+            lambda: self._connection_or_error().read_text_file(
+                session.record.id, str(target), **kwargs
+            ),
+            complete,
+        )
 
     async def write_text_file(self, session: Any, path: str, content: str) -> Any:
         self._ensure_capability("fs", "write_text_file", session.record.id)
         if len(content.encode()) > MAX_FILE_BYTES:
             raise request_error("file_too_large", session_id=session.record.id)
         target = self._allowed_path(session, path, parent=True)
-        return await self._connection_or_error().write_text_file(session.record.id, str(target), content)
+
+        async def complete(response: Any, detached: bool) -> Any:
+            return None if detached else response
+
+        return await self.resources(session.record.id)._request(
+            _OutboundRequestKind.FS_WRITE,
+            lambda: self._connection_or_error().write_text_file(
+                session.record.id, str(target), content
+            ),
+            complete,
+        )
 
     async def create_terminal(self, session: Any, **kwargs: Any) -> Any:
         self._ensure_capability("terminal", None, session.record.id)
@@ -389,17 +504,15 @@ class AcpClient:
         for item in kwargs.get("env") or ():
             if not getattr(item, "name", None) or "\x00" in item.name or "\x00" in item.value:
                 raise request_error("invalid_terminal_environment", session_id=session.record.id)
-        request = self._connection_or_error().create_terminal(session.record.id, **kwargs)
-        operation: _ClientOperation
+        resources = self.resources(session.record.id)
+        operation: _OutboundRequest
 
-        async def run_request() -> Any:
-            response = await request
+        async def complete(response: Any, detached: bool) -> Any:
             terminal_id = response.terminal_id
             operation.terminal_id = terminal_id
             resources.terminal_handles.add(terminal_id)
             stale = (
-                operation.cancel_requested
-                or operation.detached
+                detached
                 or resources.closing
                 or session.closing_requested
                 or session.record.state.value != "open"
@@ -417,50 +530,22 @@ class AcpClient:
                     type(exc).__name__,
                 )
                 raise
-            if operation.cancel_requested or operation.detached:
+            if detached:
                 raise asyncio.CancelledError
             raise request_error("session_closing", session_id=session.record.id)
 
-        # task-owner: acp.client.terminal_create
-        task = asyncio.create_task(run_request())
-        operation = _ClientOperation(task)
-        resources.terminal_create_operations.add(operation)
-        task.add_done_callback(
-            lambda completed: self._finish_terminal_create(resources, operation, completed)
+        operation = resources._start_request(
+            _OutboundRequestKind.TERMINAL_CREATE,
+            lambda: self._connection_or_error().create_terminal(
+                session.record.id, **kwargs
+            ),
+            complete,
         )
         try:
-            try:
-                response = await asyncio.shield(operation.task)
-            except asyncio.CancelledError:
-                operation.cancel_requested = True
-                operation.detached = True
-                operation.task.cancel()
-                logger.info(
-                    "event=acp.client.operation_detached session_id=%s operation=terminal_create",
-                    session.record.id,
-                )
-                raise
-            return response
+            return await asyncio.shield(operation.task)
         except asyncio.CancelledError:
+            operation.detached = True
             raise
-
-    @staticmethod
-    def _finish_terminal_create(
-        resources: AcpClientSessionResources,
-        operation: _ClientOperation,
-        task: "asyncio.Task[Any]",
-    ) -> None:
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:
-            pass
-        resources.terminal_create_operations.discard(operation)
-        logger.info(
-            "event=acp.client.operation_completed session_id=%s operation=terminal_create",
-            resources.session_id,
-        )
 
     async def _compensate_terminal(self, session_id: str, resources: AcpClientSessionResources, terminal_id: str) -> None:
         await resources._kill(session_id, terminal_id)
@@ -468,11 +553,21 @@ class AcpClient:
 
     async def terminal_output(self, session: Any, terminal_id: str) -> Any:
         self._check_terminal(session, terminal_id)
-        return await self._connection_or_error().terminal_output(session.record.id, terminal_id)
+        return await self.resources(session.record.id)._request(
+            _OutboundRequestKind.TERMINAL_OUTPUT,
+            lambda: self._connection_or_error().terminal_output(
+                session.record.id, terminal_id
+            ),
+        )
 
     async def wait_for_terminal_exit(self, session: Any, terminal_id: str) -> Any:
         self._check_terminal(session, terminal_id)
-        return await self._connection_or_error().wait_for_terminal_exit(session.record.id, terminal_id)
+        return await self.resources(session.record.id)._request(
+            _OutboundRequestKind.TERMINAL_WAIT,
+            lambda: self._connection_or_error().wait_for_terminal_exit(
+                session.record.id, terminal_id
+            ),
+        )
 
     async def kill_terminal(self, session: Any, terminal_id: str) -> Any:
         self._check_terminal(session, terminal_id)
@@ -498,65 +593,24 @@ class AcpClient:
                 raise request_error("elicitation_session_mismatch", session_id=session.record.id)
         elicitation_id = elicitation_id or uuid4().hex
         resources = self.resources(session.record.id)
-        request = self._connection_or_error().create_elicitation(message, mode)
-        operation: _ClientOperation
 
-        async def run_request() -> Any:
-            response = await request
+        async def complete(response: Any, detached: bool) -> Any:
             outcome = getattr(response, "outcome", None)
             accepted = getattr(response, "action", None) == "accept" or type(outcome).__name__ == "ElicitationAcceptAction"
             if (
                 is_url
                 and accepted
+                and not detached
                 and not resources.closing
-                and not operation.cancel_requested
-                and not operation.detached
                 and not session.closing_requested
             ):
                 resources.accepted_elicitations.add(elicitation_id)
-            return response
+            return None if detached else response
 
-        # task-owner: acp.client.elicitation
-        task = asyncio.create_task(run_request())
-        operation = _ClientOperation(task)
-        resources.elicitation_operations[elicitation_id] = operation
-        task.add_done_callback(
-            lambda completed: self._finish_elicitation(resources, elicitation_id, operation, completed)
-        )
-        try:
-            try:
-                response = await asyncio.shield(operation.task)
-            except asyncio.CancelledError:
-                operation.cancel_requested = True
-                operation.detached = True
-                operation.task.cancel()
-                logger.info(
-                    "event=acp.client.operation_detached session_id=%s operation=elicitation",
-                    session.record.id,
-                )
-                raise
-            return response
-        except asyncio.CancelledError:
-            raise
-
-    @staticmethod
-    def _finish_elicitation(
-        resources: AcpClientSessionResources,
-        elicitation_id: str,
-        operation: _ClientOperation,
-        task: "asyncio.Task[Any]",
-    ) -> None:
-        try:
-            task.exception()
-        except asyncio.CancelledError:
-            pass
-        except BaseException:
-            pass
-        if resources.elicitation_operations.get(elicitation_id) is operation:
-            resources.elicitation_operations.pop(elicitation_id, None)
-        logger.info(
-            "event=acp.client.operation_completed session_id=%s operation=elicitation",
-            resources.session_id,
+        return await resources._request(
+            _OutboundRequestKind.ELICITATION_CREATE,
+            lambda: self._connection_or_error().create_elicitation(message, mode),
+            complete,
         )
 
     async def request_approval(
@@ -573,18 +627,48 @@ class AcpClient:
             schema.PermissionOption(optionId="allow_once", name="Allow once", kind="allow_once"),
             schema.PermissionOption(optionId="reject_once", name="Reject once", kind="reject_once"),
         ]
-        response = await self._connection.request_permission(
-            request.session_id, tool_call, options
+        resources = self.resources(request.session_id)
+
+        async def complete(response: Any, detached: bool) -> Any:
+            if detached:
+                return None
+            outcome = response.outcome
+            option_id = getattr(outcome, "option_id", getattr(outcome, "optionId", None))
+            return (
+                ApprovalDecision.ALLOW
+                if option_id == "allow_once"
+                else ApprovalDecision.DENY
+                if option_id == "reject_once"
+                else None
+            )
+
+        operation = resources._start_request(
+            _OutboundRequestKind.PERMISSION,
+            lambda: self._connection_or_error().request_permission(
+                request.session_id, tool_call, options
+            ),
+            complete,
         )
-        outcome = response.outcome
-        option_id = getattr(outcome, "option_id", getattr(outcome, "optionId", None))
-        return (
-            ApprovalDecision.ALLOW
-            if option_id == "allow_once"
-            else ApprovalDecision.DENY
-            if option_id == "reject_once"
-            else None
-        )
+        cancel_wait = asyncio.create_task(cancellation.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {operation.task, cancel_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if cancel_wait in done and not operation.task.done():
+                operation.detached = True
+                return None
+            return await asyncio.shield(operation.task)
+        except asyncio.CancelledError:
+            operation.detached = True
+            raise
+        finally:
+            if not cancel_wait.done():
+                cancel_wait.cancel()
+            try:
+                await cancel_wait
+            except asyncio.CancelledError:
+                pass
 
     def _ensure_capability(self, name: str, operation: "str | None", session_id: str) -> None:
         value = getattr(self._client_capabilities, name, None)
@@ -620,7 +704,8 @@ class AcpClient:
         return True
 
     def _check_terminal(self, session: Any, terminal_id: str) -> None:
-        if terminal_id not in self.resources(session.record.id).terminal_handles:
+        resources = self._resources.get(session.record.id)
+        if resources is None or terminal_id not in resources.terminal_handles:
             raise request_error("unknown_terminal", session_id=session.record.id)
 
     def _connection_or_error(self) -> Any:
