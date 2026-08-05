@@ -36,11 +36,21 @@ class AcpClientSessionResources:
     async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
         failures: "list[ResourceFailure]" = []
         connection = self.client._connection
+        for task in tuple(self.terminal_create_tasks):
+            termination = await cancel_task(task, 1.0)
+            if termination is TaskTermination.TIMED_OUT:
+                failures.append(ResourceFailure("acp.client.terminal", None, "task_timeout"))
+        for task in tuple(self.elicitation_tasks.values()):
+            termination = await cancel_task(task, 1.0)
+            if termination is TaskTermination.TIMED_OUT:
+                failures.append(ResourceFailure("acp.client.elicitation", None, "task_timeout"))
+        self.accepted_elicitations.clear()
         if connection is None:
-            return tuple(
+            failures.extend(
                 ResourceFailure("acp.client", terminal_id, "client_connection_missing")
                 for terminal_id in self.terminal_handles
             )
+            return tuple(failures)
         for terminal_id in tuple(self.terminal_handles):
             try:
                 await connection.kill_terminal(session_id, terminal_id)
@@ -51,10 +61,6 @@ class AcpClientSessionResources:
                 await self._release(session_id, terminal_id)
             except Exception as exc:
                 failures.append(ResourceFailure("acp.client.terminal", terminal_id, type(exc).__name__))
-        for task in tuple(self.elicitation_tasks.values()):
-            termination = await cancel_task(task, 1.0)
-            if termination is TaskTermination.TIMED_OUT:
-                failures.append(ResourceFailure("acp.client.elicitation", None, "task_timeout"))
         return tuple(failures)
 
     async def _release(self, session_id: str, terminal_id: str) -> Any:
@@ -64,6 +70,7 @@ class AcpClientSessionResources:
         request = connection.release_terminal(session_id, terminal_id)
         task = self.terminal_release_tasks.get(terminal_id)
         if task is None:
+            # task-owner: acp.client.terminal_release
             task = asyncio.create_task(request)
             self.terminal_release_tasks[terminal_id] = task
         elif hasattr(request, "close"):
@@ -83,6 +90,7 @@ class AcpClientSessionResources:
             or self.terminal_create_tasks
             or self.terminal_release_tasks
             or self.elicitation_tasks
+            or self.accepted_elicitations
         )
 
 
@@ -159,23 +167,24 @@ class AcpClient:
             if not getattr(item, "name", None) or "\x00" in item.name or "\x00" in item.value:
                 raise request_error("invalid_terminal_environment", session_id=session.record.id)
         request = self._connection_or_error().create_terminal(session.record.id, **kwargs)
+        # task-owner: acp.client.terminal_create
         task = asyncio.create_task(request)
         resources.terminal_create_tasks.add(task)
         try:
             response = await asyncio.shield(task)
+            terminal_id = response.terminal_id
+            resources.terminal_handles.add(terminal_id)
+            stale = session.closing_requested or session.record.state.value != "open" or session.active_execution_id is None
+            if stale:
+                try:
+                    await self._compensate_terminal(session.record.id, resources, terminal_id)
+                except Exception as exc:
+                    logger.error("event=acp.terminal.compensation_failed session_id=%s resource_count=%s", session.record.id, len(resources.terminal_handles))
+                    raise request_error("terminal_compensation_failed", session_id=session.record.id) from exc
+                raise request_error("session_closing", session_id=session.record.id)
+            return response
         finally:
             resources.terminal_create_tasks.discard(task)
-        terminal_id = response.terminal_id
-        resources.terminal_handles.add(terminal_id)
-        stale = session.closing_requested or session.record.state.value != "open" or session.active_execution_id is None
-        if stale:
-            try:
-                await self._compensate_terminal(session.record.id, resources, terminal_id)
-            except Exception as exc:
-                logger.error("event=acp.terminal.compensation_failed session_id=%s resource_count=%s", session.record.id, len(resources.terminal_handles))
-                raise request_error("terminal_compensation_failed", session_id=session.record.id) from exc
-            raise request_error("session_closing", session_id=session.record.id)
-        return response
 
     async def _compensate_terminal(self, session_id: str, resources: AcpClientSessionResources, terminal_id: str) -> None:
         connection = self._connection_or_error()
@@ -214,17 +223,18 @@ class AcpClient:
                 raise request_error("elicitation_session_mismatch", session_id=session.record.id)
         elicitation_id = elicitation_id or uuid4().hex
         resources = self.resources(session.record.id)
+        # task-owner: acp.client.elicitation
         task = asyncio.create_task(self._connection_or_error().create_elicitation(message, mode))
         resources.elicitation_tasks[elicitation_id] = task
         try:
             response = await asyncio.shield(task)
+            outcome = getattr(response, "outcome", None)
+            accepted = getattr(response, "action", None) == "accept" or type(outcome).__name__ == "ElicitationAcceptAction"
+            if is_url and accepted:
+                resources.accepted_elicitations.add(elicitation_id)
+            return response
         finally:
             resources.elicitation_tasks.pop(elicitation_id, None)
-        outcome = getattr(response, "outcome", None)
-        accepted = getattr(response, "action", None) == "accept" or type(outcome).__name__ == "ElicitationAcceptAction"
-        if is_url and accepted:
-            resources.accepted_elicitations.add(elicitation_id)
-        return response
 
     async def request_approval(self, request: Any, cancellation: asyncio.Event) -> ApprovalDecision | None:
         if self._connection is None:

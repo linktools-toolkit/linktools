@@ -3,15 +3,19 @@
 
 """Public runtime facade over execution orchestration and authorized queries."""
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from uuid import uuid4
+from linktools.core import environ
 from ..agent.sandbox.protocols import Sandbox
 from ..agent.mcp.client import MCPConnectionPool
 from ..execution.live_events import ExecutionEventHub
 from ..errors import PrincipalAccessDeniedError
 from ..governance.identity import PrincipalContext
 from .interaction import InteractiveRunService
-from .session import RuntimeSessionService, SessionCloseResult
+from .session import ResourceFailure, RuntimeSessionService, SessionCloseResult
+
+logger = environ.get_logger("ai.runtime.facade")
 
 from typing import TYPE_CHECKING
 
@@ -39,6 +43,12 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeCloseResult:
+    closed: bool
+    session_results: "tuple[SessionCloseResult, ...]" = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Runtime:
     execution: "ExecutionService"
     query: "ExecutionQueryService"
@@ -50,6 +60,9 @@ class Runtime:
     swarm: "SwarmExecutionService | None" = None
     sessions: "RuntimeSessionService | None" = None
     interactions: "InteractiveRunService | None" = None
+    _close_task: "asyncio.Task[RuntimeCloseResult] | None" = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     async def run(
         self,
@@ -223,18 +236,48 @@ class Runtime:
             raise RuntimeError("swarm execution is not available on this runtime")
         return await self.swarm.inspect_swarm(execution_id, principal=principal)
 
-    async def aclose(self) -> None:
-        await self.shutdown()
+    async def aclose(self) -> RuntimeCloseResult:
+        task = self._close_task
+        joined = task is not None
+        if task is None:
+            # task-owner: runtime.close
+            task = asyncio.create_task(self._close_once())
+            object.__setattr__(self, "_close_task", task)
+        if joined:
+            logger.info("event=runtime.close_joined")
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except BaseException:
+                pass
+            raise
 
     async def shutdown(self) -> "tuple[SessionCloseResult, ...]":
+        result = await self.aclose()
+        return result.session_results
+
+    async def _close_once(self) -> RuntimeCloseResult:
         results: "tuple[SessionCloseResult, ...]" = ()
         if self.sessions is not None:
             results = await self.sessions.shutdown()
         if self.mcp_connections is not None:
-            await self.mcp_connections.close()
+            mcp_result = await self.mcp_connections.close()
+            if mcp_result is not None and not mcp_result.closed:
+                results += (
+                    SessionCloseResult(
+                        False,
+                        tuple(
+                            ResourceFailure("mcp", item.server_id, item.error_id)
+                            for item in mcp_result.failures
+                        ),
+                    ),
+                )
         if self.sandbox is not None:
             await self.sandbox.terminate()
-        return results
+        logger.info("event=runtime.closed")
+        return RuntimeCloseResult(all(item.closed for item in results), results)
 
     async def __aenter__(self) -> "Runtime":
         return self
@@ -243,4 +286,4 @@ class Runtime:
         await self.aclose()
 
 
-__all__ = ["Runtime"]
+__all__ = ["Runtime", "RuntimeCloseResult"]

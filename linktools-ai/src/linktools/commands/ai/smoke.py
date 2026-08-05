@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -96,6 +97,16 @@ class SmokeAssertionError(RuntimeError):
     pass
 
 
+class _TransportFailureHandler(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(level=logging.ERROR)
+        self.framing_failed = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "Error parsing JSON-RPC message" in record.getMessage():
+            self.framing_failed = True
+
+
 class Command(BaseCommand):
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("--project", type=Path, default=None)
@@ -126,7 +137,10 @@ async def _run(args: "Namespace") -> int:
     started = time.monotonic()
     process = None
     stderr_task: "asyncio.Task[bytes] | None" = None
+    stderr_output = b""
     failure_code = 0
+    transport_failure_handler = _TransportFailureHandler()
+    logging.getLogger().addHandler(transport_failure_handler)
     try:
         child_env = dict(os.environ)
         child_env["PYTHONPATH"] = os.pathsep.join(
@@ -146,6 +160,7 @@ async def _run(args: "Namespace") -> int:
             use_unstable_protocol=True,
         ) as (connection, process):
             if process.stderr is not None:
+                # task-owner: smoke.stderr
                 stderr_task = asyncio.create_task(process.stderr.read())
             result = await asyncio.wait_for(
                 _smoke(connection, str(project), args.prompt),
@@ -161,8 +176,11 @@ async def _run(args: "Namespace") -> int:
         result.error = f"ACP subprocess or transport failed: {type(exc).__name__}"
         failure_code = 3
     finally:
+        logging.getLogger().removeHandler(transport_failure_handler)
         if stderr_task is not None:
-            await asyncio.gather(stderr_task, return_exceptions=True)
+            captured_stderr = await asyncio.gather(stderr_task, return_exceptions=True)
+            if captured_stderr and isinstance(captured_stderr[0], bytes):
+                stderr_output = captured_stderr[0]
         result.process_exit_code = process.returncode if process is not None else None
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         result.update_count = len(trace)
@@ -179,6 +197,9 @@ async def _run(args: "Namespace") -> int:
         result.update_times = client.update_times
         if result.process_exit_code != 0 and failure_code == 0:
             result.error = "ACP subprocess exited unsuccessfully"
+            failure_code = 3
+        elif transport_failure_handler.framing_failed or b"Error parsing JSON-RPC message" in stderr_output:
+            result.error = "ACP subprocess stdout framing failed"
             failure_code = 3
         if failure_code == 0:
             if result.update_count == 0:

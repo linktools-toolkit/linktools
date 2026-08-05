@@ -5,7 +5,7 @@
 
 from .builder import build_runtime
 from .dependencies import RuntimeDependencies
-from .facade import Runtime
+from .facade import Runtime, RuntimeCloseResult
 from .requirements import RuntimeRequirements, RuntimeTopology
 from .storage import LocalDirectoryStorage, RuntimeStorage, SqlAlchemyRuntimeStorage
 from .prompt import (
@@ -20,6 +20,7 @@ from .prompt import (
 
 __all__ = [
     "Runtime",
+    "RuntimeCloseResult",
     "RuntimeDependencies",
     "RuntimeRequirements",
     "RuntimeTopology",

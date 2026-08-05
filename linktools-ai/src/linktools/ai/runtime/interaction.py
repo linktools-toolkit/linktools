@@ -71,11 +71,6 @@ class InteractionObserver(Protocol):
 class _InteractionState:
     cancellation: asyncio.Event
     task: "asyncio.Task[InteractionResult] | None" = None
-    orphan_tasks: set["asyncio.Task[Any]"] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        if self.orphan_tasks is None:
-            self.orphan_tasks = set()
 
 
 class InteractiveRunService:
@@ -89,7 +84,7 @@ class InteractiveRunService:
         self._event_hub = event_hub
         self._sessions = sessions
         self._states: "dict[str, _InteractionState]" = {}
-        self._orphans: "dict[str, set[asyncio.Task[Any]]]" = {}
+        self._orphan_tasks: "dict[str, set[asyncio.Task[Any]]]" = {}
         sessions.set_interaction_canceller(self.cancel)
         sessions.set_interaction_owner(self)
 
@@ -168,14 +163,12 @@ class InteractiveRunService:
 
     async def close(self, session_id: str) -> "tuple[ResourceFailure, ...]":
         state = self._states.get(session_id)
-        if state is None and not self._orphans.get(session_id):
+        if state is None and not self._orphan_tasks.get(session_id):
             return ()
         if state is not None:
             state.cancellation.set()
         failures = []
-        tasks = set(self._orphans.get(session_id, ()))
-        if state is not None:
-            tasks.update(state.orphan_tasks)
+        tasks = set(self._orphan_tasks.get(session_id, ()))
         for task in tasks:
             if not task.done():
                 failures.append(ResourceFailure("interaction", None, "orphan_task"))
@@ -183,7 +176,7 @@ class InteractiveRunService:
 
     def is_empty(self, session_id: str) -> bool:
         state = self._states.get(session_id)
-        return state is None or not state.orphan_tasks and not self._orphans.get(session_id)
+        return state is None and not self._orphan_tasks.get(session_id)
 
     async def _run_once(
         self,
@@ -199,6 +192,7 @@ class InteractiveRunService:
         state: _InteractionState,
     ) -> "InteractionResult | None":
         subscription = await self._event_hub.subscribe(execution_id)
+        # task-owner: interaction.execution
         task = asyncio.create_task(
             self._execution.run(
                 spec,
@@ -215,7 +209,9 @@ class InteractiveRunService:
                 extra_toolsets=extra_toolsets,
             )
         )
+        # task-owner: interaction.event
         event_task = asyncio.create_task(subscription.__anext__())
+        # task-owner: interaction.cancellation
         cancel_task_wait = asyncio.create_task(state.cancellation.wait())
         try:
             while True:
@@ -227,7 +223,7 @@ class InteractiveRunService:
                     await self._cancel_execution(execution_id, principal)
                     termination = await cancel_task(task, 1.0)
                     if termination is TaskTermination.TIMED_OUT:
-                        self._register_orphan(state, task)
+                        self._register_orphan(session_id, task)
                     return InteractionResult(
                         execution_id, RunStatus.CANCELLED, InteractionStopReason.CANCELLED
                     )
@@ -235,6 +231,7 @@ class InteractiveRunService:
                     try:
                         event = event_task.result()
                     except StopAsyncIteration:
+                        # task-owner: interaction.event
                         event_task = asyncio.create_task(subscription.__anext__())
                         continue
                     await observer.publish(event)
@@ -242,6 +239,7 @@ class InteractiveRunService:
                         return await self._result_from_execution(
                             execution_id, principal
                         )
+                    # task-owner: interaction.event
                     event_task = asyncio.create_task(subscription.__anext__())
                 if task in done:
                     error = task.exception()
@@ -269,7 +267,9 @@ class InteractiveRunService:
             tool_call_id=approval.tool_call_id,
             tool_name=approval.tool_name,
         )
+        # task-owner: interaction.approval
         callback = asyncio.create_task(observer.request_approval(request, state.cancellation))
+        # task-owner: interaction.cancellation
         cancel_wait = asyncio.create_task(state.cancellation.wait())
         try:
             done, _ = await asyncio.wait(
@@ -278,7 +278,7 @@ class InteractiveRunService:
             if cancel_wait in done:
                 termination = await cancel_task(callback, 1.0)
                 if termination is TaskTermination.TIMED_OUT:
-                    self._register_orphan(state, callback)
+                    self._register_orphan(session_id, callback)
                 logger.info(
                     "event=runtime.interaction.cancelled session_id=%s execution_id=%s",
                     session_id,
@@ -318,32 +318,34 @@ class InteractiveRunService:
         )
         return InteractionResult(execution_id, record.status, reason)
 
-    def _register_orphan(
-        self, state: _InteractionState, task: "asyncio.Task[Any]"
-    ) -> None:
-        state.orphan_tasks.add(task)
-        session_id = next(
-            (item for item, value in self._states.items() if value is state), None
+    def _register_orphan(self, session_id: str, task: "asyncio.Task[Any]") -> None:
+        self._orphan_tasks.setdefault(session_id, set()).add(task)
+        task.add_done_callback(
+            lambda completed: self._finish_orphan(session_id, completed)
         )
-        if session_id is not None:
-            self._orphans.setdefault(session_id, set()).add(task)
-        task.add_done_callback(lambda value: self._finish_orphan(state, value))
-        logger.warning("event=runtime.interaction.orphan_task_registered")
+        logger.warning(
+            "event=runtime.interaction.orphan_registered session_id=%s orphan_task_count=%s",
+            session_id,
+            len(self._orphan_tasks[session_id]),
+        )
 
-    @staticmethod
-    def _finish_orphan(
-        state: _InteractionState, task: "asyncio.Task[Any]"
-    ) -> None:
-        state.orphan_tasks.discard(task)
-        for session_id, tasks in tuple(self._orphans.items()):
-            tasks.discard(task)
-            if not tasks:
-                self._orphans.pop(session_id, None)
-        if not task.cancelled():
-            try:
-                task.exception()
-            except BaseException:
-                pass
+    def _finish_orphan(self, session_id: str, task: "asyncio.Task[Any]") -> None:
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(
+                "event=runtime.interaction.orphan_finished session_id=%s error_id=%s",
+                session_id,
+                type(exc).__name__,
+            )
+        finally:
+            tasks = self._orphan_tasks.get(session_id)
+            if tasks is not None:
+                tasks.discard(task)
+                if not tasks:
+                    self._orphan_tasks.pop(session_id, None)
 
 
 ExecutionTerminalEventTypes = (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)

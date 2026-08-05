@@ -110,6 +110,30 @@ class SessionBusyError(StorageError):
     """A session has an operation that cannot be interleaved."""
 
 
+class SessionClosedError(StorageError):
+    """A closed session does not allow a mutating interaction."""
+
+
+class SessionInvariantError(StorageError):
+    """The in-memory and persisted session state violated its contract."""
+
+
+class McpReplacementError(StorageError):
+    """MCP resource replacement could not complete atomically."""
+
+    def __init__(self, message: str, failures: tuple[object, ...] = ()) -> None:
+        super().__init__(message)
+        self.failures = failures
+
+
+class UnknownSessionConfigOptionError(StorageError):
+    """A session configuration option was not declared by the registry."""
+
+
+class InvalidSessionConfigValueError(StorageError):
+    """A declared session configuration option rejected its value."""
+
+
 class SessionCleanupRequiredError(StorageError):
     """A previous session cleanup failed and must be retried."""
 

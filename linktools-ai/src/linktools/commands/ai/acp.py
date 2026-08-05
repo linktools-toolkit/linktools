@@ -91,12 +91,13 @@ async def _run(args: "Namespace") -> int:
         client=AcpClient(project_root=project.root),
         protocol=protocol,
     )
+    close_result = None
     try:
         await run_acp_server(agent)
     finally:
-        await bundle.runtime.aclose()
+        close_result = await bundle.runtime.aclose()
         lock.release()
-    return 0
+    return 0 if close_result.closed else 4
 
 
 command = Command()

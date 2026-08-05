@@ -4,7 +4,7 @@
 """Protocol-neutral session lifecycle and operation ownership."""
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 from uuid import uuid4
@@ -13,7 +13,10 @@ from linktools.core import environ
 
 from ..errors import (
     SessionBusyError,
+    SessionClosedError,
     SessionCleanupRequiredError,
+    SessionInvariantError,
+    McpReplacementError,
     StorageConflictError,
     UnknownSessionError,
 )
@@ -58,6 +61,71 @@ class ResourceFailure:
 class SessionCloseResult:
     closed: bool
     failures: "tuple[ResourceFailure, ...]" = ()
+
+
+@dataclass(slots=True)
+class McpReplacement:
+    old_specs: "tuple[MCPServerSpec, ...]"
+    old_resources: Any
+    new_specs: "tuple[MCPServerSpec, ...]"
+    candidate: Any
+    committed: bool = False
+
+
+class SessionCommitter:
+    """Serialize persisted session changes with the active lease."""
+
+    def __init__(self, store: ExecutionStore) -> None:
+        self._store = store
+
+    async def commit_update(
+        self,
+        active: "ActiveRuntimeSession",
+        lease: "SessionOperationLease",
+        command: "UpdateSession | None" = None,
+        *,
+        workspace: "SessionWorkspace | None" = None,
+        settings: "SessionSettings | None" = None,
+        state: "SessionState | None" = None,
+    ) -> SessionRecord:
+        async with active.lock:
+            if active.operation is not lease:
+                raise SessionInvariantError("session operation lease changed")
+            if command is None:
+                command = UpdateSession(
+                    session_id=active.record.id,
+                    expected_revision=active.record.revision,
+                    workspace=workspace,
+                    settings=settings,
+                    state=state,
+                )
+            elif (
+                command.session_id != active.record.id
+                or command.expected_revision != active.record.revision
+            ):
+                raise SessionInvariantError("session commit command does not match active record")
+        # task-owner: runtime.session.commit
+        task = asyncio.create_task(self._store.update_session(command))
+        cancelled = False
+        try:
+            record = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            record = await task
+            cancelled = True
+        async with active.lock:
+            if active.operation is not lease:
+                raise SessionInvariantError("session operation lease changed")
+            active.record = record
+        logger.info(
+            "event=runtime.session.commit_completed session_id=%s operation_id=%s session_revision=%s session_state=%s",
+            record.id,
+            lease.operation_id,
+            record.revision,
+            record.state.value,
+        )
+        if cancelled:
+            raise asyncio.CancelledError
+        return record
 
 
 class SessionResourceOwner(Protocol):
@@ -128,10 +196,14 @@ class SessionOperationCoordinator:
         async with active.lock:
             if active.cleanup_required:
                 raise SessionCleanupRequiredError(active.record.id)
-            if active.record.state is SessionState.CLOSED and kind is not SessionOperationKind.CLOSE:
-                raise SessionBusyError(active.record.id)
             if active.closing_requested and kind is not SessionOperationKind.CLOSE:
                 raise SessionBusyError(active.record.id)
+            if active.record.state is SessionState.CLOSED and kind not in {
+                SessionOperationKind.LOAD,
+                SessionOperationKind.RESUME,
+                SessionOperationKind.CLOSE,
+            }:
+                raise SessionClosedError(active.record.id)
             if active.operation is not None:
                 raise SessionBusyError(active.record.id)
             lease = SessionOperationLease(
@@ -176,14 +248,17 @@ class SessionLoadTransaction:
         workspace: SessionWorkspace,
         settings: SessionSettings,
         history: tuple[Any, ...],
+        replacement: McpReplacement,
     ) -> None:
         self._service = service
         self._active = active
         self._lease = lease
+        self.lease = lease
         self._workspace = workspace
         self._settings = settings
         self.session = active.record
         self.history = history
+        self.replacement = replacement
         self._committed = False
         self._rolled_back = False
 
@@ -201,8 +276,10 @@ class SessionLoadTransaction:
             return self._active.record
         if self._rolled_back:
             raise RuntimeError("session load transaction is rolled back")
-        record = await self._service._update_active(
+        record = await self._service._commit_replacement(
             self._active,
+            self._lease,
+            self.replacement,
             workspace=self._workspace,
             settings=self._settings,
         )
@@ -211,9 +288,19 @@ class SessionLoadTransaction:
         return record
 
     async def rollback(self) -> None:
-        if not self._committed:
-            self._rolled_back = True
-            await self._lease.release()
+        if self._committed or self._rolled_back:
+            return
+        self._rolled_back = True
+        failures = await self._service._close_candidate(
+            self._active.record.id, self.replacement.candidate
+        )
+        if failures:
+            logger.error(
+                "event=runtime.session.mcp_replacement_failed session_id=%s mcp_close_failure_count=%s",
+                self._active.record.id,
+                len(failures),
+            )
+        await self._lease.release()
 
     async def release(self) -> None:
         await self._lease.release()
@@ -227,6 +314,7 @@ class RuntimeSessionService:
         self._authorization = authorization
         self._active: dict[str, ActiveRuntimeSession] = {}
         self._coordinator = SessionOperationCoordinator()
+        self._committer = SessionCommitter(store)
         self._interaction_cancel: Any = None
         self._interaction_owner: "SessionResourceOwner | None" = None
         self._mcp_resource_factory = mcp_resource_factory
@@ -245,6 +333,8 @@ class RuntimeSessionService:
         settings: SessionSettings,
         principal: "PrincipalContext",
         tool_sources: "tuple[MCPServerSpec, ...]" = (),
+        owner: "SessionResourceOwner | None" = None,
+        owner_name: str = "",
     ) -> ActiveRuntimeSession:
         command = CreateSession(
             session_id=session_id,
@@ -260,6 +350,12 @@ class RuntimeSessionService:
         )
         active.tool_sources = tool_sources
         self._ensure_mcp_resources(active)
+        if owner is not None:
+            try:
+                await self.register_owner(record.id, owner_name, owner)
+            except BaseException:
+                await self._join_or_start_close(active, "owner_registration")
+                raise
         return active
 
     async def get(
@@ -302,10 +398,9 @@ class RuntimeSessionService:
         lease = await self._coordinator.reserve(active, SessionOperationKind.LOAD)
         try:
             history = await self._store.get_session_messages(session_id)
-            active.tool_sources = tool_sources
-            self._ensure_mcp_resources(active)
+            replacement = self._prepare_mcp_replacement(active, tool_sources)
             return SessionLoadTransaction(
-                self, active, lease, workspace, settings, history
+                self, active, lease, workspace, settings, history, replacement
             )
         except BaseException:
             await lease.release()
@@ -319,12 +414,31 @@ class RuntimeSessionService:
         settings: SessionSettings,
         principal: "PrincipalContext",
         tool_sources: "tuple[MCPServerSpec, ...]" = (),
+        owner: "SessionResourceOwner | None" = None,
+        owner_name: str = "",
     ) -> ActiveRuntimeSession:
         active = await self.get(session_id, principal=principal)
-        async with await self._coordinator.reserve(active, SessionOperationKind.RESUME):
-            active.tool_sources = tool_sources
-            self._ensure_mcp_resources(active)
-            await self._update_active(active, workspace=workspace, settings=settings)
+        lease = await self._coordinator.reserve(active, SessionOperationKind.RESUME)
+        try:
+            replacement = self._prepare_mcp_replacement(active, tool_sources)
+            await self._commit_replacement(
+                active,
+                lease,
+                replacement,
+                workspace=workspace,
+                settings=settings,
+            )
+        except BaseException:
+            await lease.release()
+            raise
+        if owner is not None:
+            try:
+                await self.register_owner(session_id, owner_name, owner, lease=lease)
+            except BaseException:
+                await lease.release()
+                await self._join_or_start_close(active, "owner_registration")
+                raise
+        await lease.release()
         return active
 
     async def fork(
@@ -336,6 +450,8 @@ class RuntimeSessionService:
         settings: SessionSettings,
         principal: "PrincipalContext",
         tool_sources: "tuple[MCPServerSpec, ...]" = (),
+        owner: "SessionResourceOwner | None" = None,
+        owner_name: str = "",
     ) -> ActiveRuntimeSession:
         source = await self.get(source_session_id, principal=principal)
         async with await self._coordinator.reserve(source, SessionOperationKind.FORK):
@@ -357,6 +473,12 @@ class RuntimeSessionService:
             )
         active = self._active.setdefault(record.id, ActiveRuntimeSession(record, tool_sources))
         self._ensure_mcp_resources(active)
+        if owner is not None:
+            try:
+                await self.register_owner(record.id, owner_name, owner)
+            except BaseException:
+                await self._join_or_start_close(active, "owner_registration")
+                raise
         return active
 
     async def update(
@@ -368,8 +490,13 @@ class RuntimeSessionService:
         principal: "PrincipalContext",
     ) -> SessionRecord:
         active = await self.get(session_id, principal=principal)
-        async with await self._coordinator.reserve(active, SessionOperationKind.UPDATE):
-            return await self._update_active(active, workspace=workspace, settings=settings)
+        lease = await self._coordinator.reserve(active, SessionOperationKind.UPDATE)
+        try:
+            return await self._committer.commit_update(
+                active, lease, workspace=workspace, settings=settings
+            )
+        finally:
+            await lease.release()
 
     async def reserve(
         self,
@@ -383,12 +510,30 @@ class RuntimeSessionService:
         return await self._coordinator.reserve(active, kind, execution_id=execution_id)
 
     async def register_owner(
-        self, session_id: str, name: str, owner: SessionResourceOwner
+        self,
+        session_id: str,
+        name: str,
+        owner: SessionResourceOwner,
+        *,
+        lease: "SessionOperationLease | None" = None,
     ) -> None:
         active = self._active.get(session_id)
         if active is None:
             raise UnknownSessionError(session_id)
         async with active.lock:
+            if active.cleanup_required:
+                raise SessionCleanupRequiredError(session_id)
+            if active.closing_requested:
+                raise SessionBusyError(session_id)
+            if active.record.state is SessionState.CLOSED:
+                raise SessionClosedError(session_id)
+            if lease is not None and active.operation is not lease:
+                raise SessionInvariantError("session owner lease changed")
+            current = active.owners.get(name)
+            if current is owner:
+                return
+            if current is not None and not current.is_empty(session_id):
+                raise StorageConflictError(f"resource owner {name!r} is active")
             active.owners[name] = owner
 
     async def toolsets(
@@ -404,48 +549,79 @@ class RuntimeSessionService:
         self, session_id: str, *, principal: "PrincipalContext", reason: str = "client"
     ) -> SessionCloseResult:
         active = await self.get(session_id, principal=principal)
-        async with active.lock:
-            if active.close_task is None:
-                active.close_task = asyncio.create_task(self._close(active, reason))
-            task = active.close_task
-        return await asyncio.shield(task)
+        return await self._join_or_start_close(active, reason)
 
     async def shutdown(self) -> "tuple[SessionCloseResult, ...]":
         return tuple(
             await asyncio.gather(
-                *(self._close(active, "shutdown") for active in tuple(self._active.values())),
+                *(self._join_or_start_close(active, "shutdown") for active in tuple(self._active.values())),
                 return_exceptions=False,
             )
         )
 
-    async def _close(
+    async def _join_or_start_close(
         self, active: ActiveRuntimeSession, reason: str
     ) -> SessionCloseResult:
         async with active.lock:
+            if active.close_task is None:
+                # task-owner: runtime.close
+                active.close_task = asyncio.create_task(self._close_once(active, reason))
+                joined = False
+            else:
+                joined = True
+            task = active.close_task
+        logger.info(
+            "event=runtime.session.close_joined session_id=%s close_reason=%s close_joined=%s",
+            active.record.id,
+            reason,
+            joined,
+        )
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await task
+            except BaseException:
+                pass
+            raise
+
+    async def _close_once(
+        self, active: ActiveRuntimeSession, reason: str
+    ) -> SessionCloseResult:
+        async with active.lock:
+            if active.record.state is SessionState.CLOSED and not active.owners:
+                self._active.pop(active.record.id, None)
+                active.close_task = None
+                return SessionCloseResult(True)
             active.closing_requested = True
             execution_id = active.active_execution_id
             operation = active.operation
-            owners = list(active.owners.items())
-        ordered_owners: list[tuple[str, SessionResourceOwner]] = []
-        if self._interaction_owner is not None:
-            ordered_owners.append(("interaction", self._interaction_owner))
-        ordered_owners.extend((name, owner) for name, owner in owners if name != "mcp")
-        ordered_owners.extend((name, owner) for name, owner in owners if name == "mcp")
-        owners = ordered_owners
         if execution_id is not None and self._interaction_cancel is not None:
             await self._interaction_cancel(active.record.id)
         if operation is not None and operation.kind is not SessionOperationKind.CLOSE:
             await operation.done.wait()
+        async with active.lock:
+            owners_by_name = dict(active.owners)
+        if self._interaction_owner is not None:
+            owners_by_name.setdefault("interaction", self._interaction_owner)
+        ordered_names = sorted(
+            owners_by_name,
+            key=lambda name: (
+                0 if name == "interaction" else 1 if name == "acp.client" else 3 if name == "mcp" else 2,
+                name,
+            ),
+        )
         failures: "list[ResourceFailure]" = []
-        for name, owner in owners:
+        for name in ordered_names:
+            owner = owners_by_name[name]
             try:
                 failures.extend(await owner.close(active.record.id))
             except Exception as exc:
                 failures.append(ResourceFailure(name, None, type(exc).__name__))
         failures.extend(
             ResourceFailure(name, None, "owner_not_empty")
-            for name, owner in owners
-            if not owner.is_empty(active.record.id)
+            for name in ordered_names
+            if not owners_by_name[name].is_empty(active.record.id)
         )
         if failures:
             async with active.lock:
@@ -458,42 +634,151 @@ class RuntimeSessionService:
                 len(failures),
             )
             return SessionCloseResult(False, tuple(failures))
-        record = await self._update_active(active, state=SessionState.CLOSED)
+        if active.record.state is SessionState.CLOSED:
+            record = active.record
+        else:
+            lease = SessionOperationLease(
+                self._coordinator, active, SessionOperationKind.CLOSE, uuid4().hex, None
+            )
+            async with active.lock:
+                active.operation = lease
+            try:
+                record = await self._committer.commit_update(
+                    active, lease, state=SessionState.CLOSED
+                )
+            except Exception as exc:
+                async with active.lock:
+                    active.cleanup_required = True
+                    active.closing_requested = False
+                    active.close_task = None
+                return SessionCloseResult(
+                    False, (ResourceFailure("session", None, type(exc).__name__),)
+                )
+            finally:
+                await lease.release()
+        async with active.lock:
+            active.owners.clear()
+            active.close_task = None
         self._active.pop(active.record.id, None)
         logger.info("event=runtime.session.closed session_id=%s", record.id)
         return SessionCloseResult(True)
 
-    async def _update_active(
+    def _prepare_mcp_replacement(
         self,
         active: ActiveRuntimeSession,
-        *,
-        workspace: "SessionWorkspace | None" = None,
-        settings: "SessionSettings | None" = None,
-        state: "SessionState | None" = None,
-    ) -> SessionRecord:
-        command = UpdateSession(
-            session_id=active.record.id,
-            expected_revision=active.record.revision,
-            workspace=workspace,
-            settings=settings,
-            state=state,
+        tool_sources: "tuple[MCPServerSpec, ...]",
+    ) -> McpReplacement:
+        candidate = (
+            self._mcp_resource_factory(tool_sources)
+            if self._mcp_resource_factory is not None and tool_sources
+            else None
         )
-        task = asyncio.create_task(self._store.update_session(command))
+        return McpReplacement(
+            old_specs=active.tool_sources,
+            old_resources=active.mcp_resources,
+            new_specs=tool_sources,
+            candidate=candidate,
+        )
+
+    async def _commit_replacement(
+        self,
+        active: ActiveRuntimeSession,
+        lease: SessionOperationLease,
+        replacement: McpReplacement,
+        *,
+        workspace: "SessionWorkspace",
+        settings: "SessionSettings",
+    ) -> SessionRecord:
+        was_closed = active.record.state is SessionState.CLOSED
+        old_failures: tuple[ResourceFailure, ...] = ()
+        if replacement.old_resources is not None:
+            old_failures = await replacement.old_resources.close(active.record.id)
+        if old_failures:
+            candidate_failures = await self._close_candidate(active.record.id, replacement.candidate)
+            failures = old_failures + candidate_failures
+            async with active.lock:
+                active.cleanup_required = True
+            logger.error(
+                "event=runtime.session.mcp_replacement_failed session_id=%s mcp_close_failure_count=%s",
+                active.record.id,
+                len(failures),
+            )
+            raise McpReplacementError(
+                "MCP resource replacement failed", tuple(failures)
+            )
         try:
-            record = await asyncio.shield(task)
-        except asyncio.CancelledError:
-            record = await task
-            active.record = record
+            record = await self._committer.commit_update(
+                active,
+                lease,
+                workspace=workspace,
+                settings=settings,
+                state=SessionState.OPEN,
+            )
+        except BaseException:
+            candidate_failures = await self._close_candidate(
+                active.record.id, replacement.candidate
+            )
+            if candidate_failures:
+                logger.error(
+                    "event=runtime.session.mcp_replacement_failed session_id=%s mcp_close_failure_count=%s",
+                    active.record.id,
+                    len(candidate_failures),
+                )
+            async with active.lock:
+                active.tool_sources = replacement.old_specs
+                active.mcp_resources = (
+                    self._mcp_resource_factory(replacement.old_specs)
+                    if replacement.old_specs and self._mcp_resource_factory is not None
+                    else None
+                )
+                active.owners.pop("mcp", None)
+                if active.mcp_resources is not None:
+                    active.owners["mcp"] = active.mcp_resources
             raise
-        active.record = record
+        async with active.lock:
+            if active.operation is not lease:
+                raise SessionInvariantError("MCP replacement lease changed")
+            active.tool_sources = replacement.new_specs
+            active.mcp_resources = replacement.candidate
+            active.owners.pop("mcp", None)
+            if replacement.candidate is not None:
+                active.owners["mcp"] = replacement.candidate
+        replacement.committed = True
+        logger.info(
+            "event=runtime.session.mcp_replacement_started session_id=%s mcp_old_count=%s mcp_new_count=%s",
+            active.record.id,
+            len(replacement.old_specs),
+            len(replacement.new_specs),
+        )
+        if was_closed:
+            logger.info(
+                "event=runtime.session.reopened session_id=%s session_revision=%s session_state=%s",
+                active.record.id,
+                record.revision,
+                record.state.value,
+            )
         return record
+
+    async def _close_candidate(
+        self, session_id: str, candidate: Any
+    ) -> tuple[ResourceFailure, ...]:
+        if candidate is None:
+            return ()
+        try:
+            return tuple(await candidate.close(session_id))
+        except Exception as exc:
+            return (ResourceFailure("mcp.candidate", None, type(exc).__name__),)
 
     def _authorize(self, principal: "PrincipalContext", record: SessionRecord) -> None:
         if self._authorization is not None:
             self._authorization.assert_session_access(principal=principal, session=record)
 
     def _ensure_mcp_resources(self, active: ActiveRuntimeSession) -> None:
-        if self._mcp_resource_factory is None or active.mcp_resources is not None:
+        if (
+            self._mcp_resource_factory is None
+            or active.mcp_resources is not None
+            or not active.tool_sources
+        ):
             return
         active.mcp_resources = self._mcp_resource_factory(active.tool_sources)
         active.owners.setdefault("mcp", active.mcp_resources)
@@ -501,9 +786,11 @@ class RuntimeSessionService:
 
 __all__ = [
     "ActiveRuntimeSession",
+    "McpReplacement",
     "ResourceFailure",
     "RuntimeSessionService",
     "SessionCloseResult",
+    "SessionCommitter",
     "SessionLoadTransaction",
     "SessionOperationCoordinator",
     "SessionOperationKind",

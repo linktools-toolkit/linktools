@@ -82,3 +82,74 @@ def test_smoke_runs_real_acp_subprocess(
         assert result["message_chunk_count"] == 2
     if prompt.startswith("SMOKE_TOOL"):
         assert result["permission_request_count"] == 1
+
+
+def test_smoke_real_process_detects_zero_updates() -> None:
+    root = Path(__file__).resolve().parents[3]
+    fixture = root / "tests" / "fixtures" / "acp_process" / "zero_updates"
+    env = dict(os.environ)
+    env["DEBUG"] = "false"
+    env["ACP_SMOKE_FIXTURE"] = str(fixture)
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(root / "linktools-ai" / "src"), str(root / "linktools" / "src"))
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "linktools",
+            "ai",
+            "smoke",
+            "--project",
+            str(root / "tests" / "fixtures" / "acp_smoke_project"),
+            "--prompt",
+            "SMOKE_TEXT",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 4
+    result = json.loads(completed.stdout)
+    assert result["ok"] is False
+    assert result["update_count"] == 0
+    assert result["process_exit_code"] == 0
+
+
+def test_stdio_process_rejects_stdout_pollution() -> None:
+    root = Path(__file__).resolve().parents[3]
+    fixture = root / "tests" / "fixtures" / "acp_process" / "stdout_pollution"
+    env = dict(os.environ)
+    env["DEBUG"] = "false"
+    env["ACP_SMOKE_FIXTURE"] = str(fixture)
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(root / "linktools-ai" / "src"), str(root / "linktools" / "src"))
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "linktools",
+            "ai",
+            "smoke",
+            "--project",
+            str(root / "tests" / "fixtures" / "acp_smoke_project"),
+            "--prompt",
+            "SMOKE_TEXT",
+            "--json",
+        ],
+        cwd=root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 3
+    result = json.loads(completed.stdout)
+    assert result["ok"] is False
+    assert result["error"]

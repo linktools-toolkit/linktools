@@ -7,7 +7,10 @@ from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
+from linktools.core import environ
+
 from ..execution.domain import ApprovalDecision
+from ..errors import InvalidSessionConfigValueError, UnknownSessionConfigOptionError
 from ..runtime.interaction import ApprovalRequest, InteractionObserver, InteractionResult, InteractionStopReason
 from ..runtime.session import SessionSettings, SessionWorkspace
 from ..runtime.facade import Runtime
@@ -21,6 +24,8 @@ from .protocol import (
     request_error,
     require_sdk,
 )
+
+logger = environ.get_logger("ai.acp.agent")
 
 
 class _ClientObserver(InteractionObserver):
@@ -114,12 +119,13 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
+            owner=self.client.resources(session_id),
+            owner_name="acp.client",
         )
-        await self._register_client_resources(active.record.id)
         return schema.NewSessionResponse(
             sessionId=active.record.id,
             modes=self.protocol.mode_state(active.record.settings.agent_id),
-            configOptions=[],
+            configOptions=list(self.protocol.config_registry.response_state()),
         )
 
     @protocol_handler
@@ -167,6 +173,19 @@ class LinktoolsAcpAgent:
             updates = self.codec.encode_history(session_id, load.history)
             record = await load.commit()
             try:
+                await self.runtime.sessions.register_owner(
+                    session_id,
+                    "acp.client",
+                    self.client.resources(session_id),
+                    lease=load.lease,
+                )
+            except Exception as exc:
+                await load.release()
+                await self.runtime.sessions.close(
+                    session_id, principal=self.protocol.principal, reason="owner_registration"
+                )
+                raise internal_error("client_owner_registration_failed", session_id=session_id) from exc
+            try:
                 await self.client.replay(session_id, updates)
             except Exception as exc:
                 await load.release()
@@ -175,7 +194,8 @@ class LinktoolsAcpAgent:
                 )
                 raise internal_error("history_replay_failed", session_id=session_id) from exc
         return schema.LoadSessionResponse(
-            modes=self.protocol.mode_state(record.settings.agent_id), configOptions=[]
+            modes=self.protocol.mode_state(record.settings.agent_id),
+            configOptions=list(self.protocol.config_registry.response_state()),
         )
 
     @protocol_handler
@@ -203,9 +223,13 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
+            owner=self.client.resources(session_id),
+            owner_name="acp.client",
         )
-        await self._register_client_resources(active.record.id)
-        return schema.ResumeSessionResponse(modes=self.protocol.mode_state(active.record.settings.agent_id), configOptions=[])
+        return schema.ResumeSessionResponse(
+            modes=self.protocol.mode_state(active.record.settings.agent_id),
+            configOptions=list(self.protocol.config_registry.response_state()),
+        )
 
     @protocol_handler
     async def fork_session(
@@ -221,9 +245,10 @@ class LinktoolsAcpAgent:
 
         source = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
+        target_session_id = uuid4().hex
         active = await self.runtime.sessions.fork(
             session_id,
-            uuid4().hex,
+            target_session_id,
             workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
             settings=replace(
                 source.record.settings,
@@ -233,9 +258,14 @@ class LinktoolsAcpAgent:
             ),
             principal=self.protocol.principal,
             tool_sources=tool_sources,
+            owner=self.client.resources(target_session_id),
+            owner_name="acp.client",
         )
-        await self._register_client_resources(active.record.id)
-        return schema.ForkSessionResponse(sessionId=active.record.id, modes=self.protocol.mode_state(active.record.settings.agent_id), configOptions=[])
+        return schema.ForkSessionResponse(
+            sessionId=active.record.id,
+            modes=self.protocol.mode_state(active.record.settings.agent_id),
+            configOptions=list(self.protocol.config_registry.response_state()),
+        )
 
     @protocol_handler
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
@@ -260,9 +290,23 @@ class LinktoolsAcpAgent:
     async def set_config_option(self, config_id: str, session_id: str, value: "str | bool", **kwargs: Any) -> Any:
         self._require_initialized()
         active = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
-        options = dict(active.record.settings.options)
-        options[config_id] = value
-        await self.runtime.sessions.update(session_id, settings=replace(active.record.settings, options=options), principal=self.protocol.principal)
+        try:
+            settings = self.protocol.config_registry.update(
+                active.record.settings, config_id, value
+            )
+        except UnknownSessionConfigOptionError as exc:
+            logger.info(
+                "event=acp.config.unknown_option session_id=%s config_id=%s error_id=%s",
+                session_id,
+                config_id,
+                type(exc).__name__,
+            )
+            raise
+        except InvalidSessionConfigValueError:
+            raise
+        await self.runtime.sessions.update(
+            session_id, settings=settings, principal=self.protocol.principal
+        )
         return None
 
     @protocol_handler

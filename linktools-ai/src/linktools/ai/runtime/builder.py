@@ -16,7 +16,11 @@ from ..agent.tool.exposure import ToolAssembler
 from ..agent.mcp.client import McpSessionResources
 from ..agent.builtin import BuiltinToolProvider
 from ..errors import RuntimeInitializationError, StorageFeatureSupportError
-from ..execution.live_events import ExecutionEventHub, NoopSecurityEventSink
+from ..execution.live_events import (
+    CompositeRunLiveSink,
+    ExecutionEventHub,
+    NoopSecurityEventSink,
+)
 from ..execution.query import ExecutionQueryService
 from ..execution.service import ExecutionService
 from ..execution import trace_codec
@@ -136,13 +140,20 @@ def build_runtime(
         trace_codec=trace_codec,
     )
     codec = AgentSpecCodec(output_types=dependencies.output_types)
-    if event_hub is not None and dependencies.live_events not in (None, event_hub):
-        raise RuntimeInitializationError(
-            "event_hub conflicts with the configured live event sink"
-        )
-    live_events = event_hub or dependencies.live_events
-    if live_events is None:
-        live_events = ExecutionEventHub()
+    configured_live_events = dependencies.live_events
+    if isinstance(configured_live_events, ExecutionEventHub):
+        if event_hub is not None and configured_live_events is not event_hub:
+            raise RuntimeInitializationError("multiple_execution_event_hubs")
+        canonical_hub = event_hub or configured_live_events
+        extra_live_events = None
+    else:
+        canonical_hub = event_hub or ExecutionEventHub()
+        extra_live_events = configured_live_events
+    live_events = (
+        canonical_hub
+        if extra_live_events is None
+        else CompositeRunLiveSink(canonical_hub, extra_live_events)
+    )
     execution = ExecutionService(
         storage.execution,
         compiler,
@@ -176,9 +187,7 @@ def build_runtime(
     )
     interactions = InteractiveRunService(
         execution,
-        event_hub or live_events
-        if isinstance(live_events, ExecutionEventHub)
-        else ExecutionEventHub(),
+        canonical_hub,
         sessions,
     )
     return Runtime(
@@ -197,13 +206,7 @@ def build_runtime(
             if dependencies.mcp_provider is not None
             else None
         ),
-        execution_event_hub=(
-            event_hub
-            if event_hub is not None
-            else live_events
-            if isinstance(live_events, ExecutionEventHub)
-            else None
-        ),
+        execution_event_hub=canonical_hub,
         swarm=swarm,
         sessions=sessions,
         interactions=interactions,

@@ -12,6 +12,11 @@ from ..errors import (
     SessionBusyError,
     SessionCleanupRequiredError,
     SessionConflictError,
+    SessionClosedError,
+    SessionInvariantError,
+    UnknownSessionConfigOptionError,
+    InvalidSessionConfigValueError,
+    McpReplacementError,
     UnknownSessionError,
 )
 from ..governance.identity import PrincipalContext
@@ -98,6 +103,36 @@ class CapabilityInput:
     supports_mcp_acp: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SessionConfigDefinition:
+    id: str
+    encode: Callable[[], Any]
+    validate: Callable[[Any], None]
+    apply: Callable[[Any, Any], Any]
+
+
+class SessionConfigRegistry:
+    def __init__(self, definitions: "tuple[SessionConfigDefinition, ...]" = ()) -> None:
+        self._definitions = {definition.id: definition for definition in definitions}
+
+    @property
+    def definitions(self) -> "tuple[SessionConfigDefinition, ...]":
+        return tuple(self._definitions.values())
+
+    def response_state(self) -> "tuple[Any, ...]":
+        return tuple(definition.encode() for definition in self._definitions.values())
+
+    def update(self, settings: Any, config_id: str, value: Any) -> Any:
+        definition = self._definitions.get(config_id)
+        if definition is None:
+            raise UnknownSessionConfigOptionError(config_id)
+        try:
+            definition.validate(value)
+        except Exception as exc:
+            raise InvalidSessionConfigValueError(config_id) from exc
+        return definition.apply(settings, value)
+
+
 class CapabilityBuilder:
     def build(self, values: CapabilityInput, *, client_capabilities: Any = None) -> Any:
         import acp.schema as schema
@@ -159,6 +194,7 @@ class AcpProtocol:
         modes: "tuple[AcpMode, ...]" = (),
         capability_input: "CapabilityInput | None" = None,
         version: str = "0.0.0",
+        config_registry: "SessionConfigRegistry | None" = None,
     ) -> None:
         self.principal = principal
         self.spec_resolver = spec_resolver
@@ -166,6 +202,7 @@ class AcpProtocol:
         self.modes = self.capability_input.modes or (AcpMode("default", "Default"),)
         self.version = version
         self.capabilities = CapabilityBuilder()
+        self.config_registry = config_registry or SessionConfigRegistry()
 
     async def resolve_spec(self, mode_id: str) -> Any:
         return await self.spec_resolver(mode_id)
@@ -176,12 +213,22 @@ class AcpProtocol:
     def domain_error(self, error: BaseException, *, session_id: "str | None" = None) -> Exception:
         if isinstance(error, UnknownSessionError):
             reason = "unknown_session"
+        elif isinstance(error, SessionClosedError):
+            reason = "session_closed"
         elif isinstance(error, SessionBusyError):
             reason = "session_busy"
         elif isinstance(error, SessionConflictError):
             reason = "session_conflict"
         elif isinstance(error, SessionCleanupRequiredError):
             reason = "session_cleanup_required"
+        elif isinstance(error, UnknownSessionConfigOptionError):
+            reason = "unknown_config_option"
+        elif isinstance(error, InvalidSessionConfigValueError):
+            reason = "invalid_config_value"
+        elif isinstance(error, SessionInvariantError):
+            return internal_error("session_invariant_violation", session_id=session_id)
+        elif isinstance(error, McpReplacementError):
+            return internal_error("mcp_replacement_failed", session_id=session_id)
         else:
             return internal_error("internal_error", session_id=session_id)
         return request_error(reason, session_id=session_id)
@@ -217,12 +264,22 @@ def protocol_handler(function: Callable[..., Any]) -> Callable[..., Any]:
                 raise
             if isinstance(exc, UnknownSessionError):
                 raise request_error("unknown_session") from exc
+            if isinstance(exc, SessionClosedError):
+                raise request_error("session_closed") from exc
             if isinstance(exc, SessionBusyError):
                 raise request_error("session_busy") from exc
             if isinstance(exc, SessionConflictError):
                 raise request_error("session_conflict") from exc
             if isinstance(exc, SessionCleanupRequiredError):
                 raise request_error("session_cleanup_required") from exc
+            if isinstance(exc, UnknownSessionConfigOptionError):
+                raise request_error("unknown_config_option") from exc
+            if isinstance(exc, InvalidSessionConfigValueError):
+                raise request_error("invalid_config_value") from exc
+            if isinstance(exc, SessionInvariantError):
+                raise internal_error("session_invariant_violation") from exc
+            if isinstance(exc, McpReplacementError):
+                raise internal_error("mcp_replacement_failed") from exc
             raise internal_error("internal_error") from exc
 
     return wrapped
@@ -233,6 +290,8 @@ __all__ = [
     "AcpMode",
     "CapabilityBuilder",
     "CapabilityInput",
+    "SessionConfigDefinition",
+    "SessionConfigRegistry",
     "AcpProtocol",
     "STANDARD_AGENT_METHODS",
     "internal_error",

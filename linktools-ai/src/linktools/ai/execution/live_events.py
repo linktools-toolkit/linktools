@@ -292,6 +292,30 @@ class StreamingRunLiveSink:
         await self.publish(event, execution_id)
 
 
+class CompositeRunLiveSink:
+    """Deliver events to the canonical hub and an optional external sink."""
+
+    def __init__(self, canonical: ExecutionEventHub, extra: RunLiveEventSink) -> None:
+        self._canonical = canonical
+        self._extra = extra
+
+    async def publish_execution(self, execution_id: str, event: Any) -> None:
+        await publish_execution_event(self._canonical, execution_id, event)
+        try:
+            await publish_execution_event(self._extra, execution_id, event)
+        except Exception as exc:
+            logger.warning(
+                "event=runtime.event_sink_extra_failed execution_id=%s error_id=%s",
+                execution_id,
+                type(exc).__name__,
+            )
+
+    async def publish(self, event: Any) -> None:
+        await self.publish_execution(
+            getattr(event, "execution_id", "legacy"), event
+        )
+
+
 class SecurityEventSinkEmitter:
     def __init__(self, sink: SecurityEventSink) -> None:
         self._sink = sink
@@ -412,6 +436,7 @@ __all__ = [
     "LiveEventConsumerSlowError",
     "ExecutionEvent",
     "ExecutionEventHub",
+    "CompositeRunLiveSink",
     "ExecutionEventSubscription",
     "ExecutionTerminalEvent",
     "AssistantTextDelta",

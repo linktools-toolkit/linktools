@@ -3,7 +3,13 @@
 
 """MCP connection, discovery, and tool adaptation."""
 
-from .client import MCPConnectionPool, MCPToolsetHandle, build_mcp_server
+from .client import (
+    MCPConnectionPool,
+    MCPToolsetHandle,
+    McpCloseFailure,
+    McpCloseResult,
+    build_mcp_server,
+)
 from .codec import parse_mcp_spec
 from .models import (
     MCPConnectionRef,
@@ -25,6 +31,8 @@ __all__ = [
     "MCPToolInfo",
     "MCPToolProvider",
     "MCPToolsetHandle",
+    "McpCloseFailure",
+    "McpCloseResult",
     "build_mcp_server",
     "parse_mcp_spec",
 ]

@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""ACP stdio transport and Runtime teardown."""
+"""ACP stdio transport."""
 
 import asyncio
-import logging
 import signal
 
 from .agent import LinktoolsAcpAgent
 from .protocol import require_sdk
-
-
-logger = logging.getLogger("linktools.ai.acp.server")
 
 
 async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
@@ -39,14 +35,6 @@ async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
     finally:
         for signum in installed:
             loop.remove_signal_handler(signum)
-        results = await agent.runtime.shutdown()
-        failures = [failure for result in results for failure in result.failures]
-        if failures:
-            logger.error(
-                "event=acp.transport.shutdown_failed resource_count=%s",
-                len(failures),
-            )
-            raise RuntimeError("ACP Runtime shutdown failed")
 
 
 async def serve_stdio(agent: LinktoolsAcpAgent) -> None:
