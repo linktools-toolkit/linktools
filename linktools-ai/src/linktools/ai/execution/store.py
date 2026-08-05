@@ -35,19 +35,31 @@ if TYPE_CHECKING:
     )
     from .domain import RunRecord
     from ..evaluation import RunEvaluation
-    from .session import SessionContextSeed, SessionRecord
+    from .session import (
+        CreateSession,
+        ForkSession,
+        SessionContextSeed,
+        SessionQuery,
+        SessionRecord,
+        UpdateSession,
+    )
 
 class ExecutionStore(Protocol):
     coordination_scope: "CoordinationScope"
 
     async def create_session(
         self,
+        command: "CreateSession | None" = None,
         *,
-        session_id: str,
-        user_id: "str | None",
-        tenant_id: "str | None",
+        session_id: "str | None" = None,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
         context_seed: "SessionContextSeed | None" = None,
     ) -> "SessionRecord": ...
+
+    async def update_session(self, command: "UpdateSession") -> "SessionRecord": ...
+
+    async def fork_session(self, command: "ForkSession") -> "SessionRecord": ...
 
     async def update_session_context_seed(
         self, session_id: str, context_seed: "SessionContextSeed"
@@ -127,6 +139,10 @@ class ExecutionStore(Protocol):
     ) -> "tuple[RunTraceStep, ...]": ...
 
     async def get_snapshot(self, run_id: str) -> "RunSnapshot | None": ...
+
+    async def list_sessions(
+        self, query: "SessionQuery | None" = None
+    ) -> "tuple[SessionRecord, ...]": ...
 
     async def list_all_sessions(self) -> "tuple[SessionRecord, ...]": ...
 

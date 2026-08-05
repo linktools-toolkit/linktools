@@ -64,7 +64,19 @@ from ...storage.sqlalchemy.base import Base
 from ...storage.sqlalchemy.conventions import TABLE_PREFIX, as_utc
 from ..domain import Page
 from ...evaluation import RunEvaluation
-from ..session import SessionContextSeed, SessionRecord, SessionTurn
+from ..session import (
+    CreateSession,
+    ForkSession,
+    SessionContextSeed,
+    SessionQuery,
+    SessionRecord,
+    SessionSettings,
+    SessionState,
+    SessionTurn,
+    SessionWorkspace,
+    SeedTurn,
+    UpdateSession,
+)
 from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from ..commands import (
@@ -104,6 +116,11 @@ class SessionRow(Base):
     next_turn_sequence: "Mapped[int]" = mapped_column(Integer, default=1)
     latest_completed_run_id: "Mapped[str | None]" = mapped_column(String(255))
     context_seed: "Mapped[dict | None]" = mapped_column(JSON, nullable=True)
+    workspace: "Mapped[dict | None]" = mapped_column(JSON, nullable=True)
+    settings: "Mapped[dict | None]" = mapped_column(JSON, nullable=True)
+    title: "Mapped[str | None]" = mapped_column(String(255), nullable=True)
+    state: "Mapped[str]" = mapped_column(String(32), default="open")
+    revision: "Mapped[int]" = mapped_column(Integer, default=1)
 
 
 class TurnRow(Base):
@@ -357,12 +374,25 @@ class SqlAlchemyExecutionBackend:
 
     async def create_session(
         self,
+        command: "CreateSession | None" = None,
         *,
-        session_id: str,
-        user_id: "str | None",
-        tenant_id: "str | None",
+        session_id: "str | None" = None,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
         context_seed: "SessionContextSeed | None" = None,
     ) -> SessionRecord:
+        if command is not None:
+            session_id = command.session_id
+            user_id = command.user_id
+            tenant_id = command.tenant_id
+            context_seed = command.context_seed
+            workspace = command.workspace
+            settings = command.settings
+        else:
+            workspace = SessionWorkspace(cwd=".")
+            settings = SessionSettings(agent_id="default")
+        if session_id is None:
+            raise ValueError("session_id is required")
         try:
             async with self.session_factory() as session:
                 async with session.begin():
@@ -384,6 +414,10 @@ class SqlAlchemyExecutionBackend:
                         next_turn_sequence=1,
                         latest_completed_run_id=None,
                         context_seed=_context_seed_payload(context_seed),
+                        workspace={"cwd": workspace.cwd, "additional_directories": list(workspace.additional_directories)},
+                        settings={"agent_id": settings.agent_id, "options": dict(settings.options), "tool_source_fingerprints": list(settings.tool_source_fingerprints)},
+                        state=SessionState.OPEN.value,
+                        revision=1,
                         created_at=now,
                         updated_at=now,
                     )
@@ -415,16 +449,43 @@ class SqlAlchemyExecutionBackend:
     ) -> SessionRecord:
         if row.user_id != user_id or row.tenant_id != tenant_id:
             raise StorageConflictError("session ownership conflict")
+        workspace = row.workspace or {"cwd": ".", "additional_directories": []}
+        settings = row.settings or {"agent_id": "default", "options": {}, "tool_source_fingerprints": []}
         return SessionRecord(
-            row.session_id,
-            row.user_id,
-            row.tenant_id,
-            row.next_turn_sequence,
-            row.latest_completed_run_id,
-            as_utc(row.created_at),
-            as_utc(row.updated_at),
-            _context_seed(row.context_seed),
+            id=row.session_id,
+            user_id=row.user_id,
+            tenant_id=row.tenant_id,
+            next_turn_sequence=row.next_turn_sequence,
+            latest_completed_run_id=row.latest_completed_run_id,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
+            context_seed=_context_seed(row.context_seed),
+            workspace=SessionWorkspace(cwd=workspace["cwd"], additional_directories=tuple(workspace.get("additional_directories", ()))),
+            settings=SessionSettings(agent_id=settings["agent_id"], options=dict(settings.get("options", {})), tool_source_fingerprints=tuple(settings.get("tool_source_fingerprints", ()))),
+            title=row.title,
+            state=SessionState(getattr(row, "state", "open")),
+            revision=int(getattr(row, "revision", 1)),
         )
+
+    async def update_session(self, command: UpdateSession) -> SessionRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                row = await self._session_row(session, command.session_id, for_update=True)
+                if row is None:
+                    raise StorageError("unknown session")
+                if row.revision != command.expected_revision:
+                    raise StorageConflictError("session revision conflict")
+                if command.workspace is not None:
+                    row.workspace = {"cwd": command.workspace.cwd, "additional_directories": list(command.workspace.additional_directories)}
+                if command.settings is not None:
+                    row.settings = {"agent_id": command.settings.agent_id, "options": dict(command.settings.options), "tool_source_fingerprints": list(command.settings.tool_source_fingerprints)}
+                if command.title is not None:
+                    row.title = command.title
+                if command.state is not None:
+                    row.state = command.state.value
+                row.revision += 1
+                row.updated_at = datetime.now(timezone.utc)
+            return self._owned_session(row, user_id=row.user_id, tenant_id=row.tenant_id)
 
     async def update_session_context_seed(
         self, session_id: str, context_seed: SessionContextSeed
@@ -435,8 +496,55 @@ class SqlAlchemyExecutionBackend:
                 if row is None:
                     raise StorageError("unknown session")
                 row.context_seed = _context_seed_payload(context_seed)
+                row.revision += 1
                 row.updated_at = datetime.now(timezone.utc)
             return self._owned_session(row, user_id=row.user_id, tenant_id=row.tenant_id)
+
+    async def fork_session(self, command: ForkSession) -> SessionRecord:
+        async with self.session_factory() as session:
+            async with session.begin():
+                source = await self._session_row(session, command.source_session_id, for_update=True)
+                if source is None:
+                    raise StorageError("unknown session")
+                if await self._session_row(session, command.target_session_id, for_update=True) is not None:
+                    raise StorageConflictError("target session already exists")
+                turns = list((await session.scalars(select(TurnRow).where(TurnRow.session_id == command.source_session_id).order_by(TurnRow.sequence))).all())
+                if any(row.status != RunStatus.COMPLETED.value or row.capture_state != MessageCaptureState.COMPLETE.value for row in turns):
+                    raise StorageConflictError("session history is incomplete")
+                seed = SessionContextSeed(
+                    schema="session-context-seed.v1",
+                    source_session_id=source.session_id,
+                    source_updated_at=as_utc(source.updated_at),
+                    turns=tuple(
+                        SeedTurn(
+                            session_id=row.session_id,
+                            sequence=row.sequence,
+                            run_id=row.execution_id,
+                            input=row.input,
+                            delta_messages=tuple(row.delta_messages or ()),
+                            status=RunStatus(row.status),
+                            capture_state=MessageCaptureState(row.capture_state),
+                        )
+                        for row in turns
+                    ),
+                )
+                now = datetime.now(timezone.utc)
+                row = SessionRow(
+                    session_id=command.target_session_id,
+                    user_id=command.user_id,
+                    tenant_id=command.tenant_id,
+                    next_turn_sequence=1,
+                    latest_completed_run_id=None,
+                    context_seed=_context_seed_payload(seed),
+                    workspace={"cwd": command.workspace.cwd, "additional_directories": list(command.workspace.additional_directories)},
+                    settings={"agent_id": command.settings.agent_id, "options": dict(command.settings.options), "tool_source_fingerprints": list(command.settings.tool_source_fingerprints)},
+                    state=SessionState.OPEN.value,
+                    revision=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            return self._owned_session(row, user_id=command.user_id, tenant_id=command.tenant_id)
 
     async def get_session(self, session_id: str) -> "SessionRecord | None":
         async with self.session_factory() as session:
@@ -444,16 +552,7 @@ class SqlAlchemyExecutionBackend:
             return (
                 None
                 if row is None
-                else SessionRecord(
-                    row.session_id,
-                    row.user_id,
-                    row.tenant_id,
-                    row.next_turn_sequence,
-                    row.latest_completed_run_id,
-                    as_utc(row.created_at),
-                    as_utc(row.updated_at),
-                    _context_seed(row.context_seed),
-                )
+                else self._owned_session(row, user_id=row.user_id, tenant_id=row.tenant_id)
             )
 
     async def list_session_turns(
@@ -1063,18 +1162,22 @@ class SqlAlchemyExecutionBackend:
                 .all()
             )
             return tuple(
-                SessionRecord(
-                    r.session_id,
-                    r.user_id,
-                    r.tenant_id,
-                    r.next_turn_sequence,
-                    r.latest_completed_run_id,
-                    as_utc(r.created_at),
-                    as_utc(r.updated_at),
-                    _context_seed(r.context_seed),
-                )
+                self._owned_session(r, user_id=r.user_id, tenant_id=r.tenant_id)
                 for r in rows
             )
+
+    async def list_sessions(
+        self, query: "SessionQuery | None" = None
+    ) -> "tuple[SessionRecord, ...]":
+        values = await self.list_all_sessions()
+        if query is None:
+            return values
+        return tuple(
+            value
+            for value in values
+            if (query.user_id is None or value.user_id == query.user_id)
+            and (query.tenant_id is None or value.tenant_id == query.tenant_id)
+        )
 
     async def list_all_runs(self) -> "tuple[RunRecord, ...]":
         async with self.session_factory() as session:

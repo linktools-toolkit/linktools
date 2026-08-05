@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Optional Agent Client Protocol v1 adapter."""
+"""Linktools ACP protocol adapter."""
 
-__all__ = []
+from .agent import LinktoolsAcpAgent
+from .server import run_acp_server
+
+__all__ = ["LinktoolsAcpAgent", "run_acp_server"]

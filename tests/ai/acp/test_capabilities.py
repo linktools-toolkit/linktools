@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import acp.schema as schema
 
-from linktools.ai.acp.capabilities import AcpMode, CapabilityBuilder, CapabilityInput
+from linktools.ai.acp.protocol import AcpMode, CapabilityBuilder, CapabilityInput
 
 
 def test_capabilities_are_conservative_and_schema_native() -> None:

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from ..assembly.models import AgentFeatureRef
     from ..assembly.provider import AgentFeatureContext
     from .spec import MCPServerSpecProvider
-    from .connection import MCPConnectionPool
+    from .client import MCPConnectionPool
 
 def final_tool_name(
     server_id: str,

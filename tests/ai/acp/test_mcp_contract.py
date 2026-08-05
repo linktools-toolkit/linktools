@@ -10,9 +10,9 @@ import uvicorn
 from mcp.server.fastmcp import FastMCP
 
 from linktools.ai.agent.mcp.client import MCPClient
-from linktools.ai.agent.mcp.connection import MCPConnectionPool
+from linktools.ai.agent.mcp.client import MCPConnectionPool
 from linktools.ai.agent.mcp.spec import MCPServerSpec
-from linktools.ai.acp.mcp import mcp_spec
+from linktools.ai.acp.codec import AcpCodec
 
 
 @pytest.mark.parametrize(
@@ -24,12 +24,12 @@ from linktools.ai.acp.mcp import mcp_spec
     ),
 )
 def test_mcp_descriptor_converter_supports_advertised_transports(descriptor, transport) -> None:
-    assert mcp_spec(descriptor).transport == transport
+    assert AcpCodec().decode_mcp_server(descriptor).transport == transport
 
 
 def test_mcp_acp_descriptor_is_rejected_explicitly() -> None:
     with pytest.raises(Exception) as raised:
-        mcp_spec(schema.McpServerAcp(name="acp", serverId="server-1"))
+        AcpCodec().decode_mcp_server(schema.McpServerAcp(name="acp", serverId="server-1"))
 
     assert raised.value.data["reason"] == "unsupported_mcp_transport"
     assert raised.value.data["transport"] == "acp"

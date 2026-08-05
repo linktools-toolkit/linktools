@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Construct one low-level Pydantic AI MCP client from a server spec."""
+"""Construct MCP clients and own session-scoped MCP resources."""
 
 
-from dataclasses import dataclass
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, Mapping
 from linktools.core import environ
-from ...errors import MCPAuthenticationError, MCPConnectionError, MCPDiscoveryError, MCPDiscoveryUnsupportedError, MCPToolDefinitionError
-from .models import MCPDiscoveryResult, MCPToolInfo
+from ...errors import MCPAuthenticationError, MCPConnectionError, MCPConnectionUnavailableError, MCPDiscoveryError, MCPDiscoveryUnsupportedError, MCPToolDefinitionError
+from ...json import canonical_json_bytes
+from ...execution.cancellation import TaskTermination, cancel_task
+from .models import MCPConnectionRef, MCPDiscoveryResult, MCPToolInfo
 
 from typing import TYPE_CHECKING
 
 logger = environ.get_logger("ai.agent.mcp.client")
 
 if TYPE_CHECKING:
-    from .models import MCPConnectionRef
     from .spec import MCPServerSpec
 
 def _resolved_tool_prefix(spec: "MCPServerSpec") -> "str | None":
@@ -25,6 +30,35 @@ def _resolved_tool_prefix(spec: "MCPServerSpec") -> "str | None":
     if value is None or value is True:
         return spec.id
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class MCPToolsetHandle:
+    connection_ref: MCPConnectionRef
+    toolset: Any
+
+
+def _digest_mapping(values: "Mapping[str, str]") -> str:
+    canonical = json.dumps(
+        sorted(values.items()), ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _config_fingerprint(spec: "MCPServerSpec") -> str:
+    payload = {
+        "transport": spec.transport,
+        "command": list(spec.command) if spec.command is not None else None,
+        "url": spec.url,
+        "cwd": spec.cwd,
+        "timeout_seconds": spec.timeout_seconds,
+        "tool_prefix": spec.tool_prefix,
+        "enabled_tools": list(spec.enabled_tools) if spec.enabled_tools is not None else None,
+        "disabled_tools": list(spec.disabled_tools),
+        "env_digest": _digest_mapping(spec.env),
+        "headers_digest": _digest_mapping(spec.headers),
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()[:16]
 
 
 def build_mcp_server(spec: "MCPServerSpec") -> Any:
@@ -176,4 +210,181 @@ class MCPClient:
         return MCPDiscoveryError("MCP discovery failed")
 
 
-__all__ = ["MCPClient", "build_mcp_server"]
+class MCPConnectionPool:
+    """Own all live MCP toolsets and deduplicate connection creation."""
+
+    def __init__(self) -> None:
+        self._toolsets: "dict[tuple[str, str], Any]" = {}
+        self._lock = asyncio.Lock()
+
+    async def get_toolset(self, server: "MCPServerSpec") -> MCPToolsetHandle:
+        key = (server.id, _config_fingerprint(server))
+        cached = self._toolsets.get(key)
+        if cached is not None:
+            return MCPToolsetHandle(MCPConnectionRef(*key), cached)
+        async with self._lock:
+            cached = self._toolsets.get(key)
+            if cached is None:
+                cached = build_mcp_server(server)
+                self._toolsets[key] = cached
+            return MCPToolsetHandle(MCPConnectionRef(*key), cached)
+
+    async def list_tools(self, server: "MCPServerSpec") -> "tuple[str, ...]":
+        result = await self.list_tools_result(server)
+        return tuple(item.name for item in result.tools)
+
+    async def list_tools_result(self, server: "MCPServerSpec") -> MCPDiscoveryResult:
+        handle = await self.get_toolset(server)
+        return await MCPClient(handle.toolset).discover(
+            server_id=server.id, connection_ref=handle.connection_ref
+        )
+
+    async def call_tool(
+        self,
+        *,
+        connection_ref: MCPConnectionRef,
+        tool_name: str,
+        arguments: "Mapping[str, Any]",
+    ) -> Any:
+        key = (connection_ref.server_id, connection_ref.fingerprint)
+        toolset = self._toolsets.get(key)
+        if toolset is None:
+            raise MCPConnectionUnavailableError(f"MCP connection {key!r} is not available")
+        return await MCPClient(toolset).call(
+            server_id=connection_ref.server_id,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+
+    async def close_server(self, server_id: str) -> None:
+        for key in tuple(key for key in self._toolsets if key[0] == server_id):
+            toolset = self._toolsets.get(key)
+            if toolset is not None:
+                await MCPClient(toolset).close()
+                self._toolsets.pop(key, None)
+
+    async def close(self) -> None:
+        errors: "list[Exception]" = []
+        for key, toolset in tuple(self._toolsets.items()):
+            try:
+                await MCPClient(toolset).close()
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._toolsets.pop(key, None)
+        if errors:
+            logger.warning("MCP connection close failures count=%s", len(errors))
+
+
+class McpResourceState(StrEnum):
+    NEW = "new"
+    CONNECTING = "connecting"
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
+
+
+@dataclass(frozen=True, slots=True)
+class McpResourceFailure:
+    owner: str
+    resource_id: "str | None"
+    error_id: str
+
+
+@dataclass(slots=True)
+class McpSessionResources:
+    """Session owner for domain MCP specs; ACP schemas never enter here."""
+
+    specs: "tuple[MCPServerSpec, ...]" = ()
+    pool: Any = None
+    state: McpResourceState = McpResourceState.NEW
+    connect_task: "asyncio.Task[tuple[Any, ...]] | None" = None
+    close_task: "asyncio.Task[tuple[McpResourceFailure, ...]] | None" = None
+    _toolsets: "tuple[Any, ...] | None" = None
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    async def toolsets(self) -> "tuple[Any, ...]":
+        async with self._lock:
+            if self.state is McpResourceState.CLOSED:
+                raise RuntimeError("MCP session resources are closed")
+            if self.state is McpResourceState.CLOSING:
+                raise RuntimeError("MCP session resources are closing")
+            if self.state is McpResourceState.OPEN:
+                return self._toolsets or ()
+            if self.connect_task is None:
+                self.state = McpResourceState.CONNECTING
+                self.connect_task = asyncio.create_task(self._connect())
+            task = self.connect_task
+        return await asyncio.shield(task)
+
+    async def _connect(self) -> "tuple[Any, ...]":
+        pool = MCPConnectionPool()
+        try:
+            handles = tuple(
+                [await pool.get_toolset(spec) for spec in self.specs]
+            )
+        except BaseException:
+            await pool.close()
+            async with self._lock:
+                self.connect_task = None
+                self.state = McpResourceState.NEW
+            raise
+        async with self._lock:
+            if self.state is not McpResourceState.CONNECTING:
+                await pool.close()
+                return ()
+            self.pool = pool
+            self._toolsets = tuple(handle.toolset for handle in handles)
+            self.connect_task = None
+            self.state = McpResourceState.OPEN
+            logger.info("event=agent.mcp.connected resource_count=%s", len(handles))
+            return self._toolsets
+
+    async def close(self, session_id: str) -> "tuple[McpResourceFailure, ...]":
+        async with self._lock:
+            if self.close_task is None:
+                self.state = McpResourceState.CLOSING
+                self.close_task = asyncio.create_task(self._close_once())
+            task = self.close_task
+        return await asyncio.shield(task)
+
+    async def _close_once(self) -> "tuple[McpResourceFailure, ...]":
+        failures: "list[McpResourceFailure]" = []
+        async with self._lock:
+            connect_task = self.connect_task
+            pool = self.pool
+        if connect_task is not None and not connect_task.done():
+            termination = await cancel_task(connect_task, 10.0)
+            if termination is TaskTermination.TIMED_OUT:
+                failures.append(McpResourceFailure("mcp", None, "connect_timeout"))
+        if pool is not None:
+            try:
+                await asyncio.wait_for(pool.close(), 10.0)
+            except Exception as exc:
+                failures.append(McpResourceFailure("mcp", None, type(exc).__name__))
+        async with self._lock:
+            if not failures:
+                self.pool = None
+                self._toolsets = None
+                self.connect_task = None
+                self.state = McpResourceState.CLOSED
+                self.close_task = None
+                logger.info("event=agent.mcp.closed resource_count=0")
+            else:
+                self.state = McpResourceState.OPEN
+                self.close_task = None
+        return tuple(failures)
+
+    def is_empty(self, session_id: str) -> bool:
+        return self.state is McpResourceState.CLOSED or (
+            self.state is McpResourceState.NEW and self.pool is None and self.connect_task is None
+        )
+
+
+__all__ = [
+    "MCPClient",
+    "McpResourceFailure",
+    "McpResourceState",
+    "McpSessionResources",
+    "build_mcp_server",
+]

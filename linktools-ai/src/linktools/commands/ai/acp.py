@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 from linktools.core import environ
-from linktools.ai.acp.errors import AcpDependencyError, require_sdk
+from linktools.ai.acp.protocol import AcpDependencyError, require_sdk
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -38,15 +38,13 @@ class Command(BaseCommand):
 async def _run(args: "Namespace") -> int:
     require_sdk()
     from linktools.ai.acp.agent import LinktoolsAcpAgent
-    from linktools.ai.acp.capabilities import AcpMode, CapabilityInput
-    from linktools.ai.acp.client_services import AcpClientServices
-    from linktools.ai.acp.persistence import AcpSessionRepository
-    from linktools.ai.acp.process_lock import ProjectProcessLock
-    from linktools.ai.acp.server import serve_stdio
-    from linktools.ai.acp.sessions import AcpSessionService
+    from linktools.ai.acp.client import AcpClient
+    from linktools.ai.acp.codec import AcpCodec
+    from linktools.ai.acp.protocol import AcpMode, AcpProtocol, CapabilityInput
+    from linktools.ai.acp.server import run_acp_server
     from linktools.ai.cli.project import load_project
-    from linktools.ai.cli.runtime import build_cli_runtime, load_agent_spec
-    from linktools.ai.cli.client import trusted_local_principal
+    from linktools.ai.cli.runtime import ProjectProcessLock, build_cli_runtime, load_agent_spec
+    from linktools.ai.governance.identity import trusted_local_principal
     from linktools.ai.execution.live_events import ExecutionEventHub
 
     logging_options = {
@@ -60,7 +58,7 @@ async def _run(args: "Namespace") -> int:
     logging.basicConfig(**logging_options)
     environ.debug = args.log_level == "debug"
     project = load_project(data_root=environ.get_data_path("ai"), start=args.project)
-    lock = ProjectProcessLock(project.state_root / "acp" / "agent.lock")
+    lock = ProjectProcessLock(project.state_root / "runtime.lock")
     try:
         lock.acquire(project_root=project.root)
     except RuntimeError as exc:
@@ -80,27 +78,21 @@ async def _run(args: "Namespace") -> int:
         return await load_agent_spec(bundle, mode_id)
 
     modes = tuple(AcpMode(mode_id, mode_id) for mode_id in mode_ids)
-    client_services = AcpClientServices(project_root=project.root)
-    session_service = AcpSessionService(
-        runtime=bundle.runtime,
-        repository=AcpSessionRepository(project.state_root),
-        project_root=project.root,
-        principal=trusted_local_principal(),
-        default_mode_id=modes[0].id,
-        mode_ids=tuple(mode.id for mode in modes),
-        client_services=client_services,
-    )
-    agent = LinktoolsAcpAgent(
-        runtime=bundle.runtime,
-        event_hub=hub,
-        session_service=session_service,
-        project_root=str(project.root),
+    principal = trusted_local_principal()
+    protocol = AcpProtocol(
+        principal=principal,
         spec_resolver=resolve,
         modes=modes,
         capability_input=CapabilityInput(modes=modes),
     )
+    agent = LinktoolsAcpAgent(
+        runtime=bundle.runtime,
+        codec=AcpCodec(),
+        client=AcpClient(project_root=project.root),
+        protocol=protocol,
+    )
     try:
-        await serve_stdio(agent)
+        await run_acp_server(agent)
     finally:
         await bundle.runtime.aclose()
         lock.release()

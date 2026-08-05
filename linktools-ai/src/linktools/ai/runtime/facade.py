@@ -6,10 +6,12 @@
 from dataclasses import dataclass
 from uuid import uuid4
 from ..agent.sandbox.protocols import Sandbox
-from ..agent.mcp.connection import MCPConnectionPool
+from ..agent.mcp.client import MCPConnectionPool
 from ..execution.live_events import ExecutionEventHub
 from ..errors import PrincipalAccessDeniedError
 from ..governance.identity import PrincipalContext
+from .interaction import InteractiveRunService
+from .session import RuntimeSessionService, SessionCloseResult
 
 from typing import TYPE_CHECKING
 
@@ -46,6 +48,8 @@ class Runtime:
     mcp_connections: "MCPConnectionPool | None" = None
     execution_event_hub: "ExecutionEventHub | None" = None
     swarm: "SwarmExecutionService | None" = None
+    sessions: "RuntimeSessionService | None" = None
+    interactions: "InteractiveRunService | None" = None
 
     async def run(
         self,
@@ -220,10 +224,17 @@ class Runtime:
         return await self.swarm.inspect_swarm(execution_id, principal=principal)
 
     async def aclose(self) -> None:
+        await self.shutdown()
+
+    async def shutdown(self) -> "tuple[SessionCloseResult, ...]":
+        results: "tuple[SessionCloseResult, ...]" = ()
+        if self.sessions is not None:
+            results = await self.sessions.shutdown()
         if self.mcp_connections is not None:
             await self.mcp_connections.close()
         if self.sandbox is not None:
             await self.sandbox.terminate()
+        return results
 
     async def __aenter__(self) -> "Runtime":
         return self

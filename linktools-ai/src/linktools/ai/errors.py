@@ -98,6 +98,22 @@ class StorageConflictError(StorageError, ValueError):
     """A compare-and-swap, lease, or revision update lost a race."""
 
 
+class SessionConflictError(StorageConflictError):
+    """A session revision or ownership check lost a race."""
+
+
+class UnknownSessionError(StorageError):
+    """A requested session does not exist."""
+
+
+class SessionBusyError(StorageError):
+    """A session has an operation that cannot be interleaved."""
+
+
+class SessionCleanupRequiredError(StorageError):
+    """A previous session cleanup failed and must be retried."""
+
+
 class RecoveryConflictError(StorageConflictError):
     """Another owner won the exclusive recovery claim."""
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.ai.acp.history_mapper import AcpHistoryMapper
+from linktools.ai.acp.codec import AcpCodec
 from linktools.ai.execution.domain import MessageCaptureState, RunStatus
 
 
@@ -19,7 +19,7 @@ def _view(messages):
 
 
 def test_history_mapper_preserves_roles_order_and_tool_id() -> None:
-    updates = AcpHistoryMapper().preflight(
+    updates = AcpCodec().encode_history(
         "session-1",
         (
             _view(
@@ -46,13 +46,13 @@ def test_history_mapper_rejects_incomplete_history_before_mapping() -> None:
     partial = _view(())
     partial.capture_state = MessageCaptureState.PARTIAL
     with pytest.raises(Exception) as raised:
-        AcpHistoryMapper().preflight("session-1", (partial,))
+        AcpCodec().encode_history("session-1", (partial,))
     assert raised.value.data["reason"] == "incomplete_history"
 
 
 def test_history_mapper_rejects_unknown_part_without_partial_result() -> None:
     with pytest.raises(Exception) as raised:
-        AcpHistoryMapper().preflight(
+        AcpCodec().encode_history(
             "session-1",
             (_view(({"kind": "response", "parts": [{"type": "future_part"}]},)),),
         )
@@ -60,7 +60,7 @@ def test_history_mapper_rejects_unknown_part_without_partial_result() -> None:
 
 
 def test_history_mapper_maps_user_content_resources() -> None:
-    updates = AcpHistoryMapper().preflight(
+    updates = AcpCodec().encode_history(
         "session-1",
         (
             _view(

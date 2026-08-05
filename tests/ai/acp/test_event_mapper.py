@@ -1,4 +1,4 @@
-from linktools.ai.acp.event_mapper import AcpEventMapper
+from linktools.ai.acp.codec import AcpCodec
 from linktools.ai.execution.live_events import (
     AssistantTextDelta,
     ToolCallCompleted,
@@ -6,11 +6,11 @@ from linktools.ai.execution.live_events import (
 
 
 def test_event_mapper_uses_real_execution_and_tool_ids() -> None:
-    mapper = AcpEventMapper()
-    message = mapper.map(
+    mapper = AcpCodec()
+    message = mapper.encode_event(
         AssistantTextDelta(execution_id="execution", text="hello")
     )
-    tool = mapper.map(
+    tool = mapper.encode_event(
         ToolCallCompleted(
             execution_id="execution",
             tool_call_id="tool-7",

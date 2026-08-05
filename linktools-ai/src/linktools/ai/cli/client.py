@@ -418,26 +418,16 @@ class LocalRuntimeClient:
             fail("storage writable", str(exc))
 
         try:
-            from ..acp.errors import require_sdk
+            from .runtime import ProjectProcessLock
 
-            require_sdk()
-            ok("ACP SDK exact version")
-            ok("ACP schema baseline")
-        except Exception as exc:
-            fail("ACP SDK exact version", str(exc))
-        try:
-            from ..acp.persistence import AcpSessionRepository
-            from ..acp.process_lock import ProjectProcessLock
-
-            repository = AcpSessionRepository(project.state_root)
-            repository.root.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(dir=repository.root):
+            project.state_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=project.state_root):
                 pass
-            lock = ProjectProcessLock(project.state_root / "acp" / "doctor.lock")
+            lock = ProjectProcessLock(project.state_root / "runtime.lock")
             lock.acquire(project_root=project.root)
             lock.release()
             ok("ACP process lock availability")
-            ok("ACP session metadata writable")
+            ok("Runtime session metadata writable")
         except Exception as exc:
             fail("ACP process lock availability", str(exc))
         try:

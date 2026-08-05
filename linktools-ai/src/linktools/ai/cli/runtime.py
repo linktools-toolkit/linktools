@@ -4,7 +4,11 @@
 """Composition helpers for the CLI runtime client."""
 
 import asyncio
+import json
+import os
 from dataclasses import dataclass, replace
+from datetime import datetime
+from pathlib import Path
 from uuid import uuid4
 
 from linktools.core import environ
@@ -50,6 +54,57 @@ from ..agent.skill.index import SkillSpecIndex
 from .skill_index import DirectorySkillIndex
 
 logger = environ.get_logger("ai.cli.runtime")
+
+
+class ProjectProcessLock:
+    """Prevent two local Runtime composition roots sharing one project."""
+
+    def __init__(self, path: "str | Path", *, sdk_version: str = "0.12.0") -> None:
+        self.path = Path(path)
+        self.sdk_version = sdk_version
+        self._stream = None
+
+    def acquire(self, *, project_root: "str | Path") -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        stream = self.path.open("a+", encoding="utf-8")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            stream.seek(0)
+            holder = stream.read().strip() or "unknown"
+            stream.close()
+            raise RuntimeError(f"project runtime lock is held: {holder}") from exc
+        stream.seek(0)
+        stream.truncate()
+        stream.write(json.dumps({"pid": os.getpid(), "started_at": datetime.now().astimezone().isoformat(), "project_root": str(Path(project_root).resolve()), "sdk_version": self.sdk_version}, sort_keys=True))
+        stream.flush()
+        os.fsync(stream.fileno())
+        self._stream = stream
+
+    def release(self) -> None:
+        if self._stream is None:
+            return
+        stream, self._stream = self._stream, None
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            stream.close()
 
 from typing import TYPE_CHECKING
 
@@ -316,4 +371,4 @@ async def load_agent_spec(
         raise
 
 
-__all__ = ["CliRuntimeBundle", "build_cli_runtime", "load_agent_spec"]
+__all__ = ["CliRuntimeBundle", "ProjectProcessLock", "build_cli_runtime", "load_agent_spec"]

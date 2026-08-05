@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from linktools.cli import BaseCommand
-from linktools.ai.acp.errors import AcpDependencyError, require_sdk
+from linktools.ai.acp.protocol import AcpDependencyError, require_sdk
 
 if TYPE_CHECKING:
     from argparse import Namespace

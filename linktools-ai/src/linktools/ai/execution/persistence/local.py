@@ -53,7 +53,19 @@ from ..domain import (
 )
 from ..domain import Page
 from ...evaluation import RunEvaluation
-from ..session import SessionContextSeed, SeedTurn, SessionRecord, SessionTurn
+from ..session import (
+    CreateSession,
+    ForkSession,
+    SessionContextSeed,
+    SessionQuery,
+    SessionRecord,
+    SessionSettings,
+    SessionState,
+    SessionTurn,
+    SessionWorkspace,
+    SeedTurn,
+    UpdateSession,
+)
 from ..snapshots import RunSnapshot, is_run_usage_monotonic
 from ..trace_models import NewRunTraceStep, RunEvent, RunTraceStep
 from ..commands import (
@@ -139,6 +151,29 @@ def _session(raw: dict) -> SessionRecord:
             for turn in seed.get("turns", ())
         )
         raw["context_seed"] = SessionContextSeed(**seed)
+    workspace = raw.get("workspace")
+    raw["workspace"] = (
+        SessionWorkspace(
+            cwd=workspace["cwd"],
+            additional_directories=tuple(workspace.get("additional_directories", ())),
+        )
+        if workspace is not None
+        else SessionWorkspace(cwd=".")
+    )
+    settings = raw.get("settings")
+    raw["settings"] = (
+        SessionSettings(
+            agent_id=settings["agent_id"],
+            options=dict(settings.get("options", {})),
+            tool_source_fingerprints=tuple(
+                settings.get("tool_source_fingerprints", ())
+            ),
+        )
+        if settings is not None
+        else SessionSettings(agent_id="default")
+    )
+    raw["state"] = SessionState(raw.get("state", SessionState.OPEN))
+    raw["revision"] = int(raw.get("revision", 1))
     return SessionRecord(**raw)
 
 
@@ -432,12 +467,25 @@ class LocalExecutionBackend:
 
     async def create_session(
         self,
+        command: "CreateSession | None" = None,
         *,
-        session_id: str,
-        user_id: "str | None",
-        tenant_id: "str | None",
+        session_id: "str | None" = None,
+        user_id: "str | None" = None,
+        tenant_id: "str | None" = None,
         context_seed: "SessionContextSeed | None" = None,
     ) -> SessionRecord:
+        if command is not None:
+            session_id = command.session_id
+            user_id = command.user_id
+            tenant_id = command.tenant_id
+            context_seed = command.context_seed
+            workspace = command.workspace
+            settings = command.settings
+        else:
+            workspace = SessionWorkspace(cwd=".")
+            settings = SessionSettings(agent_id="default")
+        if session_id is None:
+            raise ValueError("session_id is required")
         path = self._session_path(session_id)
         async with self._locks.acquire(("session", session_id)):
             if await self._exists(path):
@@ -446,9 +494,80 @@ class LocalExecutionBackend:
                     raise StorageConflictError("session ownership conflict")
                 return existing
             now = _now()
-            value = SessionRecord(session_id, user_id, tenant_id, 1, None, now, now, context_seed)
+            value = SessionRecord(
+                id=session_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                next_turn_sequence=1,
+                latest_completed_run_id=None,
+                created_at=now,
+                updated_at=now,
+                context_seed=context_seed,
+                workspace=workspace,
+                settings=settings,
+            )
             await asyncio.to_thread(atomic_write_json, path, asdict(value))
             return value
+
+    async def update_session(self, command: UpdateSession) -> SessionRecord:
+        async with self._locks.acquire(("session", command.session_id)):
+            session = await self._read_session(command.session_id)
+            if session is None:
+                raise StorageError("unknown session")
+            if session.revision != command.expected_revision:
+                raise StorageConflictError("session revision conflict")
+            updated = replace(
+                session,
+                workspace=command.workspace or session.workspace,
+                settings=command.settings or session.settings,
+                title=command.title if command.title is not None else session.title,
+                state=command.state or session.state,
+                revision=session.revision + 1,
+                updated_at=_now(),
+            )
+            await asyncio.to_thread(
+                atomic_write_json, self._session_path(command.session_id), asdict(updated)
+            )
+            return updated
+
+    async def fork_session(self, command: ForkSession) -> SessionRecord:
+        source = await self.get_session(command.source_session_id)
+        if source is None:
+            raise StorageError("unknown session")
+        turns = await self.get_session_messages(command.source_session_id)
+        if any(
+            turn.status is not RunStatus.COMPLETED
+            or turn.capture_state is not MessageCaptureState.COMPLETE
+            for turn in turns
+        ):
+            raise StorageConflictError("session history is incomplete")
+        seed = SessionContextSeed(
+            schema="session-context-seed.v1",
+            source_session_id=source.id,
+            source_updated_at=source.updated_at,
+            turns=tuple(
+                SeedTurn(
+                    session_id=turn.session_id,
+                    sequence=turn.sequence,
+                    run_id=turn.run_id,
+                    input=turn.input,
+                    delta_messages=turn.delta_messages,
+                    status=turn.status,
+                    capture_state=turn.capture_state,
+                )
+                for turn in turns
+            ),
+        )
+        return await self.create_session(
+            CreateSession(
+                session_id=command.target_session_id,
+                user_id=command.user_id,
+                tenant_id=command.tenant_id,
+                workspace=command.workspace,
+                settings=command.settings,
+                context_seed=seed,
+            )
+        )
 
     async def update_session_context_seed(
         self, session_id: str, context_seed: SessionContextSeed
@@ -457,7 +576,12 @@ class LocalExecutionBackend:
             session = await self._read_session(session_id)
             if session is None:
                 raise StorageError("unknown session")
-            updated = replace(session, context_seed=context_seed, updated_at=_now())
+            updated = replace(
+                session,
+                context_seed=context_seed,
+                revision=session.revision + 1,
+                updated_at=_now(),
+            )
             await asyncio.to_thread(
                 atomic_write_json, self._session_path(session_id), asdict(updated)
             )
@@ -478,7 +602,9 @@ class LocalExecutionBackend:
             return None
         return _session(dict(await asyncio.to_thread(read_json, path)))
 
-    async def list_all_sessions(self) -> "tuple[SessionRecord, ...]":
+    async def list_sessions(
+        self, query: "SessionQuery | None" = None
+    ) -> "tuple[SessionRecord, ...]":
         """Every persisted session, by scanning sessions/<id>/session.json.
         Local-backend-only enumeration (the SQL backend implements its own)."""
         sessions_dir = self.root / "sessions"
@@ -499,7 +625,18 @@ class LocalExecutionBackend:
                     continue
             return out
 
-        return tuple(await asyncio.to_thread(_scan))
+        values = tuple(await asyncio.to_thread(_scan))
+        if query is None:
+            return values
+        return tuple(
+            session
+            for session in values
+            if (query.user_id is None or session.user_id == query.user_id)
+            and (query.tenant_id is None or session.tenant_id == query.tenant_id)
+        )
+
+    async def list_all_sessions(self) -> "tuple[SessionRecord, ...]":
+        return await self.list_sessions()
 
     async def list_all_runs(self) -> "tuple[RunRecord, ...]":
         """Every persisted run, by scanning runs/<id>/run.json."""

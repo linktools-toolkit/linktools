@@ -3,8 +3,7 @@
 
 """MCP connection, discovery, and tool adaptation."""
 
-from .client import build_mcp_server
-from .connection import MCPConnectionPool, MCPToolsetHandle
+from .client import MCPConnectionPool, MCPToolsetHandle, build_mcp_server
 from .codec import parse_mcp_spec
 from .models import (
     MCPConnectionRef,

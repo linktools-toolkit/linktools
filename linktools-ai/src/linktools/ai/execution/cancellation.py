@@ -15,6 +15,15 @@ goes through the database (CANCELLING status) and is observed by the worker
 polling ``raise_if_cancelled()`` -- the token is the in-process fast path."""
 
 import asyncio
+from enum import StrEnum
+from typing import Any
+
+
+class TaskTermination(StrEnum):
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    FAILED = "failed"
 
 
 class CancellationToken:
@@ -57,3 +66,36 @@ class CancellationToken:
         token is not set, so callers can await it unconditionally."""
         if self._event.is_set():
             raise asyncio.CancelledError("run cancelled by request")
+
+
+async def cancel_task(
+    task: "asyncio.Task[Any]", timeout: float
+) -> TaskTermination:
+    """Cancel a task and observe its terminal state without leaking it."""
+    if not task.done():
+        task.cancel()
+    return await observe_task(task, timeout)
+
+
+async def observe_task(
+    task: "asyncio.Task[Any]", timeout: float
+) -> TaskTermination:
+    """Observe a task, retaining ownership when it outlives the timeout."""
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    except asyncio.TimeoutError:
+        task.add_done_callback(_observe_task_result)
+        return TaskTermination.TIMED_OUT
+    except asyncio.CancelledError:
+        return TaskTermination.CANCELLED
+    except BaseException:
+        return TaskTermination.FAILED
+    return TaskTermination.COMPLETED
+
+
+def _observe_task_result(task: "asyncio.Task[Any]") -> None:
+    if not task.cancelled():
+        try:
+            task.exception()
+        except BaseException:
+            pass

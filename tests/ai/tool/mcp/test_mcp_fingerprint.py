@@ -5,7 +5,7 @@ governance-relevant config hashes without ambiguous delimiter joins. None vs
 empty allowlist, spaced-vs-split command parts, and a rotated secret must each
 produce a different fingerprint; the secret plaintext never appears in it."""
 
-from linktools.ai.agent.mcp.connection import _config_fingerprint
+from linktools.ai.agent.mcp.client import _config_fingerprint
 from linktools.ai.agent.mcp.spec import MCPServerSpec
 
 

@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""ACP stdio transport entry point."""
+"""ACP stdio transport and Runtime teardown."""
 
 import asyncio
 import logging
 import signal
 
 from .agent import LinktoolsAcpAgent
-from .errors import require_sdk
-from .session_models import CloseReason
+from .protocol import require_sdk
+
 
 logger = logging.getLogger("linktools.ai.acp.server")
 
 
-async def serve_stdio(agent: LinktoolsAcpAgent) -> None:
+async def run_acp_server(agent: LinktoolsAcpAgent) -> None:
     acp = require_sdk()
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
-    shutdown_reason: CloseReason = "eof"
-    installed = []
+    installed: list[int] = []
+
     if task is not None:
         def request_shutdown(reason: str) -> None:
-            nonlocal shutdown_reason
-            shutdown_reason = reason
-            task.cancel()
+            if task is not None:
+                task.cancel()
 
         for name in ("SIGINT", "SIGTERM"):
             signum = getattr(signal, name, None)
@@ -40,29 +39,22 @@ async def serve_stdio(agent: LinktoolsAcpAgent) -> None:
     finally:
         for signum in installed:
             loop.remove_signal_handler(signum)
-        failures = []
-        for session_id in tuple(agent.sessions.active_sessions):
-            try:
-                result = await agent.sessions.close_session_resources(
-                    session_id,
-                    reason=shutdown_reason,
-                )
-                if not result.closed:
-                    failures.extend(result.failures)
-            except Exception as exc:
-                logger.error(
-                    "ACP shutdown cleanup failed session=%s error_type=%s",
-                    session_id,
-                    type(exc).__name__,
-                )
-                failures.append(exc)
+        results = await agent.runtime.shutdown()
+        failures = [failure for result in results for failure in result.failures]
         if failures:
-            logger.error("ACP shutdown left %s cleanup failures", len(failures))
-            raise RuntimeError("ACP session cleanup failed")
+            logger.error(
+                "event=acp.transport.shutdown_failed resource_count=%s",
+                len(failures),
+            )
+            raise RuntimeError("ACP Runtime shutdown failed")
+
+
+async def serve_stdio(agent: LinktoolsAcpAgent) -> None:
+    await run_acp_server(agent)
 
 
 def run_stdio(agent: LinktoolsAcpAgent) -> None:
-    asyncio.run(serve_stdio(agent))
+    asyncio.run(run_acp_server(agent))
 
 
-__all__ = ["run_stdio", "serve_stdio"]
+__all__ = ["run_acp_server", "run_stdio", "serve_stdio"]

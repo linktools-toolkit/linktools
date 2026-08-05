@@ -425,7 +425,7 @@ async def test_connection_manager_closes_toolsets():
     mgr = MCPConnectionPool()
     # Use the real manager's close path with an object exposing close(), keyed
     # the way get_toolset actually keys (server.id, fingerprint).
-    from linktools.ai.agent.mcp.connection import _config_fingerprint
+    from linktools.ai.agent.mcp.client import _config_fingerprint
 
     class _TS:
         closed = False
@@ -445,7 +445,7 @@ async def test_connection_manager_cache_keyed_on_config_fingerprint():
     (command) must get DISTINCT cache slots -- a config change with a reused id
     must not return a stale cached toolset. Secret plaintext never enters the
     key (only a length revision does)."""
-    from linktools.ai.agent.mcp.connection import _config_fingerprint
+    from linktools.ai.agent.mcp.client import _config_fingerprint
 
     s1 = parse_mcp_spec(
         "risk", {"transport": "stdio", "command": ["python", "-m", "a"]}

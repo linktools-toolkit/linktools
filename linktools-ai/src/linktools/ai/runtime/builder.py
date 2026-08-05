@@ -13,9 +13,10 @@ from ..agent.tool.pydantic_ai import PydanticAIToolAdapter
 from ..agent.tool.schema import JsonSchemaToolValidator
 from ..agent.tool.service import ToolExecutionService
 from ..agent.tool.exposure import ToolAssembler
+from ..agent.mcp.client import McpSessionResources
 from ..agent.builtin import BuiltinToolProvider
 from ..errors import RuntimeInitializationError, StorageFeatureSupportError
-from ..execution.live_events import ExecutionEventHub, NoopRunLiveEventSink, NoopSecurityEventSink
+from ..execution.live_events import ExecutionEventHub, NoopSecurityEventSink
 from ..execution.query import ExecutionQueryService
 from ..execution.service import ExecutionService
 from ..execution import trace_codec
@@ -23,6 +24,8 @@ from ..model.resolver import ModelResolver
 from ..storage.database import CoordinationScope
 from .dependencies import RuntimeDependencies
 from .facade import Runtime
+from .interaction import InteractiveRunService
+from .session import RuntimeSessionService
 from .requirements import RuntimeRequirements, RuntimeTopology
 
 from typing import TYPE_CHECKING
@@ -137,7 +140,9 @@ def build_runtime(
         raise RuntimeInitializationError(
             "event_hub conflicts with the configured live event sink"
         )
-    live_events = event_hub or dependencies.live_events or NoopRunLiveEventSink()
+    live_events = event_hub or dependencies.live_events
+    if live_events is None:
+        live_events = ExecutionEventHub()
     execution = ExecutionService(
         storage.execution,
         compiler,
@@ -164,6 +169,18 @@ def build_runtime(
             live_events=live_events,
             agent_provider=dependencies.agent_spec_provider,
         )
+    sessions = RuntimeSessionService(
+        storage.execution,
+        authorization=dependencies.authorization,
+        mcp_resource_factory=McpSessionResources,
+    )
+    interactions = InteractiveRunService(
+        execution,
+        event_hub or live_events
+        if isinstance(live_events, ExecutionEventHub)
+        else ExecutionEventHub(),
+        sessions,
+    )
     return Runtime(
         execution=execution,
         query=ExecutionQueryService(
@@ -188,6 +205,8 @@ def build_runtime(
             else None
         ),
         swarm=swarm,
+        sessions=sessions,
+        interactions=interactions,
     )
 
 
