@@ -418,15 +418,15 @@ class ExecutionService:
         execution_id: "str | None" = None,
         extra_toolsets: "tuple[Any, ...]" = (),
     ) -> object:
-        if not isinstance(principal, PrincipalContext):
-            raise TypeError("principal must be a PrincipalContext")
-        if self._store is None:
-            raise RuntimeInitializationError("execution store is unavailable")
         session_id = session_id or uuid4().hex
         execution_id = execution_id or uuid4().hex
         envelope = _InvocationEnvelope(execution_id)
 
         async def body(scope: _InvocationEnvelope) -> object:
+            if not isinstance(principal, PrincipalContext):
+                raise TypeError("principal must be a PrincipalContext")
+            if self._store is None:
+                raise RuntimeInitializationError("execution store is unavailable")
             session = await self._store.create_session(
                 session_id=session_id,
                 user_id=principal.user_id,
@@ -450,8 +450,9 @@ class ExecutionService:
             ).record
             scope.admitted = True
             logger.info(
-                "event=execution.invocation_admitted execution_id=%s admitted=%s persisted_status=%s",
+                "event=execution.invocation_admitted execution_id=%s admitted=%s invocation_admitted=%s persisted_status=%s",
                 scope.record.id,
+                scope.admitted,
                 scope.admitted,
                 scope.record.status.value,
             )
@@ -569,24 +570,25 @@ class ExecutionService:
         principal: PrincipalContext,
         extra_toolsets: "tuple[Any, ...]" = (),
     ) -> object:
-        if not isinstance(principal, PrincipalContext):
-            raise TypeError("principal must be a PrincipalContext")
         envelope = _InvocationEnvelope(run_id)
 
         async def body(scope: _InvocationEnvelope) -> object:
+            if not isinstance(principal, PrincipalContext):
+                raise TypeError("principal must be a PrincipalContext")
             record = await self._required(run_id)
             self._authorize(principal, record, ExecutionAction.RESUME)
             if record.status is not RunStatus.PAUSED:
                 raise ExecutionInvocationRejectedError(
                     run_id,
-                    "invalid_resume_status",
-                    "invalid_resume_status",
+                    "invalid_execution_state",
+                    "invalid_execution_state",
                 )
             scope.record = record
             scope.admitted = True
             logger.info(
-                "event=execution.invocation_admitted execution_id=%s admitted=%s persisted_status=%s",
+                "event=execution.invocation_admitted execution_id=%s admitted=%s invocation_admitted=%s persisted_status=%s",
                 record.id,
+                scope.admitted,
                 scope.admitted,
                 record.status.value,
             )
@@ -1058,25 +1060,39 @@ class ExecutionService:
         except BaseException as error:
             envelope.original_error = error
             if not envelope.admitted:
-                if isinstance(
-                    error,
-                    (
-                        PrincipalAccessDeniedError,
-                        KeyError,
-                        ExecutionInvocationRejectedError,
-                    ),
-                ):
-                    raise ExecutionInvocationRejectedError(
-                        envelope.execution_id,
-                        "invocation_rejected",
-                        type(error).__name__,
-                    ) from error
-                raise
+                rejection = self._rejection_from_error(envelope, error)
+                logger.info(
+                    "event=execution.invocation_rejected execution_id=%s invocation_admitted=%s invocation_rejection_reason=%s error_id=%s",
+                    envelope.execution_id,
+                    False,
+                    rejection.reason,
+                    rejection.error_id,
+                )
+                raise rejection from error
             await self._prepare_failure_boundary(envelope, error)
             raise
         finally:
             if envelope.admitted:
                 await self._finalize_envelope(envelope)
+
+    def _rejection_from_error(
+        self,
+        envelope: _InvocationEnvelope,
+        error: BaseException,
+    ) -> ExecutionInvocationRejectedError:
+        if isinstance(error, PrincipalAccessDeniedError):
+            reason = "permission_denied"
+        elif isinstance(error, KeyError):
+            reason = "unknown_execution"
+        elif isinstance(error, ExecutionInvocationRejectedError):
+            return error
+        else:
+            reason = "invocation_start_failed"
+        return ExecutionInvocationRejectedError(
+            envelope.execution_id,
+            reason,
+            type(error).__name__,
+        )
 
     async def _prepare_failure_boundary(
         self,

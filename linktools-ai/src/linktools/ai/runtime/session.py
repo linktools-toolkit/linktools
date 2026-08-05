@@ -399,15 +399,45 @@ class RuntimeSessionService:
         *,
         principal: "PrincipalContext",
         error_id: str,
+        execution_id: "str | None" = None,
     ) -> None:
+        if not error_id:
+            raise SessionInvariantError("cleanup error id is required")
         active = self._active.get(session_id)
         if active is None:
             raise UnknownSessionError(session_id)
         self._authorize(principal, active.record)
         async with active.lock:
+            resolved_execution_id = execution_id or active.active_execution_id
+            if (
+                execution_id is None
+                and resolved_execution_id is None
+                and error_id in {
+                    "lifecycle_persistence_failed",
+                    "ExecutionLifecyclePersistenceError",
+                }
+            ):
+                raise SessionInvariantError(
+                    "execution cleanup requires an execution id"
+                )
+            existing_execution_id = active.cleanup_execution_id
+            if (
+                existing_execution_id is not None
+                and existing_execution_id != resolved_execution_id
+            ):
+                existing = await self._store.get_run(existing_execution_id)
+                if existing is None or existing.status in {
+                    RunStatus.PENDING,
+                    RunStatus.RUNNING,
+                    RunStatus.PAUSED,
+                    RunStatus.CANCELLING,
+                }:
+                    raise SessionInvariantError(
+                        "active cleanup execution cannot be replaced"
+                    )
             active.cleanup_required = True
             active.cleanup_error_id = error_id
-            active.cleanup_execution_id = active.active_execution_id
+            active.cleanup_execution_id = resolved_execution_id
         logger.error(
             "event=runtime.session.cleanup_required session_id=%s cleanup_required=%s cleanup_execution_id=%s cleanup_error_id=%s",
             session_id,
@@ -939,6 +969,19 @@ class RuntimeSessionService:
                 len(failures),
             )
             return SessionCloseResult(False, tuple(failures))
+        cleanup_failure = await self._non_terminal_cleanup_failure(active)
+        if cleanup_failure is not None:
+            async with active.lock:
+                active.cleanup_required = True
+                active.closing_requested = False
+                active.close_task = None
+            logger.error(
+                "event=runtime.session.execution_not_terminal session_id=%s cleanup_required=%s cleanup_execution_id=%s",
+                session_id,
+                True,
+                cleanup_failure.resource_id,
+            )
+            return SessionCloseResult(False, (cleanup_failure,))
         async with active.lock:
             already_closed = active.record.state is SessionState.CLOSED
             closed_record = active.record
@@ -970,6 +1013,23 @@ class RuntimeSessionService:
         await self._remove_active(active)
         logger.info("event=runtime.session.closed session_id=%s", record.id)
         return SessionCloseResult(True)
+
+    async def _non_terminal_cleanup_failure(
+        self, active: ActiveRuntimeSession
+    ) -> "ResourceFailure | None":
+        async with active.lock:
+            if not active.cleanup_required or active.cleanup_execution_id is None:
+                return None
+            execution_id = active.cleanup_execution_id
+        latest = await self._store.get_run(execution_id)
+        if latest is not None and latest.status in {
+            RunStatus.PENDING,
+            RunStatus.RUNNING,
+            RunStatus.PAUSED,
+            RunStatus.CANCELLING,
+        }:
+            return ResourceFailure("execution", execution_id, "non_terminal_execution")
+        return None
 
     async def _prepare_mcp_replacement(
         self,

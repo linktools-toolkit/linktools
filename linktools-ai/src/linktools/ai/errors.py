@@ -248,7 +248,7 @@ class ExecutionTerminalMismatchError(RunError):
     """The persisted execution result disagreed with its terminal event."""
 
 
-class ExecutionInvocationRejectedError(RunError, PrincipalAccessDeniedError):
+class ExecutionInvocationRejectedError(RunError):
     """An execution invocation was rejected before it owned a lifecycle."""
 
     def __init__(self, execution_id: str, reason: str, error_id: str) -> None:

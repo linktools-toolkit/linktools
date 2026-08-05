@@ -36,6 +36,14 @@ class AcpTransportError(RuntimeError):
     """ACP stdio transport or framing failed outside a request handler."""
 
 
+def _rejection_reason(error: "ExecutionInvocationRejectedError") -> str:
+    if error.reason == "permission_denied":
+        return "permission_denied"
+    if error.reason == "invocation_start_failed":
+        return "execution_start_failed"
+    return "execution_rejected"
+
+
 def require_sdk() -> object:
     try:
         import acp
@@ -244,12 +252,7 @@ class AcpProtocol:
         elif isinstance(error, ExecutionTerminalMismatchError):
             return internal_error("execution_terminal_mismatch", session_id=session_id)
         elif isinstance(error, ExecutionInvocationRejectedError):
-            reason = (
-                "permission_denied"
-                if error.error_id == PrincipalAccessDeniedError.__name__
-                else "execution_rejected"
-            )
-            return request_error(reason, session_id=session_id)
+            return request_error(_rejection_reason(error), session_id=session_id)
         elif isinstance(error, McpReplacementError):
             return internal_error("mcp_replacement_failed", session_id=session_id)
         else:
@@ -308,12 +311,7 @@ def protocol_handler(function: Callable[..., Any]) -> Callable[..., Any]:
             if isinstance(exc, ExecutionTerminalMismatchError):
                 raise internal_error("execution_terminal_mismatch") from exc
             if isinstance(exc, ExecutionInvocationRejectedError):
-                reason = (
-                    "permission_denied"
-                    if exc.error_id == PrincipalAccessDeniedError.__name__
-                    else "execution_rejected"
-                )
-                raise request_error(reason) from exc
+                raise request_error(_rejection_reason(exc)) from exc
             if isinstance(exc, PrincipalAccessDeniedError):
                 raise request_error("permission_denied") from exc
             if isinstance(exc, McpReplacementError):

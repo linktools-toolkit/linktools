@@ -14,6 +14,7 @@ from linktools.cli import BaseCommand
 from linktools.core import environ
 from linktools.errors import ConfigError
 from linktools.ai.acp.protocol import AcpDependencyError, AcpTransportError, require_sdk
+from linktools.ai.cli.project import ProjectConfigError
 
 logger = environ.get_logger("commands.ai.acp")
 
@@ -49,10 +50,11 @@ class Command(BaseCommand):
             return asyncio.run(_run(args))
         except asyncio.CancelledError:
             return 130
+        except (AcpDependencyError, ConfigError, ProjectConfigError):
+            return 3
 
 
 async def _run(args: "Namespace") -> int:
-    require_sdk()
     from linktools.ai.acp.agent import LinktoolsAcpAgent
     from linktools.ai.acp.client import AcpClient
     from linktools.ai.acp.codec import AcpCodec
@@ -74,7 +76,7 @@ async def _run(args: "Namespace") -> int:
         logging_options["stream"] = sys.stderr
     logging.basicConfig(**logging_options)
     environ.debug = args.log_level == "debug"
-    project = load_project(data_root=environ.get_data_path("ai"), start=args.project)
+    project = None
     lock: "ProjectProcessLock | None" = None
     lock_acquired = False
     bundle = None
@@ -82,6 +84,10 @@ async def _run(args: "Namespace") -> int:
     agent = None
     result = _AcpLifecycleResult()
     try:
+        logger.info("event=ai.acp.initialization_stage stage=dependency_check")
+        require_sdk()
+        logger.info("event=ai.acp.initialization_stage stage=project_load")
+        project = load_project(data_root=environ.get_data_path("ai"), start=args.project)
         logger.info("event=ai.acp.initialization_stage stage=lock_acquire")
         lock = ProjectProcessLock(project.state_root / "runtime.lock")
         try:
@@ -203,18 +209,22 @@ async def _run(args: "Namespace") -> int:
         exit_code = 4
     elif result.transport_error is not None:
         exit_code = 3
-    elif isinstance(result.initialization_error, (AcpDependencyError, ConfigError)):
+    elif isinstance(
+        result.initialization_error,
+        (AcpDependencyError, ConfigError, ProjectConfigError),
+    ):
         exit_code = 3
     elif result.initialization_error is not None:
         exit_code = 10
     else:
         exit_code = 0
     logger.info(
-        "event=ai.acp.shutdown_complete client_failure_count=%s runtime_closed=%s transport_error_id=%s cleanup_failure_count=%s exit_code=%s error_id=%s",
+        "event=ai.acp.shutdown_complete client_failure_count=%s runtime_closed=%s transport_error_id=%s cleanup_failure_count=%s exit_code=%s acp_exit_code=%s error_id=%s",
         len(result.client_failures),
         result.runtime_closed,
         type(result.transport_error).__name__ if result.transport_error is not None else None,
         cleanup_failure_count,
+        exit_code,
         exit_code,
         type(result.initialization_error).__name__ if result.initialization_error is not None else None,
     )
