@@ -108,19 +108,25 @@ class LinktoolsAcpAgent:
 
         session_id = uuid4().hex
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
-        active = await self.runtime.sessions.create(
-            session_id=session_id,
-            workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
-            settings=SessionSettings(
-                agent_id=self.protocol.modes[0].id,
-                tool_source_fingerprints=tuple(
-                    self.codec.mcp_server_fingerprint(item) for item in tool_sources
+        owner = self.client.resource_owner(session_id)
+        try:
+            active = await self.runtime.sessions.create(
+                session_id=session_id,
+                workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
+                settings=SessionSettings(
+                    agent_id=self.protocol.modes[0].id,
+                    tool_source_fingerprints=tuple(
+                        self.codec.mcp_server_fingerprint(item) for item in tool_sources
+                    ),
                 ),
-            ),
-            principal=self.protocol.principal,
-            tool_sources=tool_sources,
-        )
-        await self._register_client_resources(session_id)
+                principal=self.protocol.principal,
+                tool_sources=tool_sources,
+                owner=owner,
+                owner_name="acp.client",
+            )
+        except BaseException:
+            owner.discard_if_empty()
+            raise
         return schema.NewSessionResponse(
             sessionId=active.record.id,
             modes=self.protocol.mode_state(active.record.settings.agent_id),
@@ -135,7 +141,7 @@ class LinktoolsAcpAgent:
         import acp.schema as schema
 
         sessions = await self.runtime.sessions.list(principal=self.protocol.principal)
-        values = [session.record for session in sessions if cwd is None or session.record.workspace.cwd == cwd]
+        values = [record for record in sessions if cwd is None or record.workspace.cwd == cwd]
         return schema.ListSessionsResponse(
             sessions=[self.codec.encode_session(record) for record in values],
             nextCursor=None,
@@ -171,23 +177,26 @@ class LinktoolsAcpAgent:
         ) as load:
             updates = self.codec.encode_history(session_id, load.history)
             record = await load.commit()
+            owner = self.client.resource_owner(session_id)
             try:
                 await self.runtime.sessions.register_owner(
                     session_id,
                     "acp.client",
-                    self.client.resource_owner(session_id),
+                    owner,
                     lease=load.lease,
                 )
-            except Exception as exc:
+            except BaseException as exc:
                 await load.release()
+                owner.discard_if_empty()
                 await self.runtime.sessions.close(
                     session_id, principal=self.protocol.principal, reason="owner_registration"
                 )
                 raise internal_error("client_owner_registration_failed", session_id=session_id) from exc
             try:
                 await self.client.replay(session_id, updates)
-            except Exception as exc:
+            except BaseException as exc:
                 await load.release()
+                owner.discard_if_empty()
                 await self.runtime.sessions.close(
                     session_id, principal=self.protocol.principal, reason="transport_error"
                 )
@@ -211,19 +220,25 @@ class LinktoolsAcpAgent:
 
         source = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
-        active = await self.runtime.sessions.resume(
-            session_id,
-            workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
-            settings=replace(
-                source.record.settings,
-                tool_source_fingerprints=tuple(
-                    self.codec.mcp_server_fingerprint(item) for item in tool_sources
+        owner = self.client.resource_owner(session_id)
+        try:
+            active = await self.runtime.sessions.resume(
+                session_id,
+                workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
+                settings=replace(
+                    source.record.settings,
+                    tool_source_fingerprints=tuple(
+                        self.codec.mcp_server_fingerprint(item) for item in tool_sources
+                    ),
                 ),
-            ),
-            principal=self.protocol.principal,
-            tool_sources=tool_sources,
-        )
-        await self._register_client_resources(session_id)
+                principal=self.protocol.principal,
+                tool_sources=tool_sources,
+                owner=owner,
+                owner_name="acp.client",
+            )
+        except BaseException:
+            owner.discard_if_empty()
+            raise
         return schema.ResumeSessionResponse(
             modes=self.protocol.mode_state(active.record.settings.agent_id),
             configOptions=list(self.protocol.config_registry.response_state()),
@@ -244,20 +259,26 @@ class LinktoolsAcpAgent:
         source = await self.runtime.sessions.get(session_id, principal=self.protocol.principal)
         tool_sources = self.codec.decode_mcp_servers(mcp_servers)
         target_session_id = uuid4().hex
-        active = await self.runtime.sessions.fork(
-            session_id,
-            target_session_id,
-            workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
-            settings=replace(
-                source.record.settings,
-                tool_source_fingerprints=tuple(
-                    self.codec.mcp_server_fingerprint(item) for item in tool_sources
+        owner = self.client.resource_owner(target_session_id)
+        try:
+            active = await self.runtime.sessions.fork(
+                session_id,
+                target_session_id,
+                workspace=SessionWorkspace(cwd=cwd, additional_directories=tuple(additional_directories or ())),
+                settings=replace(
+                    source.record.settings,
+                    tool_source_fingerprints=tuple(
+                        self.codec.mcp_server_fingerprint(item) for item in tool_sources
+                    ),
                 ),
-            ),
-            principal=self.protocol.principal,
-            tool_sources=tool_sources,
-        )
-        await self._register_client_resources(target_session_id)
+                principal=self.protocol.principal,
+                tool_sources=tool_sources,
+                owner=owner,
+                owner_name="acp.client",
+            )
+        except BaseException:
+            owner.discard_if_empty()
+            raise
         return schema.ForkSessionResponse(
             sessionId=active.record.id,
             modes=self.protocol.mode_state(active.record.settings.agent_id),
@@ -339,19 +360,6 @@ class LinktoolsAcpAgent:
 
     async def ext_notification(self, method: str, params: "dict[str, Any]") -> None:
         return None
-
-    async def _register_client_resources(self, session_id: str) -> None:
-        try:
-            await self.runtime.sessions.register_owner(
-                session_id, "acp.client", self.client.resource_owner(session_id)
-            )
-        except BaseException:
-            await self.runtime.sessions.close(
-                session_id,
-                principal=self.protocol.principal,
-                reason="owner_registration",
-            )
-            raise
 
     def _require_initialized(self) -> None:
         if not self._initialized:

@@ -275,6 +275,12 @@ class InteractiveRunService:
                         await observer.publish(event)
                         if isinstance(event, ExecutionPaused):
                             paused = True
+                            event_task = None
+                            logger.info(
+                                "event=runtime.interaction.cycle_boundary_received session_id=%s execution_id=%s boundary=paused",
+                                session_id,
+                                execution_id,
+                            )
                         elif isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
                             terminal_event = event
                             event_task = None
@@ -301,6 +307,11 @@ class InteractiveRunService:
                         type(execution_outcome).__name__,
                     )
                 if task_done and paused and terminal_event is None:
+                    logger.info(
+                        "event=runtime.interaction.pause_cycle_completed session_id=%s execution_id=%s",
+                        session_id,
+                        execution_id,
+                    )
                     return await self._result_from_execution(execution_id, principal)
                 if task_done and terminal_event is not None:
                     result = await self._result_from_execution(execution_id, principal)

@@ -86,7 +86,6 @@ from .live_events import (
     ExecutionCompleted,
     ExecutionFailed,
     ExecutionPaused,
-    LiveEventConsumerSlowError,
     UsageUpdated,
     publish_execution_event,
 )
@@ -644,6 +643,7 @@ class ExecutionService:
             ),
             token,
         )
+        # task-owner: execution.child_heartbeat
         heartbeat = asyncio.ensure_future(
             self._heartbeat(claimed.id, owner, claimed.lease.fence, token)
         )
@@ -952,6 +952,59 @@ class ExecutionService:
             snapshot_revision=record.snapshot_revision,
             trace_sequence=lambda: collector.next_sequence,
         )
+        boundary_published = False
+
+        async def publish_boundary(event: object) -> None:
+            nonlocal boundary_published
+            if boundary_published:
+                raise ExecutionTerminalMismatchError(record.id)
+            try:
+                await self._publish_lifecycle_event(event)
+                boundary_published = True
+            finally:
+                await self._close_live_cycle(record.id)
+
+        async def persist_generic_failure(error: BaseException) -> None:
+            sanitized_error = sanitize_run_error(error)
+            try:
+                trace_end = await collector.flush()
+                await self._store.abort_run(
+                    AbortExecution(
+                        record.id,
+                        owner,
+                        record.lease.fence,
+                        AgentSnapshotData(
+                            delta_messages=(),
+                            final_output=None,
+                            usage=usage_sink.snapshot(),
+                            trace_end_sequence=trace_end,
+                            capture_state=MessageCaptureState.PARTIAL,
+                        ),
+                        sanitized_error,
+                        usage_sink.last_snapshot_revision,
+                    )
+                )
+            except Exception as abort_exc:
+                logger.warning(
+                    "run %s abort/flush failed (run may strand in RUNNING): %s: %s",
+                    record.id,
+                    type(abort_exc).__name__,
+                    abort_exc,
+                    exc_info=environ.debug,
+                )
+            await publish_boundary(
+                ExecutionFailed(
+                    execution_id=record.id,
+                    error_id=sanitized_error.error_type,
+                    error_type=sanitized_error.error_type,
+                )
+            )
+            logger.info(
+                "event=execution.lifecycle.generic_failure_published execution_id=%s error_id=%s",
+                record.id,
+                sanitized_error.error_type,
+            )
+
         decoded_history = decode_model_messages(message_history) if message_history else ()
         token = CancellationToken()
         approved = record.approval if resuming else None
@@ -960,6 +1013,7 @@ class ExecutionService:
             self._engine.execute_pure(compiled, AgentInput(prompt=prompt, message_history=decoded_history, resuming=resuming, approved_tool_call_id=approved.tool_call_id if approved is not None else None, approved_binding_fingerprint=approved.binding_fingerprint if approved is not None else None), context, cancellation=token, live_events=self._live_events, security_events=self._security_events, assembly=assembly, trace_sequence=record.trace_sequence, trace_collector=collector, usage_sink=usage_sink, extra_toolsets=extra_toolsets),
             token,
         )
+        # task-owner: execution.heartbeat
         heartbeat = asyncio.ensure_future(self._heartbeat(record.id, owner, record.lease.fence, token))
         try:
             done, _ = await asyncio.wait(
@@ -988,6 +1042,7 @@ class ExecutionService:
                             "run %s cancelled-task cleanup swallowed: %s: %s",
                             record.id, type(task_exc).__name__, task_exc,
                         )
+            boundary_event: object = ExecutionCancelled(execution_id=record.id)
             try:
                 latest = await self._required(record.id)
                 if latest.status is RunStatus.RUNNING:
@@ -1017,7 +1072,53 @@ class ExecutionService:
                             usage_sink.last_snapshot_revision,
                         )
                     )
+                latest = await self._required(record.id)
+                if latest.status is RunStatus.FAILED:
+                    error = latest.error
+                    boundary_event = ExecutionFailed(
+                        execution_id=record.id,
+                        error_id=error.error_type if error is not None else "",
+                        error_type=error.error_type if error is not None else "",
+                    )
+                elif latest.status is not RunStatus.CANCELLED:
+                    boundary_event = ExecutionFailed(
+                        execution_id=record.id,
+                        error_id="cancellation_not_terminal",
+                        error_type="cancellation_not_terminal",
+                    )
             except Exception as cleanup_error:
+                try:
+                    latest = await self._required(record.id)
+                    if latest.status in {RunStatus.RUNNING, RunStatus.CANCELLING}:
+                        trace_end = await collector.flush()
+                        latest = await self._store.abort_run(
+                            AbortExecution(
+                                record.id,
+                                owner,
+                                record.lease.fence,
+                                AgentSnapshotData(
+                                    delta_messages=(),
+                                    final_output=None,
+                                    usage=usage_sink.snapshot(),
+                                    trace_end_sequence=trace_end,
+                                    capture_state=MessageCaptureState.PARTIAL,
+                                ),
+                                sanitize_run_error(cleanup_error),
+                                usage_sink.last_snapshot_revision,
+                            )
+                        )
+                    if latest.status is not RunStatus.CANCELLED:
+                        boundary_event = ExecutionFailed(
+                            execution_id=record.id,
+                            error_id=type(cleanup_error).__name__,
+                            error_type=type(cleanup_error).__name__,
+                        )
+                except Exception as convergence_error:
+                    boundary_event = ExecutionFailed(
+                        execution_id=record.id,
+                        error_id=type(convergence_error).__name__,
+                        error_type=type(convergence_error).__name__,
+                    )
                 try:
                     await asyncio.shield(
                         self._security_events.emit(
@@ -1035,36 +1136,14 @@ class ExecutionService:
                             "run %s SecurityDegraded emit failed: %s: %s",
                             record.id, type(emit_exc).__name__, emit_exc,
                         )
+            await publish_boundary(boundary_event)
             raise
         except Exception as exc:
             # A programming/config/protocol error (as opposed to a modeled
             # AgentFailed) must not strand the run in RUNNING: persist the
             # partial snapshot, then re-raise the original exception. A failure
             # here is secondary -- the original error is what the caller sees.
-            try:
-                trace_end = await collector.flush()
-                await self._store.abort_run(
-                    AbortExecution(
-                        record.id,
-                        owner,
-                        record.lease.fence,
-                        AgentSnapshotData(
-                            delta_messages=(),
-                            final_output=None,
-                            usage=usage_sink.snapshot(),
-                            trace_end_sequence=trace_end,
-                            capture_state=MessageCaptureState.PARTIAL,
-                        ),
-                        sanitize_run_error(exc),
-                        usage_sink.last_snapshot_revision,
-                    )
-                )
-            except Exception as abort_exc:
-                logger.warning(
-                    "run %s abort/flush failed (run may strand in RUNNING): %s: %s",
-                    record.id, type(abort_exc).__name__, abort_exc,
-                    exc_info=environ.debug,
-                )
+            await persist_generic_failure(exc)
             raise
         finally:
             heartbeat.cancel()
@@ -1073,7 +1152,11 @@ class ExecutionService:
             except asyncio.CancelledError:
                 pass
             await self._controller.unregister(record.id, task=task)
-        snapshot = _snapshot(outcome)
+        try:
+            snapshot = _snapshot(outcome)
+        except Exception as exc:
+            await persist_generic_failure(exc)
+            raise
         snapshot = replace(snapshot, usage=usage_sink.snapshot())
         latest = await self._required(record.id)
         if latest.status in {
@@ -1081,6 +1164,18 @@ class ExecutionService:
             RunStatus.FAILED,
             RunStatus.CANCELLED,
         }:
+            if latest.status is RunStatus.COMPLETED:
+                terminal_event: object = ExecutionCompleted(execution_id=record.id)
+            elif latest.status is RunStatus.FAILED:
+                error = latest.error
+                terminal_event = ExecutionFailed(
+                    execution_id=record.id,
+                    error_id=error.error_type if error is not None else "",
+                    error_type=error.error_type if error is not None else "",
+                )
+            else:
+                terminal_event = ExecutionCancelled(execution_id=record.id)
+            await publish_boundary(terminal_event)
             return None
         if (
             latest.status is RunStatus.CANCELLING
@@ -1110,7 +1205,7 @@ class ExecutionService:
                         ),
                     )
                 )
-            await self._publish_lifecycle_event(
+            await publish_boundary(
                 ExecutionCancelled(execution_id=record.id)
             )
             return None
@@ -1124,7 +1219,7 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
-            await self._publish_lifecycle_event(
+            await publish_boundary(
                 ExecutionCompleted(execution_id=record.id)
             )
             return ExecutionResultView(record.id, outcome.result.output)
@@ -1150,7 +1245,7 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
-            await self._publish_lifecycle_event(
+            await publish_boundary(
                 ExecutionPaused(
                     execution_id=record.id,
                     approval_id=approval.approval_id,
@@ -1169,43 +1264,47 @@ class ExecutionService:
                     usage_sink.last_snapshot_revision,
                 )
             )
-            await self._publish_lifecycle_event(
+            await publish_boundary(
                 ExecutionCancelled(execution_id=record.id)
             )
             return None
         if isinstance(outcome, AgentFailed):
+            error = outcome.error or RunError("AgentFailed", "execution failed")
             await self._store.fail_run(
                 FailExecution(
                     record.id,
                     owner,
                     record.lease.fence,
                     snapshot,
-                    outcome.error,
+                    error,
                     usage_sink.last_snapshot_revision,
                 )
             )
-            await self._publish_lifecycle_event(
+            await publish_boundary(
                 ExecutionFailed(
                     execution_id=record.id,
-                    error_id=record.error.code if record.error is not None else "",
-                    error_type=record.error.message if record.error is not None else "",
+                    error_id=error.error_type,
+                    error_type=error.error_type,
                 )
             )
-            raise RuntimeError(outcome.error.message)
-        raise AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
+            raise RuntimeError(error.message)
+        error = AssertionError(f"unsupported agent outcome: {type(outcome).__name__}")
+        await persist_generic_failure(error)
+        raise error
 
     async def _publish_lifecycle_event(self, event: object) -> None:
+        await publish_execution_event(self._live_events, event.execution_id, event)
+
+    async def _close_live_cycle(self, execution_id: str) -> None:
+        closer = getattr(self._live_events, "close_execution_cycle", None)
+        if closer is None:
+            return
         try:
-            await publish_execution_event(self._live_events, event.execution_id, event)
-        except LiveEventConsumerSlowError:
-            raise
-        except ExecutionTerminalMismatchError:
-            raise
+            await closer(execution_id)
         except Exception as exc:
-            logger.warning(
-                "run %s lifecycle event delivery failed event=%s error_type=%s",
-                event.execution_id,
-                type(event).__name__,
+            logger.error(
+                "event=execution.extra_cycle_closed execution_id=%s error_id=%s",
+                execution_id,
                 type(exc).__name__,
             )
 

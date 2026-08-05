@@ -5,11 +5,13 @@ lines and INFO metric lines through stdlib logging."""
 
 import logging
 
+from linktools.core import environ
 from linktools.ai.observability.logging import LoggingObservabilitySink
 from linktools.ai.observability.tracing import Span
 
 
-def test_start_span_emits_debug_with_name_and_span_id(caplog):
+def test_start_span_emits_debug_with_name_and_span_id(caplog, monkeypatch):
+    monkeypatch.setattr(environ, "get_config", lambda key, type=None, default=None: True)
     sink = LoggingObservabilitySink()
     with caplog.at_level(logging.DEBUG, logger="linktools.ai.observability"):
         span = sink.start_span("do_thing", attributes={"a": 1})
@@ -21,7 +23,8 @@ def test_start_span_emits_debug_with_name_and_span_id(caplog):
     assert "parent_id=None" in caplog.text
 
 
-def test_end_span_emits_debug_with_duration_ms(caplog):
+def test_end_span_emits_debug_with_duration_ms(caplog, monkeypatch):
+    monkeypatch.setattr(environ, "get_config", lambda key, type=None, default=None: True)
     sink = LoggingObservabilitySink()
     span = sink.start_span("op")
     with caplog.at_level(logging.DEBUG, logger="linktools.ai.observability"):
@@ -58,7 +61,8 @@ def test_gauge_emits_info_line(caplog):
     assert "value=7.0" in caplog.text
 
 
-def test_record_event_emits_debug_line(caplog):
+def test_record_event_emits_debug_line(caplog, monkeypatch):
+    monkeypatch.setattr(environ, "get_config", lambda key, type=None, default=None: True)
     sink = LoggingObservabilitySink()
     with caplog.at_level(logging.DEBUG, logger="linktools.ai.observability"):
         sink.record_event("thing_happened", attributes={"k": "v"})

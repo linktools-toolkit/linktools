@@ -10,21 +10,23 @@ dependency: this is the stdlib default an OTel adapter can later plug into in
 front of. The class structurally satisfies both
 ObservabilitySink and ObservabilityMetrics without importing them."""
 
-import logging
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
+
+from linktools.core import environ
 
 from .tracing import Span, _mint_span_id
 
-_DEFAULT_LOGGER_NAME = "linktools.ai.observability"
+if TYPE_CHECKING:
+    from logging import Logger
 
 
 class LoggingObservabilitySink:
     """Implements both ObservabilitySink and ObservabilityMetrics via stdlib
     logging. Span durations are tracked in-process by span_id."""
 
-    def __init__(self, logger: "logging.Logger | None" = None) -> None:
-        self._logger = logger or logging.getLogger(_DEFAULT_LOGGER_NAME)
+    def __init__(self, logger: "Logger | None" = None) -> None:
+        self._logger = logger or environ.get_logger("ai.observability")
         self._started_at: "dict[str, datetime]" = {}
 
     # --- ObservabilitySink ------------------------------------------------
@@ -40,13 +42,14 @@ class LoggingObservabilitySink:
         now = datetime.now(timezone.utc)
         self._started_at[span_id] = now
         parent_id = parent.span_id if parent is not None else None
-        self._logger.debug(
-            "span.start name=%s span_id=%s parent_id=%s attrs=%s",
-            name,
-            span_id,
-            parent_id,
-            dict(attributes or {}),
-        )
+        if environ.debug:
+            self._logger.debug(
+                "span.start name=%s span_id=%s parent_id=%s attrs=%s",
+                name,
+                span_id,
+                parent_id,
+                dict(attributes or {}),
+            )
         return Span(
             name=name,
             span_id=span_id,
@@ -58,7 +61,8 @@ class LoggingObservabilitySink:
     def record_event(
         self, name: str, *, attributes: "Mapping[str, Any] | None" = None
     ) -> None:
-        self._logger.debug("event name=%s attrs=%s", name, dict(attributes or {}))
+        if environ.debug:
+            self._logger.debug("event name=%s attrs=%s", name, dict(attributes or {}))
 
     def end_span(self, span: Span) -> None:
         started = self._started_at.pop(span.span_id, None)

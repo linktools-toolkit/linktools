@@ -4,14 +4,16 @@
 """Process-local execution event contracts and sinks."""
 
 import asyncio
-import logging
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol, TypeAlias
 
+from linktools.core import environ
+
 from ..errors import ExecutionTerminalMismatchError
 
-logger = logging.getLogger("linktools.ai.execution.live_events")
+logger = environ.get_logger("ai.execution.live_events")
 
 
 class ExecutionAlreadySubscribedError(RuntimeError):
@@ -115,6 +117,7 @@ class ExecutionCancelled(ExecutionEvent):
 ExecutionTerminalEvent: TypeAlias = (
     ExecutionCompleted | ExecutionFailed | ExecutionCancelled
 )
+ExecutionCycleBoundary: TypeAlias = ExecutionPaused | ExecutionTerminalEvent
 
 
 class ExecutionEventSubscription:
@@ -167,7 +170,8 @@ class ExecutionEventHub:
         self._subscriptions: dict[str, ExecutionEventSubscription] = {}
         self._queues: dict[str, asyncio.Queue] = {}
         self._sequences: dict[str, int] = {}
-        self._terminal_executions: set[str] = set()
+        self._terminal_tombstones: "OrderedDict[str, None]" = OrderedDict()
+        self._terminal_tombstone_limit = 4096
         self._publish_locks: dict[str, asyncio.Lock] = {}
         self._lock = asyncio.Lock()
         self._cancel_callback: Any = None
@@ -179,12 +183,16 @@ class ExecutionEventHub:
     def active_subscription_count(self) -> int:
         return len(self._subscriptions)
 
+    @property
+    def terminal_tombstone_count(self) -> int:
+        return len(self._terminal_tombstones)
+
     async def subscribe(self, execution_id: str) -> ExecutionEventSubscription:
         async with self._lock:
             if execution_id in self._subscriptions:
                 raise ExecutionAlreadySubscribedError(execution_id)
             queue: asyncio.Queue = asyncio.Queue(maxsize=self._queue_size)
-            self._terminal_executions.discard(execution_id)
+            self._terminal_tombstones.pop(execution_id, None)
             subscription = ExecutionEventSubscription(self, execution_id, queue)
             self._subscriptions[execution_id] = subscription
             self._queues[execution_id] = queue
@@ -196,11 +204,11 @@ class ExecutionEventHub:
     async def publish(self, execution_id: str, event: ExecutionEvent) -> None:
         publish_lock = self._publish_locks.get(execution_id)
         if publish_lock is None:
-            if execution_id in self._terminal_executions:
+            if execution_id in self._terminal_tombstones:
                 raise ExecutionTerminalMismatchError(execution_id)
             return
         async with publish_lock:
-            if execution_id in self._terminal_executions:
+            if execution_id in self._terminal_tombstones:
                 raise ExecutionTerminalMismatchError(execution_id)
             subscription = self._subscriptions.get(execution_id)
             queue = self._queues.get(execution_id)
@@ -217,12 +225,21 @@ class ExecutionEventHub:
             try:
                 await asyncio.wait_for(queue.put(event), self._publish_timeout)
                 if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
-                    self._terminal_executions.add(execution_id)
+                    self._remember_terminal(execution_id)
                     await self._discard(execution_id, subscription)
             except asyncio.TimeoutError as exc:
                 await self._discard(execution_id, subscription)
                 logger.warning("execution event consumer slow execution=%s", execution_id)
                 raise LiveEventConsumerSlowError(execution_id) from exc
+
+    def _remember_terminal(self, execution_id: str) -> None:
+        self._terminal_tombstones[execution_id] = None
+        self._terminal_tombstones.move_to_end(execution_id)
+        while len(self._terminal_tombstones) > self._terminal_tombstone_limit:
+            evicted, _ = self._terminal_tombstones.popitem(last=False)
+            logger.info(
+                "event=execution.event_tombstone_evicted execution_id=%s", evicted
+            )
 
     async def close(self, execution_id: str, terminal_event: ExecutionTerminalEvent) -> None:
         subscription = self._subscriptions.get(execution_id)
@@ -331,6 +348,18 @@ class CompositeRunLiveSink:
         self._workers: "dict[str, asyncio.Task[None]]" = {}
         self._disabled: set[str] = set()
 
+    @property
+    def active_worker_count(self) -> int:
+        return len(self._workers)
+
+    @property
+    def active_queue_count(self) -> int:
+        return len(self._queues)
+
+    @property
+    def disabled_execution_count(self) -> int:
+        return len(self._disabled)
+
     async def publish_execution(self, execution_id: str, event: Any) -> None:
         await publish_execution_event(self._canonical, execution_id, event)
         if execution_id in self._disabled:
@@ -350,28 +379,45 @@ class CompositeRunLiveSink:
         except asyncio.QueueFull:
             await self._disable(execution_id, "queue_full")
 
-    async def close_execution(self, execution_id: str) -> None:
+    async def close_execution_cycle(
+        self, execution_id: str, *, drain_timeout: float = 1.0
+    ) -> None:
+        # task-owner: execution.extra_cycle_cleanup
+        task = asyncio.create_task(
+            self._close_execution_cycle_once(execution_id, drain_timeout)
+        )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _close_execution_cycle_once(
+        self, execution_id: str, drain_timeout: float
+    ) -> None:
         worker = self._workers.get(execution_id)
         if worker is None:
             self._queues.pop(execution_id, None)
             self._disabled.discard(execution_id)
             return
-        if not worker.done():
-            worker.cancel()
         try:
-            await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            if worker.cancelled():
-                return
+            await asyncio.wait_for(asyncio.shield(worker), drain_timeout)
+        except asyncio.TimeoutError:
+            worker.cancel()
             try:
-                await worker
+                await asyncio.wait_for(asyncio.shield(worker), 1.0)
             except BaseException:
                 pass
-            raise
         finally:
             self._workers.pop(execution_id, None)
             self._queues.pop(execution_id, None)
             self._disabled.discard(execution_id)
+        logger.info(
+            "event=execution.extra_cycle_closed execution_id=%s", execution_id
+        )
+
+    async def close_execution(self, execution_id: str) -> None:
+        await self.close_execution_cycle(execution_id)
 
     async def _run_worker(
         self, execution_id: str, queue: "asyncio.Queue[Any]"
@@ -387,7 +433,7 @@ class CompositeRunLiveSink:
                 except BaseException as exc:
                     await self._disable(execution_id, type(exc).__name__, current=asyncio.current_task())
                     return
-                if isinstance(event, (ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
+                if isinstance(event, (ExecutionPaused, ExecutionCompleted, ExecutionFailed, ExecutionCancelled)):
                     while not queue.empty():
                         pending = queue.get_nowait()
                         try:
@@ -576,5 +622,6 @@ __all__ = [
     "ExecutionCompleted",
     "ExecutionFailed",
     "ExecutionCancelled",
+    "ExecutionCycleBoundary",
     "publish_execution_event",
 ]
