@@ -46,7 +46,7 @@ from ..core import environ, BaseCapability, ConfigField
 from ..decorator import cached_property
 from ..types import MISSING
 from ..rich import get_log_handler, init_logging, _is_rich_available
-from ..errors import Error, CliError
+from ..errors import CliError, ConfigCastError
 from ..runtime import import_module
 
 if TYPE_CHECKING:
@@ -58,6 +58,14 @@ if TYPE_CHECKING:
     from ..types import T
 
     ERROR_HANDLER = Literal["error", "ignore", "warn"] | Callable[[str, Exception], None]
+
+
+def _debug_enabled(target: "BaseEnviron") -> bool:
+    """Return debug state without allowing an invalid external value to abort CLI handling."""
+    try:
+        return target.debug
+    except ConfigCastError:
+        return False
 
 
 class CommandError(CliError):
@@ -140,7 +148,7 @@ def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
             elif onerror == "warn":
                 environ.logger.warning(
                     f"Ignore {ep.name}, caused by {e.__class__.__name__}: {e}",
-                    exc_info=True if environ.debug else None
+                    exc_info=True if _debug_enabled(environ) else None
                 )
             elif onerror == "ignore":
                 pass
@@ -200,7 +208,7 @@ def iter_module_commands(root: "ModuleType", *, onerror: "ERROR_HANDLER" = "erro
             elif onerror == "warn":
                 environ.logger.warning(
                     f"Ignore {name}, caused by {e.__class__.__name__}: {e}",
-                    exc_info=True if environ.debug else None
+                    exc_info=True if _debug_enabled(environ) else None
                 )
             elif onerror == "ignore":
                 pass
@@ -818,7 +826,7 @@ class _SubCommandMethod(SubCommand):
                 if annotation is not inspect.Parameter.empty:
                     if annotation in (int, float, str):
                         argument_kwargs.setdefault("type", annotation)
-                    elif annotation == bool:
+                    elif annotation is bool:
                         if argument_kwargs.get("default", False):
                             argument_kwargs.setdefault("action", "store_false")
                         else:
@@ -1187,7 +1195,7 @@ class SubCommandMixin:
             current_node_expanded = max_level is None or max_level > current_node_level
 
             dbg_msg = f" [dim](group={info.node.is_group}, id={info.node.id}, order={info.node.order})[/dim]" \
-                if self.environ.debug \
+                if _debug_enabled(self.environ) \
                 else ""
 
             if info.node.is_group or info.children:
@@ -1426,7 +1434,6 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
                            help="disable all log output")
         group.add_argument(f"{prefix}{prefix}debug", action=DebugAction, nargs=0, const=True, dest=SUPPRESS,
                            help=f"increase {self.environ.name}'s log verbosity, and enable debug mode")
-
         group = parser.add_argument_group(title="interaction options")
         group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
                            help="answer yes/accept defaults to all prompts")
@@ -1474,7 +1481,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
-                exc_info=True if self.environ.debug else None,
+                exc_info=True if _debug_enabled(self.environ) else None,
             )
 
         except KeyboardInterrupt:
@@ -1548,12 +1555,17 @@ class CommandMain:
         """
         return self._command
 
-    def init_logging(self) -> None:
+    def init_logging(
+        self,
+        level: int = logging.INFO,
+        log_file: "str | None" = None,
+    ) -> None:
         """Initialize logging for command execution."""
         init_logging(
-            level=logging.INFO,
+            level=level,
             show_time=self.show_log_time,
             show_level=self.show_log_level,
+            log_file=log_file,
         )
 
     def __call__(self, args: "list[str]" = None) -> int:
@@ -1565,9 +1577,12 @@ class CommandMain:
         Returns:
             int: The operation result.
         """
-        self.init_logging()
-
         try:
+            environ = self.command.environ
+            level_name = environ.get_config("LOG_LEVEL", str, default="INFO")
+            level = getattr(logging, str(level_name).upper(), logging.INFO)
+            log_file = environ.get_config("LOG_FILE", str, default=None) or None
+            self.init_logging(level=level, log_file=log_file)
             if self.expand_user:
                 args = sys.argv[1:] if args is None else args
                 args = tuple(os.path.expanduser(arg) for arg in args)
@@ -1578,11 +1593,11 @@ class CommandMain:
             error_type, error_message = e.__class__.__name__, str(e).strip()
             self.command.logger.error(
                 f"{error_type}: {error_message}" if error_message else error_type,
-                exc_info=True if self.command.environ.debug else None,
+                exc_info=True if _debug_enabled(self.command.environ) else None,
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except Exception:
-            if self.command.environ.debug and _is_rich_available():
+            if _debug_enabled(self.command.environ) and _is_rich_available():
                 from rich import get_console
                 get_console().print_exception(show_locals=True)
             else:

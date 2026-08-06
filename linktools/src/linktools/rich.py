@@ -315,15 +315,29 @@ def _get_plain_log_handler_class():
     return LogHandler
 
 
-def init_logging(level: int = logging.INFO, show_level: bool = False, show_time: bool = False, force: bool = False) -> None:
+def init_logging(
+    level: int = logging.INFO,
+    show_level: bool = False,
+    show_time: bool = False,
+    log_file: "str | None" = None,
+) -> None:
     """Initialize root logging with rich output when available.
 
     Args:
         level (int): The level value.
         show_level (bool): The show_level value.
         show_time (bool): The show_time value.
-        force (bool): The force value.
+        log_file (str | None): Optional file receiving all configured log records.
     """
+    if log_file is not None:
+        logging.basicConfig(
+            level=level,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+            filename=str(log_file),
+            encoding="utf-8",
+        )
+        return
+
     if not _is_rich_available():
         items = []
         if show_time:
@@ -337,7 +351,6 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
             format=" ".join(items),
             datefmt="%H:%M:%S",
             handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-            force=force,
         )
 
         return
@@ -351,7 +364,6 @@ def init_logging(level: int = logging.INFO, show_level: bool = False, show_time:
             format="%(message)s",
             datefmt="[%X]",
             handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-            force=force,
         )
 
 

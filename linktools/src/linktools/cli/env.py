@@ -110,7 +110,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         def run(self, args: "argparse.Namespace") -> int:
             shell = environ.get_tool("shell")
             if not shell.exists:
-                raise NotImplementedError(f"Not found shell path")
+                raise NotImplementedError("Not found shell path")
 
             paths = os.environ.get("PATH", "").split(os.pathsep)
             stub_path = str(get_stub_path())
@@ -317,13 +317,14 @@ if __name__ == '__main__':
 
         @property
         def main(self) -> "CommandMain":
-
-            environ = self.environ
-
             class Main(CommandMain):
 
-                def init_logging(self) -> None:
-                    environ.logging.bootstrap()
+                def init_logging(
+                    self,
+                    level: int = logging.INFO,
+                    log_file: "str | None" = None,
+                ) -> None:
+                    super().init_logging(level=level, log_file=log_file)
 
             return Main(self)
 
