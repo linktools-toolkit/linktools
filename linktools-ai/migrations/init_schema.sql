@@ -1,7 +1,7 @@
 -- linktools-ai init schema (MySQL 5.7+/8.0) -- DBA-lint compliant
 --
 -- Production DDL for the 15 ORM tables in
--- linktools.ai.storage.sqlalchemy.base.Base.metadata. Tables / columns / types /
+-- linktools.ai.storage.sql.base.Base.metadata. Tables / columns / types /
 -- nullability mirror the ORM; the index strategy, comments, column ordering and
 -- timestamp indexes follow the DBA lint standard (and therefore diverge from
 -- Base.metadata.create_all's literal output). The storage kernel is

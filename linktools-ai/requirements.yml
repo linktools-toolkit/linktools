@@ -1,31 +1,45 @@
 requires-python: ">=3.10"
 
-# Core dependencies stay lightweight: FileStorage, Store Protocols, Provider
-# Protocols, and the Capability Runtime need only pydantic-ai + the linktools
-# core. SQLAlchemy/aiosqlite are optional -- install via the sqlite or
-# sqlalchemy extras when using SqlAlchemyStorage. The core wheel intentionally
-# carries NO environment-specific DB driver (postgres/mysql/etc.) or external
-# coordination client (redis/etcd) -- a deployment using those brings its own
-# driver and injects a distributed coordinator; the core stays backend-neutral.
+# The baseline wheel is assembled from this logical group. Runtime code never
+# discovers optional capabilities by importing an installed extra.
 dependencies:
-  - pydantic-ai-slim[mcp,openai]>=1.107,<2
+  - pydantic-ai-slim[mcp,openai]>=2.14.1
+  - pydantic-ai-harness>=0.9.0
+  - logfire-api>=4
   - jsonschema>=4,<5
 
 dev-dependencies:
   - linktools
+  - pytest
   - pytest-asyncio
   - sqlalchemy[asyncio]>=2.0,<3
   - aiosqlite>=0.20,<1
-  - lupa>=2,<3
 
 release-dependencies:
   - linktools>=0.9.0
 
 optional-dependencies:
-  sqlalchemy:
+  baseline-service:
+    - pydantic-ai-slim[temporal,mcp,openai]>=2.14.1
+    - pydantic-ai-harness>=0.9.0
+  local-coding:
+    - pydantic-ai-slim[mcp,openai]>=2.14.1
+    - pydantic-ai-harness>=0.9.0
+    - agent-client-protocol==0.12.0
+  sandbox: []
+  all-released-harness:
+    - pydantic-ai-harness>=0.9.0
+  storage:
     - sqlalchemy[asyncio]>=2.0,<3
-  sqlite:
+  storage-sql:
+    - sqlalchemy[asyncio]>=2.0,<3
+  storage-sqlite:
     - sqlalchemy[asyncio]>=2.0,<3
     - aiosqlite>=0.20,<1
-  acp:
-    - agent-client-protocol==0.12.0
+  evaluation:
+    - pydantic-evals>=0.1
+  dev:
+    - pytest
+    - pytest-asyncio
+  release:
+    - linktools>=0.9.0

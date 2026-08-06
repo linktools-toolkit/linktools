@@ -18,8 +18,8 @@ from enum import StrEnum
 from pathlib import Path
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from .sqlalchemy.base import Base
-from .sqlalchemy.conventions import TABLE_PREFIX
+from .sql.base import Base
+from .sql.conventions import TABLE_PREFIX
 
 from typing import TYPE_CHECKING
 

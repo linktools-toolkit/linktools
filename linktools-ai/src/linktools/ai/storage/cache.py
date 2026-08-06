@@ -4,7 +4,7 @@
 """Generic best-effort caches for immutable versioned content.
 
 The cache key is a stable domain-identity string (e.g.
-``spec:{path}:{version}:{etag}``); filesystem cache file names are its SHA-256.
+``asset:{path}:{version}:{etag}``); filesystem cache file names are its SHA-256.
 All caches are best-effort: any read/write error is swallowed and treated as a
 miss/failed write, never propagated as the origin's result.
 
@@ -240,16 +240,22 @@ class TieredContentCache:
     async def get(self, key: ContentCacheKey) -> "bytes | None":
         try:
             value = await self.l1.get(key)
-            if value is not None:
-                return value
-            if self.l2 is None:
-                return None
-            value = await self.l2.get(key)
-            if value is not None:
-                await self.l1.put(key, value)
+        except Exception:
+            value = None
+        if value is not None:
             return value
+        if self.l2 is None:
+            return None
+        try:
+            value = await self.l2.get(key)
         except Exception:
             return None
+        if value is not None:
+            try:
+                await self.l1.put(key, value)
+            except Exception:
+                pass
+        return value
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None:
         for cache in (self.l1, self.l2):
@@ -266,12 +272,18 @@ class TieredContentCache:
     ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
-        present = await self.l1.contains_many(keys)
+        try:
+            present = await self.l1.contains_many(keys)
+        except Exception:
+            present = frozenset()
         if self.l2 is None:
             return present
         missing = tuple(key for key in keys if key not in present)
         if missing:
-            present |= await self.l2.contains_many(missing)
+            try:
+                present |= await self.l2.contains_many(missing)
+            except Exception:
+                pass
         return present
 
 

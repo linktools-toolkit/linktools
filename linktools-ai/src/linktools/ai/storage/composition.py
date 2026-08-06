@@ -15,7 +15,7 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
-from ..errors import StorageFeatureSupportError
+from ..foundation.errors import StorageFeatureSupportError
 from .cache import ContentCache, contains_many, read_cache, write_cache
 from .multi import BatchStorageWriter, StorageReader, batch_get
 from .revision import (
@@ -132,7 +132,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         self.cache_concurrency = cache_concurrency
         info_key = adapter.info_key if adapter is not None else _no_adapter_info_key
         # Auto-wire the default revision source (cheap head_revision probe)
-        # when none is injected: a plain SpecStore(backend) then short-circuits
+        # when none is injected: a plain AssetStore(backend) then short-circuits
         # unchanged-revision refreshes for free. Layers do not get a source --
         # the primary carries the revisioned patch load that benefits.
         primary_source = revision_source or _BackendHeadRevisionSource(primary)
@@ -245,7 +245,12 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         if self.cache is not None and cache_adapter is not None:
             cached = await read_cache(self.cache, cache_key)
             if cached is not None:
-                return cache_adapter.from_cache(info, cached)
+                try:
+                    value = cache_adapter.from_cache(info, cached)
+                    if adapter.value_info(value) == info:
+                        return value
+                except Exception:
+                    pass
         value = await backend.get(key)
         if value is None:
             return None
@@ -265,6 +270,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
         return value
 
     async def get_many(self, keys: "tuple[KeyT, ...]") -> "dict[KeyT, ValueT]":
+        return await self._get_many(keys, retried=False)
+
+    async def _get_many(
+        self,
+        keys: "tuple[KeyT, ...]",
+        *,
+        retried: bool,
+    ) -> "dict[KeyT, ValueT]":
         if not keys:
             return {}
         adapter, cache_adapter = self._require_adapter()
@@ -285,7 +298,15 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
             miss: "list[KeyT]" = []
             for key, cached in await asyncio.gather(*(_read_one(k) for k in wanted)):
                 if cached is not None:
-                    result[key] = cache_adapter.from_cache(state.entries[key], cached)
+                    try:
+                        value = cache_adapter.from_cache(state.entries[key], cached)
+                        if adapter.value_info(value) == state.entries[key]:
+                            result[key] = value
+                        else:
+                            miss.append(key)
+                    except Exception:
+                        miss.append(key)
+                        continue
                 else:
                     miss.append(key)
         else:
@@ -316,6 +337,8 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT, WriterT]):
                 )
         for owner in raced_owners:
             self._views[owner].invalidate()
+        if raced_owners and not retried:
+            return await self._get_many(keys, retried=True)
         return result
 
     def _group_by_owner(

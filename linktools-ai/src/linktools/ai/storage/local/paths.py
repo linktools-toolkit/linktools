@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ...errors import InvalidStoragePathError
+from ...foundation.errors import InvalidStoragePathError
 
 _ID = re.compile(r"[A-Za-z0-9._-]+")
 
@@ -51,7 +51,11 @@ class Sha256Digest:
 
 def safe_child(root: "str | Path", *validated_parts: "StorageId | StoragePath | Sha256Digest | str") -> Path:
     root_path = Path(root).resolve(strict=False)
-    candidate = root_path.joinpath(*(part.value if hasattr(part, "value") else part for part in validated_parts)).resolve(strict=False)
+    values = tuple(
+        part.value if isinstance(part, (StorageId, StoragePath, Sha256Digest)) else part
+        for part in validated_parts
+    )
+    candidate = root_path.joinpath(*values).resolve(strict=False)
     if not candidate.is_relative_to(root_path):
         raise InvalidStoragePathError(f"path escapes storage root: {candidate}")
     return candidate

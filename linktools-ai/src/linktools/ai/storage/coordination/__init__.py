@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Shared ownership and fencing primitives."""
+"""Static exports for generic coordination primitives."""
 
-from .lease import Lease, assert_active, claim, is_expired, release, renew
+from .file import FileAssetCoordinator, FileRevisionHint
+from .local import LocalLeaseCoordinator, ProcessLocalLeaseCoordinator
+from .protocols import Lease, LeaseCoordinator, assert_active, claim, is_expired, release, renew
 
-__all__ = ["Lease", "assert_active", "claim", "is_expired", "release", "renew"]
+__all__ = ["FileAssetCoordinator", "FileRevisionHint", "Lease", "LeaseCoordinator", "LocalLeaseCoordinator", "ProcessLocalLeaseCoordinator", "assert_active", "claim", "is_expired", "release", "renew"]

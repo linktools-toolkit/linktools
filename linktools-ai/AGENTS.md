@@ -1,127 +1,64 @@
 # AGENTS.md (linktools-ai)
 
-This file provides guidance to coding agents when working with
-the `linktools-ai` sub-package. It complements the repo-root `AGENTS.md`
-(which covers the core framework and the shared Python code style).
-
-## What this sub-package is
-
-A pydantic-ai-based agent / session / execution runtime. It is a Python
-library consumed by downstream applications, plus an optional CLI
-(`linktools.ai.cli`). It registers itself
-with the core framework via the `ai` capability (entry point
-`linktools.capabilities.ai:__cap_ai__`).
 
 ## Layout
 
 Source lives under `src/linktools/ai/`:
 
-| Path | Responsibility |
-|------|----------------|
-| `agent/` | Agent assembly (`build_runtime`), tool invocation, sandbox, MCP, prompt/context policies, sub-agents, skills, extensions |
-| `execution/` | Run lifecycle (PENDING → RUNNING → terminal), sessions/turns, snapshots, trace events, approvals, live events |
-| `spec/` | Declarative agent/skill/extension specs over `SpecStore` (versioned, content-addressed document storage with change-log history) |
-| `storage/` | The generic persistence kernel — see "Storage" below |
-| `tasks/` | Task swarm (multi-agent plans), `TaskStore` |
-| `artifact/` | Artifact store |
-| `evaluation/` | Eval harness (`EvalExecutor`, `Evaluator`) |
-| `governance/` | Authorization policy, security pipeline, tool-policy rules |
-| `observability/` | Metrics, tracing, structured events |
-| `model/` | Model registry, pricing |
-| `cli/` | CLI surface: `console/` (run, doctor), `client.py` (RuntimeClient) |
-| `runtime.py` | `build_runtime(...)` + the `Runtime` facade (`run` / `resume` / `cancel` / `inspect` / `aclose`) |
+| Package | Responsibility |
+|---|---|
+| `foundation/` | IDs, digests, canonical JSON, clock, errors |
+| `domain/` | Pure Agent, Execution, Session, Task, Trace, Evaluation and value objects |
+| `ports/` | Runtime, Repository, Storage and external Protocols |
+| `application/` | One-action actions and cross-entity services |
+| `agent/` | Pydantic AI-independent runtime bindings, contracts and local executor |
+| `session/`, `tasks/`, `trace/`, `schema/` | Stable public APIs for their respective product contracts |
+| `local/` | Local-only Project, Skill, Private Agent and Index support |
+| `storage/` | Generic composition, cache, revision, file, coordination and async SQL kernel |
+| `outbound/` | External-system adapters; no business facts |
+| `orchestration/temporal/` | Deterministic Workflow kernel and one-operation Activities |
+| `inbound/` | API, CLI, and ACP protocol mapping |
+| `build/` | Upstream Manifest, Bundle, signing, and architecture checks |
+| `entrypoints/` | One Composition Root per published artifact |
 
-Tests live at **repo-root `tests/ai/`** (not `linktools-ai/tests/`).
+The old `agent_runtime`, `evaluation_runtime`, `execution` and duplicate
+storage-set paths are removed. Do not recreate compatibility imports.
 
-## Storage kernel
+## Storage boundary
 
-This is the most architecturally significant subsystem. Everything in
-`storage/` is generic over `KeyT` / `ValueT` / `InfoT`; domain stores (spec,
-execution, task, tool, artifact) compose it.
+Storage is domain-independent. `build_storage()` and
+`build_sqlite_storage()` construct async SQL engines without I/O; callers must
+invoke `initialize_storage()` explicitly. Domain stores are downstream of this
+kernel and never imported back into it. There is no sync SQL API, storage test
+package or storage-owned migration runner.
 
-### `StorageComposition` (`composition.py`)
+## Import and code rules
 
-The unified base for every domain store. Wires:
-- a **primary reader** + optional ordered **layers** (primary-first fallback),
-- a **writer** (`StorageWriter` / `BatchStorageWriter`),
-- an optional **content cache** (`ContentCache`).
+- Python >=3.10; every Python file starts with the two standard header lines.
+- Do not use `from __future__ import annotations`.
+- Imports within `linktools.ai` use relative paths.
+- Public methods and functions have parameter and return annotations. Quote
+  annotations containing `|` or `[...]`.
+- Domain has no I/O, global state, SDK, Repository, or current-time access.
+- Ports do not import concrete adapters. Use Cases do not import SQLAlchemy,
+  Temporal, Modal, Logfire, or Pydantic AI.
+- Workflow code is deterministic and has no database, network, Secret,
+  object-store, or telemetry I/O. External effects are Activities.
+- Obtain loggers through `from linktools.core import environ` and
+  `environ.get_logger(...)`. Do not use `logging.getLogger`.
+- `__init__.py` files only re-export stable API; they do not register or scan.
+- Do not add `Manager`, `Helper`, `Utils`, generic service locators, private
+  cross-package access, or reflection to bypass an interface.
 
-Owns: parallel per-layer metadata refresh, owner-aware entry merge, effective
-revision, owner-directed `get` / `get_many` (metadata-miss rule), preload via
-`contains_many`, and write post-processing (`_after_put` / `_after_delete` /
-`_after_reset` / `_after_batch` → clear preloaded markers + notify the
-`RevisionSource`).
+## Verification
 
-### Metadata protocol (`revision.py`)
-
-- `StorageMetadataBackend.load_metadata(after_revision | None)` — one call
-  returns the head revision + either a REPLACE (full entry set) or a PATCH
-  (diff since the caller's held revision). Replaces the old
-  current_revision → list_changes → current_revision round trip.
-- `LayerMetadataView` — single-flight refresh per backend: N concurrent
-  readers trigger at most one backend load; a cancelled caller never publishes
-  a half state.
-- `RevisionSource` — injectable revision cache. A view consults
-  `head_revision()` before paying for `load_metadata`; when it matches the
-  held state, the load is skipped entirely. A downstream redis/file source
-  shares one revision signal across machines. The default
-  `_BackendHeadRevisionSource` probes `head_revision()` live (no cache).
-
-### Protocols (`multi.py`, `versioning.py`, `cache.py`)
-
-- `StorageReader` (`get`, `list_info`), `BatchStorageReader` (`get_many`),
-  `StorageWriter` (`put`, `delete`, `reset`), `BatchStorageWriter`
-  (`apply_batch`) — all `@runtime_checkable`; `batch_get` fans single `get`
-  calls under a bounded semaphore when a reader lacks `get_many`.
-- `VersionedStorage` (`list_versions`, `get_at_revision`) — point-in-time
-  history; backends that retain a change log implement it, others omit it.
-- `ContentCache` (`get`, `put`, `contains_many`) — L1 memory + L2 filesystem,
-  best-effort.
-
-### SQL backends (`storage/sqlalchemy/`)
-
-- **No pessimistic locks.** All write concurrency is optimistic CAS:
-  `UPDATE ... WHERE <all previously-read columns still match> ...` +
-  `rowcount != 1 → StorageConflictError`. Monotonic columns (`fence`,
-  `event_sequence`, `snapshot_revision`) on every CAS WHERE prevent ABA.
-- `SqlAlchemyDialect` Protocol — the ONLY vendor seam. Provides
-  `insert_ignore_conflict`, `insert_ignore_conflict_many`, `upsert`,
-  `upsert_many` (multi-row, per-row conflict values via `excluded` / `inserted`),
-  `upsert_increment` (self-seeding counter), `classify_integrity_error`.
-  Three built-ins: `SqliteDialect`, `MySQLDialect`, `PostgreSQLDialect`.
-- `apply_batch(puts, deletes)` — atomic incremental batch write (one
-  transaction, one shared revision, mixed puts + deletes, other rows
-  untouched). `StorageComposition.apply_batch` delegates to a
-  `BatchStorageWriter` writer, or falls back to per-op `put` / `delete`.
-- The core wheel carries **no** environment-specific DB driver. Install via
-  the `sqlalchemy` or `sqlite` extras; a MySQL/PG deployment brings its own
-  async driver.
-
-## Dependencies
-
-`requirements.yml` (the wheel METADATA source). Core deps:
-`pydantic-ai-slim[mcp,openai]`, `linktools`, `jsonschema`. Optional extras:
-`sqlalchemy`, and `sqlite` (+ `aiosqlite`). Dev deps include
-`pytest-asyncio`, `sqlalchemy[asyncio]`, `aiosqlite`, `lupa`. The wheel must
-stay free of env-specific drivers/clients (a gate test enforces this).
-
-## Python code style
-
-Follows the repo-root `AGENTS.md` rules exactly: Python ≥3.10, no
-`from __future__ import annotations`, uniform file headers
-(`#!/usr/bin/env python3` + `# -*- coding: utf-8 -*-`), public API annotated,
-quote annotations containing `|` / `[...]`, annotation-only imports under
-`TYPE_CHECKING`. The storage-layer Protocols are the canonical example of the
-`@runtime_checkable` + `isinstance` capability-check pattern.
-
-## Tests
+Run focused checks with:
 
 ```bash
-# from the repo root, after installing dev deps
-python -m pytest tests/ai/ -q
+PYTHONPATH=linktools-ai/src:linktools/src .venv/bin/python -m compileall -q linktools-ai/src/linktools/ai
+PYTHONPATH=linktools-ai/src:linktools/src .venv/bin/python -m pytest tests/ai/ -q
 ```
 
-Key suites: `tests/ai/storage/` (composition, revision, cache, capabilities,
-dialects), `tests/ai/spec/` (SQL spec backend, version history, apply_batch),
-`tests/ai/persistence/` (execution/task/tool SQL backends — CAS claim/renew/
-complete fencing), `tests/ai/architecture/` (invariants + boundary gates).
+The traceability matrix is `linktools-ai/linktools-ai-traceability-matrix.json`.
+The machine-readable DAG policy is
+`linktools-ai/linktools-ai-package-dependency-policy.json`.

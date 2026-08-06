@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from .client import MacroscopeClient
+
+__all__ = ["MacroscopeClient"]

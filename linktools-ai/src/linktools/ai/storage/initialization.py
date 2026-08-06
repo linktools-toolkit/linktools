@@ -10,8 +10,6 @@ brought into existence.
 """
 
 
-from .sqlalchemy.base import Base
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,7 +17,7 @@ if TYPE_CHECKING:
 
 async def initialize_storage(storage: "StorageDatabase") -> None:
     async with storage.engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(storage.metadata.metadata.create_all)
 
 
 __all__ = ["initialize_storage"]

@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.ai.agent: the agent domain's public model. AgentSpec
-is the declaration surface, with PromptSpec/AgentFeatureRef as its component value
-types; the compiler/runner that turn it into Runs live in their submodules
-(``agent.compiler``, ``agent.engine``). A run's result is ``RunResult``
-(from ``linktools.ai.execution``), not an agent-local type."""
 
-from .spec import AgentSpec, PromptSpec
-from .codec import parse_agent_spec_markdown
+"""Static Agent runtime support API."""
 
-__all__ = ["AgentSpec", "PromptSpec", "parse_agent_spec_markdown"]
+from .bindings import LiveEventBinding, ModelBinding, ToolActivityBinding
+from .contracts import DependencyContract, OutputContract
+from .context import LinktoolsTemporalRunContext, RunContext
+from .deps import AgentDeps
+from .executor import AgentExecutor, LocalAgentExecutor
+from .instructions import InstructionAssembler
+from .interceptor import ActivityScopeInterceptor
+from .models import StartupModelRegistry
+from .scope import ActivityScope
+from .tool import ToolAccess
+
+__all__ = [
+    "ActivityScope", "ActivityScopeInterceptor", "AgentDeps", "AgentExecutor", "DependencyContract",
+    "InstructionAssembler", "LinktoolsTemporalRunContext", "LiveEventBinding", "LocalAgentExecutor", "ModelBinding", "OutputContract",
+    "RunContext",
+    "StartupModelRegistry", "ToolAccess", "ToolActivityBinding",
+]

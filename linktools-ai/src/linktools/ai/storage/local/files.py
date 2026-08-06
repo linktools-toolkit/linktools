@@ -4,29 +4,18 @@
 """Atomic local JSON and byte-file operations."""
 
 
-import os
 import json
-import tempfile
 from pathlib import Path
-from ...json import normalize_json
+from ...foundation.json import normalize_json
+from ..filesystem.atomic import atomic_write_bytes as atomic_replace_bytes
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ...json import JsonValue
+    from ...foundation.json import JsonValue
 
 def atomic_write_bytes(path: "str | Path", content: bytes) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
-    try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(content)
-            stream.flush()
-        os.replace(temporary, target)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    atomic_replace_bytes(Path(path), content)
 
 
 def atomic_write_json(path: "str | Path", value: "JsonValue") -> None:

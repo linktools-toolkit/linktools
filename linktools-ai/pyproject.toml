@@ -26,7 +26,7 @@ where = ["src"]
 include = ["linktools*"]
 
 [tool.setuptools.package-data]
-linktools = ["**/assets/**"]
+linktools = ["**/assets/**", "**/*.json", "**/*.md"]
 
 [tool.linktools]
 name = "ai"

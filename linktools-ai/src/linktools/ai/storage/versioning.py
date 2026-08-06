@@ -29,7 +29,7 @@ class VersionSummary:
     for a tombstone deletion), the row's ``created_at`` timestamp, whether that
     version is a deletion, and ``version`` -- the value's own declared version
     number at that point in time (the same field surfaced on the value's info,
-    e.g. ``SpecDocumentInfo.version``), not a synthesized history ordinal."""
+    e.g. ``AssetContentInfo.version``), not a synthesized history ordinal."""
 
     revision: int
     version: "int | None"
@@ -50,7 +50,7 @@ class VersionedStorage(Protocol[RevisionT, KeyT, ValueT]):
     async def get_at_version(self, key: KeyT, version: int) -> "ValueT | None":
         """Read the value of ``key`` recorded under its own declared
         ``version`` number (the same number as the value's info, e.g.
-        ``SpecDocumentInfo.version`` -- not a synthesized history ordinal).
+        ``AssetContentInfo.version`` -- not a synthesized history ordinal).
         When more than one history record shares that version number, the
         most recent one wins. Returns None when no record of ``key`` carries
         that version, or the matching record is a deletion."""
