@@ -1,0 +1,12 @@
+{
+  "findings": {"v2": 15, "v4": 11, "v5": 10, "v6": 8, "v7": 9, "v8": 5},
+  "status": "complete",
+  "uncovered": [],
+  "scope_exclusions": ["downstream-lockstep: migration and compatibility work explicitly excluded by the user"],
+  "verification": {
+    "storage-full-parity": "verified by storage and asset conformance tests plus cold-start review",
+    "asset-full-parity": "verified by memory/file/SQL integration and manifest checks",
+    "production-temporal-chain": "verified against temporalio==1.24.0 isolated wheel",
+    "downstream-lockstep": "excluded by user scope"
+  }
+}

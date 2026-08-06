@@ -3,9 +3,13 @@
 
 """Versioned, serializable Temporal run context."""
 
+from dataclasses import dataclass
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..foundation.json import canonical_json_bytes
+from ..core.ids import canonical_sha256
+from ..spec.model import AgentSpec, PromptSpec
+from ..core.json import canonical_json_bytes
 from .deps import AgentDeps
 
 
@@ -22,7 +26,7 @@ class LinktoolsTemporalRunContext(BaseModel):
     tool_call_id: "str | None" = None
     tool_name: "str | None" = None
     approval_id: "str | None" = None
-    partial_output: "object | None" = None
+    partial_output: "str | None" = None
 
     def serialize_run_context(self) -> bytes:
         return canonical_json_bytes(self.model_dump(mode="json"))
@@ -35,4 +39,41 @@ class LinktoolsTemporalRunContext(BaseModel):
 RunContext = LinktoolsTemporalRunContext
 
 
-__all__ = ["LinktoolsTemporalRunContext", "RunContext"]
+@dataclass(frozen=True, slots=True)
+class AgentBinding:
+    spec: AgentSpec
+    prompt: PromptSpec
+    spec_fingerprint: str
+    prompt_fingerprint: str
+    model_registry_revision: int
+    output_schema_fingerprint: str
+    capability_manifest_digest: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.model_registry_revision < 0
+            or not self.spec_fingerprint
+            or not self.prompt_fingerprint
+            or not self.output_schema_fingerprint
+            or not self.capability_manifest_digest
+        ):
+            raise ValueError("Agent binding is incomplete")
+
+    @property
+    def digest(self) -> str:
+        return canonical_sha256(
+            {
+                "agent_id": self.spec.id,
+                "agent_revision": self.spec.revision,
+                "prompt_id": self.prompt.id,
+                "prompt_revision": self.prompt.revision,
+                "spec_fingerprint": self.spec_fingerprint,
+                "prompt_fingerprint": self.prompt_fingerprint,
+                "model_registry_revision": self.model_registry_revision,
+                "output_schema_fingerprint": self.output_schema_fingerprint,
+                "capability_manifest_digest": self.capability_manifest_digest,
+            }
+        )
+
+
+__all__ = ["AgentBinding", "LinktoolsTemporalRunContext", "RunContext"]

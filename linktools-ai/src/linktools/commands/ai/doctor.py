@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai doctor`: inspect a local project using the v8 local boundary."""
+"""`lt ai doctor`: inspect a local project using the local boundary."""
 
 import json
 from argparse import Namespace

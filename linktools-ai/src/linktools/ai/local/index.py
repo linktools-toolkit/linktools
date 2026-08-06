@@ -4,12 +4,45 @@
 """Incremental local Skill and private Agent index."""
 
 import hashlib
+from dataclasses import dataclass
 from pathlib import Path
 
 from linktools.core import environ
 
-from .skill import PrivateAgent, Skill, parse_skill
-from .config import LocalPolicy
+from ..core.errors import ErrorCode, LinktoolsAIError
+from .project import LocalPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class PrivateAgent:
+    agent_id: str
+    path: Path
+    content: str
+    digest: str
+    skill_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class Skill:
+    skill_id: str
+    path: Path
+    content: str
+    digest: str
+    revision: int
+    private_agents: "tuple[PrivateAgent, ...]" = ()
+
+
+def parse_skill(path: "str | Path", *, revision: int = 1) -> Skill:
+    skill_path = Path(path).resolve()
+    content = skill_path.read_text(encoding="utf-8")
+    skill_id = skill_path.parent.name
+    agents: list[PrivateAgent] = []
+    agent_dir = skill_path.parent / "agents"
+    if agent_dir.is_dir():
+        for agent_path in sorted(agent_dir.glob("*.md"), key=lambda item: item.as_posix()):
+            agent_content = agent_path.read_text(encoding="utf-8")
+            agents.append(PrivateAgent(agent_path.stem, agent_path, agent_content, hashlib.sha256(agent_content.encode("utf-8")).hexdigest(), skill_id))
+    return Skill(skill_id, skill_path, content, hashlib.sha256(content.encode("utf-8")).hexdigest(), revision, tuple(agents))
 
 logger = environ.get_logger("ai.local.index")
 
@@ -27,12 +60,32 @@ class SkillIndex:
         self.revision = 0
 
     def refresh(self) -> int:
-        current: "set[Path]" = set()
-        paths = (
+        candidates = (
             path for path in self.root.rglob("SKILL.md")
             if len(path.parent.relative_to(self.root).parts) <= self.policy.max_skill_depth
         )
-        for path in sorted(paths, key=lambda item: item.as_posix()):
+        by_id: dict[str, list[Path]] = {}
+        for path in candidates:
+            by_id.setdefault(path.parent.name, []).append(path)
+        selected: list[Path] = []
+        for skill_id, values in sorted(by_id.items()):
+            ordered = sorted(values, key=lambda item: (len(item.parent.relative_to(self.root).parts), item.as_posix()))
+            nearest_depth = len(ordered[0].parent.relative_to(self.root).parts)
+            nearest = tuple(item for item in ordered if len(item.parent.relative_to(self.root).parts) == nearest_depth)
+            if len(nearest) > 1:
+                raise LinktoolsAIError(ErrorCode.LOCAL_SKILL_CONFLICT, f"duplicate skill id: {skill_id}")
+            selected.append(nearest[0])
+        current = set(selected)
+        for path in tuple(self._fingerprints):
+            if path not in current:
+                self.revision += 1
+                skill_id = self._skill_ids.pop(path)
+                self._fingerprints.pop(path)
+                existing = self._skills.get(skill_id)
+                if existing is not None and existing.path == path:
+                    self._skills.pop(skill_id, None)
+                logger.info("skill index removed path=%s revision=%s", path, self.revision)
+        for path in selected:
             current.add(path)
             fingerprint = self._fingerprint(path)
             if self._fingerprints.get(path) != fingerprint:
@@ -42,12 +95,6 @@ class SkillIndex:
                 self._fingerprints[path] = fingerprint
                 self._skill_ids[path] = skill.skill_id
                 logger.info("skill index refreshed skill=%s revision=%s", skill.skill_id, self.revision)
-        for path in tuple(self._fingerprints):
-            if path not in current:
-                self.revision += 1
-                self._fingerprints.pop(path)
-                self._skills.pop(self._skill_ids.pop(path), None)
-                logger.info("skill index removed path=%s revision=%s", path, self.revision)
         return self.revision
 
     @staticmethod
@@ -77,4 +124,4 @@ class SkillIndex:
         return tuple(self._skills[key] for key in sorted(self._skills))
 
 
-__all__ = ["SkillIndex"]
+__all__ = ["PrivateAgent", "Skill", "SkillIndex", "parse_skill"]

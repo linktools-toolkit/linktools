@@ -1,86 +1,207 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Lazy SQLAlchemy database construction and frozen schema registration."""
 
-"""StorageDatabase: the shared SQLAlchemy database every SQL store binds to.
-
-A ``StorageDatabase`` carries the async engine, session factory, the shared
-``Base.metadata``, the table prefix, and a ``CoordinationScope``. Construction
-does NO I/O: ``create_async_engine`` is lazy, so a SQLite database file (and any
-server connection) is opened only when ``initialize_storage`` runs or a session
-is first used. SQLite is single-process (``CoordinationScope.PROCESS``); a
-server database (MySQL/PostgreSQL) is ``CoordinationScope.SHARED_DATABASE`` and
-may be shared across workers.
-"""
-
-
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
-from .sql.base import Base
-from .sql.conventions import TABLE_PREFIX
+from typing import TYPE_CHECKING, Protocol
 
-from typing import TYPE_CHECKING
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.json import canonical_json_bytes
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy import Constraint, Index, MetaData, Table
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 class CoordinationScope(StrEnum):
-    # Single-process: the local SQLite database is owned by one OS process.
-    # Concurrent multi-worker claim against SQLite is not supported.
     PROCESS = "process"
-    # A server database (MySQL/PostgreSQL) shared across workers; lease fencing
-    # and row-level locking coordinate concurrent claim/commit.
     SHARED_DATABASE = "shared_database"
+
+
+@dataclass(frozen=True, slots=True)
+class SqlTableManifest:
+    name: str
+    owner: str
+    columns: "tuple[str, ...]"
+    constraints: "tuple[str, ...]"
+    indexes: "tuple[str, ...]"
+
+
+@dataclass(frozen=True, slots=True)
+class SqlSchemaManifest:
+    tables: "tuple[SqlTableManifest, ...]"
+    digest: str
+
+
+class SqlSchemaContributor(Protocol):
+    @classmethod
+    def register_schema(cls, registry: "SqlSchemaRegistry") -> "Table": ...
+
+
+class SqlSchemaRegistry:
+    def __init__(self) -> None:
+        self._metadata = _new_metadata()
+        self._tables: dict[str, SqlTableManifest] = {}
+        self._frozen = False
+        self._manifest: SqlSchemaManifest | None = None
+
+    @property
+    def metadata(self) -> "MetaData":
+        return self._metadata
+
+    def add_table(self, table: "Table", *, owner: str) -> None:
+        if self._frozen:
+            raise ValueError("SQL schema registry is frozen")
+        manifest = SqlTableManifest(
+            table.name,
+            owner,
+            tuple(
+                f"{column.name}:{column.type}:{int(column.nullable)}:{int(column.primary_key)}"
+                for column in table.columns
+            ),
+            tuple(sorted(sql_constraint_signature(constraint) for constraint in table.constraints)),
+            tuple(
+                sorted(
+                    _index_signature(index)
+                    for index in table.indexes
+                    if index.name is not None
+                )
+            ),
+        )
+        previous = self._tables.get(table.name)
+        if previous is not None and previous != manifest:
+            raise ValueError(f"conflicting SQL table registration: {table.name}")
+        if previous is not None and previous.owner != owner:
+            raise ValueError(f"duplicate SQL table owner: {table.name}")
+        self._tables[table.name] = manifest
+
+    def freeze(self) -> SqlSchemaManifest:
+        if self._manifest is not None:
+            return self._manifest
+        self._frozen = True
+        tables = tuple(self._tables[name] for name in sorted(self._tables))
+        payload = {
+            "tables": [
+                {
+                    "name": table.name,
+                    "owner": table.owner,
+                    "columns": list(table.columns),
+                    "constraints": list(table.constraints),
+                    "indexes": list(table.indexes),
+                }
+                for table in tables
+            ]
+        }
+        digest = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+        self._manifest = SqlSchemaManifest(tables, digest)
+        return self._manifest
+
+    @property
+    def manifest(self) -> SqlSchemaManifest:
+        if self._manifest is None:
+            raise ValueError("SQL schema registry is not frozen")
+        return self._manifest
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
 
 
 @dataclass(frozen=True, slots=True)
 class StorageDatabase:
     engine: "AsyncEngine"
-    session_factory: async_sessionmaker
+    session_factory: "async_sessionmaker[AsyncSession]"
     coordination_scope: CoordinationScope
-    metadata: "type[DeclarativeBase]" = Base
-    table_prefix: str = TABLE_PREFIX
+    metadata: "MetaData"
+    schema_manifest_digest: str
 
 
 def scope_for_url(url: str) -> CoordinationScope:
-    """Single-process for SQLite, shared-database for server databases. Pure
-    string inspection -- does not import a driver or connect."""
     return CoordinationScope.PROCESS if url.startswith("sqlite") else CoordinationScope.SHARED_DATABASE
 
 
-def build_sqlite_storage(path: "str | Path") -> StorageDatabase:
-    """Build a single-process SQLite StorageDatabase. No file is created until
-    ``initialize_storage`` runs -- ``create_async_engine`` opens lazily."""
-    from sqlalchemy.ext.asyncio import create_async_engine
+def sql_constraint_signature(constraint: "Constraint") -> str:
+    name = constraint.name or ""
+    columns = ",".join(column.name for column in constraint.columns)
+    from sqlalchemy import CheckConstraint
 
-    url = f"sqlite+aiosqlite:///{Path(path)}"
-    engine = create_async_engine(url)
+    expression = str(constraint.sqltext) if isinstance(constraint, CheckConstraint) else ""
+    return f"{type(constraint).__name__}:{name}:{columns}:{expression}"
+
+
+def _index_signature(index: "Index") -> str:
+    name = index.name or ""
+    columns = ",".join(column.name for column in index.columns)
+    return f"{name}:{columns}"
+
+
+def build_storage(
+    async_url: str,
+    *,
+    metadata: "MetaData",
+    schema_manifest_digest: str,
+) -> StorageDatabase:
+    try:
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    except ModuleNotFoundError as error:
+        if error.name == "sqlalchemy":
+            raise LinktoolsAIError(
+                ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
+                "SQLAlchemy is required for SQL storage",
+            ) from error
+        raise
+    engine = create_async_engine(async_url)
     return StorageDatabase(
-        engine=engine,
-        session_factory=async_sessionmaker(engine, expire_on_commit=False),
-        coordination_scope=CoordinationScope.PROCESS,
+        engine,
+        async_sessionmaker(engine, expire_on_commit=False),
+        scope_for_url(async_url),
+        metadata,
+        schema_manifest_digest,
     )
 
 
-def build_storage(url: str, *, coordination_scope: "CoordinationScope | None" = None) -> StorageDatabase:
-    """Build a StorageDatabase for an arbitrary async URL. The coordination scope
-    defaults to PROCESS for SQLite and SHARED_DATABASE for server databases."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    engine = create_async_engine(url)
-    return StorageDatabase(
-        engine=engine,
-        session_factory=async_sessionmaker(engine, expire_on_commit=False),
-        coordination_scope=coordination_scope or scope_for_url(url),
+def build_sqlite_storage(
+    path: Path,
+    *,
+    metadata: "MetaData",
+    schema_manifest_digest: str,
+) -> StorageDatabase:
+    return build_storage(
+        f"sqlite+aiosqlite:///{path}",
+        metadata=metadata,
+        schema_manifest_digest=schema_manifest_digest,
     )
+
+
+async def close_storage(database: StorageDatabase) -> None:
+    await database.engine.dispose()
+
+
+def _new_metadata() -> "MetaData":
+    try:
+        from sqlalchemy import MetaData
+    except ModuleNotFoundError as error:
+        if error.name == "sqlalchemy":
+            raise LinktoolsAIError(
+                ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
+                "SQLAlchemy is required for SQL schema registration",
+            ) from error
+        raise
+    return MetaData()
 
 
 __all__ = [
     "CoordinationScope",
+    "SqlSchemaContributor",
+    "SqlSchemaManifest",
+    "SqlSchemaRegistry",
+    "SqlTableManifest",
     "StorageDatabase",
     "build_sqlite_storage",
     "build_storage",
+    "close_storage",
+    "sql_constraint_signature",
     "scope_for_url",
 ]

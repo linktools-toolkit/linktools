@@ -2,6 +2,6 @@
 # -*- coding: utf-8 -*-
 """Public Runtime Protocol with no infrastructure side effects."""
 
-from .ports.runtime import Runtime
+from .runtime import Runtime
 
 __all__ = ["Runtime"]

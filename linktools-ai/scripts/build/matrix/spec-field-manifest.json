@@ -1,0 +1,35 @@
+{
+  "types": {
+    "AgentFeatureRef": {
+      "module": "linktools.ai.spec.model",
+      "fields": [
+        {"name": "kind", "type": "Literal[tool,skill,mcp,subagent,sandbox,middleware]"},
+        {"name": "id", "type": "str"},
+        {"name": "revision", "type": "int | None", "default": null},
+        {"name": "required", "type": "bool", "default": true},
+        {"name": "config", "type": "Mapping[str, JsonValue]", "default": "empty mapping"}
+      ]
+    },
+    "AgentSpec": {
+      "module": "linktools.ai.spec.model",
+      "fields": [
+        {"name": "id", "type": "str"},
+        {"name": "revision", "type": "int"},
+        {"name": "model", "type": "str"},
+        {"name": "features", "type": "tuple[AgentFeatureRef, ...]"},
+        {"name": "output_schema", "type": "str"},
+        {"name": "instructions", "type": "tuple[str, ...]", "default": []}
+      ]
+    },
+    "PromptSpec": {
+      "module": "linktools.ai.spec.model",
+      "fields": [
+        {"name": "id", "type": "str"},
+        {"name": "revision", "type": "int"},
+        {"name": "system", "type": "str"},
+        {"name": "instructions", "type": "tuple[str, ...]"},
+        {"name": "variables", "type": "tuple[str, ...]"}
+      ]
+    }
+  }
+}

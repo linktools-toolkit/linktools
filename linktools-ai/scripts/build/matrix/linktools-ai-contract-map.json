@@ -1,0 +1,15 @@
+{
+  "contracts": {
+    "storage": {"owner": "storage", "replacement": "linktools.ai.storage"},
+    "asset": {"owner": "asset", "replacement": "linktools.ai.asset.AssetStore"},
+    "sql_asset_backend": {"owner": "asset", "replacement": "linktools.ai.asset.sql.SqlAlchemyAssetBackend"},
+    "spec_dto": {"owner": "spec", "replacement": "linktools.ai.spec"},
+    "runtime_execution": {"owner": "runtime", "replacement": "Runtime.execution"},
+    "runtime_session": {"owner": "runtime", "replacement": "Runtime.session"},
+    "runtime_task": {"owner": "task", "replacement": "Runtime.task"},
+    "runtime_evaluation": {"owner": "runtime", "replacement": "Runtime.evaluation"},
+    "runtime_access": {"owner": "runtime", "replacement": "RuntimeAccess"},
+    "capability": {"owner": "capability", "replacement": "linktools.ai.capability"},
+    "principal": {"owner": "core", "replacement": "linktools.ai.core.Principal"}
+  }
+}

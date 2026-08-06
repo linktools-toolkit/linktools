@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""Version-aware decoded-object cache over an asset store."""
+"""Version-aware decoded-object cache over text asset content."""
 
 import asyncio
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeVar
 
 from linktools.core import environ
 
-T = TypeVar("T")
-logger = environ.get_logger("ai.asset.cache")
+from .content import AssetContent, AssetContentInfo
+
+TAsset = TypeVar("TAsset")
+_logger = environ.get_logger("ai.asset.cache")
 
 
 class AssetCacheStore(Protocol):
-    async def get(self, path: str) -> Any: ...
+    async def get(self, path: str) -> "AssetContent | None": ...
 
-    async def list_info(self) -> "tuple[Any, ...]": ...
-
-
-class AssetCacheCodec(Protocol, Generic[T]):
-    def decode(self, item_id: str, raw: str) -> T: ...
+    async def list_info(self) -> "tuple[AssetContentInfo, ...]": ...
 
 
-class AssetObjectCache(Generic[T]):
+class AssetCacheCodec(Generic[TAsset], Protocol):
+    def decode(self, item_id: str, raw: str) -> TAsset: ...
+
+
+class AssetObjectCache(Generic[TAsset]):
     def __init__(
         self,
         store: AssetCacheStore,
-        codec: "AssetCacheCodec[T]",
+        codec: AssetCacheCodec[TAsset],
         *,
         prefix: str,
         suffix: str,
@@ -37,8 +38,8 @@ class AssetObjectCache(Generic[T]):
         self._prefix = prefix.strip("/")
         self._suffix = suffix
         self._source_name = source_name or type(store).__name__
-        self._cache: "dict[tuple[str, int, str], T]" = {}
-        self._inflight: "dict[tuple[str, int, str], asyncio.Future[T]]" = {}
+        self._cache: dict[tuple[str, int, str], TAsset] = {}
+        self._inflight: dict[tuple[str, int, str], asyncio.Task[TAsset]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -59,42 +60,37 @@ class AssetObjectCache(Generic[T]):
         ]
         return tuple(sorted(dict.fromkeys(ids)))
 
-    async def get(self, item_id: str) -> T:
-        path = self._full_path(item_id)
+    async def get(self, item_id: str) -> TAsset:
+        content = await self._store.get(self._full_path(item_id))
+        if content is None:
+            raise KeyError(item_id)
+        key = (item_id, content.info.version, content.info.etag)
         async with self._lock:
-            content = await self._store.get(path)
-            if content is None:
-                raise KeyError(item_id)
-            key = (item_id, content.info.version, content.info.etag)
             cached = self._cache.get(key)
             if cached is not None:
-                logger.debug("asset cache hit: item=%s source=%s", item_id, self._source_name)
+                _logger.debug("asset cache hit: item=%s source=%s", item_id, self._source_name)
                 return cached
-            future = self._inflight.get(key)
-            if future is None:
-                future = asyncio.get_running_loop().create_future()
-                self._inflight[key] = future
-                logger.debug("asset cache miss: item=%s source=%s", item_id, self._source_name)
-                asyncio.create_task(self._decode(item_id, key, content, future))
-        return await future
+            task = self._inflight.get(key)
+            if task is None:
+                task = asyncio.create_task(self._decode(item_id, key, content))
+                self._inflight[key] = task
+                _logger.debug("asset cache miss: item=%s source=%s", item_id, self._source_name)
+        return await asyncio.shield(task)
 
     async def _decode(
         self,
         item_id: str,
         key: "tuple[str, int, str]",
-        content: Any,
-        future: "asyncio.Future[T]",
-    ) -> None:
+        content: AssetContent,
+    ) -> TAsset:
         try:
             value = self._codec.decode(item_id, content.content.decode("utf-8"))
             async with self._lock:
                 self._cache[key] = value
-                self._inflight.pop(key, None)
-            future.set_result(value)
-        except BaseException as exc:
+            return value
+        finally:
             async with self._lock:
                 self._inflight.pop(key, None)
-            future.set_exception(exc)
 
 
 __all__ = ["AssetCacheCodec", "AssetCacheStore", "AssetObjectCache"]

@@ -1,158 +1,217 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Session, Task, Trace, Schema, Local and Extension contracts. MT-40 MT-41 MT-42 MT-43 MT-44 MT-45 MT-46 MT-47 MT-48 MT-49 MT-50."""
+"""Agent, Task, Observe, and Temporal boundary contracts."""
 
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
-pytest.importorskip("temporalio")
-
-from linktools.ai.domain.schema import SchemaEntry
-from linktools.ai.domain.session import Session, SessionStatus
-from linktools.ai.domain.task import Job, TaskExecution, TaskNode, TaskPlan, TaskStatus
-from linktools.ai.domain.trace import RunSnapshot, StopReason, TraceEvent, TraceKind
-from linktools.ai.entrypoints.api import build_api
-from linktools.ai.entrypoints.service import build_service
-from linktools.ai.application.services.event import EventService
-from linktools.ai.extension.registry import FeatureRegistry
-from linktools.ai.foundation.errors import ErrorCode, LinktoolsAIError
-from linktools.ai.foundation.json import canonical_json_bytes
-from linktools.ai.local.index import SkillIndex
-from linktools.ai.local.project import LocalProject
-from linktools.ai.schema.registry import OutputSchemaRegistry
-from linktools.ai.trace.api import InMemoryTraceRecorder
-from linktools.ai.trace.snapshot import snapshot_digest, verify_snapshot
-from linktools.ai.agent.deps import AgentDeps
-from linktools.ai.bundles.generated import agent
-from pydantic_ai.durable_exec.temporal import TemporalDurability
-
-
-def test_session_and_task_fences_are_strict() -> None:
-    session = Session(session_id="s", owner_id="o", project_id="p", agent_id="a", agent_revision=1, profile="local-coding")
-    assert session.transition_to(SessionStatus.BUSY).status is SessionStatus.BUSY
-    plan = TaskPlan(plan_id="p", tasks=(TaskNode(task_id="a"), TaskNode(task_id="b", dependencies=("a",))))
-    assert plan.ready(frozenset()) == ("a",)
-    execution = TaskExecution(task_id="a").claim("worker", datetime.now(timezone.utc), timedelta(minutes=1))
-    with pytest.raises(LinktoolsAIError) as error:
-        execution.complete("other", execution.fence, datetime.now(timezone.utc))
-    assert error.value.code == ErrorCode.TASK_FENCE_STALE
-    done = execution.complete("worker", execution.fence, datetime.now(timezone.utc), "result")
-    assert done.status is TaskStatus.COMPLETED
-    assert done.complete("worker", execution.fence, datetime.now(timezone.utc), "other") == done
-    assert Job(job_id="j", plan=plan, executions=(done,)).aggregate() == "RUNNING"
+from linktools.ai.agent import AgentDeps
+from scripts.build.agent_bundle import build_bundle
+from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
+from linktools.ai.model import ModelRegistry, ModelRoute
+from linktools.ai.observe.context import RunContext
+from linktools.ai.observe.middleware import MiddlewarePipeline
+from linktools.ai.observe.snapshot import RunSnapshot, snapshot_digest
+from linktools.ai.observe.trace import InMemoryTraceRecorder, TraceItem
+from linktools.ai.local.principal import trusted_local_principal
+from linktools.ai.runtime.services import ExecutionRequest
+from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
+from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.temporal import WorkerActivities, WorkerRegistration, production_registration
+from linktools.ai.temporal.gateway import WorkflowGateway
+from linktools.ai.temporal.activity.evaluation import EvaluationActivity
+from linktools.ai.temporal.activity.execution import ExecuteActivity
+from linktools.ai.temporal.activity.session import SessionActivity
+from linktools.ai.temporal.activity.task import TaskActivity
+from linktools.ai.temporal.worker import ActivityType, WorkflowType
+from linktools.ai.temporal.workflow.evaluation import EvaluationWorkflowInput, EvaluationWorkflowResult
+from linktools.ai.temporal.workflow.execution import ExecutionWorkflowInput, ExecutionWorkflowResult
+from linktools.ai.temporal.workflow.session import SessionWorkflowInput, SessionWorkflowResult
+from linktools.ai.temporal.workflow.task import TaskWorkflowInput, TaskWorkflowResult
 
 
-def test_schema_drift_and_feature_freeze_are_fail_closed() -> None:
-    registry = OutputSchemaRegistry()
-    entry = SchemaEntry(schema_id="output", revision=1, fingerprint="a", python_type_path="builtins.dict", json_schema={"type": "object"})
-    assert registry.register(entry) == entry
-    with pytest.raises(LinktoolsAIError) as error:
-        registry.register(entry.model_copy(update={"fingerprint": "b"}))
-    assert error.value.code == ErrorCode.OUTPUT_SCHEMA_DRIFT
-    features = FeatureRegistry()
-    features.register("local", object())
-    features.freeze()
-    with pytest.raises(LinktoolsAIError) as error:
-        features.register("other", object())
-    assert error.value.code == ErrorCode.FEATURE_REGISTRY_FROZEN
+def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
+    with pytest.raises(ValueError):
+        TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
+    spec = AgentSpec("agent", 1, "route", (AgentFeatureRef("tool", "bash"),), "text", ("answer",))
+    prompt = PromptSpec("prompt", 1, "system", ("answer",), ())
+    assert build_bundle(spec, prompt, "capabilities").digest == build_bundle(spec, prompt, "capabilities").digest
 
 
-@pytest.mark.asyncio
-async def test_trace_is_monotonic_idempotent_and_snapshot_digest_is_verified() -> None:
-    recorder = InMemoryTraceRecorder()
-    event = TraceEvent(
-        execution_id="e", sequence=1, run_id="r", kind=TraceKind.TERMINAL,
-        timestamp=datetime.now(timezone.utc), status="SUCCEEDED",
-    )
-    assert await recorder.append(event) == event
-    assert await recorder.append(event) == event
-    values = {
-        "snapshot_id": "s", "execution_id": "e", "run_id": "r", "input_digest": "i",
-        "release_digest": "rel", "bundle_digest": "b", "model_plan_digest": "m",
-        "prompt_digest": "p", "trace_start": 1, "trace_end": 1, "result_digest": None,
-        "checkpoint_ref": None, "usage": {}, "stop_reason": StopReason.END_TURN.value,
-    }
-    snapshot = RunSnapshot(**values, digest=snapshot_digest(values))
-    assert verify_snapshot(snapshot)
-    assert snapshot.verify()
-
-
-def test_local_project_and_private_agent_index_refresh_incrementally(tmp_path: Path) -> None:
-    root = tmp_path / "project"
-    skill = root / ".linktools" / "skills" / "demo"
-    agents = skill / "agents"
-    agents.mkdir(parents=True)
-    (root / ".linktools" / "config.yaml").write_text("default_agent: builtin\n", encoding="utf-8")
-    (skill / "SKILL.md").write_text("# Demo\n", encoding="utf-8")
-    private = agents / "reviewer.md"
-    private.write_text("review", encoding="utf-8")
-    LocalProject.discover(root / "src")
-    index = SkillIndex(skill.parent)
-    first = index.refresh()
-    assert index.resolve("demo").private_agents[0].agent_id == "reviewer"
-    private.write_text("review changed", encoding="utf-8")
-    assert index.refresh() > first
-    assert index.resolve_agent("demo", "reviewer").content == "review changed"
-
-
-def test_trace_snapshot_digest_is_canonical() -> None:
-    first = snapshot_digest({"b": 1, "a": 2})
-    second = snapshot_digest({"a": 2, "b": 1})
-    assert first == second
-    assert canonical_json_bytes({"a": 2, "b": 1}) == canonical_json_bytes({"b": 1, "a": 2})
-
-
-def test_agent_deps_and_composition_roots_are_explicit() -> None:
+def test_model_registry_and_serializable_agent_deps_are_instance_owned() -> None:
+    registry = ModelRegistry()
+    snapshot = registry.prime({"route": ModelRoute("route", "openai", "model")})
+    assert snapshot.routes["route"].model == "model"
     deps = AgentDeps(
-        execution_id="e",
-        tenant_principal_ref="tenant:subject",
-        model_plan_id="model",
+        execution_id="execution",
+        tenant_principal_ref="tenant:principal",
+        model_plan_id="route",
         budget_id="budget",
         prompt_snapshot_id="prompt",
     )
-    assert deps.model_dump()["execution_id"] == "e"
-    assert agent.name == "lt.generated.empty"
-    assert TemporalDurability.from_agent(agent) is not None
+    assert deps.model_dump()["execution_id"] == "execution"
 
-    api = build_api(object(), object())
-    assert api.routes == ()
-    service = build_service(object(), ("workflow",), ("activity",))
 
-    class Worker:
-        def __init__(self) -> None:
-            self.workflows = ()
-            self.activities = ()
+def test_task_completion_checks_owner_fence_result_and_terminal_state() -> None:
+    from linktools.ai.task import TaskCompletionLedger
 
-        def register_workflows(self, workflows: tuple[object, ...]) -> None:
-            self.workflows = workflows
-
-        def register_activities(self, activities: tuple[object, ...]) -> None:
-            self.activities = activities
-
-    worker = Worker()
-    service.register(worker)
-    assert worker.workflows == ("workflow",)
-    assert worker.activities == ("activity",)
+    ledger = TaskCompletionLedger()
+    first = ledger.complete("task", "owner", 1, "digest")
+    assert ledger.complete("task", "owner", 1, "digest") == first
+    with pytest.raises(LinktoolsAIError) as result_error:
+        ledger.complete("task", "owner", 1, "other")
+    assert result_error.value.code == ErrorCode.TASK_RESULT_CONFLICT
+    with pytest.raises(LinktoolsAIError) as owner_error:
+        ledger.complete("task", "other", 1, "digest")
+    assert owner_error.value.code == ErrorCode.TASK_OWNER_CONFLICT
+    with pytest.raises(LinktoolsAIError) as fence_error:
+        ledger.complete("task", "owner", 0, "digest")
+    assert fence_error.value.code == ErrorCode.TASK_FENCE_STALE
+    with pytest.raises(LinktoolsAIError) as terminal_error:
+        ledger.fail("task", "owner", 1, "FAILED", "error")
+    assert terminal_error.value.code == ErrorCode.TASK_TERMINAL_CONFLICT
 
 
 @pytest.mark.asyncio
-async def test_durable_event_identity_is_execution_scoped() -> None:
-    class Repository:
-        def __init__(self) -> None:
-            self.events = []
+async def test_middleware_order_and_failure_classification() -> None:
+    events: list[str] = []
 
-        async def append(self, event: object) -> object:
-            self.events.append(event)
-            return event
+    class Observer:
+        mutating = False
 
-    repository = Repository()
-    service = EventService(repository)
-    timestamp = datetime.now(timezone.utc)
-    first = await service.append("execution-a", "status", 1, timestamp, {"state": "RUNNING"}, source_id="workflow", source_phase="start")
-    retry = await service.append("execution-a", "status", 1, timestamp, {"state": "RUNNING"}, source_id="workflow", source_phase="start")
-    other = await service.append("execution-b", "status", 1, timestamp, {"state": "RUNNING"}, source_id="workflow", source_phase="start")
-    assert first.event_id == retry.event_id
-    assert first.event_id != other.event_id
+        async def before_run(self, context: RunContext) -> None:
+            events.append("before")
+
+        async def before_model(self, context: RunContext) -> None:
+            events.append("model")
+
+        async def after_model(self, context: RunContext) -> None:
+            events.append("after-model")
+
+        async def before_tool(self, context: RunContext) -> None:
+            events.append("tool")
+
+        async def after_tool(self, context: RunContext) -> None:
+            events.append("after-tool")
+
+        async def on_error(self, context: RunContext, error: BaseException) -> None:
+            events.append("error")
+
+        async def after_run(self, context: RunContext) -> None:
+            events.append("after")
+
+    context = RunContext("tenant", "principal", "execution", "session", "run", "agent")
+    pipeline = MiddlewarePipeline((Observer(),))
+    await pipeline.before_run(context)
+    await pipeline.after_run(context)
+    assert events == ["before", "after"]
+
+    class FailingObserver(Observer):
+        async def before_model(self, context: RunContext) -> None:
+            raise RuntimeError("telemetry failure")
+
+    await MiddlewarePipeline((FailingObserver(),)).before_model(context)
+
+    class FailingMutation(FailingObserver):
+        mutating = True
+
+    with pytest.raises(LinktoolsAIError) as middleware_error:
+        await MiddlewarePipeline((FailingMutation(),)).before_model(context)
+    assert middleware_error.value.code == ErrorCode.MIDDLEWARE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_trace_is_monotonic_and_snapshot_digest_is_verified() -> None:
+    recorder = InMemoryTraceRecorder()
+    item = TraceItem("execution", 1, "completed", datetime.now(timezone.utc), "done")
+    assert await recorder.append(item) == item
+    assert await recorder.append(item) == item
+    values = {
+        "snapshot_id": "snapshot",
+        "execution_id": "execution",
+        "binding_digest": "binding",
+        "trace_digest": "trace",
+        "result_digest": None,
+    }
+    snapshot = RunSnapshot(**values, digest=snapshot_digest(values))
+    assert snapshot.verify()
+
+
+def test_temporal_registration_has_one_explicit_worker_surface() -> None:
+    class ExecutionOperation:
+        async def execute(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult:
+            return ExecutionWorkflowResult(request.execution_id, "SUCCEEDED", None, 0)
+
+    class SessionOperation:
+        async def execute(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
+            return SessionWorkflowResult(request.session_id, request.mutation_id, "SUCCEEDED")
+
+    class TaskOperation:
+        async def execute(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
+            return TaskWorkflowResult(request.graph_id, "SUCCEEDED", request.task_ids)
+
+    class EvaluationOperation:
+        async def execute(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
+            return EvaluationWorkflowResult(request.evaluation_id, "SUCCEEDED", request.case_ids)
+
+    activities = WorkerActivities(
+        execution=ExecuteActivity(ExecutionOperation()),
+        session=SessionActivity(SessionOperation()),
+        task=TaskActivity(TaskOperation()),
+        evaluation=EvaluationActivity(EvaluationOperation()),
+    )
+    registration = production_registration(activities)
+    assert isinstance(registration, WorkerRegistration)
+    assert len(registration.workflows) == len(registration.activities) == 4
+
+    class Worker:
+        def configure(
+            self,
+            *,
+            data_converter: str,
+            payload_codec: str,
+            interceptor: str,
+            build_id: str,
+            task_queue: str,
+        ) -> None:
+            self.configuration = (data_converter, payload_codec, interceptor, build_id, task_queue)
+
+        def register_workflows(self, workflows: tuple[WorkflowType, ...]) -> None:
+            self.workflows = workflows
+
+        def register_activities(self, activities: tuple[ActivityType, ...]) -> None:
+            self.activities = activities
+
+    worker = Worker()
+    registration.register(worker)
+    assert worker.configuration == ("json", "asset", "linktools-ai", "linktools-ai", "linktools-ai-production")
+    assert len(worker.workflows) == 4
+
+
+@pytest.mark.asyncio
+async def test_production_gateway_rejects_local_and_unknown_operations() -> None:
+    class Client:
+        async def start_workflow(self, workflow: str, request, *, workflow_id: str):
+            return None
+
+        async def start_task_graph(self, request, *, workflow_id: str):
+            return None
+
+        async def update_workflow(self, workflow_id: str, operation: str, payload):
+            return None
+
+        async def query_workflow(self, workflow_id: str, query: str):
+            return None
+
+        async def cancel_workflow(self, workflow_id: str):
+            return None
+
+    gateway = WorkflowGateway(Client())
+    local = ExecutionRequest("prompt", trusted_local_principal("local"))
+    with pytest.raises(LinktoolsAIError) as profile_error:
+        await gateway.start_execution("execution", local)
+    assert profile_error.value.code == ErrorCode.PROFILE_NOT_ALLOWED
+    with pytest.raises(ValueError):
+        await gateway.query_execution("execution", "unknown")

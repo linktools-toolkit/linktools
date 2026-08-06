@@ -1,121 +1,315 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Typed AssetStore backed by the generic StorageComposition."""
 
-"""Asset storage composed from the generic storage kernel."""
+import base64
+import binascii
+import hashlib
+import json
+from collections.abc import Sequence
+from typing import TypeVar
 
-from typing import Any, TYPE_CHECKING
+from linktools.core import environ
 
-from ..storage.composition import StorageAdapter, StorageCacheAdapter, StorageComposition, StorageLayer
-from ..storage.versioning import VersionedStorage, VersionSummary
-from .content import AssetContent, AssetContentInfo
+from ..core import Page
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..storage.composition import CacheAdapter, StorageAdapter, StorageComposition
+from ..storage.layer import StorageWriteVisibility
+from ..storage.model import StorageChange, StorageDeleteResult, StorageOperation
+from ..storage.model import StorageBatchPartialError
+from .codec import AssetCodecManifest, AssetCodecRegistry
+from .model import (
+    AssetBatchResult,
+    AssetBatchPartialError,
+    AssetChange,
+    AssetDeleteResult,
+    AssetInfo,
+    AssetKey,
+    AssetRequest,
+    AssetRevision,
+    AssetStoreRevision,
+    AssetValue,
+    AssetVersion,
+    OwnedAssetInfo,
+)
 
-if TYPE_CHECKING:
-    from ..storage.cache import ContentCache, ContentCacheKey
-    from ..storage.multi import StorageReader, StorageWriter
-    from ..storage.revision import RevisionSource
+AssetT = TypeVar("AssetT", bound=AssetValue)
+_logger = environ.get_logger("ai.asset.store")
 
 
-class AssetStorageAdapter(
-    StorageAdapter[str, AssetContent, AssetContentInfo],
-    StorageCacheAdapter[str, AssetContent, AssetContentInfo],
-):
-    def info_key(self, info: AssetContentInfo) -> str:
-        return info.path
+class _AssetStorageAdapter(StorageAdapter[AssetKey, bytes, AssetKey, bytes, AssetInfo]):
+    def to_storage_key(self, key: AssetKey) -> AssetKey:
+        return key
 
-    def value_info(self, value: AssetContent) -> AssetContentInfo:
-        return value.info
+    def from_storage_key(self, key: AssetKey) -> AssetKey:
+        return key
 
-    def cache_key(self, key: str, info: AssetContentInfo) -> "ContentCacheKey":
-        return f"asset:{key}:{info.version}:{info.etag}"
+    def from_storage_value(self, value: bytes) -> bytes:
+        return value
 
-    def cache_content(self, value: AssetContent) -> bytes:
-        return value.content
+    def to_storage_value(self, value: bytes) -> bytes:
+        return value
 
-    def from_cache(self, info: AssetContentInfo, content: bytes) -> AssetContent:
-        return AssetContent(info, content)
+    def validate_value(self, key: AssetKey, value: bytes, info: AssetInfo) -> None:
+        if info.key != key or len(value) != info.size or hashlib.sha256(value).hexdigest() != info.etag:
+            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+
+
+class _AssetCacheAdapter(CacheAdapter[AssetKey, bytes, AssetInfo]):
+    def cache_key(self, key: AssetKey, info: AssetInfo) -> str:
+        return f"asset:{info.root_digest}:{key.kind}:{key.id}:{info.entry_revision.value}:{info.etag}"
+
+    def to_cache(self, value: bytes) -> bytes:
+        return value
+
+    def from_cache(self, value: bytes) -> bytes:
+        return value
 
 
 class AssetStore:
     def __init__(
         self,
-        primary: "StorageReader[str, AssetContent, AssetContentInfo]",
         *,
-        writer: "StorageWriter[str, AssetContent, Any] | None" = None,
-        layers: "tuple[StorageLayer[str, AssetContent, AssetContentInfo], ...]" = (),
-        cache: "ContentCache | None" = None,
-        revision_source: "RevisionSource | None" = None,
+        storage: 'StorageComposition[AssetKey, bytes, AssetKey, bytes, AssetInfo, AssetRevision, AssetStoreRevision]',
+        codecs: AssetCodecRegistry,
     ) -> None:
-        adapter = AssetStorageAdapter()
-        self._storage = StorageComposition(
-            primary,
-            writer=writer,
-            layers=layers,
-            cache=cache,
-            adapter=adapter,
-            cache_adapter=adapter,
-            revision_source=revision_source,
-        )
+        if storage.write_visibility is not StorageWriteVisibility.READABLE:
+            raise ValueError("AssetStore requires readable writes")
+        if not storage.writer_is_primary:
+            raise ValueError("AssetStore requires the primary backend as writer")
+        self._storage = storage
+        self._codecs = codecs
 
     @property
-    def writer(self) -> "StorageWriter[str, AssetContent, Any] | None":
-        return self._storage.writer
+    def codec_manifest(self) -> AssetCodecManifest:
+        return self._codecs.manifest()
 
-    async def initialize_storage(self, *args: object) -> None:
-        await self._storage.initialize(*args)
+    async def stat(self, key: AssetKey) -> 'AssetInfo | None':
+        infos = await self._storage.list_info()
+        return next((info for info in infos if info.key == key), None)
 
-    async def stat(self, path: str) -> "AssetContentInfo | None":
-        state = await self._storage.refresh()
-        return None if state is None else state.entries.get(path)
+    async def get(self, key: AssetKey, *, expected: 'type[AssetT]') -> 'AssetT | None':
+        codec = self._codecs.resolve(key.kind, expected)
+        info = await self.stat(key)
+        if info is None or info.deleted:
+            return None
+        encoded = await self._storage.get(key)
+        if encoded is None:
+            return None
+        try:
+            value = codec.decode(encoded)
+            codec.validate_key(key, value)
+        except LinktoolsAIError:
+            raise
+        except Exception as error:
+            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+        return value
 
-    async def list_active(self, kind: "str | None" = None, *, preload: bool = False) -> "tuple[str, ...]":
-        return tuple(
-            info.path
-            for info in await self._storage.list_info(preload=preload)
-            if info.active and (kind is None or info.kind == kind)
+    async def get_many(self, requests: 'Sequence[AssetRequest[AssetValue]]') -> 'tuple[AssetValue | None, ...]':
+        codecs = tuple(self._codecs.resolve(request.key.kind, request.expected) for request in requests)
+        infos = {info.key: info for info in await self._storage.list_info()}
+        active_keys = tuple(
+            request.key
+            for request in requests
+            if (info := infos.get(request.key)) is not None and not info.deleted
         )
+        active_values = await self._storage.get_many(active_keys)
+        encoded_by_key = dict(zip(active_keys, active_values))
+        values: list[AssetValue | None] = []
+        for request, codec in zip(requests, codecs):
+            info = infos.get(request.key)
+            content = encoded_by_key.get(request.key)
+            if info is None or info.deleted or content is None:
+                values.append(None)
+                continue
+            try:
+                value = codec.decode(content)
+                codec.validate_key(request.key, value)
+            except LinktoolsAIError:
+                raise
+            except Exception as error:
+                raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+            values.append(value)
+        return tuple(values)
 
-    async def list_info(self, *, preload: bool = False) -> "tuple[AssetContentInfo, ...]":
-        return await self._storage.list_info(preload=preload)
+    async def put(
+        self,
+        key: AssetKey,
+        value: AssetValue,
+        *,
+        expected_entry_revision: 'AssetRevision | None' = None,
+    ) -> AssetInfo:
+        codec = self._codecs.resolve(key.kind, type(value))
+        codec.validate_key(key, value)
+        result = await self._storage.put(key, codec.encode(value), expected_entry_revision=expected_entry_revision)
+        _logger.info("asset stored: kind=%s id=%s revision=%s", key.kind, key.id, result.entry_revision)
+        return result.info
 
-    async def list_info_with_owners(self, *, preload: bool = False) -> "tuple[tuple[AssetContentInfo, int], ...]":
-        return await self._storage.list_info_with_owners(preload=preload)
+    async def apply_batch(
+        self,
+        changes: 'Sequence[AssetChange]',
+        *,
+        expected_store_revision: 'AssetStoreRevision | None' = None,
+    ) -> AssetBatchResult:
+        encoded: list[StorageChange[AssetKey, bytes, AssetRevision]] = []
+        for change in changes:
+            if change.operation == "PUT":
+                if change.value is None:
+                    raise ValueError("PUT changes require a value")
+                codec = self._codecs.resolve(change.key.kind, type(change.value))
+                codec.validate_key(change.key, change.value)
+                encoded.append(StorageChange(StorageOperation.PUT, change.key, codec.encode(change.value), change.expected_entry_revision))
+            elif change.operation == "DELETE":
+                encoded.append(StorageChange(StorageOperation.DELETE, change.key, None, change.expected_entry_revision))
+            else:
+                raise ValueError(f"unsupported asset operation: {change.operation}")
+        try:
+            result = await self._storage.apply_batch(
+                encoded,
+                expected_store_revision=expected_store_revision,
+            )
+        except StorageBatchPartialError as exc:
+            raise AssetBatchPartialError(exc.failure) from exc
+        values: list[AssetInfo | AssetDeleteResult] = []
+        for index, item in enumerate(result.results):
+            if isinstance(item, StorageDeleteResult):
+                values.append(AssetDeleteResult(changes[index].key, item.deleted, item.entry_revision, item.store_revision))
+            else:
+                values.append(item.info)
+        return AssetBatchResult(result.store_revision, result.atomic, tuple(values))
 
-    async def current_revision(self) -> "int | str":
-        return await self._storage.current_revision()
+    async def delete(
+        self,
+        key: AssetKey,
+        *,
+        expected_entry_revision: 'AssetRevision | None' = None,
+    ) -> AssetDeleteResult:
+        result = await self._storage.delete(key, expected_entry_revision=expected_entry_revision)
+        return AssetDeleteResult(key, result.deleted, result.entry_revision, result.store_revision)
 
-    async def get(self, path: str) -> "AssetContent | None":
-        return await self._storage.get(path)
+    async def list_info(
+        self,
+        *,
+        kind: 'str | None' = None,
+        prefix: 'str | None' = None,
+        cursor: 'str | None' = None,
+        limit: int = 100,
+    ) -> 'Page[AssetInfo]':
+        infos = [info for info in await self._storage.list_info() if not info.deleted]
+        infos = [info for info in infos if (kind is None or info.key.kind == kind) and (prefix is None or info.key.id.startswith(prefix))]
+        revision = await self._storage.current_revision()
+        return _page_infos(infos, revision, kind, prefix, cursor, limit)
 
-    async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, AssetContent]":
-        return await self._storage.get_many(paths)
+    async def list_info_with_owners(
+        self,
+        *,
+        kind: 'str | None' = None,
+        prefix: 'str | None' = None,
+        cursor: 'str | None' = None,
+        limit: int = 100,
+    ) -> 'Page[OwnedAssetInfo]':
+        if limit < 1:
+            raise ValueError("limit must be positive")
+        owned = [item for item in await self._storage.list_info_with_owners() if not item.info.deleted]
+        owned = [item for item in owned if (kind is None or item.info.key.kind == kind) and (prefix is None or item.info.key.id.startswith(prefix))]
+        ordered = sorted(owned, key=lambda item: (item.info.key.kind, item.info.key.id))
+        revision = await self._storage.current_revision()
+        start = _cursor_start(cursor, revision, kind, prefix, ordered)
+        page = ordered[start : start + limit]
+        next_cursor = _make_cursor(revision, kind, prefix, page[-1].info.key if len(page) == limit else None)
+        return Page(tuple(OwnedAssetInfo(item.info, item.layer, item.writable) for item in page), next_cursor)
 
-    async def put(self, content: AssetContent) -> AssetContent:
-        return await self._storage.put(content)
+    async def list_versions(self, key: AssetKey) -> 'tuple[AssetVersion, ...]':
+        versions = await self._storage.list_versions(key)
+        ordered = sorted(versions, key=lambda version: version.entry_revision.value, reverse=True)
+        result: list[AssetVersion] = []
+        for version in ordered:
+            content = await self._storage.get_at_revision(key, version.entry_revision)
+            result.append(
+                AssetVersion(
+                    version.entry_revision,
+                    version.digest,
+                    version.size,
+                    content is None,
+                    version.created_at,
+                )
+            )
+        return tuple(result)
 
-    async def delete(self, path: str) -> None:
-        await self._storage.delete(path)
+    async def get_at_revision(self, key: AssetKey, entry_revision: AssetRevision, *, expected: 'type[AssetT]') -> 'AssetT | None':
+        codec = self._codecs.resolve(key.kind, expected)
+        content = await self._storage.get_at_revision(key, entry_revision)
+        if content is None:
+            return None
+        try:
+            value = codec.decode(content)
+            codec.validate_key(key, value)
+        except LinktoolsAIError:
+            raise
+        except Exception as error:
+            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+        return value
 
-    async def reset(self, contents: "tuple[AssetContent, ...]") -> None:
-        await self._storage.reset(contents)
+    async def get_at_version(self, key: AssetKey, version: int, *, expected: 'type[AssetT]') -> 'AssetT | None':
+        codec = self._codecs.resolve(key.kind, expected)
+        content = await self._storage.get_at_version(key, version)
+        if content is None:
+            return None
+        try:
+            value = codec.decode(content)
+            codec.validate_key(key, value)
+        except LinktoolsAIError:
+            raise
+        except Exception as error:
+            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+        return value
 
-    async def apply_batch(self, puts: "tuple[AssetContent, ...]", deletes: "tuple[str, ...]") -> None:
-        await self._storage.apply_batch(puts, deletes)
 
-    def _versioned_primary(self) -> "VersionedStorage[object, str, AssetContent] | None":
-        primary = self._storage.primary
-        return primary if isinstance(primary, VersionedStorage) else None
+def _page_infos(
+    infos: 'Sequence[AssetInfo]',
+    revision: AssetStoreRevision,
+    kind: 'str | None',
+    prefix: 'str | None',
+    cursor: 'str | None',
+    limit: int,
+) -> 'Page[AssetInfo]':
+    if limit < 1:
+        raise ValueError("limit must be positive")
+    ordered = sorted(infos, key=lambda info: (info.key.kind, info.key.id))
+    start = _cursor_start(cursor, revision, kind, prefix, ordered)
+    page = ordered[start : start + limit]
+    next_cursor = _make_cursor(revision, kind, prefix, page[-1].key if len(page) == limit else None)
+    return Page(tuple(page), next_cursor)
 
-    async def list_versions(self, path: str) -> "tuple[VersionSummary, ...]":
-        primary = self._versioned_primary()
-        return () if primary is None else await primary.list_versions(path)
 
-    async def get_at_revision(self, path: str, revision: object) -> "AssetContent | None":
-        primary = self._versioned_primary()
-        return None if primary is None else await primary.get_at_revision(path, revision)
+def _make_cursor(revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', key: 'AssetKey | None') -> 'str | None':
+    if key is None:
+        return None
+    raw = json.dumps({"revision": revision.value, "kind": kind, "prefix": prefix, "last": [key.kind, key.id]}, sort_keys=True, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    async def get_at_version(self, path: str, version: int) -> "AssetContent | None":
-        primary = self._versioned_primary()
-        return None if primary is None else await primary.get_at_version(path, version)
+
+def _cursor_start(cursor: 'str | None', revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', values: 'Sequence[AssetInfo | OwnedAssetInfo]') -> int:
+    if cursor is None:
+        return 0
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+        if not isinstance(payload, dict):
+            raise ValueError
+        if set(payload) != {"revision", "kind", "prefix", "last"}:
+            raise ValueError
+        if payload["revision"] != revision.value or payload["kind"] != kind or payload["prefix"] != prefix:
+            raise ValueError
+        raw_last = payload.get("last")
+        if not isinstance(raw_last, list) or len(raw_last) != 2 or not all(isinstance(item, str) for item in raw_last):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
+        raise LinktoolsAIError(ErrorCode.ASSET_CURSOR_INVALID) from None
+    for index, value in enumerate(values):
+        info = value.info if isinstance(value, OwnedAssetInfo) else value
+        if (info.key.kind, info.key.id) > tuple(raw_last):
+            return index
+    return len(values)
 
 
 __all__ = ["AssetStore"]

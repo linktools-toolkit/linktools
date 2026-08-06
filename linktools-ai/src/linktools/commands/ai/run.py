@@ -14,8 +14,10 @@ from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
-from ...ai.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
-from ...ai.local import LocalAgentRuntime, LocalProject, LocalRunResult
+from ...ai.agent.runner import LocalAgentRunner
+from ...ai.core.json import JsonValue
+from ...ai.local.project import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from ...ai.local import LocalAgentRuntime, LocalProject, LocalRunResult, build_local_capabilities
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -30,6 +32,8 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("prompt", nargs="?", help="the prompt")
+        parser.add_argument("--project", type=Path, default=None, help="working directory")
+        parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--agent", default=None, help="agent id (default: project default)")
         parser.add_argument("--session", default="main", help="session id (default main)")
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
@@ -40,16 +44,31 @@ class Command(BaseCommand):
     def run(self, args: Namespace) -> int:
         if args.prompt is None:
             raise CommandError("a prompt is required")
-        project = LocalProject.discover(Path.cwd())
+        project = LocalProject.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+        if args.model == "test":
+            runner = LocalAgentRunner(
+                project.root,
+                project.config,
+                model=args.model,
+                base_url=args.base_url,
+                api_key=args.api_key,
+            )
+        else:
+            runner = LocalAgentRunner(
+                project.root,
+                project.config,
+                model=args.model,
+                base_url=args.base_url,
+                api_key=args.api_key,
+                capabilities=build_local_capabilities(project.root),
+            )
         runtime = LocalAgentRuntime(
             project,
-            model=args.model,
-            base_url=args.base_url,
-            api_key=args.api_key,
+            runner=runner,
         )
         output_terminated = False
 
-        async def on_event(event: "dict[str, object]") -> None:
+        async def on_event(event: "dict[str, JsonValue]") -> None:
             nonlocal output_terminated
             event_type = event.get("type")
             if args.json:
@@ -59,7 +78,7 @@ class Command(BaseCommand):
             if event_type == "text":
                 sys.stdout.write(str(event.get("text", "")))
                 sys.stdout.flush()
-            elif event_type == "text_end":
+            elif event_type == "text_end" and not output_terminated:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
                 output_terminated = True

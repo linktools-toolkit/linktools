@@ -1,0 +1,38 @@
+{
+  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "local", "adapter", "temporal", "entry"],
+  "dependencies": {
+    "core": [],
+    "storage": ["core"],
+    "asset": ["core", "storage"],
+    "spec": ["core", "asset"],
+    "model": ["core"],
+    "observe": ["core"],
+    "capability": ["core", "asset", "spec", "observe"],
+    "task": ["core", "observe"],
+    "agent": ["core", "spec", "model", "observe", "capability"],
+    "runtime": ["core", "spec", "model", "observe", "capability", "task", "agent"],
+    "local": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "adapter": ["core", "storage", "spec", "model", "observe", "capability", "task", "runtime"],
+    "temporal": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "entry": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "local", "adapter", "temporal"]
+  },
+  "module_dependencies": {
+    "adapter.execution": ["core", "runtime", "observe"],
+    "adapter.session": ["core", "storage", "runtime"],
+    "adapter.task": ["core", "storage", "task"],
+    "adapter.evaluation": ["core", "storage", "runtime"],
+    "adapter.blob": ["core"],
+    "adapter.nats": ["core", "observe"],
+    "adapter.logfire": ["core", "observe"],
+    "adapter.provider": ["core", "model"],
+    "adapter.principal": ["core"],
+    "adapter.schema": ["core", "storage"],
+    "adapter.tool": ["core", "storage", "capability"],
+    "runtime.factory": ["core", "spec", "model", "observe", "capability", "task", "agent"],
+    "runtime.services": ["core", "observe", "task", "agent"],
+    "agent.context": ["core", "spec", "model"]
+  },
+  "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
+  "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],
+  "asset_invariants": ["immutable-root", "typed-codec-freeze", "etag-validation", "entry-cas", "store-cas", "tombstone", "stable-cursor", "sql-backend", "file-journal"]
+}

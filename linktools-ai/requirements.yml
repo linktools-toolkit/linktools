@@ -3,43 +3,44 @@ requires-python: ">=3.10"
 # The baseline wheel is assembled from this logical group. Runtime code never
 # discovers optional capabilities by importing an installed extra.
 dependencies:
-  - pydantic-ai-slim[mcp,openai]>=2.14.1
-  - pydantic-ai-harness>=0.9.0
-  - logfire-api>=4
-  - jsonschema>=4,<5
+  - pydantic-ai-slim[mcp,openai]==2.15.0
+  - pydantic-ai-harness==0.9.0
+  - logfire-api==4.37.0
+  - jsonschema==4.23.0
 
 dev-dependencies:
   - linktools
   - pytest
   - pytest-asyncio
-  - sqlalchemy[asyncio]>=2.0,<3
-  - aiosqlite>=0.20,<1
+  - sqlalchemy[asyncio]==2.0.51
+  - aiosqlite==0.22.1
 
 release-dependencies:
-  - linktools>=0.9.0
+  - linktools==0.9.0
 
 optional-dependencies:
   baseline-service:
-    - pydantic-ai-slim[temporal,mcp,openai]>=2.14.1
-    - pydantic-ai-harness>=0.9.0
+    - pydantic-ai-slim[temporal,mcp,openai]==2.15.0
+    - pydantic-ai-harness==0.9.0
+    - temporalio==1.24.0
   local-coding:
-    - pydantic-ai-slim[mcp,openai]>=2.14.1
-    - pydantic-ai-harness>=0.9.0
+    - pydantic-ai-slim[mcp,openai]==2.15.0
+    - pydantic-ai-harness==0.9.0
     - agent-client-protocol==0.12.0
   sandbox: []
   all-released-harness:
-    - pydantic-ai-harness>=0.9.0
+    - pydantic-ai-harness==0.9.0
   storage:
-    - sqlalchemy[asyncio]>=2.0,<3
+    - sqlalchemy[asyncio]==2.0.51
   storage-sql:
-    - sqlalchemy[asyncio]>=2.0,<3
+    - sqlalchemy[asyncio]==2.0.51
   storage-sqlite:
-    - sqlalchemy[asyncio]>=2.0,<3
-    - aiosqlite>=0.20,<1
+    - sqlalchemy[asyncio]==2.0.51
+    - aiosqlite==0.22.1
   evaluation:
-    - pydantic-evals>=0.1
+    - pydantic-evals==0.1.0
   dev:
     - pytest
     - pytest-asyncio
   release:
-    - linktools>=0.9.0
+    - linktools==0.9.0

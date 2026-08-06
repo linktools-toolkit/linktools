@@ -1,0 +1,33 @@
+{
+  "owner": "storage",
+  "invariants": [
+    "primary-first-layer-precedence",
+    "metadata-replace-and-patch",
+    "owner-directed-read",
+    "cache-validation-and-delete",
+    "batch-reader-grouping-and-fallback",
+    "preload-batches-and-markers",
+    "revision-source-correction-and-single-flight",
+    "entry-and-store-versioning",
+    "atomic-file-write-and-recovery",
+    "explicit-sql-initialize",
+    "process-and-shared-filesystem-coordination"
+  ],
+  "public_modules": [
+    "cache",
+    "composition",
+    "database",
+    "dialects",
+    "files",
+    "initialize",
+    "layer",
+    "lock",
+    "model",
+    "names",
+    "revision"
+  ],
+  "verification": {
+    "tests": ["tests/ai/test_storage.py", "tests/ai/test_asset_and_commands.py", "tests/ai/test_storage_asset_restoration.py"],
+    "architecture": "ArchitecturePolicyChecker().check(linktools-ai/src/linktools/ai)"
+  }
+}

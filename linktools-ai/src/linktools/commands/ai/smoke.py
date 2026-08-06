@@ -1,32 +1,42 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""`lt ai smoke`: verify the explicit ACP boundary can be imported."""
+"""`lt ai smoke`: construct the local ACP application boundary."""
 
 import json
 from argparse import Namespace
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 
-from ...ai.inbound.acp import ACPServer
+from ...ai.entry.acp import ACPApplication
+from ...ai.local import LocalProject
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
 
 
 class Command(BaseCommand):
-    """run a boundary-only ACP smoke check"""
+    """construct and validate the local ACP application"""
 
     def init_arguments(self, parser: "CommandParser") -> None:
+        parser.add_argument("--project", type=Path, default=None, help="working directory")
+        parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--json", action="store_true", help="emit JSON")
 
     def run(self, args: Namespace) -> int:
-        report = {"ok": True, "boundary": ACPServer.__name__, "application_required": True}
+        project = LocalProject.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+        application = ACPApplication.for_project(project)
+        report = {
+            "ok": application.agent().__class__.__name__ == "LocalACPAgent",
+            "boundary": ACPApplication.__name__,
+            "project_root": project.root.as_posix(),
+        }
         if args.json:
             print(json.dumps(report, sort_keys=True))
         else:
-            self.logger.info("ACP boundary import succeeded; application wiring is required")
+            self.logger.info("ACP application ready: project=%s", project.root)
         return 0
 
 

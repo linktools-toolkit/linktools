@@ -1,35 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Content-identity keyed index for parsed text assets."""
 
-"""Content-identity keyed parsed asset index."""
+from typing import Generic, TypeVar
 
-from typing import Generic, TYPE_CHECKING, TypeVar
-
-from .contracts import AssetCodec
+from .contracts import AssetCodec, AssetSource
+from .parsing import AssetLoader
 from .source import AssetLoaderSource
 
-if TYPE_CHECKING:
-    from .contracts import AssetSource
-    from .parsing import AssetLoader
-
-T = TypeVar("T")
+TAsset = TypeVar("TAsset")
 
 
-class AssetIndex(Generic[T]):
-    def __init__(self, source: "AssetSource", codec: "AssetCodec[T]", *, suffix: str) -> None:
+class AssetIndex(Generic[TAsset]):
+    def __init__(self, source: AssetSource, codec: AssetCodec[TAsset], *, suffix: str) -> None:
         self._suffix = suffix
         self._codec = codec
         self._source = source
-        self._cache: "dict[tuple[str, str], T]" = {}
+        self._cache: dict[tuple[str, str], TAsset] = {}
 
     @classmethod
-    def source_from_loader(cls, loader: "AssetLoader") -> "AssetSource":
+    def source_from_loader(cls, loader: AssetLoader) -> AssetSource:
         return AssetLoaderSource(loader)
 
     async def list_ids(self) -> "tuple[str, ...]":
         return await self._source.list_ids(self._suffix)
 
-    async def get(self, item_id: str) -> T:
+    async def get(self, item_id: str) -> TAsset:
         raw = await self._source.read(f"{item_id}{self._suffix}")
         key = (item_id, self._source.identity(raw))
         cached = self._cache.get(key)

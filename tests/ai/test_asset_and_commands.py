@@ -1,97 +1,148 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Asset storage and command checks."""
+"""AssetStore, file durability, and public command checks."""
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
-from linktools.ai.foundation.errors import InvalidAssetError, AssetConflictError
-from linktools.ai.asset import (
-    AssetContent,
-    AssetContentInfo,
-    AssetIndex,
-    AssetLoader,
-    StrictConfigReader,
-    compute_asset_etag,
-    parse_json_text,
-    parse_markdown_text,
-)
-from linktools.ai.asset.persistence.local import LocalAssetBackend, PrefixAssetPathAdapter
-from linktools.ai.asset.persistence.sqlalchemy import SqlAlchemyAssetBackend
-from linktools.ai.asset.store import AssetStore
-from linktools.ai.storage.database import build_sqlite_storage
+from linktools.ai.asset import AssetCodecRegistry, AssetKey, AssetRequest, AssetRoot, AssetStore
+from linktools.ai.asset.files import FileAssetBackend, MemoryAssetBackend
+from linktools.ai.asset.path import file_root
+from linktools.ai.asset.model import AssetInfo, AssetRevision, AssetStoreRevision
+from linktools.ai.storage.composition import StorageAdapter, StorageComposition
+from linktools.ai.storage.layer import StorageWriteVisibility
 
 
-def asset_content(path: str, raw: bytes, version: int = 1) -> AssetContent:
-    return AssetContent(
-        AssetContentInfo(path, path.split("/", 1)[0], version, compute_asset_etag(raw)),
-        raw,
+@dataclass(frozen=True, slots=True)
+class SampleAsset:
+    asset_kind: str
+    asset_id: str
+    value: str
+
+
+class SampleCodec:
+    kind = "sample"
+    value_type = SampleAsset
+    fingerprint = "sample-codec-v1"
+
+    def encode(self, value: SampleAsset) -> bytes:
+        return json.dumps({"kind": value.asset_kind, "id": value.asset_id, "value": value.value}, sort_keys=True).encode()
+
+    def decode(self, data: bytes) -> SampleAsset:
+        value = json.loads(data.decode())
+        return SampleAsset(str(value["kind"]), str(value["id"]), str(value["value"]))
+
+    def validate_key(self, key: AssetKey, value: SampleAsset) -> None:
+        if (value.asset_kind, value.asset_id) != (key.kind, key.id):
+            raise ValueError("asset key mismatch")
+
+
+class IdentityAdapter(StorageAdapter[AssetKey, bytes, AssetKey, bytes, AssetInfo]):
+    def to_storage_key(self, key: AssetKey) -> AssetKey:
+        return key
+
+    def from_storage_key(self, key: AssetKey) -> AssetKey:
+        return key
+
+    def from_storage_value(self, value: bytes) -> bytes:
+        return value
+
+    def to_storage_value(self, value: bytes) -> bytes:
+        return value
+
+    def validate_value(self, key: AssetKey, value: bytes, info: AssetInfo) -> None:
+        if len(value) != info.size:
+            raise ValueError("asset size mismatch")
+
+
+def make_store(backend: MemoryAssetBackend | FileAssetBackend) -> tuple[AssetStore, StorageComposition[AssetKey, bytes, AssetKey, bytes, AssetInfo, AssetRevision, AssetStoreRevision]]:
+    codecs = AssetCodecRegistry()
+    codecs.register(SampleCodec())
+    codecs.freeze()
+    storage = StorageComposition(
+        backend,
+        writer=backend,
+        write_visibility=StorageWriteVisibility.READABLE,
+        adapter=IdentityAdapter(),
     )
+    return AssetStore(storage=storage, codecs=codecs), storage
 
 
-def test_asset_parsers_and_strict_null_semantics() -> None:
-    assert parse_json_text('{"name": "demo"}') == {"name": "demo"}
-    frontmatter, body = parse_markdown_text("---\nname: demo\n---\nbody")
-    assert frontmatter == {"name": "demo"}
-    assert body.endswith("body")
-    reader = StrictConfigReader({}, allowed={"retries"}, context="asset")
-    assert reader.non_negative_int("retries", 2) == 2
-    with pytest.raises(InvalidAssetError):
-        StrictConfigReader({"retries": None}, allowed={"retries"}, context="asset").non_negative_int("retries")
-
-
-def test_local_backend_path_adapter_and_atomic_contract(tmp_path: Path) -> None:
+def test_memory_asset_store_cas_tombstone_and_history() -> None:
     async def run() -> None:
-        backend = LocalAssetBackend(tmp_path, path_adapter=PrefixAssetPathAdapter({"mcp": "adapter"}))
-        await backend.initialize_storage()
-        entry = asset_content("mcp/demo.json", b"{}")
-        await backend.put(entry)
-        assert (tmp_path / "adapter/demo.json").read_bytes() == b"{}"
-        assert await backend.get("mcp/demo.json") == entry
-        assert [item.path for item in await backend.list_info()] == ["mcp/demo.json"]
-        with pytest.raises(AssetConflictError):
-            await backend.get("../escape")
-
-    asyncio.run(run())
-
-def test_asset_index_reloads_changed_files(tmp_path: Path) -> None:
-    async def run() -> None:
-        (tmp_path / "one.json").write_text('{"value": 1}', encoding="utf-8")
-        loader = AssetLoader.from_filesystem(tmp_path)
-
-        class Codec:
-            def decode(self, item_id: str, raw: str) -> dict[str, object]:
-                return parse_json_text(raw)
-
-        index = AssetIndex(index_source := AssetIndex.source_from_loader(loader), Codec(), suffix=".json")
-        assert await index.list_ids() == ("one",)
-        assert await index.get("one") == {"value": 1}
-        (tmp_path / "one.json").write_text('{"value": 2}', encoding="utf-8")
-        assert await index.get("one") == {"value": 2}
-        assert index_source.identity('{"value": 2}')
+        backend = MemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
+        store, storage = make_store(backend)
+        await storage.initialize()
+        key = AssetKey("sample", "one")
+        first = await store.put(key, SampleAsset("sample", "one", "first"))
+        second = await store.put(key, SampleAsset("sample", "one", "second"), expected_entry_revision=first.entry_revision)
+        assert await store.get(key, expected=SampleAsset) == SampleAsset("sample", "one", "second")
+        assert await store.get_at_version(key, first.entry_revision.value, expected=SampleAsset) == SampleAsset("sample", "one", "first")
+        assert len(await store.list_versions(key)) == 2
+        deleted = await store.delete(key, expected_entry_revision=second.entry_revision)
+        assert deleted.deleted is True
+        assert await store.get(key, expected=SampleAsset) is None
+        assert (await store.list_info()).items == ()
 
     asyncio.run(run())
 
 
-def test_sql_backend_history_and_composed_reads(tmp_path: Path) -> None:
+def test_asset_get_many_preserves_request_order() -> None:
     async def run() -> None:
-        database = build_sqlite_storage(tmp_path / "assets.db")
-        backend = SqlAlchemyAssetBackend(database.session_factory)
-        await backend.initialize_storage(database.engine)
-        store = AssetStore(backend, writer=backend)
-        first = asset_content("agent/demo.json", b"one", 1)
-        second = asset_content("agent/demo.json", b"two", 2)
-        await store.put(first)
-        first_revision = await store.current_revision()
-        await store.put(second)
-        assert (await store.get_at_revision("agent/demo.json", first_revision)).content == b"one"
-        assert (await store.get_at_version("agent/demo.json", 1)).content == b"one"
-        assert (await store.get("agent/demo.json")).content == b"two"
-        await store.delete("agent/demo.json")
-        assert (await store.list_versions("agent/demo.json"))[0].deleted is True
-        await database.engine.dispose()
+        backend = MemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
+        store, storage = make_store(backend)
+        await storage.initialize()
+        await store.put(AssetKey("sample", "one"), SampleAsset("sample", "one", "one"))
+        await store.put(AssetKey("sample", "two"), SampleAsset("sample", "two", "two"))
+        values = await store.get_many(
+            (
+                AssetRequest(AssetKey("sample", "two"), SampleAsset),
+                AssetRequest(AssetKey("sample", "missing"), SampleAsset),
+                AssetRequest(AssetKey("sample", "one"), SampleAsset),
+            )
+        )
+        assert values == (
+            SampleAsset("sample", "two", "two"),
+            None,
+            SampleAsset("sample", "one", "one"),
+        )
 
     asyncio.run(run())
+
+
+def test_file_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
+    async def run() -> None:
+        backend = FileAssetBackend(file_root(str(tmp_path)))
+        store, storage = make_store(backend)
+        await storage.initialize()
+        key = AssetKey("sample", "one")
+        first = await store.put(key, SampleAsset("sample", "one", "first"))
+        await store.put(key, SampleAsset("sample", "one", "second"), expected_entry_revision=first.entry_revision)
+        restarted = FileAssetBackend(file_root(str(tmp_path)))
+        restarted_store, restarted_storage = make_store(restarted)
+        await restarted_storage.initialize()
+        assert await restarted_store.get(key, expected=SampleAsset) == SampleAsset("sample", "one", "second")
+        assert len(await restarted_store.list_versions(key)) == 2
+
+    asyncio.run(run())
+
+
+def test_ai_asset_command_is_removed() -> None:
+    environment = dict(os.environ)
+    source_root = Path(__file__).parents[2]
+    environment["PYTHONPATH"] = os.pathsep.join((str(source_root / "linktools-ai/src"), str(source_root / "linktools/src")))
+    result = subprocess.run(
+        [sys.executable, "-m", "linktools", "ai", "asset", "--help"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "invalid choice: 'asset'" in result.stderr

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""Persisted asset content and its identity metadata."""
+"""Legacy content value and identity metadata for asset loaders."""
 
 import hashlib
 from dataclasses import dataclass
 
-from ..foundation.errors import AssetConflictError
+from ..core.errors import AssetConflictError
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@
 """Generic best-effort caches for immutable versioned content.
 
 The cache key is a stable domain-identity string (e.g.
-``asset:{path}:{version}:{etag}``); filesystem cache file names are its SHA-256.
+``domain:{key}:{version}:{digest}``); filesystem cache file names are its SHA-256.
 All caches are best-effort: any read/write error is swallowed and treated as a
 miss/failed write, never propagated as the origin's result.
 
@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import os
 import tempfile
+from collections.abc import Sequence
 from collections import OrderedDict
 from pathlib import Path
 from typing import Protocol, TypeAlias
@@ -29,9 +30,11 @@ class ContentCache(Protocol):
 
     async def put(self, key: ContentCacheKey, content: bytes) -> None: ...
 
+    async def delete(self, key: ContentCacheKey) -> None: ...
+
     async def contains_many(
         self,
-        keys: "tuple[ContentCacheKey, ...]",
+        keys: "Sequence[ContentCacheKey]",
     ) -> "frozenset[ContentCacheKey]": ...
 
 
@@ -102,9 +105,15 @@ class MemoryContentCache:
                 _, removed = self._items.popitem(last=False)
                 self._size -= len(removed)
 
+    async def delete(self, key: ContentCacheKey) -> None:
+        async with self._lock:
+            previous = self._items.pop(key, None)
+            if previous is not None:
+                self._size -= len(previous)
+
     async def contains_many(
         self,
-        keys: "tuple[ContentCacheKey, ...]",
+        keys: "Sequence[ContentCacheKey]",
     ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
@@ -124,7 +133,7 @@ class FilesystemContentCache:
     def __init__(self, root: "str | Path", *, max_bytes: int) -> None:
         if max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
-        self.root = Path(root)
+        self.root = Path(root).resolve()
         self.max_bytes = max_bytes
         self._lock = asyncio.Lock()
         self._indexed = False
@@ -171,9 +180,20 @@ class FilesystemContentCache:
                 self._total -= size
                 await asyncio.to_thread((self.root / victim).unlink, missing_ok=True)
 
+    async def delete(self, key: ContentCacheKey) -> None:
+        name = self._name(key)
+        async with self._lock:
+            previous = self._entries.pop(name, None)
+            if previous is not None:
+                self._total -= previous[0]
+            try:
+                await asyncio.to_thread((self.root / name).unlink, missing_ok=True)
+            except OSError:
+                return
+
     async def contains_many(
         self,
-        keys: "tuple[ContentCacheKey, ...]",
+        keys: "Sequence[ContentCacheKey]",
     ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()
@@ -222,7 +242,14 @@ class FilesystemContentCache:
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
             os.replace(temporary, path)
+            directory = os.open(self.root, os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -266,9 +293,20 @@ class TieredContentCache:
             except Exception:
                 continue
 
+    async def delete(self, key: ContentCacheKey) -> None:
+        for cache in (self.l1, self.l2):
+            if cache is None:
+                continue
+            try:
+                await cache.delete(key)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
     async def contains_many(
         self,
-        keys: "tuple[ContentCacheKey, ...]",
+        keys: "Sequence[ContentCacheKey]",
     ) -> "frozenset[ContentCacheKey]":
         if not keys:
             return frozenset()

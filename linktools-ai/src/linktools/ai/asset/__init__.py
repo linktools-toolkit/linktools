@@ -1,41 +1,83 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Typed asset values, codecs and the single AssetStore boundary."""
 
-"""Asset parsing, indexing, caching, and persistence contracts."""
-
-from ..foundation.errors import (
-    InvalidAssetError,
-    AssetConflictError,
-    AssetError,
-    AssetNotFoundError,
-    AssetParseError,
-)
-from .cache import AssetObjectCache
-from .contracts import AssetCodec, AssetSource
+from .codec import AssetCodec, AssetCodecManifest, AssetCodecManifestEntry, AssetCodecRegistry
+from .cache import AssetCacheCodec, AssetCacheStore, AssetObjectCache
+from .config import StrictConfigReader, resolved_name
 from .content import AssetContent, AssetContentInfo, compute_asset_etag
+from .contracts import AssetSource
 from .index import AssetIndex
-from .parsing import AssetLoader, StrictConfigReader, parse_json_text, parse_markdown_text, parse_yaml_text
-from .source import AssetLoaderSource
+from .model import (
+    AssetBackend,
+    AssetBatchPartialError,
+    AssetBatchResult,
+    AssetChange,
+    AssetDeleteResult,
+    AssetInfo,
+    AssetKey,
+    AssetRequest,
+    AssetRevision,
+    AssetRoot,
+    AssetStoreRevision,
+    AssetValue,
+    AssetVersion,
+    BatchAssetReader,
+    BatchAssetWriter,
+    OwnedAssetInfo,
+    VersionedAssetBackend,
+)
 from .store import AssetStore
+from .parsing import AssetLoader, TextAssetStore, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
+from .local import AssetPathAdapter, LocalAssetBackend, PrefixAssetPathAdapter
+from ..core.errors import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
 
 __all__ = [
-    "InvalidAssetError",
-    "AssetCodec",
+    "AssetBackend",
+    "AssetBatchPartialError",
+    "AssetBatchResult",
+    "AssetChange",
     "AssetConflictError",
+    "AssetCodec",
+    "AssetCodecManifest",
+    "AssetCodecManifestEntry",
+    "AssetCodecRegistry",
+    "AssetDeleteResult",
+    "AssetError",
     "AssetContent",
     "AssetContentInfo",
-    "AssetError",
+    "AssetInfo",
     "AssetIndex",
+    "AssetKey",
     "AssetLoader",
-    "AssetLoaderSource",
     "AssetNotFoundError",
     "AssetObjectCache",
+    "AssetPathAdapter",
     "AssetParseError",
-    "AssetSource",
+    "AssetRequest",
+    "AssetRevision",
+    "AssetRoot",
     "AssetStore",
+    "AssetStoreRevision",
+    "AssetValue",
+    "AssetVersion",
+    "BatchAssetReader",
+    "BatchAssetWriter",
+    "OwnedAssetInfo",
+    "VersionedAssetBackend",
+    "AssetCacheCodec",
+    "AssetCacheStore",
+    "AssetSource",
+    "InvalidAssetError",
+    "LocalAssetBackend",
+    "PrefixAssetPathAdapter",
     "StrictConfigReader",
+    "TextAssetStore",
     "compute_asset_etag",
+    "load_markdown_text",
+    "load_yaml_text",
     "parse_json_text",
     "parse_markdown_text",
     "parse_yaml_text",
+    "resolved_name",
 ]

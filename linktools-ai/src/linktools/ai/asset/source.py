@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""Adapters from loaders to the asset source protocol."""
+"""Adapters from text asset loaders to source contracts."""
 
 from typing import TYPE_CHECKING
+
+from .contracts import AssetSource
 
 if TYPE_CHECKING:
     from .parsing import AssetLoader
 
 
-class AssetLoaderSource:
+class AssetLoaderSource(AssetSource):
     def __init__(self, loader: "AssetLoader") -> None:
         self._loader = loader
 

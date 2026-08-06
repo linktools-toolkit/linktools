@@ -1,25 +1,120 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
 """Static exports for the domain-independent storage kernel."""
 
 from .cache import ContentCache, FilesystemContentCache, MemoryContentCache, TieredContentCache
-from .composition import StorageAdapter, StorageCacheAdapter, StorageComposition, StorageLayer
-from .database import CoordinationScope, StorageDatabase, build_sqlite_storage, build_storage, scope_for_url
-from .initialization import initialize_storage
-from .local.files import atomic_write_bytes, atomic_write_json, read_bytes, read_json
-from .local.paths import Sha256Digest, StorageId, StoragePath, safe_child
-from .multi import BatchStorageReader, BatchStorageWriter, StorageReader, StorageWriter
-from .revision import LayerRefreshPolicy, MetadataLoad, MetadataLoadMode, RevisionSource, StorageChange, StorageMetadataBackend
-from .versioning import VersionSummary, VersionedStorage
+from .composition import CacheAdapter, StorageAdapter, StorageComposition, StorageLayer
+from .database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage
+from .dialects import (
+    IntegrityViolationKind,
+    InsertResult,
+    MySQLDialect,
+    PostgreSQLDialect,
+    SQLiteDialect,
+    SqlAlchemyDialect,
+    SqlValue,
+    SqliteDialect,
+    classify_integrity_error_by_message,
+    primary_key_column,
+    resolve_dialect,
+)
+from .files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child
+from .initialize import initialize_storage
+from .layer import LayerRefreshPolicy, StorageWriteVisibility
+from .model import (
+    BatchStorageReader,
+    BatchStorageWriter,
+    MetadataChange,
+    MetadataLoad,
+    MetadataLoadMode,
+    PreloadResult,
+    ReadableMetadataBackend,
+    StorageBatchFailure,
+    StorageBatchPartialError,
+    StorageBatchResult,
+    StorageChange,
+    StorageDeleteResult,
+    StorageMetadataBackend,
+    StorageOperation,
+    StorageOwnedInfo,
+    StoragePutResult,
+    StorageReader,
+    StorageResetResult,
+    StorageWriter,
+    VersionSummary,
+    VersionedStorage,
+)
+from .names import TABLE_PREFIX, storage_name
+from .revision import BackendRevisionSource, LayerMetadataView, RevisionSource
+from .lock import FileLeaseCoordinator, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
 
 __all__ = [
-    "BatchStorageReader", "BatchStorageWriter", "ContentCache", "CoordinationScope",
-    "FilesystemContentCache", "LayerRefreshPolicy", "MemoryContentCache", "MetadataLoad",
-    "MetadataLoadMode", "RevisionSource", "Sha256Digest", "StorageAdapter",
-    "StorageCacheAdapter", "StorageChange", "StorageComposition", "StorageDatabase",
-    "StorageLayer", "StorageMetadataBackend", "StoragePath", "StorageId", "StorageReader",
-    "StorageWriter", "TieredContentCache", "atomic_write_bytes", "atomic_write_json",
-    "build_sqlite_storage", "build_storage", "initialize_storage", "read_bytes", "read_json",
-    "safe_child", "scope_for_url", "VersionSummary", "VersionedStorage",
+    "BackendRevisionSource",
+    "BatchStorageReader",
+    "BatchStorageWriter",
+    "CacheAdapter",
+    "ContentCache",
+    "CoordinationScope",
+    "FileLeaseCoordinator",
+    "FilesystemContentCache",
+    "IntegrityViolationKind",
+    "InsertResult",
+    "KeyedAsyncLock",
+    "LayerMetadataView",
+    "LayerRefreshPolicy",
+    "Lease",
+    "MemoryContentCache",
+    "MySQLDialect",
+    "MetadataChange",
+    "MetadataLoad",
+    "MetadataLoadMode",
+    "PreloadResult",
+    "PostgreSQLDialect",
+    "ProcessLeaseCoordinator",
+    "ReadableMetadataBackend",
+    "RevisionSource",
+    "SqlSchemaRegistry",
+    "SqlSchemaManifest",
+    "SqlTableManifest",
+    "StorageAdapter",
+    "StorageBatchFailure",
+    "StorageBatchPartialError",
+    "StorageBatchResult",
+    "StorageChange",
+    "StorageComposition",
+    "StorageDatabase",
+    "StorageId",
+    "StorageDeleteResult",
+    "StorageLayer",
+    "StoragePath",
+    "StorageMetadataBackend",
+    "StorageOperation",
+    "StorageOwnedInfo",
+    "StoragePutResult",
+    "StorageReader",
+    "StorageResetResult",
+    "StorageWriteVisibility",
+    "StorageWriter",
+    "TABLE_PREFIX",
+    "TieredContentCache",
+    "SQLiteDialect",
+    "SqlAlchemyDialect",
+    "SqlValue",
+    "SqliteDialect",
+    "VersionSummary",
+    "VersionedStorage",
+    "classify_integrity_error_by_message",
+    "Sha256Digest",
+    "atomic_write_bytes",
+    "atomic_write_json",
+    "build_sqlite_storage",
+    "build_storage",
+    "close_storage",
+    "initialize_storage",
+    "read_bytes",
+    "read_json",
+    "resolve_dialect",
+    "safe_child",
+    "primary_key_column",
+    "storage_name",
 ]

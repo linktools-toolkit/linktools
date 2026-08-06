@@ -1,23 +1,33 @@
 # linktools-ai
 
-`linktools-ai` is the V8 Harness integration layer. Its public surface is the
-`Runtime` Protocol and the typed Domain/Port contracts under
-`linktools.ai.domain` and `linktools.ai.ports`.
+`linktools-ai` is the agent runtime for local coding and durable service
+profiles. Its public storage abstraction is `AssetStore`; specification DTOs
+and codecs live in `linktools.ai.spec`, while the concrete SQL asset backend is
+available from `linktools.ai.asset.sql`.
 
-The Baseline profiles are:
+The three execution profiles are:
 
-- `production-service`: Temporal and explicitly constructed domain stores over
-  the generic async Storage kernel.
-- `local-coding`: Local File/SQLite storage and a trusted local executor.
+- `production-service`: durable Temporal workflows with explicitly assembled
+  self-hosted storage and runtime services;
+- `production-sandboxed`: blocked until the official Harness wheel provides
+  the required Modal capability;
+- `local-coding`: direct local execution with project, file and shell tools.
 
-`production-sandboxed` is deliberately blocked until the installed official
-Harness wheel contains and validates the Modal capability. It is not emulated
-by a Linktools wrapper.
+Storage builders are lazy. Callers explicitly initialize the SQL schema and
+then construct the storage composition and asset store. The `ai run` command
+streams model text, thinking and tool activity; `ai acp` serves the local ACP
+transport when its optional dependency is installed.
 
-The generic Storage kernel exposes async `build_storage()` and
-`build_sqlite_storage()` builders. Construction is lazy; callers explicitly
-invoke `initialize_storage()` for DDL. Storage remains domain-independent and
-does not own migrations, repositories or runtime state.
+For local execution, `--project` selects the working directory and `--storage`
+selects the Runtime state directory:
 
-See `.docs/linktools-ai-harness-final-spec-v8.md` and the checked-in
-traceability matrix for the release and verification contract.
+```bash
+ai-run --project /workspace/project --storage /var/lib/linktools-ai "hello"
+ai-acp --project /workspace/project --storage /var/lib/linktools-ai
+```
+
+Sessions and execution records are stored below `<storage>/.linktools/`;
+tools and agent files remain rooted at the project directory.
+
+See `.docs/linktools-ai-integrated-spec.md` and the checked-in manifests under
+`scripts/build/matrix` for the architecture and release contract.

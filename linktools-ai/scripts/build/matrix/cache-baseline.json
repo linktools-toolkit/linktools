@@ -1,0 +1,5 @@
+{
+  "tiers": ["memory", "filesystem", "tiered"],
+  "rules": ["byte bounded LRU", "contains_many does not touch LRU order", "corrupt content is deleted and read falls through", "single-flight decode uses shielded waiters", "preload writes in bounded batches"],
+  "verification": "tests/ai/test_storage.py"
+}

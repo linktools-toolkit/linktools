@@ -1,0 +1,13 @@
+{
+  "registration_order": ["AgentSpec", "PromptSpec", "SkillSpec", "MCPServerSpec"],
+  "capabilities": [
+    "mcp",
+    "skill",
+    "subagent",
+    "tool",
+    "sandbox",
+    "retrieval",
+    "extension"
+  ],
+  "production_rules": ["provider manifest is read-only", "required feature resolution is fail-closed", "no local fallback for production"]
+}

@@ -1,11 +1,10 @@
 -- linktools-ai init schema (MySQL 5.7+/8.0) -- DBA-lint compliant
 --
--- Production DDL for the 15 ORM tables in
--- linktools.ai.storage.sql.base.Base.metadata. Tables / columns / types /
--- nullability mirror the ORM; the index strategy, comments, column ordering and
--- timestamp indexes follow the DBA lint standard (and therefore diverge from
--- Base.metadata.create_all's literal output). The storage kernel is
--- filesystem/object-store based and has no SQL tables.
+-- Production DDL for the 16 existing linktools-ai runtime, asset and adapter
+-- tables. Tables / columns / types / nullability mirror the published schema;
+-- the index strategy, comments, column ordering and timestamp indexes follow
+-- the DBA lint standard. Generic storage initialization does not own domain
+-- rows; Entry registers these tables explicitly before initialization.
 --
 -- DBA requirements applied (every rule below is satisfied):
 --   * ai_ table prefix; surrogate BIGINT AUTO_INCREMENT `id` primary key.
@@ -160,7 +159,7 @@ CREATE TABLE `ai_execution_evaluations` (
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Execution evaluation result';
 
-CREATE TABLE `ai_spec_documents` (
+CREATE TABLE `ai_asset_contents` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
   `path` VARCHAR(512) NOT NULL COMMENT 'Path',
   `kind` VARCHAR(128) NOT NULL COMMENT 'Kind',
@@ -175,9 +174,9 @@ CREATE TABLE `ai_spec_documents` (
   KEY `ix_kind` (`kind`),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Spec document current state';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Asset current state';
 
-CREATE TABLE `ai_spec_revision` (
+CREATE TABLE `ai_asset_revision` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
   `revision` INT NOT NULL COMMENT 'Revision',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Updated at',
@@ -186,16 +185,16 @@ CREATE TABLE `ai_spec_revision` (
   KEY `ix_revision` (`revision`),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Global spec revision counter (singleton row id=1)';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Global asset revision counter (singleton row id=1)';
 
-CREATE TABLE `ai_spec_changes` (
+CREATE TABLE `ai_asset_changes` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
   `revision` INT NOT NULL COMMENT 'Revision',
   `path` VARCHAR(512) NOT NULL COMMENT 'Path',
   `kind` VARCHAR(128) NULL COMMENT 'Kind',
   `version` INT NULL COMMENT 'Version',
   `etag` VARCHAR(255) NULL COMMENT 'Etag',
-  `object_id` VARCHAR(128) NULL COMMENT 'Object id (spec_blobs sha256; null for tombstone)',
+  `object_id` VARCHAR(128) NULL COMMENT 'Object id (asset_blobs sha256; null for tombstone)',
   `active` TINYINT(1) NULL COMMENT 'Active',
   `deleted` TINYINT(1) NOT NULL COMMENT 'Deleted',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Updated at',
@@ -205,9 +204,9 @@ CREATE TABLE `ai_spec_changes` (
   KEY `ix_object_id` (`object_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Spec change + version log (append-only; retained permanently for audit/rollback)';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Asset change + version log (append-only; retained permanently for audit/rollback)';
 
-CREATE TABLE `ai_spec_blobs` (
+CREATE TABLE `ai_asset_blobs` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
   `sha256` VARCHAR(64) NOT NULL COMMENT 'Sha256 content digest',
   `content` BLOB NOT NULL COMMENT 'Content bytes',
@@ -217,7 +216,7 @@ CREATE TABLE `ai_spec_blobs` (
   UNIQUE KEY `uk_sha256` (`sha256`),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Content-addressed spec document blob (dedup by sha256; immutable)';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Content-addressed asset blob (dedup by sha256; immutable)';
 
 CREATE TABLE `ai_artifacts` (
   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT 'Primary key id',
