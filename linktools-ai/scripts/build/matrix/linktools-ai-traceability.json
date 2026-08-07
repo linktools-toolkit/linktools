@@ -1,14 +1,14 @@
 {
-  "status": "complete",
+  "status": "COMPLETE",
   "entries": [
     {"owner": "core", "spec": "2", "requirements": "T-GLO-01..12", "implementation": ["core/errors.py", "core/value.py", "scripts/build/agent_bundle.py"], "tests": ["tests/ai/test_contracts.py"]},
     {"owner": "storage", "spec": "4", "requirements": "T-STO-01..34", "implementation": ["storage/model.py", "storage/composition.py", "storage/cache.py", "storage/revision.py", "storage/files.py", "storage/database.py", "storage/initialize.py", "storage/lock.py", "storage/dialects.py", "storage/names.py"], "tests": ["tests/ai/test_storage.py", "tests/ai/test_asset_and_commands.py", "tests/ai/test_storage_asset_restoration.py"]},
     {"owner": "asset", "spec": "5", "requirements": "T-AST-01..33", "implementation": ["asset/model.py", "asset/codec.py", "asset/store.py", "asset/files.py", "asset/sql.py", "asset/path.py", "asset/config.py", "asset/content.py", "asset/contracts.py", "asset/parsing.py", "asset/source.py", "asset/index.py", "asset/cache.py", "asset/local.py"], "tests": ["tests/ai/test_storage.py", "tests/ai/test_asset_and_commands.py", "tests/ai/test_storage_asset_restoration.py"]},
     {"owner": "spec", "spec": "5.9..5.11", "requirements": "T-DATA-01..07", "implementation": ["spec/model.py", "spec/codec.py", "spec/output.py"], "tests": ["tests/ai/test_contracts.py"]},
-    {"owner": "runtime", "spec": "6", "requirements": "T-API-01..16", "implementation": ["runtime/container.py", "runtime/factory.py", "runtime/services.py"], "tests": ["tests/ai/test_contracts.py"]},
-    {"owner": "session", "spec": "6.7", "requirements": "T-SES-01..10", "implementation": ["local/runtime.py", "local/record.py", "runtime/session.py"], "tests": ["tests/ai/test_local_commands.py"]},
+    {"owner": "runtime", "spec": "5..6", "requirements": "T-API-01..16", "implementation": ["runtime/persistence.py", "runtime/container.py", "runtime/factory.py", "runtime/services.py", "runtime/execution.py", "runtime/session.py", "runtime/task.py", "runtime/evaluation.py", "runtime/artifact.py"], "tests": ["tests/ai/test_contracts.py", "tests/ai/test_local_commands.py", "cold-start FILE/SQL checks"]},
+    {"owner": "session", "spec": "6.2..6.7", "requirements": "T-SES-01..10", "implementation": ["local/runtime.py", "local/record.py", "local/persistence.py", "runtime/session.py"], "tests": ["tests/ai/test_local_commands.py", "cold-start restart/reconcile checks"]},
     {"owner": "model", "spec": "6.3", "requirements": "T-MOD-01..04", "implementation": ["model/registry.py", "model/resolver.py"], "tests": ["tests/ai/test_contracts.py"]},
-    {"owner": "task", "spec": "6.9", "requirements": "T-TSK-01..06", "implementation": ["task/model.py", "task/graph.py", "task/service.py"], "tests": ["tests/ai/test_contracts.py"]},
+    {"owner": "task", "spec": "8", "requirements": "T-TSK-01..06", "implementation": ["task/model.py", "task/service.py", "runtime/task.py", "temporal/workflow/task.py"], "tests": ["tests/ai/test_contracts.py", "cold-start DAG/fence/cancel review"]},
     {"owner": "evaluation", "spec": "6.8", "requirements": "T-EVL-01..04", "implementation": ["runtime/evaluation.py", "runtime/factory.py"], "tests": ["tests/ai/test_contracts.py"]},
     {"owner": "local", "spec": "6.10", "requirements": "T-LOC-01..07", "implementation": ["local/runtime.py", "local/record.py", "local/index.py", "src/linktools/commands/ai/run.py", "src/linktools/commands/ai/acp.py"], "tests": ["tests/ai/test_local_commands.py"]},
     {"owner": "observe", "spec": "6.5", "requirements": "T-OBS-01..06", "implementation": ["observe/middleware.py", "observe/context.py", "observe/trace.py", "observe/snapshot.py"], "tests": ["tests/ai/test_contracts.py"]},
@@ -19,7 +19,7 @@
     {"owner": "release", "spec": "9.9", "requirements": "T-REL-01..04", "implementation": ["requirements.yml", "scripts/build/matrix/requirements-lock.json", "scripts/build/requirements.py"], "tests": ["ruff", "compileall", "cold-start import verification"]},
     {"owner": "data", "spec": "9.9", "requirements": "T-DATA-01..07", "implementation": ["scripts/build/matrix/sql-schema-manifest.json", "scripts/build/matrix/sql-data-manifest.json", "scripts/build/matrix/asset-file-layout.json", "scripts/build/matrix/spec-field-manifest.json", "scripts/build/matrix/codec-manifest.json", "scripts/build/matrix/output-manifest.json"], "tests": ["SQL schema registration and integration verification"]},
     {"owner": "evidence", "spec": "10.10..10.11", "requirements": "T-EVD-01..04", "implementation": ["scripts/build/matrix/linktools-ai-evidence.json", "scripts/build/matrix/linktools-ai-review-coverage.json", "scripts/build/matrix/linktools-ai-traceability.json"], "tests": ["cold-start review"]},
-    {"owner": "downstream", "spec": "8", "requirements": "T-DM-01..25", "implementation": ["scripts/build/imports.py", "scripts/build/matrix/downstream-linktools-imports.json"], "tests": ["not run: compatibility and migration explicitly excluded by user scope"]}
+    {"owner": "downstream", "spec": "8", "requirements": "T-DM-01..25", "implementation": ["scripts/build/imports.py", "scripts/build/matrix/downstream-linktools-imports.json"], "tests": ["excluded by user scope: compatibility and migration"]}
   ],
   "scope_exclusions": ["Downstream migration and compatibility work are explicitly excluded by the user; the separate downstream repository remains unchanged."]
 }

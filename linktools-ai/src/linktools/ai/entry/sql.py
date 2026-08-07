@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ..adapter.schema import SqlRuntimeSchema, SqlRuntimeTables
-from ..adapter.tool import SqlToolState
+from ..adapter.tool import SqlToolOperationRepository
 from ..asset.sql import SqlAlchemyAssetBackend, SqlAssetTables
 from ..storage import SqlSchemaManifest, SqlSchemaRegistry
 
@@ -31,7 +31,7 @@ def register_sql_schema() -> SqlSchemaAssembly:
     registry = SqlSchemaRegistry()
     asset = SqlAlchemyAssetBackend.register_schema(registry)
     runtime = SqlRuntimeSchema.register_schema(registry)
-    tool = SqlToolState.register_schema(registry)
+    tool = SqlToolOperationRepository.register_schema(registry)
     manifest = registry.freeze()
     _logger.info("SQL schema frozen: tables=%s digest=%s", len(manifest.tables), manifest.digest)
     return SqlSchemaAssembly(asset, runtime, tool, registry.metadata, manifest)

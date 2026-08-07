@@ -152,7 +152,7 @@ class MemoryAssetBackend:
     async def list_versions(self, key: AssetKey) -> 'tuple[VersionSummary[AssetRevision], ...]':
         async with self._lock:
             return tuple(
-                VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at)
+                VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at, info.deleted)
                 for info, _ in self._versions.get(key, ())
             )
 
@@ -248,7 +248,7 @@ class FileAssetBackend:
             try:
                 content = read_bytes(asset_path(self._root, key))
             except FileNotFoundError:
-                return None
+                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
             if _etag(content) != entry[0].etag:
                 raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return content
@@ -260,7 +260,10 @@ class FileAssetBackend:
                 entry = self._entries.get(key)
                 if entry is None or entry[0].deleted:
                     continue
-                content = read_bytes(asset_path(self._root, key))
+                try:
+                    content = read_bytes(asset_path(self._root, key))
+                except FileNotFoundError:
+                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
                 if _etag(content) != entry[0].etag:
                     raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[key] = content
@@ -321,7 +324,7 @@ class FileAssetBackend:
 
     async def list_versions(self, key: AssetKey) -> 'tuple[VersionSummary[AssetRevision], ...]':
         async with self._lock:
-            return tuple(VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at) for info, _ in self._versions.get(key, ()))
+            return tuple(VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at, info.deleted) for info, _ in self._versions.get(key, ()))
 
     async def get_at_revision(self, key: AssetKey, entry_revision: AssetRevision) -> 'bytes | None':
         async with self._lock:

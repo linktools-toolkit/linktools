@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Evaluation query and execution API."""
+"""Evaluation query API and persistence-backed default service."""
 
+import asyncio
+import uuid
+from datetime import datetime, timezone
 from typing import Protocol
+
+from linktools.core import environ
 
 from ..core import Principal
 from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
+from ..core.ids import canonical_sha256
+from ..core.value import EvaluationStatus, ExecutionProfile, IdempotencyStatus, ResourceKind
+from ..agent.context import AgentBinding
 from ..observe.snapshot import RunSnapshot
+from .persistence import EvaluationRecord, IdempotencyRecord, RuntimePersistence
 from .services import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -15,7 +25,11 @@ from .services import (
     ReplayEvaluationRequest,
     RunEvaluationRequest,
     ExecutionHandle,
+    ExecutionRequest,
 )
+from .services import ExecutionService
+
+_logger = environ.get_logger("ai.runtime.evaluation")
 
 
 def validate_compare_request(request: CompareEvaluationRequest) -> None:
@@ -49,4 +63,126 @@ class EvaluationApi(EvaluationQueryApi, Protocol):
     async def replay(self, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
 
 
-__all__ = ["EvaluationApi", "EvaluationQueryApi", "validate_compare_request"]
+class DefaultEvaluationService:
+    """Persist evaluation identity and enforce compatibility before replay."""
+
+    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, execution: ExecutionService) -> None:
+        self._persistence = persistence
+        self._authorization = authorization
+        self._execution = execution
+
+    async def run(self, binding: AgentBinding, request: RunEvaluationRequest) -> EvaluationHandle:
+        evaluation_id = uuid.uuid4().hex
+        await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
+        request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding.digest})
+        existing = await self._persistence.idempotency.get("evaluation.run", request.idempotency_key, tenant_id=request.principal.tenant_id)
+        if existing is not None:
+            if existing.request_digest != request_digest:
+                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if existing.status is IdempotencyStatus.FAILED:
+                raise _stable_error(existing.error_code, ErrorCode.STORAGE_UNAVAILABLE)
+            return EvaluationHandle(existing.execution_id)
+        now = datetime.now(timezone.utc)
+        await self._persistence.idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
+        try:
+            execution = await self._execution.run(binding, ExecutionRequest(f"evaluation:{request.dataset_digest}", request.principal, ExecutionProfile.LOCAL_CODING, f"evaluation:{request.idempotency_key}"))
+            record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding.digest, binding.output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
+            await self._persistence.evaluations.create(record)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            current = await self._persistence.idempotency.get("evaluation.run", request.idempotency_key, tenant_id=request.principal.tenant_id)
+            if current is not None and current.status is IdempotencyStatus.RESERVED:
+                error_code = error.code.value if isinstance(error, LinktoolsAIError) else ErrorCode.STORAGE_UNAVAILABLE.value
+                await self._persistence.idempotency.compare_and_swap(
+                    "evaluation.run",
+                    request.idempotency_key,
+                    expected_status=IdempotencyStatus.RESERVED,
+                    next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.FAILED, None, error_code, current.created_at, datetime.now(timezone.utc)),
+                )
+            raise
+        await self._persistence.idempotency.compare_and_swap("evaluation.run", request.idempotency_key, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.COMPLETED, None, None, now, datetime.now(timezone.utc)))
+        _logger.info("evaluation submitted: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id)
+        return EvaluationHandle(evaluation_id)
+
+    async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView:
+        record = await self._authorized(evaluation_id, principal, AuthorizationAction.EVALUATION_READ)
+        record = await self._synchronize(record)
+        return EvaluationView(record.evaluation_id, record.status)
+
+    async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison:
+        validate_compare_request(request)
+        await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_READ, ResourceRef(ResourceKind.EVALUATION, request.baseline_id, request.principal.tenant_id))
+        await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_READ, ResourceRef(ResourceKind.EVALUATION, request.candidate_id, request.principal.tenant_id))
+        await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_COMPARE, ResourceRef(ResourceKind.EVALUATION, request.candidate_id, request.principal.tenant_id))
+        baseline = await self._synchronize(await self._authorized(request.baseline_id, request.principal, AuthorizationAction.EVALUATION_READ))
+        candidate = await self._synchronize(await self._authorized(request.candidate_id, request.principal, AuthorizationAction.EVALUATION_READ))
+        if (
+            baseline.dataset_id != candidate.dataset_id
+            or baseline.dataset_revision != candidate.dataset_revision
+            or baseline.evaluator_id != candidate.evaluator_id
+            or baseline.evaluator_revision != candidate.evaluator_revision
+            or baseline.binding_digest != candidate.binding_digest
+            or baseline.output_schema_fingerprint != candidate.output_schema_fingerprint
+        ):
+            raise LinktoolsAIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        return EvaluationComparison(request.baseline_id, request.candidate_id, True)
+
+    async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot:
+        record = await self._synchronize(await self._authorized(evaluation_id, principal, AuthorizationAction.EVALUATION_READ))
+        result = await self._persistence.results.get(record.execution_id, tenant_id=principal.tenant_id)
+        result_digest = None if result is None else result.payload_digest
+        digest = canonical_sha256({"snapshot_id": evaluation_id, "execution_id": record.execution_id, "binding_digest": record.binding_digest, "trace_digest": record.artifact_digest or "", "result_digest": result_digest})
+        return RunSnapshot(evaluation_id, record.execution_id, record.binding_digest, record.artifact_digest or "", result_digest, digest)
+
+    async def replay(self, binding: AgentBinding, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle:
+        record = await self._authorized(snapshot_id, request.principal, AuthorizationAction.EVALUATION_READ)
+        if record.binding_digest != binding.digest:
+            raise LinktoolsAIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+        return await self._execution.run(binding, ExecutionRequest(f"replay:{record.evaluation_id}", request.principal, ExecutionProfile.LOCAL_CODING, request.idempotency_key))
+
+    async def _synchronize(self, record: EvaluationRecord) -> EvaluationRecord:
+        execution = await self._persistence.executions.get(record.execution_id, tenant_id=record.tenant_id)
+        if execution is None:
+            return record
+        status = {
+            "PENDING_START": EvaluationStatus.PENDING,
+            "STARTED": EvaluationStatus.RUNNING,
+            "START_UNKNOWN": EvaluationStatus.FAILED,
+            "WAITING_APPROVAL": EvaluationStatus.RUNNING,
+            "WAITING_EXTERNAL": EvaluationStatus.RUNNING,
+            "CANCELLING": EvaluationStatus.CANCELLED,
+            "SUCCEEDED": EvaluationStatus.SUCCEEDED,
+            "FAILED": EvaluationStatus.FAILED,
+            "CANCELLED": EvaluationStatus.CANCELLED,
+        }[execution.status.value]
+        if status is record.status:
+            return record
+        updated = EvaluationRecord(record.evaluation_id, record.tenant_id, record.execution_id, record.dataset_id, record.dataset_revision, record.evaluator_id, record.evaluator_revision, record.binding_digest, record.output_schema_fingerprint, record.artifact_digest, status, record.revision + 1, record.metrics, record.created_at, datetime.now(timezone.utc))
+        try:
+            return await self._persistence.evaluations.compare_and_swap(record.evaluation_id, tenant_id=record.tenant_id, expected_revision=record.revision, next_record=updated)
+        except LinktoolsAIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._persistence.evaluations.get(record.evaluation_id, tenant_id=record.tenant_id)
+            return record if current is None else current
+
+    async def _authorized(self, evaluation_id: str, principal: Principal, action: AuthorizationAction) -> EvaluationRecord:
+        header = await self._persistence.evaluations.get_header(evaluation_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(principal, action, header)
+        record = await self._persistence.evaluations.get(evaluation_id, tenant_id=principal.tenant_id)
+        if record is None:
+            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+        return record
+
+
+def _stable_error(error_code: str | None, fallback: ErrorCode) -> LinktoolsAIError:
+    try:
+        return LinktoolsAIError(fallback if error_code is None else ErrorCode(error_code))
+    except ValueError:
+        return LinktoolsAIError(fallback)
+
+
+__all__ = ["DefaultEvaluationService", "EvaluationApi", "EvaluationQueryApi", "validate_compare_request"]

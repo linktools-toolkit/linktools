@@ -116,13 +116,14 @@ def build_runtime(
                 for feature in spec.features
             ],
             "output_schema": spec.output_schema,
+            "output_schema_revision": spec.output_schema_revision,
             "instructions": list(spec.instructions),
         }
     )
     prompt_fingerprint = canonical_sha256(
         {"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions), "variables": list(prompt.variables)}
     )
-    output_schema_fingerprint = dependencies.output_types.fingerprint(spec.output_schema, spec.revision)
+    output_schema_fingerprint = dependencies.output_types.fingerprint(spec.output_schema, spec.output_schema_revision)
     capability_manifest_digest = _capability_digest(spec, dependencies)
     binding = AgentBinding(
         spec,
@@ -132,10 +133,15 @@ def build_runtime(
         model_revision,
         output_schema_fingerprint,
         capability_manifest_digest,
+        dependencies.tool_policy.fingerprint,
+        dependencies.sandbox.fingerprint,
+        dependencies.middleware.fingerprint,
     )
     logger = environ.get_logger("ai.runtime.factory")
     logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, route.route_id)
     return Runtime(
+        dependencies.services.identity,
+        binding,
         _ExecutionApi(dependencies.services.execution, binding),
         _SessionApi(dependencies.services.session, binding),
         _TaskApi(dependencies.services.task, binding),
@@ -150,6 +156,7 @@ def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
     if services is None:
         raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     return RuntimeAccess(
+        services.identity,
         _ExecutionAccess(services.execution),
         _SessionAccess(services.session),
         _TaskAccess(services.task),
@@ -161,20 +168,38 @@ def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
 
 
 def _capability_digest(spec: AgentSpec, dependencies: RuntimeDependencies) -> str:
-    manifests: list[str] = []
+    manifests: list[dict[str, str | int | bool]] = []
     for feature in spec.features:
-        if feature.kind == "skill":
-            dependencies.skill_provider.resolve_ref(feature.id, feature.revision)
-            manifests.append(dependencies.skill_provider.manifest())
-        elif feature.kind == "mcp":
-            dependencies.mcp_provider.resolve_ref(feature.id, feature.revision)
-            manifests.append(dependencies.mcp_provider.manifest())
-        elif feature.kind == "subagent":
-            dependencies.subagent_provider.resolve_ref(feature.id, feature.revision)
-            manifests.append(dependencies.subagent_provider.manifest())
-        elif feature.required and feature.kind not in {"tool", "sandbox", "middleware"}:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, f"unsupported capability: {feature.kind}")
-    return canonical_sha256({"manifests": sorted(manifests)})
+        provider_digest = ""
+        try:
+            if feature.kind == "skill":
+                resolved = dependencies.skill_provider.resolve_ref(feature.id, feature.revision)
+                provider_digest = dependencies.skill_provider.manifest()
+                resolved_revision = resolved.revision
+                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "content": resolved.content})
+            elif feature.kind == "mcp":
+                resolved = dependencies.mcp_provider.resolve_ref(feature.id, feature.revision)
+                provider_digest = dependencies.mcp_provider.manifest()
+                resolved_revision = resolved.revision
+                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "command": resolved.command, "args": list(resolved.args)})
+            elif feature.kind == "subagent":
+                resolved = dependencies.subagent_provider.resolve_ref(feature.id, feature.revision)
+                provider_digest = dependencies.subagent_provider.manifest()
+                resolved_revision = feature.revision or 1
+                fingerprint = canonical_sha256(resolved)
+            elif feature.kind in {"tool", "sandbox", "middleware"}:
+                resolved_revision = feature.revision or 1
+                fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id})
+            else:
+                raise LinktoolsAIError(ErrorCode.FEATURE_REQUIRED_MISSING if feature.required else ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        except LinktoolsAIError as error:
+            if feature.required:
+                raise LinktoolsAIError(ErrorCode.FEATURE_REQUIRED_MISSING) from error
+            resolved_revision = 0
+            fingerprint = "UNRESOLVED"
+            provider_digest = "UNRESOLVED"
+        manifests.append({"kind": feature.kind, "id": feature.id, "requested_revision": feature.revision or 0, "resolved_revision": resolved_revision, "config_digest": canonical_sha256(dict(feature.config)), "fingerprint": fingerprint, "provider_manifest_digest": provider_digest, "required": feature.required})
+    return canonical_sha256({"features": sorted(manifests, key=lambda value: (str(value["kind"]), str(value["id"]), int(value["resolved_revision"])))})
 
 
 class _ExecutionApi(ExecutionApi):

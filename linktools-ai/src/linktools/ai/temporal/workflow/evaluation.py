@@ -78,7 +78,10 @@ async def _run_evaluation_children(request: EvaluationWorkflowInput) -> Evaluati
         )
         for case_id in request.case_ids
     )
-    results = tuple(await handle.result() for handle in handles)
+    results_list: list[ExecutionWorkflowResult] = []
+    for handle in handles:
+        results_list.append(await handle.result())
+    results = tuple(results_list)
     _validate_case_results(request, results)
     completed = tuple(
         case_id

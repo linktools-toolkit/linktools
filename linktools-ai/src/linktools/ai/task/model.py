@@ -4,18 +4,10 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from enum import StrEnum
 
 from ..core.errors import ErrorCode, LinktoolsAIError
-from ..core.value import ExecutionProfile, Principal
-
-
-class TaskStatus(StrEnum):
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
+from ..core.validation import validate_idempotency_key
+from ..core.value import ExecutionProfile, Principal, TaskStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +27,10 @@ class TaskNode:
     task_id: str
     dependencies: "tuple[str, ...]" = ()
     binding_digest: "str | None" = None
+    budget_cost: int = 1
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies):
+        if not self.task_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies) or self.budget_cost < 1:
             raise ValueError("task node identity is invalid")
         if self.binding_digest is not None and not self.binding_digest.strip():
             raise ValueError("task node binding digest is invalid")
@@ -55,7 +48,7 @@ class TaskGraph:
         object.__setattr__(self, "nodes", tuple(self.nodes))
         ids = {node.task_id for node in self.nodes}
         if len(ids) != len(self.nodes) or any(dependency not in ids for node in self.nodes for dependency in node.dependencies):
-            raise ValueError("task graph contains an unknown or duplicate node")
+            raise TaskGraphValidationError(ErrorCode.TASK_DEPENDENCY_UNKNOWN, "task graph contains an unknown dependency")
         self._topological_order()
 
     def _topological_order(self) -> 'tuple[str, ...]':
@@ -64,7 +57,7 @@ class TaskGraph:
         while remaining:
             ready = tuple(sorted(task_id for task_id, dependencies in remaining.items() if not dependencies))
             if not ready:
-                raise ValueError("task graph contains a cycle")
+                raise TaskGraphValidationError(ErrorCode.TASK_GRAPH_CYCLE, "task graph contains a cycle")
             order.extend(ready)
             for task_id in ready:
                 remaining.pop(task_id)
@@ -81,6 +74,14 @@ class TaskGraph:
             depths[task_id] = 1 + max((depths[item] for item in node.dependencies), default=0)
         if max(depths.values(), default=0) > limits.max_depth:
             raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds depth limit")
+        if sum(node.budget_cost for node in self.nodes) > limits.max_budget:
+            raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds budget limit")
+
+
+class TaskGraphValidationError(LinktoolsAIError, ValueError):
+    def __init__(self, code: ErrorCode, message: str) -> None:
+        LinktoolsAIError.__init__(self, code, message)
+        ValueError.__init__(self, message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,7 +110,7 @@ class TaskCompletionLedger:
         if not result_digest:
             raise ValueError("result digest is required")
         return self._apply(
-            TaskTerminalRecord(task_id, owner, fence, TaskStatus.COMPLETED, result_digest, None, None)
+            TaskTerminalRecord(task_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None)
         )
 
     def fail(self, task_id: str, owner: str, fence: int, error_code: str, error_digest: str) -> TaskTerminalRecord:
@@ -140,7 +141,7 @@ class TaskCompletionLedger:
                 return previous
             if candidate.status is not previous.status:
                 raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-            if candidate.status is TaskStatus.COMPLETED:
+            if candidate.status is TaskStatus.SUCCEEDED:
                 raise LinktoolsAIError(ErrorCode.TASK_RESULT_CONFLICT)
             raise LinktoolsAIError(ErrorCode.TASK_RESULT_CONFLICT)
         raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
@@ -162,10 +163,12 @@ def _same_terminal_result(left: TaskTerminalRecord, right: TaskTerminalRecord) -
 class TaskGraphRequest:
     graph: TaskGraph
     principal: Principal
+    idempotency_key: str = ""
     requested_profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING
     limits: SwarmLimits = field(default_factory=SwarmLimits)
 
     def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
         self.graph.validate_limits(self.limits)
 
 
@@ -192,7 +195,11 @@ class TaskGraphView:
 @dataclass(frozen=True, slots=True)
 class CancelGraphRequest:
     principal: Principal
+    cancel_request_id: str
     force: bool = False
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.cancel_request_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,5 +219,5 @@ class Swarm:
 __all__ = [
     "CancelGraphRequest", "Job", "Swarm", "SwarmLimits", "TaskCompletionLedger", "TaskGraph",
     "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode",
-    "TaskStatus", "TaskTerminalRecord",
+    "TaskGraphValidationError", "TaskStatus", "TaskTerminalRecord",
 ]

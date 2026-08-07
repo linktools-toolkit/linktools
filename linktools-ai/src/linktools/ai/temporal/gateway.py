@@ -17,7 +17,7 @@ from ..runtime.services import (
     WorkflowQueryResult,
     WorkflowUpdateResult,
 )
-from ..task.model import TaskGraphHandle, TaskGraphRequest
+from ..task.model import TaskGraphHandle, TaskGraphRequest, TaskGraphView
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})
@@ -51,6 +51,8 @@ class TemporalClient(Protocol):
 
     async def cancel_workflow(self, workflow_id: str) -> CancelExecutionResult: ...
 
+    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView: ...
+
 
 class WorkflowGateway:
     def __init__(self, client: TemporalClient) -> None:
@@ -73,6 +75,14 @@ class WorkflowGateway:
     ) -> WorkflowUpdateResult:
         if not workflow_id.strip() or operation not in UPDATE_NAMES:
             raise ValueError("unsupported execution update")
+        if operation == "supply_external_result":
+            required = {"call_id", "result_id", "payload_ref", "payload_digest", "principal_id"}
+            if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
+                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if operation == "approve":
+            required = {"approval_id", "decision_id", "decision", "principal_id", "decision_digest"}
+            if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
+                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
 
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult:
@@ -93,6 +103,11 @@ class WorkflowGateway:
             raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
         _logger.info("starting durable task workflow: workflow_id=%s", workflow_id)
         return await self._client.start_task_graph(request, workflow_id=workflow_id)
+
+    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView:
+        if not workflow_id.strip() or not cancel_request_id.strip():
+            raise ValueError("workflow and cancel request ids are required")
+        return await self._client.cancel_task_graph(workflow_id, cancel_request_id)
 
 
 __all__ = ["QUERY_NAMES", "TemporalClient", "UPDATE_NAMES", "WorkflowGateway"]

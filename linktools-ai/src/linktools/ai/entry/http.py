@@ -10,9 +10,6 @@ from ..core import Principal
 from ..core.errors import ErrorCode, LinktoolsAIError
 from .services import EntryServices
 
-
-class HttpHandler(Protocol):
-    async def __call__(self, request: Mapping[str, str]) -> Mapping[str, str]: ...
 REQUIRED_ROUTE_NAMES = frozenset({
     "execution",
     "session",
@@ -22,6 +19,10 @@ REQUIRED_ROUTE_NAMES = frozenset({
     "artifact",
     "evaluation",
 })
+
+
+class HttpHandler(Protocol):
+    async def __call__(self, request: Mapping[str, str]) -> Mapping[str, str]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +51,6 @@ class HttpApplication:
             raise ValueError("HTTP method and path pairs must be unique")
         if services.principal_provider is None:
             raise LinktoolsAIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider is not ready")
-        self._runtime = services.runtime
         self._access = services.access
         self._principal_provider = services.principal_provider
         self._routes = routes

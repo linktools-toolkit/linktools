@@ -22,6 +22,7 @@ class LocalExecutionRecord:
     created_at: datetime
     updated_at: datetime
     stop_reason: "str | None"
+    idempotency_key: "str | None" = None
 
     def __post_init__(self) -> None:
         if (
@@ -90,6 +91,10 @@ class LocalRecordStore:
         await self.initialize()
         return self._records.get(execution_id)
 
+    async def list(self) -> 'tuple[LocalExecutionRecord, ...]':
+        await self.initialize()
+        return tuple(sorted(self._records.values(), key=lambda item: item.execution_id))
+
     def _write(self, record: LocalExecutionRecord) -> None:
         write_json_atomic(self._directory / f"{record.execution_id}.json", _record_json(record), fsync=True)
 
@@ -105,6 +110,7 @@ def _record_json(record: LocalExecutionRecord) -> 'dict[str, str | int | bool | 
         "created_at": record.created_at.isoformat(),
         "updated_at": record.updated_at.isoformat(),
         "stop_reason": record.stop_reason,
+        "idempotency_key": record.idempotency_key,
     }
 
 
@@ -137,6 +143,7 @@ def _record_from_json(
             datetime.fromisoformat(str(value["created_at"])),
             datetime.fromisoformat(str(value["updated_at"])),
             None if value.get("stop_reason") is None else str(value["stop_reason"]),
+            None if value.get("idempotency_key") is None else str(value["idempotency_key"]),
         )
         if (
             not record.session_id

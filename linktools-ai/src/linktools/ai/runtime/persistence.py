@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Runtime persistence contracts and immutable records.
+
+This module contains no backend, filesystem, database, or workflow code.  It
+is the single semantic boundary shared by the local and SQL implementations.
+"""
+
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from typing import Protocol
+
+from ..capability.tool import ToolOperationRecord, ToolStateStore
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.json import JsonValue
+from ..core.paging import Page
+from ..core.principal import ResourceRef
+from ..core.value import (
+    ApprovalDecision, ApprovalStatus, BlobStatus, CaptureState, EvaluationStatus,
+    ExecutionEventType, ExecutionProfile, ExecutionStatus, ExternalCallStatus,
+    IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus,
+    StopReason, TaskStatus, ToolOperationStatus, TraceKind,
+)
+from ..task.model import TaskGraph
+
+
+class RuntimePersistenceMode(StrEnum):
+    MEMORY = "MEMORY"
+    FILE = "FILE"
+    SQL = "SQL"
+
+
+def validate_runtime_profile(
+    mode: RuntimePersistenceMode,
+    profile: ExecutionProfile,
+    *,
+    temporal_enabled: bool,
+    local_trusted: bool = False,
+) -> None:
+    """Reject profile and durable-engine combinations that cannot be safe."""
+    if profile is ExecutionProfile.PRODUCTION_SERVICE:
+        if mode is not RuntimePersistenceMode.SQL or not temporal_enabled or local_trusted:
+            raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+    elif profile is ExecutionProfile.LOCAL_CODING and mode not in {RuntimePersistenceMode.FILE, RuntimePersistenceMode.MEMORY}:
+        raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+
+
+@dataclass(frozen=True, slots=True)
+class BlobRef:
+    tenant_id: str
+    digest: str
+    size: int
+    locator: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionRecord:
+    session_id: str
+    tenant_id: str
+    owner_principal_id: str
+    binding_digest: str
+    status: SessionStatus
+    revision: int
+    resource_generation: int
+    cwd: "str | None"
+    metadata: Mapping[str, JsonValue]
+    created_at: datetime
+    updated_at: datetime
+    closed_at: "datetime | None"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurnRecord:
+    session_id: str
+    tenant_id: str
+    sequence: int
+    execution_id: str
+    input_digest: str
+    delta_messages: "tuple[JsonValue, ...]"
+    capture_state: CaptureState
+    completed_at: "datetime | None"
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionRecord:
+    execution_id: str
+    tenant_id: str
+    session_id: "str | None"
+    profile: ExecutionProfile
+    binding_digest: str
+    parent_execution_id: "str | None"
+    root_execution_id: str
+    status: ExecutionStatus
+    snapshot_revision: int
+    event_sequence: int
+    trace_sequence: int
+    result_ref: "str | None"
+    result_digest: "str | None"
+    error_code: "str | None"
+    safe_error_details: Mapping[str, JsonValue]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class IdempotencyRecord:
+    tenant_id: str
+    scope: str
+    key: str
+    request_digest: str
+    execution_id: str
+    status: IdempotencyStatus
+    result_digest: "str | None"
+    error_code: "str | None"
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ResultRecord:
+    execution_id: str
+    tenant_id: str
+    status: ExecutionStatus
+    output_schema_id: str
+    output_schema_revision: int
+    output_schema_fingerprint: str
+    payload_ref: "str | None"
+    payload_digest: "str | None"
+    stop_reason: StopReason
+    input_tokens: int
+    output_tokens: int
+    total_cost_micros: int
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OperationLedgerRecord:
+    operation_id: str
+    tenant_id: str
+    resource_kind: ResourceKind
+    resource_id: str
+    execution_id: "str | None"
+    kind: OperationKind
+    status: OperationStatus
+    request_digest: str
+    result_ref: "str | None"
+    result_digest: "str | None"
+    error_code: "str | None"
+    compactable: bool
+    sequence: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryRecord:
+    memory_id: str
+    tenant_id: str
+    owner_id: str
+    kind: str
+    content_ref: str
+    content_digest: str
+    metadata: Mapping[str, JsonValue]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationRecord:
+    evaluation_id: str
+    tenant_id: str
+    execution_id: str
+    dataset_id: str
+    dataset_revision: int
+    evaluator_id: str
+    evaluator_revision: int
+    binding_digest: str
+    output_schema_fingerprint: str
+    artifact_digest: "str | None"
+    status: EvaluationStatus
+    revision: int
+    metrics: Mapping[str, float | int]
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRecord:
+    artifact_id: str
+    execution_id: str
+    tenant_id: str
+    producer: str
+    media_type: str
+    size: int
+    digest: str
+    blob_ref: str
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionTerminalCommit:
+    operation_id: str
+    expected_execution_revision: int
+    terminal_execution: ExecutionRecord
+    result: ResultRecord
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionTerminalCommitResult:
+    execution: ExecutionRecord
+    result: ResultRecord
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalRecord:
+    approval_id: str
+    execution_id: str
+    tenant_id: str
+    operation_id: str
+    status: ApprovalStatus
+    decision_id: "str | None"
+    decision: "ApprovalDecision | None"
+    decided_by: "str | None"
+    decision_digest: "str | None"
+    created_at: datetime
+    decided_at: "datetime | None"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalResultRecord:
+    call_id: str
+    execution_id: str
+    tenant_id: str
+    operation_id: str
+    status: ExternalCallStatus
+    result_id: "str | None"
+    payload_ref: "str | None"
+    payload_digest: "str | None"
+    created_at: datetime
+    supplied_at: "datetime | None"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskLease:
+    graph_id: str
+    task_id: str
+    tenant_id: str
+    owner: str
+    fence: int
+    lease_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TaskNodeView:
+    graph_id: str
+    task_id: str
+    dependencies: "tuple[str, ...]"
+    status: TaskStatus
+    owner: "str | None"
+    fence: int
+    lease_expires_at: "datetime | None"
+    result_digest: "str | None"
+    error_code: "str | None"
+    error_digest: "str | None"
+
+
+class RuntimeRepository(Protocol):
+    @property
+    def mode(self) -> RuntimePersistenceMode: ...
+
+    @property
+    def namespace(self) -> str: ...
+
+    @property
+    def atomic_domain_id(self) -> str: ...
+
+    async def initialize(self) -> None: ...
+    async def close(self) -> None: ...
+
+
+class ManagedToolStateRepository(ToolStateStore, RuntimeRepository, Protocol):
+    pass
+
+
+class SessionRepository(RuntimeRepository, Protocol):
+    async def create(self, record: SessionRecord) -> SessionRecord: ...
+    async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
+    async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
+    async def compare_and_swap(self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord) -> SessionRecord: ...
+    async def append_turn(self, turn: SessionTurnRecord, *, expected_sequence: int) -> SessionTurnRecord: ...
+    async def list_turns(self, session_id: str, *, tenant_id: str, after_sequence: int, limit: int) -> Page[SessionTurnRecord]: ...
+
+
+class ExecutionRepository(RuntimeRepository, Protocol):
+    async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
+    async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
+    async def compare_and_swap(self, execution_id: str, *, tenant_id: str, expected_snapshot_revision: int, next_record: ExecutionRecord) -> ExecutionRecord: ...
+    async def list_by_session(self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None) -> tuple[ExecutionRecord, ...]: ...
+    async def advance_sequence(self, execution_id: str, *, tenant_id: str, kind: str, expected_sequence: int) -> ExecutionRecord: ...
+    async def mark_trace_persistence_failed(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord: ...
+    async def commit_terminal(self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord) -> ExecutionRecord: ...
+
+
+class IdempotencyRepository(RuntimeRepository, Protocol):
+    async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
+    async def get(self, scope: str, key: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
+    async def compare_and_swap(self, scope: str, key: str, *, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord: ...
+
+
+class ResultRepository(RuntimeRepository, Protocol):
+    async def commit_terminal(self, commit: ExecutionTerminalCommit) -> ExecutionTerminalCommitResult: ...
+    async def get(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
+
+
+class EventRepository(RuntimeRepository, Protocol):
+    async def append(self, execution_id: str, *, tenant_id: str, expected_sequence: int, event_type: ExecutionEventType, payload: JsonValue) -> "ExecutionEventRecord": ...
+    async def list(self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int) -> Page["ExecutionEventRecord"]: ...
+
+
+class TraceRepository(RuntimeRepository, Protocol):
+    async def append(self, execution_id: str, *, tenant_id: str, expected_sequence: int, kind: TraceKind, payload: JsonValue) -> "TraceRecord": ...
+    async def list(self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int) -> Page["TraceRecord"]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionEventRecord:
+    execution_id: str
+    tenant_id: str
+    sequence: int
+    event_type: ExecutionEventType
+    payload: JsonValue
+
+
+@dataclass(frozen=True, slots=True)
+class TraceRecord:
+    execution_id: str
+    tenant_id: str
+    sequence: int
+    kind: TraceKind
+    payload: JsonValue
+
+
+class ApprovalRepository(RuntimeRepository, Protocol):
+    async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def create(self, record: ApprovalRecord) -> ApprovalRecord: ...
+    async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None: ...
+    async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, decision_id: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord: ...
+    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]: ...
+
+
+class ExternalResultRepository(RuntimeRepository, Protocol):
+    async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def create_call(self, record: ExternalResultRecord) -> ExternalResultRecord: ...
+    async def get(self, call_id: str, *, tenant_id: str) -> ExternalResultRecord | None: ...
+    async def supply(self, call_id: str, *, tenant_id: str, expected_status: ExternalCallStatus, result_id: str, payload_ref: str, payload_digest: str, supplied_at: datetime) -> ExternalResultRecord: ...
+    async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ExternalResultRecord, ...]: ...
+
+
+class OperationLedgerRepository(RuntimeRepository, Protocol):
+    async def next_sequence(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> int: ...
+    async def create(self, record: OperationLedgerRecord) -> OperationLedgerRecord: ...
+    async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None: ...
+    async def compare_and_swap(self, operation_id: str, *, tenant_id: str, expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord: ...
+    async def list_pending(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, limit: int) -> tuple[OperationLedgerRecord, ...]: ...
+    async def compact_terminal(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, through_sequence: int) -> str: ...
+
+
+class TaskRepository(RuntimeRepository, Protocol):
+    async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def create_plan(self, graph: TaskGraph, *, tenant_id: str) -> "TaskGraphView": ...
+    async def get_plan(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None": ...
+    async def cancel_plan(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView": ...
+    async def claim(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease: ...
+    async def renew(self, lease: TaskLease, *, tenant_id: str) -> TaskLease: ...
+    async def complete(self, lease: TaskLease, *, tenant_id: str, result_digest: str) -> "TaskTerminalRecord": ...
+    async def fail(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> "TaskTerminalRecord": ...
+    async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]: ...
+
+
+class EvaluationRepository(RuntimeRepository, Protocol):
+    async def get_header(self, evaluation_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def create(self, record: EvaluationRecord) -> EvaluationRecord: ...
+    async def get(self, evaluation_id: str, *, tenant_id: str) -> EvaluationRecord | None: ...
+    async def compare_and_swap(self, evaluation_id: str, *, tenant_id: str, expected_revision: int, next_record: EvaluationRecord) -> EvaluationRecord: ...
+    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[EvaluationRecord, ...]: ...
+
+
+class MemoryRepository(RuntimeRepository, Protocol):
+    async def get_header(self, memory_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord: ...
+    async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
+    async def list(self, *, tenant_id: str, owner_id: str, cursor: str | None, limit: int) -> Page[MemoryRecord]: ...
+
+
+class ArtifactRepository(RuntimeRepository, Protocol):
+    async def put_metadata(self, record: ArtifactRecord) -> ArtifactRecord: ...
+    async def get_header(self, artifact_id: str, *, tenant_id: str) -> ResourceRef | None: ...
+    async def get_metadata(self, artifact_id: str, *, tenant_id: str) -> ArtifactRecord | None: ...
+    async def list_by_execution(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[ArtifactRecord]: ...
+
+
+class BlobStore(RuntimeRepository, Protocol):
+    async def put_bytes(self, *, tenant_id: str, data: bytes, expected_digest: str | None = None) -> BlobRef: ...
+    async def put_stream(self, *, tenant_id: str, chunks: AsyncIterator[bytes], expected_size: int, expected_digest: str) -> BlobRef: ...
+    async def stat(self, ref: BlobRef, *, tenant_id: str) -> BlobRef | None: ...
+    def open(self, ref: BlobRef, *, tenant_id: str) -> AsyncIterator[bytes]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimePersistence:
+    mode: RuntimePersistenceMode
+    namespace: str
+    sessions: SessionRepository
+    executions: ExecutionRepository
+    results: ResultRepository
+    idempotency: IdempotencyRepository
+    events: EventRepository
+    traces: TraceRepository
+    tasks: TaskRepository
+    evaluations: EvaluationRepository
+    memories: MemoryRepository
+    artifacts: ArtifactRepository
+    approvals: ApprovalRepository
+    externals: ExternalResultRepository
+    operations: OperationLedgerRepository
+    tools: ManagedToolStateRepository
+    blobs: BlobStore
+    local_tenant_id: "str | None" = None
+
+    @property
+    def atomic_domain_id(self) -> str:
+        return self.sessions.atomic_domain_id
+
+    def __post_init__(self) -> None:
+        if not self.namespace.strip():
+            raise ValueError("runtime persistence namespace is required")
+        if self.mode is RuntimePersistenceMode.FILE and not self.local_tenant_id:
+            raise ValueError("FILE runtime requires local_tenant_id")
+        components = (
+            self.sessions, self.executions, self.results, self.idempotency, self.events,
+            self.traces, self.tasks, self.evaluations, self.memories, self.artifacts,
+            self.approvals, self.externals, self.operations, self.tools, self.blobs,
+        )
+        if any(component is None for component in components):
+            raise ValueError("runtime persistence requires every repository")
+        identities = {(component.mode, component.namespace, component.atomic_domain_id) for component in components}
+        identity = next(iter(identities), None)
+        if identity != (self.mode, self.namespace, self.atomic_domain_id) or len(identities) != 1:
+            raise ValueError("runtime persistence components must share one atomic domain")
+
+
+__all__ = [
+    "ApprovalRecord", "ApprovalRepository", "ArtifactRecord", "ArtifactRepository", "BlobRef", "BlobStatus",
+    "BlobStore", "EvaluationRecord", "EvaluationRepository", "ExecutionEventRecord", "ExecutionRecord",
+    "ExecutionRepository", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord",
+    "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository",
+    "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimePersistence",
+    "RuntimePersistenceMode", "RuntimeRepository", "ManagedToolStateRepository", "SessionRecord", "SessionRepository", "SessionTurnRecord",
+    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationRecord", "ToolOperationStatus", "TraceRecord",
+    "TraceRepository", "validate_runtime_profile",
+]

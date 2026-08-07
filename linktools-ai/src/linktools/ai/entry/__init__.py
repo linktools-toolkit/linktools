@@ -5,10 +5,10 @@
 from .acp import ACPApplication
 from .cli import CliApplication
 from .http import HttpApplication, HttpHandler, HttpRoute
-from .services import AgentServices, EntryServices, build_agent_services, build_asset_codecs, build_services
+from .services import AgentServices, EntryServices, build_agent_services, build_asset_codecs, build_default_runtime_services, build_services
 from .worker import build_worker, register_worker
 
 __all__ = [
     "ACPApplication", "AgentServices", "CliApplication", "EntryServices", "HttpApplication", "HttpHandler",
-    "HttpRoute", "build_agent_services", "build_asset_codecs", "build_services", "build_worker", "register_worker",
+    "HttpRoute", "build_agent_services", "build_asset_codecs", "build_default_runtime_services", "build_services", "build_worker", "register_worker",
 ]

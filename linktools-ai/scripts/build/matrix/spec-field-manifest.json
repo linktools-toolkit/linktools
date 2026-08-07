@@ -18,6 +18,7 @@
         {"name": "model", "type": "str"},
         {"name": "features", "type": "tuple[AgentFeatureRef, ...]"},
         {"name": "output_schema", "type": "str"},
+        {"name": "output_schema_revision", "type": "int"},
         {"name": "instructions", "type": "tuple[str, ...]", "default": []}
       ]
     },

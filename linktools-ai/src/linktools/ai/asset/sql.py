@@ -531,7 +531,7 @@ class SqlAlchemyAssetBackend:
             if content is None:
                 raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             size = len(content)
-        return VersionSummary(AssetRevision(int(row["version"] or 0)), digest, size, _as_utc(row["created_at"]))
+        return VersionSummary(AssetRevision(int(row["version"] or 0)), digest, size, _as_utc(row["created_at"]), bool(row["deleted"]))
 
     def _dialect_for(self, session: AsyncSession) -> SqlAlchemyDialect:
         if self._dialect is None:

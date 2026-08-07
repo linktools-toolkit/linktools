@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 from collections.abc import Mapping
+from threading import Lock
 
 from linktools.core import environ
 
@@ -35,28 +36,37 @@ class ModelRegistrySnapshot:
 class ModelRegistry:
     def __init__(self) -> None:
         self._snapshot = ModelRegistrySnapshot(0, MappingProxyType({}), canonical_sha256({"revision": 0, "routes": {}}))
+        self._lock = Lock()
 
     def prime(self, routes: 'Mapping[str, ModelRoute]') -> ModelRegistrySnapshot:
-        if self._snapshot.revision != 0:
-            if dict(routes) == dict(self._snapshot.routes):
-                return self._snapshot
-            raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
-        return self._commit(routes)
+        with self._lock:
+            if self._snapshot.revision != 0:
+                if dict(routes) == dict(self._snapshot.routes):
+                    return self._snapshot
+                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+            return self._commit(routes)
 
-    def register(self, route: ModelRoute) -> ModelRegistrySnapshot:
-        routes = dict(self._snapshot.routes)
-        routes[route.route_id] = route
-        return self._commit(routes)
+    def register(self, route: ModelRoute, *, expected_revision: int) -> ModelRegistrySnapshot:
+        with self._lock:
+            if expected_revision != self._snapshot.revision:
+                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+            routes = dict(self._snapshot.routes)
+            routes[route.route_id] = route
+            return self._commit(routes)
 
-    def remove(self, route_id: str) -> ModelRegistrySnapshot:
-        routes = dict(self._snapshot.routes)
-        routes.pop(route_id, None)
-        return self._commit(routes)
+    def remove(self, route_id: str, *, expected_revision: int) -> ModelRegistrySnapshot:
+        with self._lock:
+            if expected_revision != self._snapshot.revision:
+                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+            routes = dict(self._snapshot.routes)
+            routes.pop(route_id, None)
+            return self._commit(routes)
 
-    def apply(self, routes: 'Mapping[str, ModelRoute]', *, expected_revision: 'int | None' = None) -> ModelRegistrySnapshot:
-        if expected_revision is not None and expected_revision != self._snapshot.revision:
-            raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
-        return self._commit(routes)
+    def apply(self, routes: 'Mapping[str, ModelRoute]', *, expected_revision: int) -> ModelRegistrySnapshot:
+        with self._lock:
+            if expected_revision != self._snapshot.revision:
+                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+            return self._commit(routes)
 
     def snapshot(self) -> ModelRegistrySnapshot:
         return self._snapshot

@@ -15,6 +15,7 @@ from linktools.ai.asset import AssetCodecRegistry, AssetKey, AssetRequest, Asset
 from linktools.ai.asset.files import FileAssetBackend, MemoryAssetBackend
 from linktools.ai.asset.path import file_root
 from linktools.ai.asset.model import AssetInfo, AssetRevision, AssetStoreRevision
+from linktools.ai.core.paging import HmacCursorSigner
 from linktools.ai.storage.composition import StorageAdapter, StorageComposition
 from linktools.ai.storage.layer import StorageWriteVisibility
 
@@ -71,7 +72,7 @@ def make_store(backend: MemoryAssetBackend | FileAssetBackend) -> tuple[AssetSto
         write_visibility=StorageWriteVisibility.READABLE,
         adapter=IdentityAdapter(),
     )
-    return AssetStore(storage=storage, codecs=codecs), storage
+    return AssetStore(storage=storage, codecs=codecs, cursor_signer=HmacCursorSigner("test", b"cursor-key")), storage
 
 
 def test_memory_asset_store_cas_tombstone_and_history() -> None:

@@ -146,8 +146,8 @@ class AssetVersion:
     entry_revision: AssetRevision
     etag: str
     size: int
-    deleted: bool
     modified_at: datetime
+    deleted: bool = False
 
 
 @runtime_checkable

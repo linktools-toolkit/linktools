@@ -29,6 +29,12 @@ class MiddlewarePipeline:
         self._middleware = tuple(middleware)
         self._logger = environ.get_logger("ai.observe.middleware")
 
+    @property
+    def fingerprint(self) -> str:
+        from ..core.ids import canonical_sha256
+
+        return canonical_sha256([type(item).__qualname__ for item in self._middleware])
+
     async def before_run(self, context: RunContext) -> None:
         await self._run_before(context, "before_run")
 

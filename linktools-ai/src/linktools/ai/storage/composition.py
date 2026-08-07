@@ -26,6 +26,7 @@ from .model import (
     StorageDeleteResult,
     StorageOperation,
     StoragePutResult,
+    StorageStatBackend,
     StorageOwnedInfo,
     StorageResetResult,
     StorageWriter,
@@ -234,6 +235,28 @@ class StorageComposition(
         state = await self._state()
         return await self._get_from_state(key, state, retried=False)
 
+    async def stat(self, key: DomainKeyT) -> 'InfoT | None':
+        state = await self._state()
+        info = state.entries.get(key)
+        if info is None:
+            return None
+        backend = self._views[state.owners[key]].backend
+        if isinstance(backend, StorageStatBackend):
+            origin = await backend.stat(self._to_storage_key(key))
+            if origin is None:
+                raise LinktoolsAIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "storage metadata points to a missing origin",
+                    safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
+                )
+            if origin != info:
+                raise LinktoolsAIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "storage metadata and origin disagree",
+                    safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
+                )
+        return info
+
     async def _get(self, key: DomainKeyT, *, retried: bool) -> 'DomainValueT | None':
         state = await self._state()
         return await self._get_from_state(key, state, retried=retried)
@@ -273,7 +296,11 @@ class StorageComposition(
                     key,
                     extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                 )
-                return None
+                raise LinktoolsAIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "storage metadata points to a missing origin",
+                    safe_details={"key_digest": canonical_sha256(str(key))},
+                )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
         domain_value = self._from_storage_value(value)
@@ -287,7 +314,11 @@ class StorageComposition(
                     key,
                     extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                 )
-                return None
+                raise LinktoolsAIError(
+                    ErrorCode.STORAGE_INTEGRITY_ERROR,
+                    "storage metadata and origin disagree",
+                    safe_details={"key_digest": canonical_sha256(str(key))},
+                )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
         if self.cache is not None and cache_key is not None:
@@ -354,7 +385,11 @@ class StorageComposition(
                         key,
                         extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                     )
-                    values[key] = None
+                    raise LinktoolsAIError(
+                        ErrorCode.STORAGE_INTEGRITY_ERROR,
+                        "storage metadata and origin disagree",
+                        safe_details={"key_digest": canonical_sha256(str(key))},
+                    )
         return values
 
     async def _read_cache_value(
@@ -727,29 +762,46 @@ class StorageComposition(
 
     async def list_versions(self, key: DomainKeyT) -> 'tuple[VersionSummary[EntryRevisionT], ...]':
         state = await self._state()
-        owner = state.owners.get(key, 0)
-        backend = self._views[owner].backend
-        if not isinstance(backend, VersionedStorage):
-            raise LinktoolsAIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        return tuple(await backend.list_versions(self._to_storage_key(key)))
+        owners = tuple(range(len(self._views)))
+        collected: dict[tuple[str, str, bool], VersionSummary[EntryRevisionT]] = {}
+        for owner in owners:
+            backend = self._views[owner].backend
+            if not isinstance(backend, VersionedStorage):
+                continue
+            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
+            for version in versions:
+                collected[(str(version.entry_revision), version.digest, version.deleted)] = version
+        if collected:
+            return tuple(sorted(collected.values(), key=lambda version: str(version.entry_revision), reverse=True))
+        if key not in state.owners:
+            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+        raise LinktoolsAIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_revision(self, key: DomainKeyT, entry_revision: EntryRevisionT) -> 'DomainValueT | None':
         state = await self._state()
-        owner = state.owners.get(key, 0)
-        backend = self._views[owner].backend
-        if not isinstance(backend, VersionedStorage):
-            raise LinktoolsAIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        value = await backend.get_at_revision(self._to_storage_key(key), entry_revision)
-        return None if value is None else self._from_storage_value(value)
+        owners = tuple(range(len(self._views)))
+        for owner in owners:
+            backend = self._views[owner].backend
+            if not isinstance(backend, VersionedStorage):
+                continue
+            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
+            if any(version.entry_revision == entry_revision for version in versions):
+                value = await backend.get_at_revision(self._to_storage_key(key), entry_revision)
+                return None if value is None else self._from_storage_value(value)
+        raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_version(self, key: DomainKeyT, version: int) -> 'DomainValueT | None':
         state = await self._state()
-        owner = state.owners.get(key, 0)
-        backend = self._views[owner].backend
-        if not isinstance(backend, VersionedStorage):
-            raise LinktoolsAIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-        value = await backend.get_at_version(self._to_storage_key(key), version)
-        return None if value is None else self._from_storage_value(value)
+        owners = tuple(range(len(self._views)))
+        for owner in owners:
+            backend = self._views[owner].backend
+            if not isinstance(backend, VersionedStorage):
+                continue
+            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
+            if any(str(item.entry_revision.value) == str(version) for item in versions):
+                value = await backend.get_at_version(self._to_storage_key(key), version)
+                return None if value is None else self._from_storage_value(value)
+        raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 __all__ = [

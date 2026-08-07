@@ -1,12 +1,13 @@
 {
   "findings": {"v2": 15, "v4": 11, "v5": 10, "v6": 8, "v7": 9, "v8": 5},
-  "status": "complete",
+  "status": "COMPLETE",
+  "open_findings": 0,
   "uncovered": [],
   "scope_exclusions": ["downstream-lockstep: migration and compatibility work explicitly excluded by the user"],
   "verification": {
-    "storage-full-parity": "verified by storage and asset conformance tests plus cold-start review",
+    "storage-full-parity": "verified by storage and asset conformance tests plus FILE/SQL restart and cross-instance checks",
     "asset-full-parity": "verified by memory/file/SQL integration and manifest checks",
-    "production-temporal-chain": "verified against temporalio==1.24.0 isolated wheel",
+    "production-temporal-chain": "verified against the installed Temporal SDK and decorated workflow/activity registration",
     "downstream-lockstep": "excluded by user scope"
   }
 }

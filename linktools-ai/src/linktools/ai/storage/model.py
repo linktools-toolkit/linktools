@@ -109,6 +109,7 @@ class VersionSummary(Generic[EntryRevisionT]):
     digest: str
     size: int
     created_at: datetime
+    deleted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +209,11 @@ class ReadableMetadataBackend(
     pass
 
 
+@runtime_checkable
+class StorageStatBackend(Protocol[KeyT, InfoT]):
+    async def stat(self, key: KeyT) -> "InfoT | None": ...
+
+
 __all__ = [
     "BatchStorageReader", "BatchStorageWriter", "InitializableStorage",
     "MetadataChange", "MetadataLoad", "MetadataLoadMode", "PreloadResult",
@@ -215,5 +221,5 @@ __all__ = [
     "StorageBatchPartialError",
     "StorageDeleteResult", "StorageMetadataBackend", "StorageOperation",
     "StorageOwnedInfo", "StoragePutResult", "StorageReader", "StorageResetResult",
-    "StorageWriter", "VersionSummary", "VersionedStorage", "ReadableMetadataBackend",
+    "StorageWriter", "VersionSummary", "VersionedStorage", "ReadableMetadataBackend", "StorageStatBackend",
 ]

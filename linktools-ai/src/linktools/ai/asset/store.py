@@ -2,17 +2,18 @@
 # -*- coding: utf-8 -*-
 """Typed AssetStore backed by the generic StorageComposition."""
 
-import base64
 import binascii
 import hashlib
 import json
+import time
 from collections.abc import Sequence
 from typing import TypeVar
 
 from linktools.core import environ
 
-from ..core import Page
+from ..core import CursorPayload, CursorSigner, Page
 from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.ids import canonical_sha256
 from ..storage.composition import CacheAdapter, StorageAdapter, StorageComposition
 from ..storage.layer import StorageWriteVisibility
 from ..storage.model import StorageChange, StorageDeleteResult, StorageOperation
@@ -72,6 +73,7 @@ class AssetStore:
         *,
         storage: 'StorageComposition[AssetKey, bytes, AssetKey, bytes, AssetInfo, AssetRevision, AssetStoreRevision]',
         codecs: AssetCodecRegistry,
+        cursor_signer: CursorSigner,
     ) -> None:
         if storage.write_visibility is not StorageWriteVisibility.READABLE:
             raise ValueError("AssetStore requires readable writes")
@@ -79,14 +81,14 @@ class AssetStore:
             raise ValueError("AssetStore requires the primary backend as writer")
         self._storage = storage
         self._codecs = codecs
+        self._cursor_signer = cursor_signer
 
     @property
     def codec_manifest(self) -> AssetCodecManifest:
         return self._codecs.manifest()
 
     async def stat(self, key: AssetKey) -> 'AssetInfo | None':
-        infos = await self._storage.list_info()
-        return next((info for info in infos if info.key == key), None)
+        return await self._storage.stat(key)
 
     async def get(self, key: AssetKey, *, expected: 'type[AssetT]') -> 'AssetT | None':
         codec = self._codecs.resolve(key.kind, expected)
@@ -198,7 +200,7 @@ class AssetStore:
         infos = [info for info in await self._storage.list_info() if not info.deleted]
         infos = [info for info in infos if (kind is None or info.key.kind == kind) and (prefix is None or info.key.id.startswith(prefix))]
         revision = await self._storage.current_revision()
-        return _page_infos(infos, revision, kind, prefix, cursor, limit)
+        return _page_infos(infos, revision, kind, prefix, cursor, limit, self._cursor_signer)
 
     async def list_info_with_owners(
         self,
@@ -208,15 +210,15 @@ class AssetStore:
         cursor: 'str | None' = None,
         limit: int = 100,
     ) -> 'Page[OwnedAssetInfo]':
-        if limit < 1:
-            raise ValueError("limit must be positive")
+        if limit < 1 or limit > 200:
+            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
         owned = [item for item in await self._storage.list_info_with_owners() if not item.info.deleted]
         owned = [item for item in owned if (kind is None or item.info.key.kind == kind) and (prefix is None or item.info.key.id.startswith(prefix))]
         ordered = sorted(owned, key=lambda item: (item.info.key.kind, item.info.key.id))
         revision = await self._storage.current_revision()
-        start = _cursor_start(cursor, revision, kind, prefix, ordered)
+        start = _cursor_start(cursor, revision, kind, prefix, ordered, self._cursor_signer)
         page = ordered[start : start + limit]
-        next_cursor = _make_cursor(revision, kind, prefix, page[-1].info.key if len(page) == limit else None)
+        next_cursor = _make_cursor(revision, kind, prefix, page[-1].info.key if len(page) == limit else None, self._cursor_signer)
         return Page(tuple(OwnedAssetInfo(item.info, item.layer, item.writable) for item in page), next_cursor)
 
     async def list_versions(self, key: AssetKey) -> 'tuple[AssetVersion, ...]':
@@ -224,23 +226,28 @@ class AssetStore:
         ordered = sorted(versions, key=lambda version: version.entry_revision.value, reverse=True)
         result: list[AssetVersion] = []
         for version in ordered:
-            content = await self._storage.get_at_revision(key, version.entry_revision)
             result.append(
                 AssetVersion(
                     version.entry_revision,
                     version.digest,
                     version.size,
-                    content is None,
                     version.created_at,
+                    version.deleted,
                 )
             )
         return tuple(result)
 
     async def get_at_revision(self, key: AssetKey, entry_revision: AssetRevision, *, expected: 'type[AssetT]') -> 'AssetT | None':
         codec = self._codecs.resolve(key.kind, expected)
+        versions = await self._storage.list_versions(key)
+        version = next((item for item in versions if item.entry_revision == entry_revision), None)
+        if version is None:
+            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+        if version.deleted:
+            return None
         content = await self._storage.get_at_revision(key, entry_revision)
         if content is None:
-            return None
+            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             value = codec.decode(content)
             codec.validate_key(key, value)
@@ -252,9 +259,15 @@ class AssetStore:
 
     async def get_at_version(self, key: AssetKey, version: int, *, expected: 'type[AssetT]') -> 'AssetT | None':
         codec = self._codecs.resolve(key.kind, expected)
+        versions = await self._storage.list_versions(key)
+        summary = next((item for item in versions if item.entry_revision.value == version), None)
+        if summary is None:
+            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+        if summary.deleted:
+            return None
         content = await self._storage.get_at_version(key, version)
         if content is None:
-            return None
+            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             value = codec.decode(content)
             codec.validate_key(key, value)
@@ -272,35 +285,31 @@ def _page_infos(
     prefix: 'str | None',
     cursor: 'str | None',
     limit: int,
+    signer: CursorSigner,
 ) -> 'Page[AssetInfo]':
-    if limit < 1:
-        raise ValueError("limit must be positive")
+    if limit < 1 or limit > 200:
+        raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
     ordered = sorted(infos, key=lambda info: (info.key.kind, info.key.id))
-    start = _cursor_start(cursor, revision, kind, prefix, ordered)
+    start = _cursor_start(cursor, revision, kind, prefix, ordered, signer)
     page = ordered[start : start + limit]
-    next_cursor = _make_cursor(revision, kind, prefix, page[-1].key if len(page) == limit else None)
+    next_cursor = _make_cursor(revision, kind, prefix, page[-1].key if len(page) == limit else None, signer)
     return Page(tuple(page), next_cursor)
 
 
-def _make_cursor(revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', key: 'AssetKey | None') -> 'str | None':
+def _make_cursor(revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', key: 'AssetKey | None', signer: CursorSigner) -> 'str | None':
     if key is None:
         return None
-    raw = json.dumps({"revision": revision.value, "kind": kind, "prefix": prefix, "last": [key.kind, key.id]}, sort_keys=True, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    return signer.encode(CursorPayload(1, "asset", "ASSET", canonical_sha256({"kind": kind, "prefix": prefix, "include_deleted": False}), json.dumps([key.kind, key.id], separators=(",", ":")), int(revision.value) if revision.value.isdigit() else 0, int(time.time()) + 3600, False))
 
 
-def _cursor_start(cursor: 'str | None', revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', values: 'Sequence[AssetInfo | OwnedAssetInfo]') -> int:
+def _cursor_start(cursor: 'str | None', revision: AssetStoreRevision, kind: 'str | None', prefix: 'str | None', values: 'Sequence[AssetInfo | OwnedAssetInfo]', signer: CursorSigner) -> int:
     if cursor is None:
         return 0
     try:
-        payload = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
-        if not isinstance(payload, dict):
+        payload = signer.decode(cursor)
+        if payload.cursor_version != 1 or payload.resource_kind != "ASSET" or payload.tenant_id != "asset" or payload.include_deleted or payload.filter_digest != canonical_sha256({"kind": kind, "prefix": prefix, "include_deleted": False}) or not revision.value.isdigit() or str(payload.snapshot_or_store_revision) != revision.value:
             raise ValueError
-        if set(payload) != {"revision", "kind", "prefix", "last"}:
-            raise ValueError
-        if payload["revision"] != revision.value or payload["kind"] != kind or payload["prefix"] != prefix:
-            raise ValueError
-        raw_last = payload.get("last")
+        raw_last = json.loads(payload.sort_key)
         if not isinstance(raw_last, list) or len(raw_last) != 2 or not all(isinstance(item, str) for item in raw_last):
             raise ValueError
     except (ValueError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):

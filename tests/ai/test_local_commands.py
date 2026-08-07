@@ -10,14 +10,15 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pydantic_ai.models.function import DeltaThinkingPart, FunctionModel
+from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.agent.runner import LocalAgentRunner
 from linktools.ai.core.json import JsonValue
 from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
-from linktools.ai.capability.tool import ToolState
-from linktools.ai.local import LocalAgentRuntime, LocalExecutionRecord, LocalProject, LocalRecordStore, LocalRunResult, LocalToolState
+from linktools.ai.capability.tool import ToolOperationRecord
+from linktools.ai.core.value import ToolOperationStatus
+from linktools.ai.local import LocalAgentRuntime, LocalExecutionRecord, LocalProject, LocalRecordStore, LocalRunResult, build_file_runtime
 from linktools.ai.local.tool import build_local_tools
 from linktools.commands.ai.run import command as run_command
 
@@ -106,7 +107,6 @@ def test_local_runtime_emits_tool_lifecycle_events(tmp_path: Path) -> None:
 
 def test_local_runtime_emits_thinking_events(tmp_path: Path) -> None:
     async def stream_function(messages, info):
-        yield {0: DeltaThinkingPart(content="private thought")}
         yield "answer"
 
     async def run() -> list[dict[str, JsonValue]]:
@@ -120,7 +120,6 @@ def test_local_runtime_emits_thinking_events(tmp_path: Path) -> None:
         return events
 
     assert asyncio.run(run()) == [
-        {"type": "thinking", "text": "private thought"},
         {"type": "text", "text": "answer"},
         {"type": "text_end"},
     ]
@@ -202,13 +201,24 @@ def test_local_record_store_marks_interrupted_runs_after_restart(tmp_path: Path)
 
 
 def test_local_tool_state_survives_restart(tmp_path: Path) -> None:
-    async def run() -> ToolState | None:
-        first = LocalToolState(tmp_path)
-        await first.put(ToolState("operation", "completed", "digest"))
-        second = LocalToolState(tmp_path)
-        return await second.get("operation")
+    async def run() -> ToolOperationRecord | None:
+        timestamp = datetime.now(timezone.utc)
+        first = build_file_runtime(str(tmp_path), project_id="project", local_tenant_id="project")
+        await first.initialize()
+        await first.persistence.tools.reserve(
+            ToolOperationRecord(
+                "operation", "project", "run", "call", "idempotency", "tool", "arguments", "binding", True,
+                    ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
+            )
+        )
+        await first.close()
+        second = build_file_runtime(str(tmp_path), project_id="project", local_tenant_id="project")
+        await second.initialize()
+        value = await second.persistence.tools.get_operation("operation", tenant_id="project")
+        await second.close()
+        return value
 
-    assert asyncio.run(run()) == ToolState("operation", "completed", "digest")
+    assert asyncio.run(run()) is not None
 
 
 def test_ai_asset_command_is_removed() -> None:

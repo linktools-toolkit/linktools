@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 """Stable errors exposed at package boundaries."""
 
-from enum import StrEnum
 from collections.abc import Mapping
+from dataclasses import dataclass
+from enum import StrEnum
 
 from .json import JsonValue
 
@@ -17,6 +18,7 @@ class ErrorCode(StrEnum):
     ASSET_CONFIG_TYPE_INVALID = "ASSET_CONFIG_TYPE_INVALID"
     ASSET_CONTENT_MISMATCH = "ASSET_CONTENT_MISMATCH"
     ASSET_CURSOR_INVALID = "ASSET_CURSOR_INVALID"
+    CURSOR_INVALID = "CURSOR_INVALID"
     ASSET_ENV_MISSING = "ASSET_ENV_MISSING"
     ASSET_REVISION_CONFLICT = "ASSET_REVISION_CONFLICT"
     ASSET_PATH_OUTSIDE_ROOT = "ASSET_PATH_OUTSIDE_ROOT"
@@ -67,6 +69,51 @@ class ErrorCode(StrEnum):
     SESSION_ACTIVE_EXECUTIONS = "SESSION_ACTIVE_EXECUTIONS"
     SESSION_CLEANUP_REQUIRED = "SESSION_CLEANUP_REQUIRED"
     LOCAL_SKILL_CONFLICT = "LOCAL_SKILL_CONFLICT"
+    REQUEST_FIELD_INVALID = "REQUEST_FIELD_INVALID"
+    PROMPT_TOO_LARGE = "PROMPT_TOO_LARGE"
+    EXTERNAL_RESULT_TOO_LARGE = "EXTERNAL_RESULT_TOO_LARGE"
+    TOOL_ARGUMENTS_TOO_LARGE = "TOOL_ARGUMENTS_TOO_LARGE"
+    OBSERVATION_PAYLOAD_TOO_LARGE = "OBSERVATION_PAYLOAD_TOO_LARGE"
+    PAGE_LIMIT_INVALID = "PAGE_LIMIT_INVALID"
+    IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID"
+    RUNTIME_SERVICE_MISMATCH = "RUNTIME_SERVICE_MISMATCH"
+    STORAGE_CLOSED = "STORAGE_CLOSED"
+    STORAGE_RECOVERY_REQUIRED = "STORAGE_RECOVERY_REQUIRED"
+    SESSION_REVISION_CONFLICT = "SESSION_REVISION_CONFLICT"
+    EXECUTION_RESULT_CONFLICT = "EXECUTION_RESULT_CONFLICT"
+    EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
+    EXECUTION_START_UNKNOWN = "EXECUTION_START_UNKNOWN"
+    EXECUTION_START_PERSISTENCE_FAILED = "EXECUTION_START_PERSISTENCE_FAILED"
+    EXTERNAL_RESULT_CONFLICT = "EXTERNAL_RESULT_CONFLICT"
+    AGENT_ID_INVALID = "AGENT_ID_INVALID"
+    AGENT_INSTRUCTIONS_OUTSIDE_ROOT = "AGENT_INSTRUCTIONS_OUTSIDE_ROOT"
+    TOOL_TIMEOUT_INVALID = "TOOL_TIMEOUT_INVALID"
+    TOOL_OUTPUT_TRUNCATED = "TOOL_OUTPUT_TRUNCATED"
+    TOOL_OPERATION_CONFLICT = "TOOL_OPERATION_CONFLICT"
+    TOOL_EFFECT_UNKNOWN = "TOOL_EFFECT_UNKNOWN"
+    TOOL_RESULT_CONFLICT = "TOOL_RESULT_CONFLICT"
+    TOO_MANY_PENDING_OPERATIONS = "TOO_MANY_PENDING_OPERATIONS"
+    TASK_GRAPH_CYCLE = "TASK_GRAPH_CYCLE"
+    TASK_GRAPH_DEADLOCK = "TASK_GRAPH_DEADLOCK"
+    TASK_DEPENDENCY_UNKNOWN = "TASK_DEPENDENCY_UNKNOWN"
+    FEATURE_CONFLICT = "FEATURE_CONFLICT"
+    FEATURE_REQUIRED_MISSING = "FEATURE_REQUIRED_MISSING"
+    OUTPUT_SCHEMA_REVISION_REQUIRED = "OUTPUT_SCHEMA_REVISION_REQUIRED"
+    ASSET_VERSION_NOT_FOUND = "ASSET_VERSION_NOT_FOUND"
+    ASSET_VERSION_OWNER_UNKNOWN = "ASSET_VERSION_OWNER_UNKNOWN"
+    REDACTION_FAILED = "REDACTION_FAILED"
+    MCP_RESPONSE_TOO_LARGE = "MCP_RESPONSE_TOO_LARGE"
+    LOCAL_SHELL_PLATFORM_UNSUPPORTED = "LOCAL_SHELL_PLATFORM_UNSUPPORTED"
+
+
+@dataclass(frozen=True, slots=True)
+class SafeError:
+    code: str
+    category: str
+    retryable: bool
+    operation_id: str
+    safe_details: Mapping[str, JsonValue]
+    cause_digest: str
 
 
 class LinktoolsAIError(Exception):
@@ -96,6 +143,18 @@ class LinktoolsAIError(Exception):
         } if retryable is None else retryable
         self.operation_id = operation_id
         self.safe_details = dict(safe_details or {})
+
+    def to_safe_error(self, *, operation_id: str) -> SafeError:
+        from .ids import canonical_sha256
+
+        return SafeError(
+            self.code.value,
+            self.category,
+            self.retryable,
+            operation_id,
+            self.safe_details,
+            canonical_sha256({"type": type(self).__name__, "code": self.code.value}),
+        )
 
 
 class StorageError(LinktoolsAIError):
@@ -155,4 +214,5 @@ __all__ = [
     "StorageConflictError",
     "StorageCorruptionError",
     "StorageError",
+    "SafeError",
 ]

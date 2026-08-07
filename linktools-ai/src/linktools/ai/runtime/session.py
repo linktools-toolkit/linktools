@@ -1,14 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Session query and mutation API."""
+"""Session query API and persistence-backed session service."""
 
+import asyncio
+import json
+import time
+from binascii import Error as Base64Error
+from datetime import datetime, timezone
 from typing import Protocol
 
+from linktools.core import environ
+
 from ..core import Page, Principal
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.ids import canonical_sha256
+from ..core.paging import CursorPayload, CursorSigner
+from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
+from ..core.value import ExecutionProfile, ExecutionStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus
+from .persistence import OperationLedgerRecord, RuntimePersistence, SessionRecord, SessionTurnRecord
 from .services import (
     CloseSessionRequest,
+    CancelExecutionRequest,
     CreateSessionRequest,
     ExecutionHandle,
+    ExecutionRequest,
     ForkSessionRequest,
     ListSessionRequest,
     LoadedSession,
@@ -16,6 +31,10 @@ from .services import (
     SessionView,
     UpdateSessionRequest,
 )
+from .services import ExecutionService
+from ..agent.context import AgentBinding
+
+_logger = environ.get_logger("ai.runtime.session")
 
 
 class SessionQueryApi(Protocol):
@@ -32,4 +51,355 @@ class SessionApi(SessionQueryApi, Protocol):
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
 
 
-__all__ = ["SessionApi", "SessionQueryApi"]
+class DefaultSessionService:
+    """Enforce session ownership, binding immutability, and revision CAS."""
+
+    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner) -> None:
+        self._persistence = persistence
+        self._authorization = authorization
+        self._execution = execution
+        self._cursor_signer = cursor_signer
+
+    async def create(self, binding: AgentBinding, request: CreateSessionRequest) -> SessionView:
+        resource = ResourceRef(ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id)
+        await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
+        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding.digest})
+        operation = await self._begin_operation(request.create_request_id, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
+        if operation.result_ref:
+            current = await self._persistence.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
+            if current is not None:
+                return await self._view(current, request.principal)
+        now = datetime.now(timezone.utc)
+        record = SessionRecord(request.session_id, request.principal.tenant_id, request.principal.principal_id, binding.digest, SessionStatus.OPEN, 0, 0, None, {}, now, now, None)
+        try:
+            await self._persistence.sessions.create(record)
+        except LinktoolsAIError as error:
+            if error.code is not ErrorCode.SESSION_CONFLICT:
+                raise
+            current = await self._persistence.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
+            if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding.digest:
+                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            record = current
+        await self._complete_operation(operation, request.principal.tenant_id, record.session_id, canonical_sha256({"session_id": record.session_id, "revision": record.revision}))
+        _logger.info("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
+        return await self._view(record, request.principal)
+
+    async def get(self, session_id: str, *, principal: Principal) -> SessionView:
+        record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        return await self._view(record, principal)
+
+    async def list(self, request: ListSessionRequest) -> Page[SessionView]:
+        await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, "list", request.principal.tenant_id))
+        records = await self._persistence.sessions.list(tenant_id=request.principal.tenant_id, owner_principal_id=request.principal.principal_id)
+        if not 1 <= request.limit <= 200:
+            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+        snapshot = _session_snapshot(records)
+        start = _cursor_start(request.cursor, snapshot, request.principal.tenant_id, request.principal.principal_id, records, self._cursor_signer)
+        values = records[start:start + request.limit]
+        views = tuple(
+            await asyncio.gather(*(self._view(record, request.principal) for record in values))
+        )
+        next_cursor = _make_cursor(snapshot, request.principal.tenant_id, request.principal.principal_id, views[-1].session_id if len(records) > start + request.limit and views else None, self._cursor_signer)
+        return Page(views, next_cursor)
+
+    async def load(self, session_id: str, *, principal: Principal) -> LoadedSession:
+        record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
+        executions = await self._persistence.executions.list_by_session(session_id, tenant_id=principal.tenant_id)
+        active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
+        return LoadedSession(await self._view(record, principal), active)
+
+    async def resume(self, binding: AgentBinding, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
+        record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+        await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id))
+        if record.status is not SessionStatus.OPEN:
+            raise LinktoolsAIError(ErrorCode.SESSION_CONFLICT)
+        if record.binding_digest != binding.digest:
+            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        return await self._execution.run_for_session(binding, session_id, ExecutionRequest(request.prompt, request.principal, ExecutionProfile.LOCAL_CODING, request.idempotency_key))
+
+    async def fork(self, binding: AgentBinding, session_id: str, request: ForkSessionRequest) -> SessionView:
+        source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+        await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, ResourceRef(ResourceKind.SESSION, request.new_session_id, request.principal.tenant_id, request.principal.principal_id))
+        digest = canonical_sha256({"action": "session.fork", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "source": session_id, "target": request.new_session_id, "binding": source.binding_digest})
+        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.new_session_id, OperationKind.SESSION_FORK, digest)
+        if operation.result_ref:
+            current = await self._persistence.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
+            if current is not None:
+                return await self._view(current, request.principal)
+        if source.binding_digest != binding.digest:
+            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        now = datetime.now(timezone.utc)
+        target = SessionRecord(request.new_session_id, source.tenant_id, source.owner_principal_id, source.binding_digest, SessionStatus.OPEN, 0, 0, source.cwd, source.metadata, now, now, None)
+        try:
+            await self._persistence.sessions.create(target)
+        except LinktoolsAIError as error:
+            if error.code is not ErrorCode.SESSION_CONFLICT:
+                raise
+            existing_target = await self._persistence.sessions.get(request.new_session_id, tenant_id=request.principal.tenant_id)
+            if (
+                existing_target is None
+                or existing_target.tenant_id != target.tenant_id
+                or existing_target.owner_principal_id != target.owner_principal_id
+                or existing_target.binding_digest != target.binding_digest
+                or existing_target.status is not SessionStatus.OPEN
+                or existing_target.revision != 0
+                or existing_target.resource_generation != 0
+            ):
+                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+            target = existing_target
+        target_turns: dict[int, SessionTurnRecord] = {}
+        target_after_sequence = 0
+        while True:
+            target_page = await self._persistence.sessions.list_turns(
+                target.session_id,
+                tenant_id=request.principal.tenant_id,
+                after_sequence=target_after_sequence,
+                limit=200,
+            )
+            for target_turn in target_page.items:
+                target_turns[target_turn.sequence] = target_turn
+                target_after_sequence = target_turn.sequence
+            if target_page.next_cursor is None:
+                break
+        after_sequence = 0
+        while True:
+            page = await self._persistence.sessions.list_turns(
+                session_id,
+                tenant_id=request.principal.tenant_id,
+                after_sequence=after_sequence,
+                limit=200,
+            )
+            for source_turn in page.items:
+                target_turn = target_turns.get(source_turn.sequence)
+                if target_turn is None:
+                    await self._persistence.sessions.append_turn(
+                        SessionTurnRecord(
+                            target.session_id,
+                            target.tenant_id,
+                            source_turn.sequence,
+                            source_turn.execution_id,
+                            source_turn.input_digest,
+                            source_turn.delta_messages,
+                            source_turn.capture_state,
+                            source_turn.completed_at,
+                        ),
+                        expected_sequence=target_after_sequence,
+                    )
+                    target_after_sequence = source_turn.sequence
+                elif target_turn != SessionTurnRecord(
+                    target.session_id,
+                    target.tenant_id,
+                    source_turn.sequence,
+                    source_turn.execution_id,
+                    source_turn.input_digest,
+                    source_turn.delta_messages,
+                    source_turn.capture_state,
+                    source_turn.completed_at,
+                ):
+                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                after_sequence = source_turn.sequence
+            if page.next_cursor is None:
+                break
+        await self._complete_operation(operation, request.principal.tenant_id, target.session_id, canonical_sha256({"session_id": target.session_id, "revision": target.revision}))
+        _logger.info("session forked: source=%s target=%s", session_id, target.session_id)
+        return await self._view(target, request.principal)
+
+    async def update(self, binding: AgentBinding, session_id: str, request: UpdateSessionRequest) -> SessionView:
+        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
+        if current.binding_digest != binding.digest:
+            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
+        operation = await self._begin_operation(request.mutation_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
+        if operation.result_ref:
+            updated = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            if updated is not None:
+                return await self._view(updated, request.principal)
+        requested_cwd = request.cwd if request.cwd is not None else current.cwd
+        if (
+            operation.status is OperationStatus.PENDING
+            and current.revision == request.expected_revision + 1
+            and current.resource_generation == request.expected_revision + 1
+            and current.status is SessionStatus.OPEN
+            and current.metadata == request.metadata
+            and current.cwd == requested_cwd
+        ):
+            await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
+            _logger.info("session update reconciled: session=%s revision=%s", session_id, current.revision)
+            return await self._view(current, request.principal)
+        if current.status is SessionStatus.CLEANUP_REQUIRED:
+            raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+        if current.revision != request.expected_revision or current.status is not SessionStatus.OPEN:
+            raise LinktoolsAIError(ErrorCode.SESSION_REVISION_CONFLICT)
+        now = datetime.now(timezone.utc)
+        next_record = SessionRecord(current.session_id, current.tenant_id, current.owner_principal_id, current.binding_digest, current.status, current.revision + 1, current.resource_generation + 1, requested_cwd, request.metadata, current.created_at, now, current.closed_at)
+        updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
+        await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
+        _logger.info("session updated: session=%s revision=%s", session_id, updated.revision)
+        return await self._view(updated, request.principal)
+
+    async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
+        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
+        digest = canonical_sha256({"action": "session.close", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "force": request.force, "wait_timeout_seconds": request.wait_timeout_seconds})
+        operation = await self._begin_operation(request.close_request_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
+        if operation.result_ref:
+            closed = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            if closed is not None:
+                return await self._view(closed, request.principal)
+        executions = await self._active_executions(session_id, request.principal.tenant_id)
+        active = executions
+        if active and not request.force:
+            raise LinktoolsAIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+        if current.status is SessionStatus.CLOSED:
+            await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
+            return await self._view(current, request.principal)
+        if current.status is SessionStatus.CLEANUP_REQUIRED and not request.force:
+            raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+        if current.status is SessionStatus.OPEN:
+            now = datetime.now(timezone.utc)
+            current = await self._persistence.sessions.compare_and_swap(
+                session_id,
+                tenant_id=request.principal.tenant_id,
+                expected_revision=current.revision,
+                next_record=SessionRecord(
+                    current.session_id,
+                    current.tenant_id,
+                    current.owner_principal_id,
+                    current.binding_digest,
+                    SessionStatus.CLOSING,
+                    current.revision + 1,
+                    current.resource_generation,
+                    current.cwd,
+                    current.metadata,
+                    current.created_at,
+                    now,
+                    current.closed_at,
+                ),
+            )
+        if active and request.force:
+            for execution in active:
+                await self._execution.cancel(
+                    execution.execution_id,
+                    CancelExecutionRequest(
+                        request.principal,
+                        f"{request.close_request_id}/{execution.execution_id}",
+                        True,
+                    ),
+                )
+            try:
+                await asyncio.wait_for(
+                    self._wait_for_no_active(session_id, request.principal.tenant_id),
+                    timeout=request.wait_timeout_seconds,
+                )
+            except asyncio.TimeoutError as error:
+                now = datetime.now(timezone.utc)
+                cleanup = SessionRecord(
+                    current.session_id,
+                    current.tenant_id,
+                    current.owner_principal_id,
+                    current.binding_digest,
+                    SessionStatus.CLEANUP_REQUIRED,
+                    current.revision + 1,
+                    current.resource_generation,
+                    current.cwd,
+                    current.metadata,
+                    current.created_at,
+                    now,
+                    current.closed_at,
+                )
+                await self._persistence.sessions.compare_and_swap(
+                    session_id,
+                    tenant_id=request.principal.tenant_id,
+                    expected_revision=current.revision,
+                    next_record=cleanup,
+                )
+                raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
+        now = datetime.now(timezone.utc)
+        closing = SessionRecord(current.session_id, current.tenant_id, current.owner_principal_id, current.binding_digest, SessionStatus.CLOSED, current.revision + 1, current.resource_generation, current.cwd, current.metadata, current.created_at, now, now)
+        updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
+        await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
+        _logger.info("session closed: session=%s revision=%s force=%s", session_id, updated.revision, request.force)
+        return await self._view(updated, request.principal)
+
+    async def _active_executions(self, session_id: str, tenant_id: str) -> tuple:
+        records = await self._persistence.executions.list_by_session(session_id, tenant_id=tenant_id)
+        return tuple(
+            record
+            for record in records
+            if record.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
+        )
+
+    async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
+        while await self._active_executions(session_id, tenant_id):
+            await asyncio.sleep(0.05)
+
+    async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
+        header = await self._persistence.sessions.get_header(session_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(principal, action, header)
+        record = await self._persistence.sessions.get(session_id, tenant_id=principal.tenant_id)
+        if record is None:
+            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+        return record
+
+    async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
+        executions = await self._persistence.executions.list_by_session(record.session_id, tenant_id=principal.tenant_id)
+        active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
+        return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active)
+
+    async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
+        for _ in range(4):
+            existing = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
+            if existing is not None:
+                if existing.request_digest != request_digest:
+                    raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                return existing
+            now = datetime.now(timezone.utc)
+            record = OperationLedgerRecord(operation_id, tenant_id, resource_kind, resource_id, None, kind, OperationStatus.PENDING, request_digest, None, None, None, True, await self._persistence.operations.next_sequence(resource_kind, resource_id, tenant_id=tenant_id), now, now)
+            try:
+                return await self._persistence.operations.create(record)
+            except LinktoolsAIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+        raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def _complete_operation(self, operation: OperationLedgerRecord, tenant_id: str, result_ref: str, result_digest: str) -> None:
+        now = datetime.now(timezone.utc)
+        completed = OperationLedgerRecord(operation.operation_id, tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, result_ref, result_digest, None, operation.compactable, operation.sequence, operation.created_at, now)
+        try:
+            await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=completed)
+        except LinktoolsAIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+            if current is None or current.status is not OperationStatus.SUCCEEDED or current.result_digest != result_digest:
+                raise
+
+
+__all__ = ["DefaultSessionService", "SessionApi", "SessionQueryApi"]
+
+
+def _session_snapshot(records: tuple[SessionRecord, ...]) -> int:
+    return int(canonical_sha256([(record.session_id, record.revision, record.resource_generation, record.status.value) for record in records])[:16], 16)
+
+
+def _make_cursor(snapshot: int, tenant_id: str, owner_id: str, session_id: str | None, signer: CursorSigner) -> str | None:
+    if session_id is None:
+        return None
+    return signer.encode(CursorPayload(1, tenant_id, "SESSION", canonical_sha256({"owner_principal_id": owner_id}), session_id, snapshot, int(time.time()) + 3600))
+
+
+def _cursor_start(cursor: str | None, snapshot: int, tenant_id: str, owner_id: str, records: tuple[SessionRecord, ...], signer: CursorSigner) -> int:
+    if cursor is None:
+        return 0
+    try:
+        payload = signer.decode(cursor)
+        if payload.cursor_version != 1 or payload.tenant_id != tenant_id or payload.resource_kind != "SESSION" or payload.filter_digest != canonical_sha256({"owner_principal_id": owner_id}) or payload.snapshot_or_store_revision != snapshot:
+            raise ValueError("session cursor identity mismatch")
+        if not payload.sort_key.strip():
+            raise ValueError("session cursor sort key is empty")
+        return next((index + 1 for index, item in enumerate(records) if item.session_id == payload.sort_key), len(records))
+    except (Base64Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error
+    except LinktoolsAIError as error:
+        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error

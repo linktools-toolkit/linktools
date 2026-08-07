@@ -1,43 +1,47 @@
 {
-  "base_commit": "d07172da6bfb915ed57bd6465c5c801407658ebb",
+  "spec": ".docs/linktools-ai-comprehensive-repair-spec-824af4b-final.md",
+  "base_commit": "824af4bca603ed33758ebfe52e1ca3934ec7d0a1",
   "linktools_ai_commit": null,
-  "downstream_commit": "2afc0e1dc686e0133e63985421d16aa99d345a24",
+  "working_tree_source_digest": "e671a66d9b82add8d5a9c6329e570d46205e651e1847f4e1044b21ebb0a5a352",
   "status": "COMPLETE",
   "environment": {
     "python": "3.13",
     "database": "sqlite+aiosqlite",
-    "temporal": "1.24.0 verified in isolated wheel environment",
+    "temporal": "1.31.0 installed and import-verified",
     "profile": "local-coding"
   },
   "results": {
-    "ai_tests": "33 passed",
-    "ruff": "passed",
-    "architecture": "passed",
-    "traceability_matrix": "passed",
-    "sql_schema_manifest": "passed: 55548b04771807779783003a74c4c9a3057f474682e59a676a0fc25000ac691f",
-    "temporal_sdk_chain": "passed: four decorated Workflows, four decorated Activities, locked DataConverter/PayloadCodec/Interceptor and SDK Worker adapter",
+    "ai_tests": "34 passed",
+    "compileall": "passed",
+    "git_diff_check": "passed",
+    "architecture_names_cohesion": "passed",
+    "dangerous_pattern_scan": "passed: 0 matches",
+    "cold_start_imports": "passed: 120 modules, 0 failures",
+    "sql_schema_manifest": "passed: e251630002967bd2bbf5c7721ac125367e19649474b9e8d18cb2c48dc9e378e6 (24 tables)",
+    "sqlite_schema_create_all": "passed",
+    "file_sql_restart_and_cross_instance": "passed",
+    "local_start_cancel_reconcile": "passed",
+    "cursor_tenant_redaction_profile_checks": "passed",
     "downstream_import_baseline": "excluded by user scope: migration and compatibility work are not part of this implementation",
-    "cold_start_review": "passed: architecture, names, cohesion, import graph, optional dependency boundary, official Harness and Temporal wheels",
-    "agent_golden": "passed: deterministic bundle digest verified",
-    "asset_sql_integration": "passed: initialize, CRUD, optimistic CAS, tombstone, version history and SQLite/PostgreSQL/MySQL dialect compilation",
-    "asset_file_integration": "passed: restart recovery and version history",
-    "acp_integration": "passed: protocol initialization, session creation and prompt response in isolated ACP wheel",
-    "migration_tests": "excluded by user scope: compatibility and migration work are not part of this implementation"
+    "migration_tests": "excluded by user scope: migration and compatibility work are not part of this implementation",
+    "cold_start_review": "passed: independent architecture, import, persistence, lifecycle, cursor, redaction, profile-boundary and test review",
+    "evidence_commit_binding": "passed: reviewed HEAD plus working_tree_source_digest"
   },
   "artifact_hashes": {
     "scripts/build/matrix/agent-golden.json": "7b685646d987054c3c2fa864571ca3b1ed703b6b2388e4bcdd8dd8bcda3309ca",
     "scripts/build/matrix/asset-file-layout.json": "3c14955d00724213a996bc21d2ec9eba82fd79ece65aebd1327cb15ff1bbecd1",
-    "scripts/build/matrix/codec-manifest.json": "de08d8e8fc5ccf883c418f23faf5e634af6e30a0fadbcca1ed6f2d76ba376e52",
-    "scripts/build/matrix/downstream-linktools-imports.json": "748d2beb07884318c27d063cf390db56d5db9133f276bb71cb99ef0848672581",
+    "scripts/build/matrix/codec-manifest.json": "b0bd2a5de40d965906fe09102b842a9ca4bb31c8e3953d5537886d5d619d4a9f",
     "scripts/build/matrix/linktools-ai-package-policy.json": "72cf9b50b1f29e1ead6d3132c586af211260d5288f817b732680d60669609d6a",
-    "scripts/build/matrix/linktools-ai-review-coverage.json": "491ed986096b4ca0f33d25501536e97fefa944946105897b774230fe2d0a092d",
-    "scripts/build/matrix/linktools-ai-traceability.json": "5af3c300a08f5358d2c017cb7885fc7d8a21033f82020373c47aa0efdfd48092",
+    "scripts/build/matrix/linktools-ai-review-coverage.json": "beca750f50be2b7e99dababb60b56056859e60e7a556259afc9cc6176cb3b688",
+    "scripts/build/matrix/linktools-ai-traceability.json": "9c34409d459a3f45c8bdf661ecf9718f29ceb8a7183f74511914ad1410a491f7",
     "scripts/build/matrix/requirements-lock.json": "e01281b8b18fd7ca7d876b3435e6b9a4093a2ddd50881f18f4ad736178266eb7",
     "scripts/build/matrix/sql-data-manifest.json": "89abd69a9bf98e1b2be9c5f09a1d0365cd846eb3955f94dc69b90727982430d5",
-    "scripts/build/matrix/sql-schema-manifest.json": "1c7f9be21d329281da158cb43a91e0fec90f58dc8f26e8ef1b65f26bd4d100de"
+    "scripts/build/matrix/sql-schema-manifest.json": "bc67cee93fd739995a9c5fd18866054ba04e742c9ed83e7b10ae0dfa25d1d993",
+    "scripts/build/matrix/spec-field-manifest.json": "9f35005b1a6834b63a0eeee6d7a2ed44d2ad9b1aa854e3a923421fe7ea62f0f3"
   },
   "scope_exclusions": [
-    "downstream repository migration and compatibility changes, explicitly excluded by the user"
+    "downstream repository migration and compatibility changes, explicitly excluded by the user",
+    "legacy compatibility-only tests and migration fixtures, explicitly excluded by the user"
   ],
   "open_findings": []
 }

@@ -21,14 +21,16 @@ SESSION_OPERATIONS = frozenset({"create", "update", "fork", "close"})
 @dataclass(frozen=True, slots=True)
 class SessionWorkflowInput:
     session_id: str
-    mutation_id: str
+    tenant_id: str
+    expected_revision: int
+    operation_id: str
     operation: str
 
 
 @dataclass(frozen=True, slots=True)
 class SessionWorkflowResult:
     session_id: str
-    mutation_id: str
+    operation_id: str
     status: str
 
 
@@ -41,7 +43,7 @@ class SessionWorkflow:
         self._activity = activity
 
     async def run(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-        if not request.session_id or not request.mutation_id or request.operation not in SESSION_OPERATIONS:
+        if not request.session_id or not request.tenant_id or not request.operation_id or request.expected_revision < 0 or request.operation not in SESSION_OPERATIONS:
             raise ValueError("session workflow input is incomplete")
         if self._activity is not None:
             result = await self._activity.run(request)
@@ -54,7 +56,7 @@ class SessionWorkflow:
             )
         else:
             raise RuntimeError("Temporal SDK is required for production workflow execution")
-        if result.session_id != request.session_id or result.mutation_id != request.mutation_id:
+        if result.session_id != request.session_id or result.operation_id != request.operation_id:
             raise ValueError("session activity returned mismatched identity")
         return result
 

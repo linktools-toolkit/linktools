@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from typing import Literal
 
 from ..core.json import JsonValue
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.ids import canonical_sha256
 from ..asset.model import AssetValue
 
 
@@ -32,13 +34,24 @@ class AgentSpec(AssetValue):
     model: str
     features: "tuple[AgentFeatureRef, ...]"
     output_schema: str
+    output_schema_revision: int
     instructions: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip():
+        if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
             raise ValueError("agent spec is incomplete")
         object.__setattr__(self, "features", tuple(self.features))
         object.__setattr__(self, "instructions", tuple(self.instructions))
+        unique: dict[tuple[str, str], AgentFeatureRef] = {}
+        for feature in self.features:
+            key = (feature.kind, feature.id)
+            previous = unique.get(key)
+            if previous is not None:
+                if _feature_digest(previous) != _feature_digest(feature):
+                    raise LinktoolsAIError(ErrorCode.FEATURE_CONFLICT)
+                continue
+            unique[key] = feature
+        object.__setattr__(self, "features", tuple(unique.values()))
 
     @property
     def asset_kind(self) -> str:
@@ -47,6 +60,10 @@ class AgentSpec(AssetValue):
     @property
     def asset_id(self) -> str:
         return self.id
+
+
+def _feature_digest(feature: AgentFeatureRef) -> str:
+    return canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)})
 
 
 @dataclass(frozen=True, slots=True)

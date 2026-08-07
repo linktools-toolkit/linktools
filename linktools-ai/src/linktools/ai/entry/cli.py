@@ -15,7 +15,8 @@ class CliApplication:
 
     async def run(self, prompt: str, *, principal_id: str = "local") -> ExecutionHandle:
         principal = trusted_local_principal(principal_id)
-        return await self.services.runtime.execution.run(ExecutionRequest(prompt, principal))
+        runtime = await self.services.runtime_factory.build_for_request(ExecutionRequest(prompt, principal))
+        return await runtime.execution.run(ExecutionRequest(prompt, principal))
 
 
 __all__ = ["CliApplication"]

@@ -1,18 +1,48 @@
 {
-  "digest": "55548b04771807779783003a74c4c9a3057f474682e59a676a0fc25000ac691f",
+  "digest": "e251630002967bd2bbf5c7721ac125367e19649474b9e8d18cb2c48dc9e378e6",
   "tables": [
+    {
+      "name": "ai_approvals",
+      "owner": "adapter.approval",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "approval_id:VARCHAR(256):0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "operation_id:VARCHAR(256):0:0",
+        "status:VARCHAR(32):0:0",
+        "decision_id:VARCHAR(256):1:0",
+        "decision:VARCHAR(16):1:0",
+        "decided_by:VARCHAR(256):1:0",
+        "decision_digest:VARCHAR(64):1:0",
+        "created_at:DATETIME:0:0",
+        "decided_at:DATETIME:1:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_approvals_uk_tenant_approval:tenant_id,approval_id:",
+        "UniqueConstraint:ai_approvals_uk_tenant_approval_decision:tenant_id,approval_id,decision_id:"
+      ],
+      "indexes": [
+        "ai_approvals_ix_tenant_execution_status:tenant_id,execution_id,status"
+      ]
+    },
     {
       "name": "ai_artifacts",
       "owner": "adapter.artifact",
       "columns": [
         "id:BIGINT:0:1",
-        "artifact_id:VARCHAR(128):0:0",
+        "artifact_id:VARCHAR(256):0:0",
         "sha256:VARCHAR(64):0:0",
         "media_type:VARCHAR(128):0:0",
         "size:INTEGER:0:0",
         "tenant_id:VARCHAR(128):0:0",
+        "execution_id:VARCHAR(256):0:0",
         "producer_kind:VARCHAR(64):0:0",
         "producer_id:VARCHAR(128):0:0",
+        "producer:VARCHAR(256):0:0",
+        "digest:VARCHAR(64):0:0",
+        "blob_ref:VARCHAR(512):0:0",
         "run_id:VARCHAR(128):1:0",
         "session_id:VARCHAR(128):1:0",
         "parent_artifact_ids:JSON:0:0",
@@ -29,214 +59,6 @@
         "ai_artifacts_ix_created_at:created_at",
         "ai_artifacts_ix_sha256:sha256",
         "ai_artifacts_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_execution_evaluations",
-      "owner": "adapter.evaluation",
-      "columns": [
-        "id:BIGINT:0:1",
-        "evaluation_id:VARCHAR(255):0:0",
-        "execution_id:VARCHAR(255):0:0",
-        "evaluator:VARCHAR(255):0:0",
-        "score:DOUBLE:1:0",
-        "result:JSON:0:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_execution_evaluations_uk_evaluation_id:evaluation_id:"
-      ],
-      "indexes": [
-        "ai_execution_evaluations_ix_created_at:created_at",
-        "ai_execution_evaluations_ix_evaluator:evaluator",
-        "ai_execution_evaluations_ix_execution_id_created_at:execution_id,created_at",
-        "ai_execution_evaluations_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_execution_events",
-      "owner": "adapter.execution",
-      "columns": [
-        "id:BIGINT:0:1",
-        "execution_id:VARCHAR(255):0:0",
-        "sequence:INTEGER:0:0",
-        "type:VARCHAR(120):0:0",
-        "payload:JSON:0:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_execution_events_uk_execution_id_sequence:execution_id,sequence:"
-      ],
-      "indexes": [
-        "ai_execution_events_ix_created_at:created_at",
-        "ai_execution_events_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_execution_snapshots",
-      "owner": "adapter.execution",
-      "columns": [
-        "id:BIGINT:0:1",
-        "execution_id:VARCHAR(255):0:0",
-        "revision:INTEGER:0:0",
-        "resume_messages:JSON:0:0",
-        "outcome:JSON:0:0",
-        "status:VARCHAR(32):0:0",
-        "trace_end_sequence:INTEGER:0:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_execution_snapshots_uk_execution_id:execution_id:"
-      ],
-      "indexes": [
-        "ai_execution_snapshots_ix_created_at:created_at",
-        "ai_execution_snapshots_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_execution_trace_steps",
-      "owner": "adapter.execution",
-      "columns": [
-        "id:BIGINT:0:1",
-        "execution_id:VARCHAR(255):0:0",
-        "sequence:INTEGER:0:0",
-        "kind:VARCHAR(40):0:0",
-        "payload:JSON:0:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_execution_trace_steps_uk_execution_id_sequence:execution_id,sequence:"
-      ],
-      "indexes": [
-        "ai_execution_trace_steps_ix_created_at:created_at",
-        "ai_execution_trace_steps_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_executions",
-      "owner": "adapter.execution",
-      "columns": [
-        "id:BIGINT:0:1",
-        "execution_id:VARCHAR(255):0:0",
-        "session_id:VARCHAR(255):0:0",
-        "kind:VARCHAR(40):0:0",
-        "runnable_id:VARCHAR(255):0:0",
-        "runnable_type:VARCHAR(40):0:0",
-        "session_turn_sequence:INTEGER:1:0",
-        "parent_execution_id:VARCHAR(255):1:0",
-        "root_execution_id:VARCHAR(255):0:0",
-        "status:VARCHAR(40):0:0",
-        "definition:JSON:0:0",
-        "definition_hash:VARCHAR(64):0:0",
-        "data:JSON:0:0",
-        "owner:VARCHAR(255):1:0",
-        "fence:INTEGER:0:0",
-        "lease_expires_at:DATETIME:1:0",
-        "cancel_requested_at:DATETIME:1:0",
-        "snapshot_revision:INTEGER:0:0",
-        "trace_sequence:INTEGER:0:0",
-        "event_sequence:INTEGER:0:0",
-        "tenant_id:VARCHAR(255):1:0",
-        "user_id:VARCHAR(255):1:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_executions_uk_execution_id:execution_id:"
-      ],
-      "indexes": [
-        "ai_executions_ix_created_at:created_at",
-        "ai_executions_ix_lease_expires_at:lease_expires_at",
-        "ai_executions_ix_root_execution_id:root_execution_id",
-        "ai_executions_ix_session_id:session_id",
-        "ai_executions_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_memories",
-      "owner": "adapter.memory",
-      "columns": [
-        "id:BIGINT:0:1",
-        "memory_id:VARCHAR(128):0:0",
-        "tenant_id:VARCHAR(128):1:0",
-        "owner_id:VARCHAR(128):0:0",
-        "content:TEXT:0:0",
-        "category:VARCHAR(64):1:0",
-        "confidence:NUMERIC(5, 4):1:0",
-        "version:INTEGER:0:0",
-        "metadata_json:TEXT:0:0",
-        "user_id:VARCHAR(128):1:0",
-        "workspace_id:VARCHAR(128):1:0",
-        "session_id:VARCHAR(128):1:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_memories_uk_memory_id:memory_id:"
-      ],
-      "indexes": [
-        "ai_memories_ix_created_at:created_at",
-        "ai_memories_ix_tenant_id:tenant_id",
-        "ai_memories_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_session_turns",
-      "owner": "adapter.session",
-      "columns": [
-        "id:BIGINT:0:1",
-        "session_id:VARCHAR(255):0:0",
-        "sequence:INTEGER:0:0",
-        "execution_id:VARCHAR(255):0:0",
-        "input:JSON:1:0",
-        "delta_messages:JSON:1:0",
-        "status:VARCHAR(32):0:0",
-        "capture_state:VARCHAR(32):0:0",
-        "completed_at:DATETIME:1:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_session_turns_uk_execution_id:execution_id:",
-        "UniqueConstraint:ai_session_turns_uk_session_id_sequence:session_id,sequence:"
-      ],
-      "indexes": [
-        "ai_session_turns_ix_created_at:created_at",
-        "ai_session_turns_ix_updated_at:updated_at"
-      ]
-    },
-    {
-      "name": "ai_sessions",
-      "owner": "adapter.session",
-      "columns": [
-        "id:BIGINT:0:1",
-        "session_id:VARCHAR(255):0:0",
-        "tenant_id:VARCHAR(255):1:0",
-        "user_id:VARCHAR(255):1:0",
-        "next_turn_sequence:INTEGER:0:0",
-        "latest_completed_run_id:VARCHAR(255):1:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
-      ],
-      "constraints": [
-        "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_sessions_uk_session_id:session_id:"
-      ],
-      "indexes": [
-        "ai_sessions_ix_created_at:created_at",
-        "ai_sessions_ix_tenant_id_user_id:tenant_id,user_id",
-        "ai_sessions_ix_updated_at:updated_at"
       ]
     },
     {
@@ -327,26 +149,437 @@
       ]
     },
     {
+      "name": "ai_execution_evaluations",
+      "owner": "adapter.evaluation",
+      "columns": [
+        "id:BIGINT:0:1",
+        "evaluation_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "dataset_id:VARCHAR(256):0:0",
+        "dataset_revision:BIGINT:0:0",
+        "evaluator:VARCHAR(255):0:0",
+        "evaluator_revision:BIGINT:0:0",
+        "binding_digest:VARCHAR(64):0:0",
+        "output_schema_fingerprint:VARCHAR(64):0:0",
+        "artifact_digest:VARCHAR(64):1:0",
+        "status:VARCHAR(32):0:0",
+        "revision:BIGINT:0:0",
+        "score:DOUBLE:1:0",
+        "result:JSON:0:0",
+        "metrics_json:JSON:0:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_execution_evaluations_uk_tenant_evaluation_id:tenant_id,evaluation_id:"
+      ],
+      "indexes": [
+        "ai_execution_evaluations_ix_created_at:created_at",
+        "ai_execution_evaluations_ix_evaluator:evaluator",
+        "ai_execution_evaluations_ix_execution_id_created_at:execution_id,created_at",
+        "ai_execution_evaluations_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_execution_events",
+      "owner": "adapter.execution",
+      "columns": [
+        "id:BIGINT:0:1",
+        "execution_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "sequence:INTEGER:0:0",
+        "type:VARCHAR(120):0:0",
+        "payload:JSON:0:0",
+        "payload_digest:VARCHAR(64):0:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_execution_events_uk_tenant_execution_id_sequence:tenant_id,execution_id,sequence:"
+      ],
+      "indexes": [
+        "ai_execution_events_ix_created_at:created_at",
+        "ai_execution_events_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_execution_results",
+      "owner": "adapter.result",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "status:VARCHAR(32):0:0",
+        "output_schema_id:VARCHAR(256):0:0",
+        "output_schema_revision:BIGINT:0:0",
+        "output_schema_fingerprint:VARCHAR(64):0:0",
+        "payload_ref:VARCHAR(512):1:0",
+        "payload_digest:VARCHAR(64):1:0",
+        "stop_reason:VARCHAR(64):0:0",
+        "input_tokens:BIGINT:0:0",
+        "output_tokens:BIGINT:0:0",
+        "total_cost_micros:BIGINT:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_execution_results_uk_tenant_execution:tenant_id,execution_id:"
+      ],
+      "indexes": [
+        "ai_execution_results_ix_tenant_status:tenant_id,status,created_at"
+      ]
+    },
+    {
+      "name": "ai_execution_snapshots",
+      "owner": "adapter.execution",
+      "columns": [
+        "id:BIGINT:0:1",
+        "execution_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "revision:INTEGER:0:0",
+        "resume_messages:JSON:0:0",
+        "outcome:JSON:0:0",
+        "status:VARCHAR(32):0:0",
+        "trace_end_sequence:INTEGER:0:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_execution_snapshots_uk_tenant_execution_revision:tenant_id,execution_id,revision:"
+      ],
+      "indexes": [
+        "ai_execution_snapshots_ix_created_at:created_at",
+        "ai_execution_snapshots_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_execution_trace_steps",
+      "owner": "adapter.execution",
+      "columns": [
+        "id:BIGINT:0:1",
+        "execution_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "sequence:INTEGER:0:0",
+        "kind:VARCHAR(40):0:0",
+        "payload:JSON:0:0",
+        "payload_digest:VARCHAR(64):0:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_execution_trace_steps_uk_tenant_execution_id_sequence:tenant_id,execution_id,sequence:"
+      ],
+      "indexes": [
+        "ai_execution_trace_steps_ix_created_at:created_at",
+        "ai_execution_trace_steps_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_executions",
+      "owner": "adapter.execution",
+      "columns": [
+        "id:BIGINT:0:1",
+        "execution_id:VARCHAR(256):0:0",
+        "session_id:VARCHAR(256):1:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "kind:VARCHAR(40):0:0",
+        "runnable_id:VARCHAR(256):0:0",
+        "runnable_type:VARCHAR(40):0:0",
+        "session_turn_sequence:INTEGER:1:0",
+        "parent_execution_id:VARCHAR(256):1:0",
+        "root_execution_id:VARCHAR(256):0:0",
+        "status:VARCHAR(40):0:0",
+        "definition:JSON:0:0",
+        "definition_hash:VARCHAR(64):0:0",
+        "data:JSON:0:0",
+        "owner:VARCHAR(256):1:0",
+        "fence:INTEGER:0:0",
+        "lease_expires_at:DATETIME:1:0",
+        "cancel_requested_at:DATETIME:1:0",
+        "snapshot_revision:INTEGER:0:0",
+        "trace_sequence:INTEGER:0:0",
+        "event_sequence:INTEGER:0:0",
+        "profile:VARCHAR(32):0:0",
+        "result_ref:VARCHAR(512):1:0",
+        "result_digest:VARCHAR(64):1:0",
+        "error_code:VARCHAR(128):1:0",
+        "safe_error_json:JSON:0:0",
+        "user_id:VARCHAR(255):1:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_executions_uk_tenant_execution_id:tenant_id,execution_id:"
+      ],
+      "indexes": [
+        "ai_executions_ix_created_at:created_at",
+        "ai_executions_ix_lease_expires_at:lease_expires_at",
+        "ai_executions_ix_root_execution_id:root_execution_id",
+        "ai_executions_ix_session_id:session_id",
+        "ai_executions_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_external_results",
+      "owner": "adapter.external",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "call_id:VARCHAR(256):0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "operation_id:VARCHAR(256):0:0",
+        "status:VARCHAR(32):0:0",
+        "result_id:VARCHAR(256):1:0",
+        "payload_ref:VARCHAR(512):1:0",
+        "payload_digest:VARCHAR(64):1:0",
+        "created_at:DATETIME:0:0",
+        "supplied_at:DATETIME:1:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_external_results_uk_tenant_call:tenant_id,call_id:",
+        "UniqueConstraint:ai_external_results_uk_tenant_call_result:tenant_id,call_id,result_id:"
+      ],
+      "indexes": [
+        "ai_external_results_ix_tenant_execution_status:tenant_id,execution_id,status"
+      ]
+    },
+    {
+      "name": "ai_memories",
+      "owner": "adapter.memory",
+      "columns": [
+        "id:BIGINT:0:1",
+        "memory_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "owner_id:VARCHAR(256):0:0",
+        "content:TEXT:0:0",
+        "category:VARCHAR(64):1:0",
+        "confidence:NUMERIC(5, 4):1:0",
+        "version:INTEGER:0:0",
+        "metadata_json:TEXT:0:0",
+        "user_id:VARCHAR(128):1:0",
+        "workspace_id:VARCHAR(128):1:0",
+        "session_id:VARCHAR(128):1:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_memories_uk_tenant_memory_id:tenant_id,memory_id:"
+      ],
+      "indexes": [
+        "ai_memories_ix_created_at:created_at",
+        "ai_memories_ix_tenant_id:tenant_id",
+        "ai_memories_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_operation_ledger",
+      "owner": "adapter.operation",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "operation_id:VARCHAR(256):0:0",
+        "resource_kind:VARCHAR(64):0:0",
+        "resource_id:VARCHAR(256):0:0",
+        "execution_id:VARCHAR(256):1:0",
+        "sequence:BIGINT:0:0",
+        "kind:VARCHAR(64):0:0",
+        "status:VARCHAR(32):0:0",
+        "request_digest:VARCHAR(64):0:0",
+        "result_ref:VARCHAR(512):1:0",
+        "result_digest:VARCHAR(64):1:0",
+        "error_code:VARCHAR(128):1:0",
+        "compactable:BOOLEAN:0:0",
+        "created_at:DATETIME:0:0",
+        "updated_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_operation_ledger_uk_tenant_operation:tenant_id,operation_id:",
+        "UniqueConstraint:ai_operation_ledger_uk_tenant_resource_sequence:tenant_id,resource_kind,resource_id,sequence:"
+      ],
+      "indexes": [
+        "ai_operation_ledger_ix_tenant_execution:tenant_id,execution_id",
+        "ai_operation_ledger_ix_tenant_resource_status:tenant_id,resource_kind,resource_id,status,sequence"
+      ]
+    },
+    {
+      "name": "ai_runtime_blob_chunks",
+      "owner": "adapter.blob",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "digest:VARCHAR(64):0:0",
+        "chunk_index:BIGINT:0:0",
+        "content:BLOB:0:0",
+        "content_size:BIGINT:0:0",
+        "content_digest:VARCHAR(64):0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_runtime_blob_chunks_uk_tenant_digest_index:tenant_id,digest,chunk_index:"
+      ],
+      "indexes": []
+    },
+    {
+      "name": "ai_runtime_blobs",
+      "owner": "adapter.blob",
+      "columns": [
+        "id:BIGINT:0:1",
+        "tenant_id:VARCHAR(128):0:0",
+        "digest:VARCHAR(64):0:0",
+        "size:BIGINT:0:0",
+        "status:VARCHAR(32):0:0",
+        "chunk_count:BIGINT:0:0",
+        "created_at:DATETIME:0:0",
+        "completed_at:DATETIME:1:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_runtime_blobs_uk_tenant_digest:tenant_id,digest:"
+      ],
+      "indexes": [
+        "ai_runtime_blobs_ix_tenant_status_created_at:tenant_id,status,created_at"
+      ]
+    },
+    {
+      "name": "ai_runtime_idempotency",
+      "owner": "adapter.idempotency",
+      "columns": [
+        "id:BIGINT:0:1",
+        "scope:VARCHAR(512):0:0",
+        "key_hash:VARCHAR(64):0:0",
+        "request_digest:VARCHAR(64):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "status:VARCHAR(32):0:0",
+        "result_digest:VARCHAR(64):1:0",
+        "error_code:VARCHAR(128):1:0",
+        "created_at:DATETIME:0:0",
+        "updated_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_runtime_idempotency_uk_tenant_scope_key:tenant_id,scope,key_hash:"
+      ],
+      "indexes": [
+        "ai_runtime_idempotency_ix_status_updated_at:status,updated_at",
+        "ai_runtime_idempotency_ix_tenant_execution:tenant_id,execution_id"
+      ]
+    },
+    {
+      "name": "ai_runtime_repository_records",
+      "owner": "adapter.runtime",
+      "columns": [
+        "id:BIGINT:0:1",
+        "namespace:VARCHAR(512):0:0",
+        "component:VARCHAR(128):0:0",
+        "record_key:VARCHAR(512):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "payload:TEXT:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_runtime_repository_records_uk_identity:namespace,component,record_key:"
+      ],
+      "indexes": [
+        "ai_runtime_repository_records_ix_tenant:namespace,tenant_id,component"
+      ]
+    },
+    {
+      "name": "ai_session_turns",
+      "owner": "adapter.session",
+      "columns": [
+        "id:BIGINT:0:1",
+        "session_id:VARCHAR(256):0:0",
+        "sequence:INTEGER:0:0",
+        "execution_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "input:JSON:1:0",
+        "delta_messages:JSON:1:0",
+        "status:VARCHAR(32):0:0",
+        "capture_state:VARCHAR(32):0:0",
+        "completed_at:DATETIME:1:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_session_turns_uk_tenant_execution_id:tenant_id,execution_id:",
+        "UniqueConstraint:ai_session_turns_uk_tenant_session_id_sequence:tenant_id,session_id,sequence:"
+      ],
+      "indexes": [
+        "ai_session_turns_ix_created_at:created_at",
+        "ai_session_turns_ix_updated_at:updated_at"
+      ]
+    },
+    {
+      "name": "ai_sessions",
+      "owner": "adapter.session",
+      "columns": [
+        "id:BIGINT:0:1",
+        "session_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "owner_principal_id:VARCHAR(256):0:0",
+        "binding_digest:VARCHAR(64):0:0",
+        "status:VARCHAR(32):0:0",
+        "revision:BIGINT:0:0",
+        "resource_generation:BIGINT:0:0",
+        "cwd:TEXT:1:0",
+        "metadata_json:JSON:0:0",
+        "closed_at:DATETIME:1:0",
+        "user_id:VARCHAR(255):1:0",
+        "next_turn_sequence:INTEGER:0:0",
+        "latest_completed_run_id:VARCHAR(255):1:0",
+        "updated_at:DATETIME:0:0",
+        "created_at:DATETIME:0:0"
+      ],
+      "constraints": [
+        "PrimaryKeyConstraint::id:",
+        "UniqueConstraint:ai_sessions_uk_tenant_session_id:tenant_id,session_id:"
+      ],
+      "indexes": [
+        "ai_sessions_ix_created_at:created_at",
+        "ai_sessions_ix_tenant_id_user_id:tenant_id,user_id",
+        "ai_sessions_ix_updated_at:updated_at"
+      ]
+    },
+    {
       "name": "ai_task_executions",
       "owner": "adapter.task",
       "columns": [
         "id:BIGINT:0:1",
         "execution_id:VARCHAR(255):0:0",
+        "tenant_id:VARCHAR(128):0:0",
         "plan_id:VARCHAR(255):0:0",
-        "node_id:VARCHAR(255):0:0",
+        "graph_id:VARCHAR(256):0:0",
+        "node_id:VARCHAR(256):0:0",
+        "dependencies_json:JSON:0:0",
+        "binding_digest:VARCHAR(64):0:0",
+        "budget_cost:BIGINT:0:0",
         "status:VARCHAR(32):0:0",
         "owner:VARCHAR(255):1:0",
         "fence:INTEGER:0:0",
         "attempt:INTEGER:0:0",
         "result:JSON:1:0",
+        "result_digest:VARCHAR(64):1:0",
         "error:JSON:1:0",
+        "error_code:VARCHAR(128):1:0",
+        "error_digest:VARCHAR(64):1:0",
         "lease_expires_at:DATETIME:1:0",
         "updated_at:DATETIME:0:0",
         "created_at:DATETIME:0:0"
       ],
       "constraints": [
         "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_task_executions_uk_execution_id:execution_id:"
+        "UniqueConstraint:ai_task_executions_uk_tenant_execution_id:tenant_id,execution_id:"
       ],
       "indexes": [
         "ai_task_executions_ix_created_at:created_at",
@@ -359,14 +592,21 @@
       "owner": "adapter.task",
       "columns": [
         "id:BIGINT:0:1",
-        "plan_id:VARCHAR(255):0:0",
+        "plan_id:VARCHAR(256):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "graph_id:VARCHAR(256):0:0",
+        "status:VARCHAR(32):0:0",
+        "limits_json:JSON:0:0",
+        "graph_digest:VARCHAR(64):0:0",
+        "spent_budget:BIGINT:0:0",
+        "revision:BIGINT:0:0",
         "payload:JSON:0:0",
         "updated_at:DATETIME:0:0",
         "created_at:DATETIME:0:0"
       ],
       "constraints": [
         "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_task_plans_uk_plan_id:plan_id:"
+        "UniqueConstraint:ai_task_plans_uk_tenant_plan_id:tenant_id,plan_id:"
       ],
       "indexes": [
         "ai_task_plans_ix_created_at:created_at",
@@ -378,32 +618,32 @@
       "owner": "adapter.tool",
       "columns": [
         "id:BIGINT:0:1",
-        "operation_id:VARCHAR(128):0:0",
-        "tenant_id:VARCHAR(128):1:0",
-        "run_id:VARCHAR(128):0:0",
-        "tool_call_id:VARCHAR(128):0:0",
-        "idempotency_key:VARCHAR(128):0:0",
-        "tool_name:VARCHAR(128):0:0",
-        "arguments_hash:VARCHAR(128):0:0",
-        "binding_fingerprint:VARCHAR(128):0:0",
+        "tenant_id:VARCHAR(128):0:0",
+        "operation_id:VARCHAR(256):0:0",
+        "run_id:VARCHAR(256):0:0",
+        "tool_call_id:VARCHAR(256):0:0",
+        "idempotency_key_hash:VARCHAR(64):0:0",
+        "tool_name:VARCHAR(256):0:0",
+        "arguments_hash:VARCHAR(64):0:0",
+        "binding_fingerprint:VARCHAR(64):0:0",
         "replay_safe:BOOLEAN:0:0",
         "status:VARCHAR(32):0:0",
-        "owner:VARCHAR(128):1:0",
+        "owner:VARCHAR(256):1:0",
         "fence:INTEGER:0:0",
         "lease_expires_at:DATETIME:1:0",
-        "result:JSON:1:0",
-        "error:JSON:1:0",
-        "updated_at:DATETIME:0:0",
-        "created_at:DATETIME:0:0"
+        "result_ref:VARCHAR(512):1:0",
+        "result_digest:VARCHAR(64):1:0",
+        "error_code:VARCHAR(128):1:0",
+        "created_at:DATETIME:0:0",
+        "updated_at:DATETIME:0:0"
       ],
       "constraints": [
         "PrimaryKeyConstraint::id:",
-        "UniqueConstraint:ai_tool_operations_uk_operation_id:operation_id:"
+        "UniqueConstraint:ai_tool_operations_uk_run_call:tenant_id,run_id,tool_call_id:",
+        "UniqueConstraint:ai_tool_operations_uk_tenant_operation:tenant_id,operation_id:"
       ],
       "indexes": [
-        "ai_tool_operations_ix_created_at:created_at",
-        "ai_tool_operations_ix_updated_at:updated_at",
-        "ai_tool_operations_uk_run_id_tool_call_id:run_id,tool_call_id"
+        "ai_tool_operations_ix_tenant_status:tenant_id,status,updated_at"
       ]
     }
   ]

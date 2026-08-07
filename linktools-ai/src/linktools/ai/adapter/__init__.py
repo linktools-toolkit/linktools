@@ -12,10 +12,10 @@ from .provider import ProviderClient
 from .schema import SqlRuntimeSchema, SqlRuntimeTables
 from .session import SessionGateway
 from .task import TaskGateway
-from .tool import SqlToolState
+from .tool import SqlToolOperationRepository
 
 __all__ = [
     "BlobStore", "ExecutionGateway", "EvaluationGateway", "LogfireSink", "NatsPublisher",
-    "ProviderClient", "SessionGateway", "SqlRuntimeSchema", "SqlRuntimeTables", "SqlToolState",
+    "ProviderClient", "SessionGateway", "SqlRuntimeSchema", "SqlRuntimeTables", "SqlToolOperationRepository",
     "StaticPrincipalProvider", "TaskGateway",
 ]

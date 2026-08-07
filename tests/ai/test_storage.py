@@ -5,14 +5,16 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
-from linktools.ai.adapter.tool import SqlToolState
+from linktools.ai.adapter.tool import SqlToolOperationRepository
 from linktools.ai.asset.sql import SqlAlchemyAssetBackend
-from linktools.ai.capability.tool import ToolState
+from linktools.ai.capability.tool import ToolOperationRecord
+from linktools.ai.core.value import ToolOperationStatus
 from linktools.ai.storage.cache import FilesystemContentCache, MemoryContentCache
 from linktools.ai.storage.composition import StorageAdapter, StorageComposition
 from linktools.ai.storage.database import SqlSchemaRegistry, build_sqlite_storage, close_storage
@@ -146,9 +148,10 @@ async def test_read_only_write_is_fail_closed() -> None:
 
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
+    timestamp = datetime.now(timezone.utc)
     registry = SqlSchemaRegistry()
     SqlAlchemyAssetBackend.register_schema(registry)
-    tool_table = SqlToolState.register_schema(registry)
+    tool_table = SqlToolOperationRepository.register_schema(registry)
     manifest = registry.freeze()
     database = build_sqlite_storage(
         tmp_path / "tool-state.db",
@@ -157,12 +160,21 @@ async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> No
     )
     await initialize_storage(database)
     try:
-        first = SqlToolState(database.session_factory, table=tool_table)
-        await first.put(ToolState("operation", "completed", "digest"))
-        second = SqlToolState(database.session_factory, table=tool_table)
-        assert await second.get("operation") == ToolState("operation", "completed", "digest")
+        record = ToolOperationRecord(
+            "operation", "tenant", "run", "call", "idempotency", "tool", "arguments", "binding", True,
+            ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
+        )
+        first = SqlToolOperationRepository(database.session_factory, table=tool_table)
+        await first.reserve(record)
+        second = SqlToolOperationRepository(database.session_factory, table=tool_table)
+        assert await second.get_operation("operation", tenant_id="tenant") == record
         with pytest.raises(LinktoolsAIError) as error:
-            await second.put(ToolState("operation", "failed", "other"))
-        assert error.value.code == ErrorCode.STORAGE_CONFLICT
+            await second.reserve(
+                ToolOperationRecord(
+                    "operation", "tenant", "run", "other-call", "idempotency", "tool", "arguments", "binding", True,
+                    ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
+                )
+            )
+        assert error.value.code == ErrorCode.TOOL_OPERATION_CONFLICT
     finally:
         await close_storage(database)

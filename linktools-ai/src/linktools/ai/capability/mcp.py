@@ -3,7 +3,13 @@
 """MCP capability provider boundary."""
 
 from dataclasses import dataclass
+from collections.abc import Mapping
 from typing import Protocol
+
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.json import JsonValue, canonical_json_bytes
+from ..core.principal import ResourceRef
+from ..core.value import Principal
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,8 +32,31 @@ class MCPServerSpec:
         return self.id
 
 
+@dataclass(frozen=True, slots=True)
+class MCPCallRequest:
+    principal: Principal
+    execution: ResourceRef
+    operation_id: str
+    server_id: str
+    tool_name: str
+    arguments: Mapping[str, JsonValue]
+    timeout_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if self.principal.tenant_id != self.execution.tenant_id or not self.operation_id.strip() or not self.server_id.strip() or not self.tool_name.strip() or not 1 <= self.timeout_seconds <= 900:
+            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if len(canonical_json_bytes(dict(self.arguments))) > 4 * 1024 * 1024:
+            raise LinktoolsAIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
+
+
+def validate_mcp_response(value: JsonValue) -> JsonValue:
+    if len(canonical_json_bytes(value)) > 4 * 1024 * 1024:
+        raise LinktoolsAIError(ErrorCode.MCP_RESPONSE_TOO_LARGE)
+    return value
+
+
 class MCPConnectionPool(Protocol):
-    async def call(self, server_id: str, tool_name: str, arguments: 'dict[str, str]') -> str: ...
+    async def call(self, request: MCPCallRequest) -> JsonValue: ...
 
 
 class MCPToolProvider(Protocol):
@@ -36,4 +65,4 @@ class MCPToolProvider(Protocol):
     async def connect(self, server_id: str) -> MCPConnectionPool: ...
 
 
-__all__ = ["MCPConnectionPool", "MCPServerSpec", "MCPToolProvider"]
+__all__ = ["MCPCallRequest", "MCPConnectionPool", "MCPServerSpec", "MCPToolProvider", "validate_mcp_response"]

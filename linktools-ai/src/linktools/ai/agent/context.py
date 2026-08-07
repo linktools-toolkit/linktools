@@ -48,6 +48,9 @@ class AgentBinding:
     model_registry_revision: int
     output_schema_fingerprint: str
     capability_manifest_digest: str
+    tool_policy_fingerprint: str
+    sandbox_fingerprint: str
+    middleware_fingerprint: str
 
     def __post_init__(self) -> None:
         if (
@@ -56,6 +59,9 @@ class AgentBinding:
             or not self.prompt_fingerprint
             or not self.output_schema_fingerprint
             or not self.capability_manifest_digest
+            or not self.tool_policy_fingerprint
+            or not self.sandbox_fingerprint
+            or not self.middleware_fingerprint
         ):
             raise ValueError("Agent binding is incomplete")
 
@@ -71,7 +77,12 @@ class AgentBinding:
                 "prompt_fingerprint": self.prompt_fingerprint,
                 "model_registry_revision": self.model_registry_revision,
                 "output_schema_fingerprint": self.output_schema_fingerprint,
+                "output_schema_id": self.spec.output_schema,
+                "output_schema_revision": self.spec.output_schema_revision,
                 "capability_manifest_digest": self.capability_manifest_digest,
+                "tool_policy_fingerprint": self.tool_policy_fingerprint,
+                "sandbox_fingerprint": self.sandbox_fingerprint,
+                "middleware_fingerprint": self.middleware_fingerprint,
             }
         )
 

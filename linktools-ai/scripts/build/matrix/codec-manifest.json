@@ -1,9 +1,29 @@
 {
   "digest": "14e0891f7d4a4308f825782e48dbc7412bce3a6f1ae8fd11406ffcab1da26272",
   "entries": [
-    {"kind": "agent", "value_type": "linktools.ai.spec.model.AgentSpec", "fingerprint": "agent-spec", "codec_version": 1},
-    {"kind": "mcp", "value_type": "linktools.ai.capability.mcp.MCPServerSpec", "fingerprint": "mcp-server-spec", "codec_version": 1},
-    {"kind": "prompt", "value_type": "linktools.ai.spec.model.PromptSpec", "fingerprint": "prompt-spec", "codec_version": 1},
-    {"kind": "skill", "value_type": "linktools.ai.capability.skill.SkillSpec", "fingerprint": "skill-spec", "codec_version": 1}
+    {
+      "kind": "agent",
+      "value_type": "linktools.ai.spec.model.AgentSpec",
+      "fingerprint": "agent-spec",
+      "codec_version": 1
+    },
+    {
+      "kind": "mcp",
+      "value_type": "linktools.ai.capability.mcp.MCPServerSpec",
+      "fingerprint": "mcp-server-spec",
+      "codec_version": 1
+    },
+    {
+      "kind": "prompt",
+      "value_type": "linktools.ai.spec.model.PromptSpec",
+      "fingerprint": "prompt-spec",
+      "codec_version": 1
+    },
+    {
+      "kind": "skill",
+      "value_type": "linktools.ai.capability.skill.SkillSpec",
+      "fingerprint": "skill-spec",
+      "codec_version": 1
+    }
   ]
 }

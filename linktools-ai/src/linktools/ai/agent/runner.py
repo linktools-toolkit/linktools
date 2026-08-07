@@ -2,7 +2,10 @@
 # -*- coding: utf-8 -*-
 """Official Harness and local Agent execution boundaries."""
 
+import asyncio
 import os
+import re
+import unicodedata
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,8 +22,6 @@ from pydantic_ai.messages import (
     PartStartEvent,
     TextPart,
     TextPartDelta,
-    ThinkingPart,
-    ThinkingPartDelta,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.test import TestModel
@@ -29,6 +30,8 @@ from pydantic_ai.providers.openai import OpenAIProvider
 
 from linktools.core import environ
 
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
 from .context import AgentBinding
 
@@ -74,7 +77,8 @@ class LocalAgentRunner:
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._tools = tools
         self._capabilities = capabilities
-        self._agents: dict[str | None, Agent[None, str]] = {}
+        self._agents: dict[tuple[str, str], Agent[None, str]] = {}
+        self._agent_lock = asyncio.Lock()
         self._logger = environ.get_logger("ai.agent.runner")
 
     async def run(
@@ -86,7 +90,7 @@ class LocalAgentRunner:
         *,
         on_event: 'LocalEventHandler | None' = None,
     ) -> LocalAgentResult:
-        agent = self._get_agent(agent_id)
+        agent = await self._get_agent(agent_id)
         self._logger.info("agent runner started: agent=%s conversation=%s", agent_id or "default", conversation_id)
         final_result = None
         output_parts: list[str] = []
@@ -114,41 +118,89 @@ class LocalAgentRunner:
         self._logger.info("agent runner completed: agent=%s run=%s", agent_id or "default", result.run_id)
         return result
 
-    def _get_agent(self, agent_id: 'str | None') -> 'Agent[None, str]':
-        existing = self._agents.get(agent_id)
-        if existing is not None:
-            return existing
+    async def _get_agent(self, agent_id: 'str | None') -> 'Agent[None, str]':
+        selected = agent_id or str(self._config.get("default_agent", "default"))
+        instructions = await asyncio.to_thread(self._instructions, selected)
         model = self._model or self._config.get("model") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
-        if isinstance(model, str) and model != "test":
-            model = OpenAIChatModel(
-                model.removeprefix("openai:"),
-                provider=OpenAIProvider(
-                    base_url=self._base_url or _config_string(self._config, "base_url"),
-                    api_key=self._api_key,
-                ),
-            )
-        test_model = model == "test" or isinstance(model, TestModel)
-        selected_tools = self._tools if test_model else ()
-        selected_capabilities = () if test_model else self._capabilities
-        agent = Agent(
-            model,
-            name=agent_id or "linktools-local",
-            instructions=self._instructions(agent_id),
-            tools=selected_tools,
-            capabilities=selected_capabilities,
-        )
-        self._agents[agent_id] = cast("Agent[None, str]", agent)
-        return self._agents[agent_id]
+        cache_key = (selected, canonical_sha256({
+            "instructions": instructions,
+            "tools": [type(tool).__qualname__ for tool in self._tools],
+            "toolset_fingerprint": self._config.get("toolset_fingerprint", ""),
+            "model": str(model),
+            "output_schema": self._config.get("output_schema", "text"),
+            "output_schema_revision": self._config.get("output_schema_revision", 1),
+        }))
+        async with self._agent_lock:
+            existing = self._agents.get(cache_key)
+            if existing is not None:
+                return existing
+            try:
+                if isinstance(model, str) and model != "test":
+                    model = OpenAIChatModel(
+                        model.removeprefix("openai:"),
+                        provider=OpenAIProvider(
+                            base_url=self._base_url or _config_string(self._config, "base_url"),
+                            api_key=self._api_key,
+                        ),
+                    )
+                test_model = model == "test" or isinstance(model, TestModel)
+                selected_tools = self._tools if test_model else ()
+                selected_capabilities = () if test_model else self._capabilities
+                agent = Agent(
+                    model,
+                    name=selected,
+                    instructions=instructions,
+                    tools=selected_tools,
+                    capabilities=selected_capabilities,
+                )
+            except Exception:
+                raise
+            cached = cast("Agent[None, str]", agent)
+            self._agents[cache_key] = cached
+            if len(self._agents) > 128:
+                self._agents.pop(next(iter(self._agents)))
+            return cached
 
     def _instructions(self, agent_id: 'str | None') -> str:
+        selected = agent_id or str(self._config.get("default_agent", "default"))
+        _validate_agent_id(selected)
         configured = self._config.get("instructions")
         if isinstance(configured, str) and configured.strip():
             return configured
-        selected = agent_id or str(self._config.get("default_agent", "default"))
-        agent_file = self._root / ".linktools" / "agents" / f"{selected}.md"
-        if agent_file.is_file():
-            return agent_file.read_text(encoding="utf-8")
-        return "You are the Linktools local coding assistant. Be concise and practical."
+        agents_root = (self._root / ".linktools" / "agents").resolve()
+        agent_file = (agents_root / f"{selected}.md").resolve()
+        try:
+            agent_file.relative_to(agents_root)
+        except ValueError as error:
+            raise LinktoolsAIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT) from error
+        try:
+            exists = agent_file.exists()
+        except OSError as error:
+            raise LinktoolsAIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        if exists:
+            try:
+                if not agent_file.is_file():
+                    raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                if agent_file.stat().st_size > 1024 * 1024:
+                    raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                return agent_file.read_text(encoding="utf-8")
+            except LinktoolsAIError:
+                raise
+            except PermissionError as error:
+                raise LinktoolsAIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            except UnicodeDecodeError as error:
+                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        return ""
+
+
+def _validate_agent_id(agent_id: str) -> None:
+    normalized = unicodedata.normalize("NFC", agent_id)
+    if normalized != agent_id or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", agent_id):
+        raise LinktoolsAIError(ErrorCode.AGENT_ID_INVALID)
+    if agent_id in {".", ".."} or "/" in agent_id or "\\" in agent_id or "\x00" in agent_id:
+        raise LinktoolsAIError(ErrorCode.AGENT_ID_INVALID)
+    if agent_id.startswith(".") or re.match(r"^[A-Za-z]:", agent_id) or "%2f" in agent_id.lower() or "%5c" in agent_id.lower():
+        raise LinktoolsAIError(ErrorCode.AGENT_ID_INVALID)
 
 
 def _config_string(config: 'dict[str, JsonValue]', name: str) -> 'str | None':
@@ -162,13 +214,9 @@ def _map_event(
     if isinstance(event, PartStartEvent):
         if isinstance(event.part, TextPart) and event.part.content:
             return {"type": "text", "text": event.part.content}
-        if isinstance(event.part, ThinkingPart) and event.part.content:
-            return {"type": "thinking", "text": event.part.content}
     elif isinstance(event, PartDeltaEvent):
         if isinstance(event.delta, TextPartDelta) and event.delta.content_delta:
             return {"type": "text", "text": event.delta.content_delta}
-        if isinstance(event.delta, ThinkingPartDelta) and event.delta.content_delta:
-            return {"type": "thinking", "text": event.delta.content_delta}
     elif isinstance(event, PartEndEvent) and isinstance(event.part, TextPart) and event.part.content:
         return {"type": "text_end"}
     elif isinstance(event, FunctionToolCallEvent):
@@ -178,7 +226,10 @@ def _map_event(
             "id": part.tool_call_id,
             "name": part.tool_name,
             "phase": "start",
-            "arguments": part.args_as_dict(),
+            "arguments_digest": canonical_sha256(part.args_as_dict()),
+            "operation_id": part.tool_call_id,
+            "status": "STARTED",
+            "truncated": False,
         })
     elif isinstance(event, FunctionToolResultEvent):
         part = event.part
@@ -187,8 +238,11 @@ def _map_event(
             "id": part.tool_call_id,
             "name": part.tool_name,
             "phase": "end",
-            "ok": part.outcome == "success",
-            "detail": str(part.content),
+            "operation_id": part.tool_call_id,
+            "result_digest": canonical_sha256(part.content),
+            "status": "SUCCEEDED" if part.outcome == "success" else "FAILED",
+            "truncated": False,
+            "safe_summary": "tool completed" if part.outcome == "success" else "tool failed",
         })
     return None
 

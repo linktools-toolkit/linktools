@@ -5,8 +5,14 @@
 from dataclasses import dataclass
 from collections.abc import AsyncIterator, Mapping
 from typing import Protocol
+import uuid
+import secrets
+import time
 
-from ..core import ExecutionProfile, Page, Principal
+from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionProfile, ExecutionStatus, Page, Principal, SessionStatus
+from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.validation import validate_idempotency_key, validate_prompt, validate_resource_id
+from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
 from ..observe.snapshot import RunSnapshot
 from ..task.model import (
@@ -17,6 +23,42 @@ from ..task.model import (
     TaskGraphView,
 )
 from ..agent.context import AgentBinding
+from .persistence import BlobRef, BlobStore, RuntimePersistenceMode, validate_runtime_profile
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeServiceIdentity:
+    service_id: str
+    persistence_digest: str
+    profile: ExecutionProfile
+
+    def __post_init__(self) -> None:
+        if not self.service_id.strip() or not self.persistence_digest.strip():
+            raise ValueError("runtime service identity is incomplete")
+
+
+def new_runtime_service_identity(
+    *,
+    mode: str = "MEMORY",
+    namespace: str = "default",
+    atomic_domain_id: str = "default",
+    schema_digest: str = "memory",
+    profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING,
+    temporal_enabled: bool = False,
+    local_trusted: bool = False,
+) -> RuntimeServiceIdentity:
+    validate_runtime_profile(RuntimePersistenceMode(mode), profile, temporal_enabled=temporal_enabled, local_trusted=local_trusted)
+    persistence_digest = canonical_sha256({"mode": mode, "namespace": namespace, "atomic_domain_id": atomic_domain_id, "schema_digest": schema_digest, "blob_schema_version": 1})
+    return RuntimeServiceIdentity(_uuid7(), persistence_digest, profile)
+
+
+def _uuid7() -> str:
+    timestamp = int(time.time() * 1000) & ((1 << 48) - 1)
+    random_bits = secrets.randbits(76)
+    value = (timestamp << 80) | (0x7 << 76) | (random_bits & ((1 << 76) - 1))
+    value &= ~(0x3 << 62)
+    value |= 0x2 << 62
+    return str(uuid.UUID(int=value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,23 +68,40 @@ class ExecutionRequest:
     requested_profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING
     idempotency_key: "str | None" = None
 
+    def __post_init__(self) -> None:
+        validate_prompt(self.prompt)
+        if self.requested_profile is ExecutionProfile.PRODUCTION_SERVICE and self.idempotency_key is None:
+            raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        if self.idempotency_key is not None:
+            validate_idempotency_key(self.idempotency_key)
+
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
     principal: Principal
-    idempotency_key: "str | None" = None
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
     principal: Principal
-    idempotency_key: "str | None" = None
+    idempotency_key: str
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class CancelExecutionRequest:
     principal: Principal
+    cancel_request_id: str
     force: bool = False
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.cancel_request_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +119,14 @@ class ExecutionHandle:
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
-    status: str
+    status: ExecutionStatus
     profile: ExecutionProfile
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
     execution_id: str
-    status: str
+    status: ExecutionStatus
     output: str
 
 
@@ -89,6 +148,10 @@ class TranscriptItem:
 class CreateSessionRequest:
     principal: Principal
     session_id: str
+    create_request_id: str
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.create_request_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,31 +165,57 @@ class ListSessionRequest:
 class ResumeSessionRequest:
     principal: Principal
     prompt: str
+    idempotency_key: str = ""
+
+    def __post_init__(self) -> None:
+        validate_prompt(self.prompt)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkSessionRequest:
     principal: Principal
     new_session_id: str
+    idempotency_key: str = ""
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateSessionRequest:
     principal: Principal
+    expected_revision: int
+    mutation_id: str
     metadata: "Mapping[str, JsonValue]"
+    cwd: "str | None" = None
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.mutation_id)
 
 
 @dataclass(frozen=True, slots=True)
 class CloseSessionRequest:
     principal: Principal
+    close_request_id: str
     force: bool = False
+    wait_timeout_seconds: int = 30
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.close_request_id)
+        if not 1 <= self.wait_timeout_seconds <= 300:
+            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
 class SessionView:
     session_id: str
     binding_digest: str
-    status: str
+    status: SessionStatus
+    revision: int = 0
+    resource_generation: int = 0
+    cwd: "str | None" = None
+    active_execution_ids: "tuple[str, ...]" = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +228,10 @@ class LoadedSession:
 class RunEvaluationRequest:
     principal: Principal
     dataset_digest: str
+    idempotency_key: str = ""
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +253,10 @@ class CompareEvaluationRequest:
 @dataclass(frozen=True, slots=True)
 class ReplayEvaluationRequest:
     principal: Principal
+    idempotency_key: str = ""
+
+    def __post_init__(self) -> None:
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +267,7 @@ class EvaluationHandle:
 @dataclass(frozen=True, slots=True)
 class EvaluationView:
     evaluation_id: str
-    status: str
+    status: EvaluationStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +305,7 @@ class EvaluationComparison:
 @dataclass(frozen=True, slots=True)
 class ApprovalView:
     approval_id: str
-    status: str
+    status: ApprovalStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,21 +313,48 @@ class ApprovalDecisionRequest:
     principal: Principal
     approval_id: str
     decision_id: str
-    decision: str
+    decision: ApprovalDecision
+
+    def __post_init__(self) -> None:
+        validate_resource_id(self.approval_id)
+        validate_idempotency_key(self.decision_id)
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalDecisionResult:
     approval_id: str
     decision_id: str
-    decision: str
+    decision: ApprovalDecision
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalResultRequest:
+    principal: Principal
+    call_id: str
+    result_id: str
+    payload_ref: str
+    payload_digest: str
+
+    def __post_init__(self) -> None:
+        validate_resource_id(self.call_id)
+        validate_idempotency_key(self.result_id)
+        if not self.payload_ref.strip() or len(self.payload_digest) != 64:
+            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalResultResult:
+    call_id: str
+    result_id: str
+    payload_ref: str
+    payload_digest: str
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionEvent:
     execution_id: str
     sequence: int
-    event_type: str
+    event_type: ExecutionEventType
     payload: JsonValue
 
 
@@ -315,6 +439,7 @@ class WorkflowGateway(Protocol):
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
     async def cancel_execution(self, workflow_id: str) -> CancelExecutionResult: ...
     async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle: ...
+    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView: ...
 
 
 class ExecutionService(Protocol):
@@ -358,6 +483,10 @@ class ApprovalService(Protocol):
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult: ...
 
 
+class ExternalService(Protocol):
+    async def supply(self, execution_id: str, request: ExternalResultRequest) -> ExternalResultResult: ...
+
+
 class EventService(Protocol):
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
     def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionStreamItem]': ...
@@ -370,6 +499,7 @@ class ArtifactService(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeServices:
+    identity: RuntimeServiceIdentity
     execution: ExecutionService
     session: SessionService
     task: TaskService
@@ -399,12 +529,27 @@ class PayloadService(Protocol):
     async def store(self, data: bytes) -> PayloadRef: ...
 
 
-class EventRepository(Protocol):
-    async def append(self, execution_id: str, event: ExecutionEvent, *, expected_sequence: int) -> ExecutionEvent: ...
+class BlobPayloadService:
+    """Payload facade backed by the RuntimePersistence blob store."""
 
+    def __init__(self, blobs: BlobStore, *, tenant_id: str) -> None:
+        if not tenant_id.strip():
+            raise ValueError("payload tenant is required")
+        self._blobs = blobs
+        self._tenant_id = tenant_id
 
-class ResultRepository(Protocol):
-    async def commit(self, execution_id: str, result: ExecutionResult, *, idempotency_key: str) -> str: ...
+    async def load(self, ref: PayloadRef) -> bytes:
+        blob = await self._blobs.stat(BlobRef(self._tenant_id, ref.value, 0, ""), tenant_id=self._tenant_id)
+        if blob is None:
+            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+        chunks = bytearray()
+        async for chunk in self._blobs.open(blob, tenant_id=self._tenant_id):
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    async def store(self, data: bytes) -> PayloadRef:
+        ref = await self._blobs.put_bytes(tenant_id=self._tenant_id, data=data)
+        return PayloadRef(ref.digest)
 
 
 class BudgetService(Protocol):
@@ -414,16 +559,17 @@ class BudgetService(Protocol):
 
 __all__ = [
     "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalService", "ApprovalView",
+    "ExternalResultRequest", "ExternalResultResult", "ExternalService",
     "ArtifactDownload", "ArtifactService", "ArtifactView", "BudgetService", "CancelExecutionRequest",
     "BudgetReservation", "BudgetReservationRequest", "BudgetSettlement", "BudgetSettlementRequest",
     "CancelExecutionResult",
     "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
-    "EvaluationView", "EventRepository", "EventService", "ExecutionEvent", "ExecutionHandle",
+    "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStreamItem", "ExecutionView",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-    "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResultRepository", "ResumeSessionRequest",
+    "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "RuntimeServices", "SessionService", "SessionView",
     "TaskService", "TraceItem", "TranscriptItem", "UpdateSessionRequest",
-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
+    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult", "RuntimeServiceIdentity", "new_runtime_service_identity",
 ]

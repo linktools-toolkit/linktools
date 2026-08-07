@@ -6,6 +6,7 @@ import json
 
 from ..asset.codec import AssetCodec
 from ..asset.model import AssetKey
+from ..core.errors import ErrorCode, LinktoolsAIError
 from .model import AgentFeatureRef, AgentSpec, PromptSpec
 
 
@@ -23,11 +24,13 @@ class AgentSpecCodec(AssetCodec[AgentSpec]):
         return "agent-spec"
 
     def encode(self, value: AgentSpec) -> bytes:
-        return json.dumps({"id": value.id, "revision": value.revision, "model": value.model, "features": [{"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)} for feature in value.features], "output_schema": value.output_schema, "instructions": list(value.instructions)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return json.dumps({"id": value.id, "revision": value.revision, "model": value.model, "features": [{"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)} for feature in value.features], "output_schema": value.output_schema, "output_schema_revision": value.output_schema_revision, "instructions": list(value.instructions)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     def decode(self, data: bytes) -> AgentSpec:
         raw = json.loads(data.decode("utf-8"))
-        return AgentSpec(raw["id"], raw["revision"], raw["model"], tuple(AgentFeatureRef(item["kind"], item["id"], item.get("revision"), item.get("required", True), item.get("config", {})) for item in raw["features"]), raw["output_schema"], tuple(raw.get("instructions", ())))
+        if "output_schema_revision" not in raw:
+            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
+        return AgentSpec(raw["id"], raw["revision"], raw["model"], tuple(AgentFeatureRef(item["kind"], item["id"], item.get("revision"), item.get("required", True), item.get("config", {})) for item in raw["features"]), raw["output_schema"], int(raw["output_schema_revision"]), tuple(raw.get("instructions", ())))
 
     def validate_key(self, key: "AssetKey", value: AgentSpec) -> None:
         if value.asset_kind != key.kind or value.asset_id != key.id:
