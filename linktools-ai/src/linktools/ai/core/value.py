@@ -4,7 +4,6 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TypeAlias
 
 from .paging import Page
 from .errors import ErrorCode, LinktoolsAIError
@@ -33,34 +32,22 @@ class ExecutionEventType(StrEnum):
     EXECUTION_CREATED = "EXECUTION_CREATED"
     EXECUTION_STARTED = "EXECUTION_STARTED"
     EXECUTION_START_UNKNOWN = "EXECUTION_START_UNKNOWN"
-    MODEL_RUN_STARTED = "MODEL_RUN_STARTED"
     APPROVAL_REQUESTED = "APPROVAL_REQUESTED"
     APPROVAL_DECIDED = "APPROVAL_DECIDED"
     EXTERNAL_REQUESTED = "EXTERNAL_REQUESTED"
     EXTERNAL_SUPPLIED = "EXTERNAL_SUPPLIED"
-    RESULT_COMMITTED = "RESULT_COMMITTED"
     CANCEL_REQUESTED = "CANCEL_REQUESTED"
     EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
-    TRACE_PERSISTENCE_FAILED = "TRACE_PERSISTENCE_FAILED"
 
 
-class TraceKind(StrEnum):
-    MODEL_REQUEST = "MODEL_REQUEST"
-    MODEL_RESPONSE = "MODEL_RESPONSE"
-    TOOL_CALL = "TOOL_CALL"
-    TOOL_RESULT = "TOOL_RESULT"
-    TOOL_ERROR = "TOOL_ERROR"
-    SUBAGENT_STARTED = "SUBAGENT_STARTED"
-    SUBAGENT_COMPLETED = "SUBAGENT_COMPLETED"
-    OBSERVER_ERROR = "OBSERVER_ERROR"
-
-
-class CaptureState(StrEnum):
-    COMPLETE = "COMPLETE"
-    PARTIAL = "PARTIAL"
-    CORRUPT = "CORRUPT"
+class ExecutionLineageKind(StrEnum):
+    RUN = "RUN"
+    SESSION_RESUME = "SESSION_RESUME"
+    RETRY = "RETRY"
+    FORK = "FORK"
+    SUBAGENT = "SUBAGENT"
 
 
 class ExecutionStatus(StrEnum):
@@ -209,9 +196,9 @@ def require_profile_available(profile: ExecutionProfile) -> None:
 
 
 __all__ = [
-    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "CaptureState", "EvaluationStatus",
-    "ExecutionEventType", "ExecutionProfile", "ExecutionStatus", "ExternalCallStatus",
+    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
+    "ExecutionEventType", "ExecutionLineageKind", "ExecutionProfile", "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",
-    "ToolOperationStatus", "TraceKind", "profile_available", "require_profile_available",
+    "ToolOperationStatus", "profile_available", "require_profile_available",
 ]

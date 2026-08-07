@@ -354,10 +354,8 @@ def _temporal_activity_functions(activities: Sequence[ActivityType]) -> tuple[Te
                     cast(TemporalActivity, activity.reserve_budget),
                     cast(TemporalActivity, activity.run_agent),
                     cast(TemporalActivity, activity.process_deferred),
-                    cast(TemporalActivity, activity.append_event),
                     cast(TemporalActivity, activity.commit_result),
                     cast(TemporalActivity, activity.settle_budget),
-                    cast(TemporalActivity, activity.append_terminal_event),
                 )
             )
         elif isinstance(activity, (SessionActivity, TaskActivity, EvaluationActivity)):

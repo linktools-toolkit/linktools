@@ -1,510 +1,174 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Registration of the non-asset tables in the published SQL schema."""
+"""Normalized SQL tables owned by the Runtime SQL adapter."""
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..core.errors import ErrorCode, LinktoolsAIError
 from ..storage.database import SqlSchemaRegistry
 from ..storage.names import storage_name
+from ..core.errors import ErrorCode, LinktoolsAIError
 
-try:
-    from sqlalchemy import (
-        BigInteger,
-        Boolean,
-        Column,
-        DateTime,
-        Double,
-        Index,
-        Integer,
-        JSON,
-        LargeBinary,
-        Numeric,
-        String,
-        Table,
-        Text,
-        UniqueConstraint,
-    )
-except ModuleNotFoundError as error:
-    if error.name == "sqlalchemy":
-        raise LinktoolsAIError(
-            ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
-            "SQLAlchemy is required for SQL schema registration",
-        ) from error
-    raise
+runtime_metadata: object | None = None
+step_metadata: object | None = None
 
 if TYPE_CHECKING:
-    from sqlalchemy.sql.schema import Table as TableType
+    from sqlalchemy import CHAR, MetaData, String, Table
 
 
 @dataclass(frozen=True, slots=True)
 class SqlRuntimeTables:
-    sessions: "TableType"
-    session_turns: "TableType"
-    executions: "TableType"
-    execution_snapshots: "TableType"
-    execution_trace_steps: "TableType"
-    execution_events: "TableType"
-    execution_evaluations: "TableType"
-    artifacts: "TableType"
-    task_plans: "TableType"
-    task_executions: "TableType"
-    memories: "TableType"
-    execution_results: "TableType"
-    runtime_idempotency: "TableType"
-    approvals: "TableType"
-    external_results: "TableType"
-    operation_ledger: "TableType"
-    runtime_blobs: "TableType"
-    runtime_blob_chunks: "TableType"
-    repository_records: "TableType"
+    tables: "dict[str, Table]"
+
+    def __getitem__(self, name: str) -> "Table":
+        return self.tables[name]
 
 
 class SqlRuntimeSchema:
-    """Register runtime tables without performing database I/O."""
+    """Register one concrete table for each persisted Runtime fact family."""
 
     @classmethod
     def register_schema(cls, registry: SqlSchemaRegistry) -> SqlRuntimeTables:
-        json_type = JSON().with_variant(Text(), "sqlite")
+        global runtime_metadata
+        try:
+            from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, UniqueConstraint
+            from sqlalchemy.dialects import mysql
+        except ModuleNotFoundError as error:
+            raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Runtime storage") from error
+
+        runtime_metadata = registry.metadata
         integer_id = BigInteger().with_variant(Integer, "sqlite")
-        sessions = Table(
-            storage_name("sessions"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("session_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("owner_principal_id", String(256), nullable=False),
-            Column("binding_digest", String(64), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("revision", BigInteger, nullable=False),
-            Column("resource_generation", BigInteger, nullable=False),
-            Column("cwd", Text, nullable=True),
-            Column("metadata_json", json_type, nullable=False),
-            Column("closed_at", DateTime(timezone=True), nullable=True),
-            Column("user_id", String(255), nullable=True),
-            Column("next_turn_sequence", Integer, nullable=False),
-            Column("latest_completed_run_id", String(255), nullable=True),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "session_id", name=storage_name("sessions_uk_tenant_session_id")),
-            Index(storage_name("sessions_ix_tenant_id_user_id"), "tenant_id", "user_id"),
-            Index(storage_name("sessions_ix_updated_at"), "updated_at"),
-            Index(storage_name("sessions_ix_created_at"), "created_at"),
+        names = (
+            "sessions", "executions", "results", "idempotency", "execution_events",
+            "task_graphs", "task_nodes", "evaluations", "memories", "artifacts", "approvals",
+            "external_results", "operation_counters", "operation_ledger", "tool_operations", "blobs", "blob_chunks",
         )
-        session_turns = Table(
-            storage_name("session_turns"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("session_id", String(256), nullable=False),
-            Column("sequence", Integer, nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("input", json_type, nullable=True),
-            Column("delta_messages", json_type, nullable=True),
-            Column("status", String(32), nullable=False),
-            Column("capture_state", String(32), nullable=False),
-            Column("completed_at", DateTime(timezone=True), nullable=True),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "session_id", "sequence", name=storage_name("session_turns_uk_tenant_session_id_sequence")),
-            UniqueConstraint("tenant_id", "execution_id", name=storage_name("session_turns_uk_tenant_execution_id")),
-            Index(storage_name("session_turns_ix_updated_at"), "updated_at"),
-            Index(storage_name("session_turns_ix_created_at"), "created_at"),
-        )
-        executions = Table(
-            storage_name("executions"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("execution_id", String(256), nullable=False),
-            Column("session_id", String(256), nullable=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("kind", String(40), nullable=False),
-            Column("runnable_id", String(256), nullable=False),
-            Column("runnable_type", String(40), nullable=False),
-            Column("session_turn_sequence", Integer, nullable=True),
-            Column("parent_execution_id", String(256), nullable=True),
-            Column("root_execution_id", String(256), nullable=False),
-            Column("status", String(40), nullable=False),
-            Column("definition", json_type, nullable=False),
-            Column("definition_hash", String(64), nullable=False),
-            Column("data", json_type, nullable=False),
-            Column("owner", String(256), nullable=True),
-            Column("fence", Integer, nullable=False),
-            Column("lease_expires_at", DateTime(timezone=True), nullable=True),
-            Column("cancel_requested_at", DateTime(timezone=True), nullable=True),
-            Column("snapshot_revision", Integer, nullable=False),
-            Column("trace_sequence", Integer, nullable=False),
-            Column("event_sequence", Integer, nullable=False),
-            Column("profile", String(32), nullable=False),
-            Column("result_ref", String(512), nullable=True),
-            Column("result_digest", String(64), nullable=True),
-            Column("error_code", String(128), nullable=True),
-            Column("safe_error_json", json_type, nullable=False),
-            Column("user_id", String(255), nullable=True),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", name=storage_name("executions_uk_tenant_execution_id")),
-            Index(storage_name("executions_ix_session_id"), "session_id"),
-            Index(storage_name("executions_ix_root_execution_id"), "root_execution_id"),
-            Index(storage_name("executions_ix_lease_expires_at"), "lease_expires_at"),
-            Index(storage_name("executions_ix_updated_at"), "updated_at"),
-            Index(storage_name("executions_ix_created_at"), "created_at"),
-        )
-        execution_snapshots = Table(
-            storage_name("execution_snapshots"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("execution_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("revision", Integer, nullable=False),
-            Column("resume_messages", json_type, nullable=False),
-            Column("outcome", json_type, nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("trace_end_sequence", Integer, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", "revision", name=storage_name("execution_snapshots_uk_tenant_execution_revision")),
-            Index(storage_name("execution_snapshots_ix_updated_at"), "updated_at"),
-            Index(storage_name("execution_snapshots_ix_created_at"), "created_at"),
-        )
-        execution_trace_steps = Table(
-            storage_name("execution_trace_steps"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("execution_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("sequence", Integer, nullable=False),
-            Column("kind", String(40), nullable=False),
-            Column("payload", json_type, nullable=False),
-            Column("payload_digest", String(64), nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", "sequence", name=storage_name("execution_trace_steps_uk_tenant_execution_id_sequence")),
-            Index(storage_name("execution_trace_steps_ix_updated_at"), "updated_at"),
-            Index(storage_name("execution_trace_steps_ix_created_at"), "created_at"),
-        )
-        execution_events = Table(
-            storage_name("execution_events"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("execution_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("sequence", Integer, nullable=False),
-            Column("type", String(120), nullable=False),
-            Column("payload", json_type, nullable=False),
-            Column("payload_digest", String(64), nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", "sequence", name=storage_name("execution_events_uk_tenant_execution_id_sequence")),
-            Index(storage_name("execution_events_ix_updated_at"), "updated_at"),
-            Index(storage_name("execution_events_ix_created_at"), "created_at"),
-        )
-        execution_evaluations = Table(
-            storage_name("execution_evaluations"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("evaluation_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("dataset_id", String(256), nullable=False),
-            Column("dataset_revision", BigInteger, nullable=False),
-            Column("evaluator", String(255), nullable=False),
-            Column("evaluator_revision", BigInteger, nullable=False),
-            Column("binding_digest", String(64), nullable=False),
-            Column("output_schema_fingerprint", String(64), nullable=False),
-            Column("artifact_digest", String(64), nullable=True),
-            Column("status", String(32), nullable=False),
-            Column("revision", BigInteger, nullable=False),
-            Column("score", Double, nullable=True),
-            Column("result", json_type, nullable=False),
-            Column("metrics_json", json_type, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "evaluation_id", name=storage_name("execution_evaluations_uk_tenant_evaluation_id")),
-            Index(storage_name("execution_evaluations_ix_evaluator"), "evaluator"),
-            Index(storage_name("execution_evaluations_ix_execution_id_created_at"), "execution_id", "created_at"),
-            Index(storage_name("execution_evaluations_ix_updated_at"), "updated_at"),
-            Index(storage_name("execution_evaluations_ix_created_at"), "created_at"),
-        )
-        artifacts = Table(
-            storage_name("artifacts"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("artifact_id", String(256), nullable=False),
-            Column("sha256", String(64), nullable=False),
-            Column("media_type", String(128), nullable=False),
-            Column("size", Integer, nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("producer_kind", String(64), nullable=False),
-            Column("producer_id", String(128), nullable=False),
-            Column("producer", String(256), nullable=False),
-            Column("digest", String(64), nullable=False),
-            Column("blob_ref", String(512), nullable=False),
-            Column("run_id", String(128), nullable=True),
-            Column("session_id", String(128), nullable=True),
-            Column("parent_artifact_ids", json_type, nullable=False),
-            Column("provenance_metadata", json_type, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "artifact_id", name=storage_name("artifacts_uk_tenant_id_artifact_id")),
-            Index(storage_name("artifacts_ix_artifact_id"), "artifact_id"),
-            Index(storage_name("artifacts_ix_sha256"), "sha256"),
-            Index(storage_name("artifacts_ix_updated_at"), "updated_at"),
-            Index(storage_name("artifacts_ix_created_at"), "created_at"),
-        )
-        task_plans = Table(
-            storage_name("task_plans"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("plan_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("graph_id", String(256), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("limits_json", json_type, nullable=False),
-            Column("graph_digest", String(64), nullable=False),
-            Column("spent_budget", BigInteger, nullable=False),
-            Column("revision", BigInteger, nullable=False),
-            Column("payload", json_type, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "plan_id", name=storage_name("task_plans_uk_tenant_plan_id")),
-            Index(storage_name("task_plans_ix_updated_at"), "updated_at"),
-            Index(storage_name("task_plans_ix_created_at"), "created_at"),
-        )
-        task_executions = Table(
-            storage_name("task_executions"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("execution_id", String(255), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("plan_id", String(255), nullable=False),
-            Column("graph_id", String(256), nullable=False),
-            Column("node_id", String(256), nullable=False),
-            Column("dependencies_json", json_type, nullable=False),
-            Column("binding_digest", String(64), nullable=False),
-            Column("budget_cost", BigInteger, nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("owner", String(255), nullable=True),
-            Column("fence", Integer, nullable=False),
-            Column("attempt", Integer, nullable=False),
-            Column("result", json_type, nullable=True),
-            Column("result_digest", String(64), nullable=True),
-            Column("error", json_type, nullable=True),
-            Column("error_code", String(128), nullable=True),
-            Column("error_digest", String(64), nullable=True),
-            Column("lease_expires_at", DateTime(timezone=True), nullable=True),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", name=storage_name("task_executions_uk_tenant_execution_id")),
-            Index(storage_name("task_executions_ix_plan_id"), "plan_id"),
-            Index(storage_name("task_executions_ix_updated_at"), "updated_at"),
-            Index(storage_name("task_executions_ix_created_at"), "created_at"),
-        )
-        memories = Table(
-            storage_name("memories"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("memory_id", String(256), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("owner_id", String(256), nullable=False),
-            Column("content", Text, nullable=False),
-            Column("category", String(64), nullable=True),
-            Column("confidence", Numeric(5, 4), nullable=True),
-            Column("version", Integer, nullable=False),
-            Column("metadata_json", Text, nullable=False),
-            Column("user_id", String(128), nullable=True),
-            Column("workspace_id", String(128), nullable=True),
-            Column("session_id", String(128), nullable=True),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "memory_id", name=storage_name("memories_uk_tenant_memory_id")),
-            Index(storage_name("memories_ix_tenant_id"), "tenant_id"),
-            Index(storage_name("memories_ix_updated_at"), "updated_at"),
-            Index(storage_name("memories_ix_created_at"), "created_at"),
-        )
-        execution_results = Table(
-            storage_name("execution_results"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("output_schema_id", String(256), nullable=False),
-            Column("output_schema_revision", BigInteger, nullable=False),
-            Column("output_schema_fingerprint", String(64), nullable=False),
-            Column("payload_ref", String(512), nullable=True),
-            Column("payload_digest", String(64), nullable=True),
-            Column("stop_reason", String(64), nullable=False),
-            Column("input_tokens", BigInteger, nullable=False),
-            Column("output_tokens", BigInteger, nullable=False),
-            Column("total_cost_micros", BigInteger, nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "execution_id", name=storage_name("execution_results_uk_tenant_execution")),
-            Index(storage_name("execution_results_ix_tenant_status"), "tenant_id", "status", "created_at"),
-        )
-        runtime_idempotency = Table(
-            storage_name("runtime_idempotency"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("scope", String(512), nullable=False),
-            Column("key_hash", String(64), nullable=False),
-            Column("request_digest", String(64), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("result_digest", String(64), nullable=True),
-            Column("error_code", String(128), nullable=True),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "scope", "key_hash", name=storage_name("runtime_idempotency_uk_tenant_scope_key")),
-            Index(storage_name("runtime_idempotency_ix_tenant_execution"), "tenant_id", "execution_id"),
-            Index(storage_name("runtime_idempotency_ix_status_updated_at"), "status", "updated_at"),
-        )
-        approvals = Table(
-            storage_name("approvals"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("approval_id", String(256), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("operation_id", String(256), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("decision_id", String(256), nullable=True),
-            Column("decision", String(16), nullable=True),
-            Column("decided_by", String(256), nullable=True),
-            Column("decision_digest", String(64), nullable=True),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("decided_at", DateTime(timezone=True), nullable=True),
-            UniqueConstraint("tenant_id", "approval_id", name=storage_name("approvals_uk_tenant_approval")),
-            UniqueConstraint("tenant_id", "approval_id", "decision_id", name=storage_name("approvals_uk_tenant_approval_decision")),
-            Index(storage_name("approvals_ix_tenant_execution_status"), "tenant_id", "execution_id", "status"),
-        )
-        external_results = Table(
-            storage_name("external_results"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("call_id", String(256), nullable=False),
-            Column("execution_id", String(256), nullable=False),
-            Column("operation_id", String(256), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("result_id", String(256), nullable=True),
-            Column("payload_ref", String(512), nullable=True),
-            Column("payload_digest", String(64), nullable=True),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("supplied_at", DateTime(timezone=True), nullable=True),
-            UniqueConstraint("tenant_id", "call_id", name=storage_name("external_results_uk_tenant_call")),
-            UniqueConstraint("tenant_id", "call_id", "result_id", name=storage_name("external_results_uk_tenant_call_result")),
-            Index(storage_name("external_results_ix_tenant_execution_status"), "tenant_id", "execution_id", "status"),
-        )
-        operation_ledger = Table(
-            storage_name("operation_ledger"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("operation_id", String(256), nullable=False),
-            Column("resource_kind", String(64), nullable=False),
-            Column("resource_id", String(256), nullable=False),
-            Column("execution_id", String(256), nullable=True),
-            Column("sequence", BigInteger, nullable=False),
-            Column("kind", String(64), nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("request_digest", String(64), nullable=False),
-            Column("result_ref", String(512), nullable=True),
-            Column("result_digest", String(64), nullable=True),
-            Column("error_code", String(128), nullable=True),
-            Column("compactable", Boolean, nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False),
-            UniqueConstraint("tenant_id", "operation_id", name=storage_name("operation_ledger_uk_tenant_operation")),
-            UniqueConstraint("tenant_id", "resource_kind", "resource_id", "sequence", name=storage_name("operation_ledger_uk_tenant_resource_sequence")),
-            Index(storage_name("operation_ledger_ix_tenant_resource_status"), "tenant_id", "resource_kind", "resource_id", "status", "sequence"),
-            Index(storage_name("operation_ledger_ix_tenant_execution"), "tenant_id", "execution_id"),
-        )
-        runtime_blobs = Table(
-            storage_name("runtime_blobs"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("digest", String(64), nullable=False),
-            Column("size", BigInteger, nullable=False),
-            Column("status", String(32), nullable=False),
-            Column("chunk_count", BigInteger, nullable=False),
-            Column("created_at", DateTime(timezone=True), nullable=False),
-            Column("completed_at", DateTime(timezone=True), nullable=True),
-            UniqueConstraint("tenant_id", "digest", name=storage_name("runtime_blobs_uk_tenant_digest")),
-            Index(storage_name("runtime_blobs_ix_tenant_status_created_at"), "tenant_id", "status", "created_at"),
-        )
-        runtime_blob_chunks = Table(
-            storage_name("runtime_blob_chunks"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("tenant_id", String(128), nullable=False),
-            Column("digest", String(64), nullable=False),
-            Column("chunk_index", BigInteger, nullable=False),
-            Column("content", LargeBinary, nullable=False),
-            Column("content_size", BigInteger, nullable=False),
-            Column("content_digest", String(64), nullable=False),
-            UniqueConstraint("tenant_id", "digest", "chunk_index", name=storage_name("runtime_blob_chunks_uk_tenant_digest_index")),
-        )
-        repository_records = Table(
-            storage_name("runtime_repository_records"),
-            registry.metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace", String(512), nullable=False),
-            Column("component", String(128), nullable=False),
-            Column("record_key", String(512), nullable=False),
-            Column("tenant_id", String(128), nullable=False),
-            Column("payload", Text, nullable=False),
-            UniqueConstraint("namespace", "component", "record_key", name=storage_name("runtime_repository_records_uk_identity")),
-            Index(storage_name("runtime_repository_records_ix_tenant"), "namespace", "tenant_id", "component"),
-        )
-        tables = (
-            (sessions, "adapter.session"),
-            (session_turns, "adapter.session"),
-            (executions, "adapter.execution"),
-            (execution_snapshots, "adapter.execution"),
-            (execution_trace_steps, "adapter.execution"),
-            (execution_events, "adapter.execution"),
-            (execution_evaluations, "adapter.evaluation"),
-            (artifacts, "adapter.artifact"),
-            (task_plans, "adapter.task"),
-            (task_executions, "adapter.task"),
-            (memories, "adapter.memory"),
-            (execution_results, "adapter.result"),
-            (runtime_idempotency, "adapter.idempotency"),
-            (approvals, "adapter.approval"),
-            (external_results, "adapter.external"),
-            (operation_ledger, "adapter.operation"),
-            (runtime_blobs, "adapter.blob"),
-            (runtime_blob_chunks, "adapter.blob"),
-            (repository_records, "adapter.runtime"),
-        )
-        for table, owner in tables:
-            registry.add_table(table, owner=owner)
-        return SqlRuntimeTables(
-            sessions,
-            session_turns,
-            executions,
-            execution_snapshots,
-            execution_trace_steps,
-            execution_events,
-            execution_evaluations,
-            artifacts,
-            task_plans,
-            task_executions,
-            memories,
-            execution_results,
-            runtime_idempotency,
-            approvals,
-            external_results,
-            operation_ledger,
-            runtime_blobs,
-            runtime_blob_chunks,
-            repository_records,
-        )
+        physical_names = {
+            "sessions": "runtime_sessions",
+            "executions": "runtime_executions",
+            "results": "runtime_results",
+            "idempotency": "runtime_idempotency",
+            "execution_events": "runtime_events",
+            "task_graphs": "runtime_tasks",
+            "task_nodes": "runtime_task_nodes",
+            "evaluations": "runtime_evaluations",
+            "memories": "runtime_memories",
+            "artifacts": "runtime_artifacts",
+            "approvals": "runtime_approvals",
+            "external_results": "runtime_externals",
+            "operation_counters": "runtime_operation_counters",
+            "operation_ledger": "runtime_operations",
+            "tool_operations": "runtime_tools",
+            "blobs": "runtime_blobs",
+            "blob_chunks": "runtime_blob_chunks",
+        }
+        tables: dict[str, Table] = {}
+        for name in names:
+            table = Table(
+                storage_name(physical_names[name]),
+                registry.metadata,
+                Column("id", integer_id, primary_key=True, autoincrement=True),
+                Column("namespace_key", _hex64(), nullable=False),
+                Column("tenant_id", _text_key(128), nullable=False),
+                Column("record_id", _text_key(256), nullable=False),
+                Column("session_id", _text_key(256), nullable=True),
+                Column("parent_execution_id", _text_key(256), nullable=True),
+                Column("source_execution_id", _text_key(256), nullable=True),
+                Column("base_execution_id", _text_key(256), nullable=True),
+                Column("lineage_kind", _text_key(64), nullable=False, default="RUN"),
+                Column("sequence", BigInteger, nullable=False, default=0),
+                Column("revision", BigInteger, nullable=False, default=0),
+                Column("status", _text_key(64), nullable=False, default=""),
+                Column("payload", JSON, nullable=False),
+                Column("created_at", DateTime(timezone=True), nullable=False),
+                Column("updated_at", DateTime(timezone=True), nullable=False),
+                UniqueConstraint("namespace_key", "tenant_id", "record_id", name=storage_name(f"{name}_uk_identity")),
+                mysql_engine="InnoDB",
+                mysql_charset="utf8mb4",
+                mysql_collate="utf8mb4_bin",
+                extend_existing=True,
+            )
+            if name == "sessions":
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "session_id", name=storage_name("runtime_sessions_uk_session")))
+            if name == "executions":
+                Index(storage_name("runtime_executions_ix_session_status"), table.c.namespace_key, table.c.tenant_id, table.c.session_id, table.c.status)
+                Index(storage_name("runtime_executions_ix_source"), table.c.namespace_key, table.c.tenant_id, table.c.source_execution_id)
+                Index(storage_name("runtime_executions_ix_base"), table.c.namespace_key, table.c.tenant_id, table.c.base_execution_id)
+                Index(storage_name("runtime_executions_ix_parent_created"), table.c.namespace_key, table.c.tenant_id, table.c.parent_execution_id, table.c.created_at)
+            if name == "tool_operations":
+                table.append_column(Column("run_id", _text_key(256), nullable=True))
+                table.append_column(Column("tool_call_id", _text_key(256), nullable=True))
+                table.append_column(Column("owner", _text_key(256), nullable=True))
+                table.append_column(Column("fence", BigInteger, nullable=True))
+                table.append_column(Column("lease_expires_at", DateTime(timezone=True), nullable=True))
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "run_id", "tool_call_id", name=storage_name("tool_operations_uk_call")))
+            if name == "task_nodes":
+                table.append_column(Column("owner", String(512), nullable=True))
+                table.append_column(Column("fence", BigInteger, nullable=False, default=0))
+                table.append_column(Column("lease_expires_at", DateTime(timezone=True), nullable=True))
+            if name == "operation_counters":
+                table.append_column(Column("resource_kind", _text_key(64), nullable=False, default=""))
+                table.append_column(Column("resource_id", _text_key(256), nullable=False, default=""))
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "resource_kind", "resource_id", name=storage_name("operation_counters_uk_partition")))
+            if name == "idempotency":
+                table.append_column(Column("scope", _text_key(64), nullable=False, default=""))
+                table.append_column(Column("key_hash", _hex64(), nullable=False, default=""))
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "scope", "key_hash", name=storage_name("idempotency_uk_key")))
+            if name == "operation_ledger":
+                table.append_column(Column("resource_kind", _text_key(64), nullable=False, default=""))
+                table.append_column(Column("resource_id", _text_key(256), nullable=False, default=""))
+            if name == "blobs":
+                table.append_column(Column("digest", _hex64(), nullable=False, default=""))
+                table.append_column(Column("size", BigInteger, nullable=False, default=0))
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "digest", name=storage_name("runtime_blobs_uk_digest")))
+            if name == "blob_chunks":
+                table.append_column(Column("digest", _hex64(), nullable=False, default=""))
+                table.append_column(Column("chunk_index", BigInteger, nullable=False, default=0))
+                table.append_column(Column("content", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False, default=b""))
+                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "digest", "chunk_index", name=storage_name("runtime_blob_chunks_uk_chunk")))
+            if name == "sessions":
+                table.append_column(Column("profile", _text_key(64), nullable=False, default="local-coding"))
+                table.append_column(Column("head_execution_id", _text_key(256), nullable=True))
+            if name == "executions":
+                table.append_column(Column("agent_run_sequence", BigInteger, nullable=False, default=0))
+            registry.add_table(table, owner="adapter.sql")
+            tables[name] = table
+        return SqlRuntimeTables(tables)
 
 
-__all__ = ["SqlRuntimeSchema", "SqlRuntimeTables"]
+def _text_key(length: int) -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+    return String(length).with_variant(mysql.VARCHAR(length, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+
+
+def _hex64() -> "CHAR":
+    from sqlalchemy import CHAR
+    from sqlalchemy.dialects import mysql
+    return CHAR(64).with_variant(mysql.CHAR(64, charset="ascii", collation="ascii_bin"), "mysql")
+
+
+def ensure_step_metadata() -> "MetaData":
+    global step_metadata
+    if step_metadata is None:
+        try:
+            from sqlalchemy import MetaData
+        except ModuleNotFoundError as error:
+            raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Step storage") from error
+        step_metadata = MetaData()
+    return step_metadata
+
+
+def new_step_metadata() -> "MetaData":
+    global step_metadata
+    try:
+        from sqlalchemy import MetaData
+    except ModuleNotFoundError as error:
+        raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Step storage") from error
+    metadata = MetaData()
+    if step_metadata is None:
+        step_metadata = metadata
+    return metadata
+
+
+__all__ = ["SqlRuntimeSchema", "SqlRuntimeTables", "ensure_step_metadata", "new_step_metadata", "runtime_metadata", "step_metadata"]

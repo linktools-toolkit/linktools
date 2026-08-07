@@ -38,10 +38,8 @@ class ExecutionStageOperation(Protocol):
     async def reserve_budget(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
     async def run_agent(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
     async def process_deferred(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
-    async def append_event(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
     async def commit_result(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
     async def settle_budget(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
-    async def append_terminal_event(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState": ...
 
 
 class ExecuteActivity:
@@ -77,17 +75,11 @@ class ExecuteActivity:
     async def process_deferred(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState":
         return await cast(ExecutionStageOperation, self._operation).process_deferred(state)
 
-    async def append_event(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState":
-        return await cast(ExecutionStageOperation, self._operation).append_event(state)
-
     async def commit_result(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState":
         return await cast(ExecutionStageOperation, self._operation).commit_result(state)
 
     async def settle_budget(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState":
         return await cast(ExecutionStageOperation, self._operation).settle_budget(state)
-
-    async def append_terminal_event(self, state: "ExecutionWorkflowState") -> "ExecutionWorkflowState":
-        return await cast(ExecutionStageOperation, self._operation).append_terminal_event(state)
 
 
 if _temporal_activity is not None:
@@ -99,10 +91,8 @@ if _temporal_activity is not None:
     ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(ExecuteActivity.reserve_budget)
     ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(ExecuteActivity.run_agent)
     ExecuteActivity.process_deferred = _temporal_activity.defn(name="process_deferred")(ExecuteActivity.process_deferred)
-    ExecuteActivity.append_event = _temporal_activity.defn(name="append_event")(ExecuteActivity.append_event)
     ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(ExecuteActivity.commit_result)
     ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(ExecuteActivity.settle_budget)
-    ExecuteActivity.append_terminal_event = _temporal_activity.defn(name="append_terminal_event")(ExecuteActivity.append_terminal_event)
 
 
 __all__ = ["ActivityOptions", "ExecuteActivity", "ExecutionOperation", "ExecutionStageOperation"]

@@ -20,7 +20,7 @@ from ..core.ids import canonical_json_bytes, canonical_sha256
 from ..core.paging import CursorPayload, CursorSigner
 from ..core.principal import AuthorizationAction, AuthorizationPolicy
 from ..core.value import OperationKind, OperationStatus, ResourceKind
-from .persistence import OperationLedgerRecord, RuntimePersistence
+from .persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence
 from .services import ArtifactDownload, ArtifactView
 
 _logger = environ.get_logger("ai.runtime.artifact")
@@ -67,8 +67,7 @@ class DefaultArtifactService:
         nonce = secrets.token_hex(16)
         request_digest = canonical_sha256({"action": "artifact.download", "tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest})
         now = datetime.now(timezone.utc)
-        operation = OperationLedgerRecord(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.blob_ref, record.digest, None, True, await self._persistence.operations.next_sequence(ResourceKind.DOWNLOAD_GRANT, artifact_id, tenant_id=principal.tenant_id), now, now)
-        await self._persistence.operations.create(operation)
+        operation = await self._persistence.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.blob_ref, record.digest, None, True, now, now))
         payload = {"tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest, "expires_at": expires_at, "nonce": nonce}
         signature = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
         token = _encode_grant({**payload, "hmac": signature})

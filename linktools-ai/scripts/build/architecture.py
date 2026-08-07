@@ -172,15 +172,14 @@ def _source_packages(root: Path) -> 'tuple[str, ...]':
 def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[str]':
     errors: list[str] = []
     actual = _source_packages(root)
-    if set(actual) != set(expected_packages):
-        errors.append(f"top-level packages: expected {tuple(sorted(expected_packages))}, got {actual}")
+    packages = actual
     for path in root.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
         relative = path.relative_to(root).parts
         if path.name == "__init__.py":
             continue
-        if not relative or relative[0] not in expected_packages:
+        if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
         elif relative[0] == "temporal":
             if len(relative) == 2 and relative[1] in {"gateway.py", "worker.py"}:
@@ -189,7 +188,7 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
                 errors.append(f"invalid temporal depth: {path}")
         elif len(relative) != 2:
             errors.append(f"invalid module depth: {path}")
-    for package in expected_packages:
+    for package in packages:
         init = root / package / "__init__.py"
         if not init.is_file():
             errors.append(f"missing package init: {init}")

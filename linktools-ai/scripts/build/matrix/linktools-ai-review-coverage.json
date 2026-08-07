@@ -1,13 +1,13 @@
 {
-  "findings": {"v2": 15, "v4": 11, "v5": 10, "v6": 8, "v7": 9, "v8": 5},
-  "status": "COMPLETE",
-  "open_findings": 0,
+  "spec": ".docs/linktools-ai-runtime-step-persistence-spec-v11-final.md",
+  "status": "CLEAN",
+  "open_findings": [],
   "uncovered": [],
-  "scope_exclusions": ["downstream-lockstep: migration and compatibility work explicitly excluded by the user"],
+  "scope_exclusions": ["migration and compatibility work explicitly excluded by the user"],
   "verification": {
-    "storage-full-parity": "verified by storage and asset conformance tests plus FILE/SQL restart and cross-instance checks",
-    "asset-full-parity": "verified by memory/file/SQL integration and manifest checks",
-    "production-temporal-chain": "verified against the installed Temporal SDK and decorated workflow/activity registration",
-    "downstream-lockstep": "excluded by user scope"
+    "memory_file_sqlite": "passed",
+    "mysql": "not_run_no_environment_accepted",
+    "postgresql": "not_run_no_environment_accepted",
+    "full_spec_review": "passed: cold-start architecture, dependency, schema, and terminal aggregate review"
   }
 }

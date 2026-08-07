@@ -13,11 +13,11 @@ from .factory import RuntimeDependencies, build_runtime, build_runtime_access
 from .session import DefaultSessionService, SessionApi, SessionQueryApi
 from .task import DefaultTaskService
 from .services import RuntimeServiceIdentity, RuntimeServices
-from .persistence import RuntimePersistence, RuntimePersistenceMode
+from .persistence import RuntimeBackend, RuntimePersistence, RuntimePersistenceMode
 
 __all__ = [
     "ApprovalApi", "ApprovalQueryApi", "DefaultApprovalService", "ArtifactApi", "DefaultArtifactService", "DefaultEventService", "DefaultExternalService", "EventApi", "DefaultEvaluationService", "EvaluationApi", "EvaluationQueryApi",
     "DefaultExecutionService", "ExecutionApi", "ExecutionQueryApi", "DefaultSessionService", "DefaultTaskService", "Runtime", "RuntimeAccess", "RuntimeDependencies",
     "RuntimeServiceIdentity", "RuntimeServices", "SessionApi", "SessionQueryApi", "build_runtime", "build_runtime_access",
-    "RuntimePersistence", "RuntimePersistenceMode",
+    "RuntimeBackend", "RuntimePersistence", "RuntimePersistenceMode",
 ]

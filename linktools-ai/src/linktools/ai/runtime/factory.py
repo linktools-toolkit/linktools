@@ -208,7 +208,7 @@ class _ExecutionApi(ExecutionApi):
         self._binding = binding
 
     async def run(self, request: ExecutionRequest) -> ExecutionHandle:
-        return await self._service.run(self._binding, request)
+        return await self._service.run(self._binding.digest, request)
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)
@@ -223,10 +223,10 @@ class _ExecutionApi(ExecutionApi):
         return await self._service.transcript(execution_id, principal=principal, cursor=cursor, limit=limit)
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
-        return await self._service.retry(self._binding, execution_id, request)
+        return await self._service.retry(self._binding.digest, execution_id, request)
 
     async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
-        return await self._service.fork(self._binding, execution_id, request)
+        return await self._service.fork(self._binding.digest, execution_id, request)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         return await self._service.cancel(execution_id, request)
@@ -255,7 +255,7 @@ class _SessionApi(SessionApi):
         self._binding = binding
 
     async def create(self, request: CreateSessionRequest) -> SessionView:
-        return await self._service.create(self._binding, request)
+        return await self._service.create(self._binding.digest, request)
 
     async def get(self, session_id: str, *, principal: Principal) -> SessionView:
         return await self._service.get(session_id, principal=principal)
@@ -267,13 +267,13 @@ class _SessionApi(SessionApi):
         return await self._service.load(session_id, principal=principal)
 
     async def resume(self, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
-        return await self._service.resume(self._binding, session_id, request)
+        return await self._service.resume(self._binding.digest, session_id, request)
 
     async def fork(self, session_id: str, request: ForkSessionRequest) -> SessionView:
-        return await self._service.fork(self._binding, session_id, request)
+        return await self._service.fork(self._binding.digest, session_id, request)
 
     async def update(self, session_id: str, request: UpdateSessionRequest) -> SessionView:
-        return await self._service.update(self._binding, session_id, request)
+        return await self._service.update(self._binding.digest, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         return await self._service.close(session_id, request)

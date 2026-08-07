@@ -10,11 +10,11 @@ from linktools.core import environ
 
 from ..agent.context import AgentBinding
 from ..core.errors import ErrorCode, LinktoolsAIError
-from ..core.ids import canonical_sha256
+from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.value import OperationKind, OperationStatus, Principal, ResourceKind, TaskStatus
 from ..task.model import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
-from .persistence import OperationLedgerRecord, RuntimePersistence
+from .persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence
 from .services import WorkflowGateway
 
 _logger = environ.get_logger("ai.runtime.task")
@@ -31,15 +31,15 @@ class DefaultTaskService:
     async def run_graph(self, binding: AgentBinding, request: TaskGraphRequest) -> TaskGraphResult:
         await self._authorization.authorize(request.principal, AuthorizationAction.TASK_RUN, ResourceRef(ResourceKind.TASK_GRAPH, request.graph.graph_id, request.principal.tenant_id))
         digest = canonical_sha256({"graph_id": request.graph.graph_id, "nodes": [node.task_id for node in request.graph.nodes], "binding": binding.digest, "limits": {"max_nodes": request.limits.max_nodes, "max_depth": request.limits.max_depth, "max_budget": request.limits.max_budget, "max_concurrency": request.limits.max_concurrency}})
-        existing = await self._persistence.operations.get(request.idempotency_key, tenant_id=request.principal.tenant_id)
+        operation_id = idempotency_key_hash(request.idempotency_key)
+        existing = await self._persistence.operations.get(operation_id, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != digest:
                 raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             view = await self._persistence.tasks.get_plan(request.graph.graph_id, tenant_id=request.principal.tenant_id)
             return TaskGraphResult(request.graph.graph_id, view.status if view else TaskStatus.PENDING, ())
         now = datetime.now(timezone.utc)
-        operation = OperationLedgerRecord(request.idempotency_key, request.principal.tenant_id, ResourceKind.TASK_GRAPH, request.graph.graph_id, None, OperationKind.TASK_NODE, OperationStatus.PENDING, digest, None, None, None, True, await self._persistence.operations.next_sequence(ResourceKind.TASK_GRAPH, request.graph.graph_id, tenant_id=request.principal.tenant_id), now, now)
-        await self._persistence.operations.create(operation)
+        operation = await self._persistence.operations.append(OperationLedgerInput(operation_id, request.principal.tenant_id, ResourceKind.TASK_GRAPH, request.graph.graph_id, None, OperationKind.TASK_NODE, OperationStatus.PENDING, digest, None, None, None, True, now, now))
         try:
             view = await self._persistence.tasks.create_plan(request.graph, tenant_id=request.principal.tenant_id)
             if self._workflow_gateway is not None and request.requested_profile.value == "production-service":
@@ -59,7 +59,7 @@ class DefaultTaskService:
                 ),
             )
             raise
-        await self._persistence.operations.compare_and_swap(request.idempotency_key, tenant_id=request.principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, view.graph_id, canonical_sha256({"graph_id": view.graph_id, "status": view.status.value}), None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
+        await self._persistence.operations.compare_and_swap(operation_id, tenant_id=request.principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, view.graph_id, canonical_sha256({"graph_id": view.graph_id, "status": view.status.value}), None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
         _logger.info("task graph submitted: graph=%s tenant=%s profile=%s", view.graph_id, request.principal.tenant_id, request.requested_profile)
         return TaskGraphResult(view.graph_id, view.status, ())
 
@@ -87,8 +87,9 @@ class DefaultTaskService:
                 "force": request.force,
             }
         )
+        operation_id = idempotency_key_hash(request.cancel_request_id)
         operation = await self._persistence.operations.get(
-            request.cancel_request_id,
+            operation_id,
             tenant_id=request.principal.tenant_id,
         )
         if operation is not None:
@@ -101,9 +102,9 @@ class DefaultTaskService:
                 return view
         else:
             now = datetime.now(timezone.utc)
-            operation = await self._persistence.operations.create(
-                OperationLedgerRecord(
-                    request.cancel_request_id,
+            operation = await self._persistence.operations.append(
+                OperationLedgerInput(
+                    operation_id,
                     request.principal.tenant_id,
                     ResourceKind.TASK_GRAPH,
                     graph_id,
@@ -115,11 +116,6 @@ class DefaultTaskService:
                     None,
                     None,
                     True,
-                    await self._persistence.operations.next_sequence(
-                        ResourceKind.TASK_GRAPH,
-                        graph_id,
-                        tenant_id=request.principal.tenant_id,
-                    ),
                     now,
                     now,
                 )

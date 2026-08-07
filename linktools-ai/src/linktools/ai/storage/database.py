@@ -6,6 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from urllib.parse import urlsplit, unquote
 from typing import TYPE_CHECKING, Protocol
 
 from ..core.errors import ErrorCode, LinktoolsAIError
@@ -41,8 +42,8 @@ class SqlSchemaContributor(Protocol):
 
 
 class SqlSchemaRegistry:
-    def __init__(self) -> None:
-        self._metadata = _new_metadata()
+    def __init__(self, metadata: "MetaData | None" = None) -> None:
+        self._metadata = _new_metadata() if metadata is None else metadata
         self._tables: dict[str, SqlTableManifest] = {}
         self._frozen = False
         self._manifest: SqlSchemaManifest | None = None
@@ -115,7 +116,19 @@ class StorageDatabase:
     session_factory: "async_sessionmaker[AsyncSession]"
     coordination_scope: CoordinationScope
     metadata: "MetaData"
+    target_identity: str
     schema_manifest_digest: str
+
+
+def dialect_for_url(url: str) -> str:
+    scheme = url.split(":", 1)[0]
+    if scheme == "sqlite+aiosqlite":
+        return "sqlite"
+    if scheme == "mysql+asyncmy":
+        return "mysql"
+    if scheme == "postgresql+asyncpg":
+        return "postgresql"
+    raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID, "unsupported SQL storage dialect")
 
 
 def scope_for_url(url: str) -> CoordinationScope:
@@ -143,6 +156,7 @@ def build_storage(
     metadata: "MetaData",
     schema_manifest_digest: str,
 ) -> StorageDatabase:
+    dialect = dialect_for_url(async_url)
     try:
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     except ModuleNotFoundError as error:
@@ -152,12 +166,34 @@ def build_storage(
                 "SQLAlchemy is required for SQL storage",
             ) from error
         raise
-    engine = create_async_engine(async_url)
+    try:
+        engine = create_async_engine(async_url)
+    except ModuleNotFoundError as error:
+        if error.name in {"aiosqlite", "asyncmy", "asyncpg"}:
+            raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, f"SQL driver is required for {dialect} storage") from error
+        raise
+    if dialect == "sqlite":
+        from sqlalchemy import event
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _configure_sqlite(connection: object, _: object) -> None:
+            cursor = connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                if str(cursor.fetchone()[0]).lower() != "wal":
+                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA busy_timeout=5000")
+            finally:
+                cursor.close()
+    parsed = urlsplit(async_url)
+    target = str(Path(unquote(parsed.path)).expanduser().resolve()) if dialect == "sqlite" else f"{dialect}:{parsed.hostname}:{parsed.port or 0}:{parsed.path.lstrip('/')}"
     return StorageDatabase(
         engine,
         async_sessionmaker(engine, expire_on_commit=False),
         scope_for_url(async_url),
         metadata,
+        target,
         schema_manifest_digest,
     )
 
@@ -202,6 +238,7 @@ __all__ = [
     "build_sqlite_storage",
     "build_storage",
     "close_storage",
+    "dialect_for_url",
     "sql_constraint_signature",
     "scope_for_url",
 ]

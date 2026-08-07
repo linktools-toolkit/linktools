@@ -1,7 +1,3 @@
-requires-python: ">=3.10"
-
-# The baseline wheel is assembled from this logical group. Runtime code never
-# discovers optional capabilities by importing an installed extra.
 dependencies:
   - pydantic-ai-slim[mcp,openai]==2.15.0
   - pydantic-ai-harness==0.9.0
@@ -37,6 +33,12 @@ optional-dependencies:
   storage-sqlite:
     - sqlalchemy[asyncio]==2.0.51
     - aiosqlite==0.22.1
+  storage-mysql:
+    - sqlalchemy[asyncio]==2.0.51
+    - asyncmy==0.2.11
+  storage-postgresql:
+    - sqlalchemy[asyncio]==2.0.51
+    - asyncpg==0.31.0
   evaluation:
     - pydantic-evals==0.1.0
   dev:

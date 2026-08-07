@@ -4,7 +4,7 @@
 
 from .cache import ContentCache, FilesystemContentCache, MemoryContentCache, TieredContentCache
 from .composition import CacheAdapter, StorageAdapter, StorageComposition, StorageLayer
-from .database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage
+from .database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage, dialect_for_url
 from .dialects import (
     IntegrityViolationKind,
     InsertResult,
@@ -46,7 +46,7 @@ from .model import (
 )
 from .names import TABLE_PREFIX, storage_name
 from .revision import BackendRevisionSource, LayerMetadataView, RevisionSource
-from .lock import FileLeaseCoordinator, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
+from .lock import FileLeaseCoordinator, FileWriterLock, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
 
 __all__ = [
     "BackendRevisionSource",
@@ -56,6 +56,7 @@ __all__ = [
     "ContentCache",
     "CoordinationScope",
     "FileLeaseCoordinator",
+    "FileWriterLock",
     "FilesystemContentCache",
     "IntegrityViolationKind",
     "InsertResult",
@@ -110,6 +111,7 @@ __all__ = [
     "build_sqlite_storage",
     "build_storage",
     "close_storage",
+    "dialect_for_url",
     "initialize_storage",
     "read_bytes",
     "read_json",

@@ -53,7 +53,6 @@ STAGE_POLICIES: Mapping[str, StagePolicy] = {
     "load_resume_input": StagePolicy(30, 3),
     "commit_result": StagePolicy(60, 3, True),
     "settle_budget": StagePolicy(30, 3),
-    "append_event": StagePolicy(30, 3),
     "cancel_effect": StagePolicy(60, 3, True),
     "blob_put": StagePolicy(300, 3, True),
 }
@@ -173,8 +172,6 @@ class ExecutionWorkflow:
                 state = await _commit_result(state)
                 self._state = state
                 state = await _settle_budget(state)
-                self._state = state
-                state = await _append_event(state)
                 self._state = state
             if state.last_event_sequence >= CONTINUE_EVENT_THRESHOLD:
                 _temporal_workflow.continue_as_new(args=(request, state))
@@ -437,10 +434,6 @@ async def _commit_result(state: ExecutionWorkflowState) -> ExecutionWorkflowStat
 
 async def _settle_budget(state: ExecutionWorkflowState) -> ExecutionWorkflowState:
     return _validate_activity_result(state, await _execute_activity("settle_budget", state), "settle_budget")
-
-
-async def _append_event(state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-    return _validate_activity_result(state, await _execute_activity("append_event", state), "append_event")
 
 
 async def _cancel_effect(state: ExecutionWorkflowState) -> ExecutionWorkflowState:

@@ -43,8 +43,4 @@ class SubagentProvider(Protocol):
     async def launcher(self) -> RunLauncher: ...
 
 
-class AgentBackedSubagentProvider(SubagentProvider, Protocol):
-    pass
-
-
-__all__ = ["AgentBackedSubagentProvider", "RunLauncher", "SubagentProvider", "SubagentRunRequest", "SubagentRunResult"]
+__all__ = ["RunLauncher", "SubagentProvider", "SubagentRunRequest", "SubagentRunResult"]

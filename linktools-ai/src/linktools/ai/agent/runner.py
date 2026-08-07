@@ -17,6 +17,8 @@ from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
     ModelMessage,
+    ModelRequest,
+    ModelResponse,
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
@@ -27,18 +29,17 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from linktools.core import environ
 
 from ..core.errors import ErrorCode, LinktoolsAIError
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
-from .context import AgentBinding
 
 
 class AgentRunner(Protocol):
-    async def run(self, binding: AgentBinding, prompt: str) -> str: ...
-    async def resume(self, binding: AgentBinding, execution_id: str, prompt: str) -> str: ...
+    async def run(self, agent_id: "str | None", prompt: str, history: "list[ModelMessage]", conversation_id: str, *, step_store: StepStore, step_run_id: str, segment_sequence: int, parent_step_run_id: "str | None" = None, on_event: "LocalEventHandler | None" = None) -> "LocalAgentResult": ...
 
 
 class LocalTool(Protocol):
@@ -88,38 +89,66 @@ class LocalAgentRunner:
         history: 'list[ModelMessage]',
         conversation_id: str,
         *,
+        step_store: StepStore,
+        step_run_id: str,
+        segment_sequence: int,
+        parent_step_run_id: str | None = None,
         on_event: 'LocalEventHandler | None' = None,
     ) -> LocalAgentResult:
+        selected_agent_name = self._selected_agent_name(agent_id)
+        existing = await step_store.get_run(run_id=step_run_id)
+        if existing is not None:
+            raise _SegmentAlreadyStarted(step_run_id)
         agent = await self._get_agent(agent_id)
-        self._logger.info("agent runner started: agent=%s conversation=%s", agent_id or "default", conversation_id)
+        step_persistence = StepPersistence(
+            store=step_store,
+            agent_name=None,
+            run_id=step_run_id,
+            parent_run_id=parent_step_run_id,
+            metadata={"segment_sequence": str(segment_sequence), "agent_name": selected_agent_name},
+        )
+        self._logger.info("agent runner started: agent=%s conversation=%s step=%s segment=%s", selected_agent_name, conversation_id, step_run_id, segment_sequence)
         final_result = None
         output_parts: list[str] = []
-        async with agent.run_stream_events(
-            prompt,
-            message_history=history or None,
-            conversation_id=conversation_id,
-        ) as events:
-            async for event in events:
-                if isinstance(event, AgentRunResultEvent):
-                    final_result = event.result
-                    continue
-                mapped = _map_event(event)
-                if mapped is None:
-                    continue
-                if mapped["type"] == "text":
-                    output_parts.append(str(mapped["text"]))
-                if on_event is not None:
-                    pending = on_event(mapped)
-                    if pending is not None:
-                        await pending
+        try:
+            async with agent.run_stream_events(
+                prompt,
+                message_history=history or None,
+                conversation_id=conversation_id,
+                capabilities=(step_persistence,),
+            ) as events:
+                async for event in events:
+                    if isinstance(event, AgentRunResultEvent):
+                        final_result = event.result
+                        continue
+                    mapped = _map_event(event)
+                    if mapped is None:
+                        continue
+                    if mapped["type"] == "text":
+                        output_parts.append(str(mapped["text"]))
+                    if on_event is not None:
+                        pending = on_event(mapped)
+                        if pending is not None:
+                            await pending
+        except LinktoolsAIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT and await step_store.get_run(run_id=step_run_id) is not None:
+                raise _SegmentAlreadyStarted(step_run_id) from error
+            raise
         if final_result is None:
             raise RuntimeError("Agent ended without a result")
-        result = cast("LocalAgentResult", LocalAgentResult(final_result.run_id, "".join(output_parts) or str(final_result.output), final_result.all_messages()))
+        record = await step_store.get_run(run_id=step_run_id)
+        if record is None or record.conversation_id != conversation_id or record.metadata.get("segment_sequence") != str(segment_sequence) or record.metadata.get("agent_name") != selected_agent_name:
+            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        messages = final_result.all_messages()
+        message_run_ids = {message.run_id for message in messages if isinstance(message, (ModelRequest, ModelResponse))}
+        if message_run_ids and message_run_ids != {final_result.run_id}:
+            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result = cast("LocalAgentResult", LocalAgentResult(final_result.run_id, "".join(output_parts) or str(final_result.output), messages))
         self._logger.info("agent runner completed: agent=%s run=%s", agent_id or "default", result.run_id)
         return result
 
     async def _get_agent(self, agent_id: 'str | None') -> 'Agent[None, str]':
-        selected = agent_id or str(self._config.get("default_agent", "default"))
+        selected = self._selected_agent_name(agent_id)
         instructions = await asyncio.to_thread(self._instructions, selected)
         model = self._model or self._config.get("model") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
         cache_key = (selected, canonical_sha256({
@@ -162,7 +191,7 @@ class LocalAgentRunner:
             return cached
 
     def _instructions(self, agent_id: 'str | None') -> str:
-        selected = agent_id or str(self._config.get("default_agent", "default"))
+        selected = self._selected_agent_name(agent_id)
         _validate_agent_id(selected)
         configured = self._config.get("instructions")
         if isinstance(configured, str) and configured.strip():
@@ -191,6 +220,19 @@ class LocalAgentRunner:
             except UnicodeDecodeError as error:
                 raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID) from error
         return ""
+
+    def _selected_agent_name(self, agent_id: str | None) -> str:
+        selected = agent_id or str(self._config.get("default_agent", "default"))
+        _validate_agent_id(selected)
+        return selected
+
+
+class _SegmentAlreadyStarted(RuntimeError):
+    """Private control-flow signal used to fence a duplicate segment launch."""
+
+    def __init__(self, step_run_id: str) -> None:
+        super().__init__(step_run_id)
+        self.step_run_id = step_run_id
 
 
 def _validate_agent_id(agent_id: str) -> None:

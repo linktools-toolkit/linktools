@@ -12,7 +12,7 @@ from linktools.core import environ
 from ..core import Principal
 from ..core.errors import ErrorCode, LinktoolsAIError
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core.ids import canonical_sha256
+from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.value import EvaluationStatus, ExecutionProfile, IdempotencyStatus, ResourceKind
 from ..agent.context import AgentBinding
 from ..observe.snapshot import RunSnapshot
@@ -73,9 +73,10 @@ class DefaultEvaluationService:
 
     async def run(self, binding: AgentBinding, request: RunEvaluationRequest) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
+        key_hash = idempotency_key_hash(request.idempotency_key)
         await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
         request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding.digest})
-        existing = await self._persistence.idempotency.get("evaluation.run", request.idempotency_key, tenant_id=request.principal.tenant_id)
+        existing = await self._persistence.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -83,7 +84,7 @@ class DefaultEvaluationService:
                 raise _stable_error(existing.error_code, ErrorCode.STORAGE_UNAVAILABLE)
             return EvaluationHandle(existing.execution_id)
         now = datetime.now(timezone.utc)
-        await self._persistence.idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
+        await self._persistence.idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
         try:
             execution = await self._execution.run(binding, ExecutionRequest(f"evaluation:{request.dataset_digest}", request.principal, ExecutionProfile.LOCAL_CODING, f"evaluation:{request.idempotency_key}"))
             record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding.digest, binding.output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
@@ -91,17 +92,18 @@ class DefaultEvaluationService:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            current = await self._persistence.idempotency.get("evaluation.run", request.idempotency_key, tenant_id=request.principal.tenant_id)
+            current = await self._persistence.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
             if current is not None and current.status is IdempotencyStatus.RESERVED:
                 error_code = error.code.value if isinstance(error, LinktoolsAIError) else ErrorCode.STORAGE_UNAVAILABLE.value
                 await self._persistence.idempotency.compare_and_swap(
                     "evaluation.run",
-                    request.idempotency_key,
+                    key_hash,
+                    tenant_id=request.principal.tenant_id,
                     expected_status=IdempotencyStatus.RESERVED,
-                    next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.FAILED, None, error_code, current.created_at, datetime.now(timezone.utc)),
+                    next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.FAILED, None, error_code, current.created_at, datetime.now(timezone.utc)),
                 )
             raise
-        await self._persistence.idempotency.compare_and_swap("evaluation.run", request.idempotency_key, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", request.idempotency_key, request_digest, evaluation_id, IdempotencyStatus.COMPLETED, None, None, now, datetime.now(timezone.utc)))
+        await self._persistence.idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.COMPLETED, None, None, now, datetime.now(timezone.utc)))
         _logger.info("evaluation submitted: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id)
         return EvaluationHandle(evaluation_id)
 

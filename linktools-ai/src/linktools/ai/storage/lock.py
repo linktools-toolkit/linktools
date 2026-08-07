@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 from linktools.core import environ
+from ..core.errors import ErrorCode, LinktoolsAIError
 
 
 _logger = environ.get_logger("ai.storage.lock")
@@ -198,6 +199,39 @@ def _lease_guard(root: Path, key: str) -> Iterator[None]:
             fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
 
 
+class FileWriterLock:
+    """Hold a non-blocking advisory lock for a runtime lifetime."""
+
+    def __init__(self, path: "str | Path") -> None:
+        self.path = Path(path)
+        self._descriptor: int | None = None
+
+    async def acquire(self) -> None:
+        if self._descriptor is not None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = await asyncio.to_thread(os.open, self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(descriptor)
+            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT) from error
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._descriptor = descriptor
+        _logger.info("runtime writer lock acquired: path=%s", self.path)
+
+    async def release(self) -> None:
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is None:
+            return
+        await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+        _logger.info("runtime writer lock released: path=%s", self.path)
+
+
 def _read_record(path: Path) -> 'dict[str, str | int | float]':
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -248,4 +282,4 @@ def _write_record(path: Path, record: 'dict[str, str | int | float]') -> None:
     os.replace(temporary, path)
 
 
-__all__ = ["FileLeaseCoordinator", "KeyedAsyncLock", "Lease", "ProcessLeaseCoordinator"]
+__all__ = ["FileLeaseCoordinator", "FileWriterLock", "KeyedAsyncLock", "Lease", "ProcessLeaseCoordinator"]

@@ -23,13 +23,14 @@ from ..task.model import (
     TaskGraphView,
 )
 from ..agent.context import AgentBinding
-from .persistence import BlobRef, BlobStore, RuntimePersistenceMode, validate_runtime_profile
+from .persistence import BlobRef, BlobStore, RuntimeBackend, validate_runtime_profile
 
 
 @dataclass(frozen=True, slots=True)
 class RuntimeServiceIdentity:
     service_id: str
     persistence_digest: str
+    backend: RuntimeBackend
     profile: ExecutionProfile
 
     def __post_init__(self) -> None:
@@ -39,7 +40,7 @@ class RuntimeServiceIdentity:
 
 def new_runtime_service_identity(
     *,
-    mode: str = "MEMORY",
+    backend: RuntimeBackend = RuntimeBackend.MEMORY,
     namespace: str = "default",
     atomic_domain_id: str = "default",
     schema_digest: str = "memory",
@@ -47,9 +48,9 @@ def new_runtime_service_identity(
     temporal_enabled: bool = False,
     local_trusted: bool = False,
 ) -> RuntimeServiceIdentity:
-    validate_runtime_profile(RuntimePersistenceMode(mode), profile, temporal_enabled=temporal_enabled, local_trusted=local_trusted)
-    persistence_digest = canonical_sha256({"mode": mode, "namespace": namespace, "atomic_domain_id": atomic_domain_id, "schema_digest": schema_digest, "blob_schema_version": 1})
-    return RuntimeServiceIdentity(_uuid7(), persistence_digest, profile)
+    validate_runtime_profile(backend, profile, temporal_enabled=temporal_enabled, local_trusted=local_trusted)
+    persistence_digest = canonical_sha256({"backend": backend.value, "namespace": namespace, "atomic_domain_id": atomic_domain_id, "schema_digest": schema_digest, "blob_schema_version": 1})
+    return RuntimeServiceIdentity(_uuid7(), persistence_digest, backend, profile)
 
 
 def _uuid7() -> str:
@@ -78,19 +79,23 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
+    prompt: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
+        validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
+    prompt: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
+        validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -144,11 +149,32 @@ class TranscriptItem:
     text: str
 
 
+class ExecutionHistoryReader(Protocol):
+    async def trace(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[TraceItem]: ...
+
+    async def transcript(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[TranscriptItem]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class CreateSessionRequest:
     principal: Principal
     session_id: str
     create_request_id: str
+    cwd: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.create_request_id)
@@ -177,6 +203,7 @@ class ForkSessionRequest:
     principal: Principal
     new_session_id: str
     idempotency_key: str = ""
+    cwd: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
@@ -443,24 +470,24 @@ class WorkflowGateway(Protocol):
 
 
 class ExecutionService(Protocol):
-    async def run(self, binding: AgentBinding, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
-    async def retry(self, binding: AgentBinding, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
-    async def fork(self, binding: AgentBinding, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
+    async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
+    async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
     async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TraceItem]': ...
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
 
 
 class SessionService(Protocol):
-    async def create(self, binding: AgentBinding, request: CreateSessionRequest) -> SessionView: ...
+    async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
-    async def resume(self, binding: AgentBinding, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
-    async def fork(self, binding: AgentBinding, session_id: str, request: ForkSessionRequest) -> SessionView: ...
-    async def update(self, binding: AgentBinding, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
+    async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
+    async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
+    async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView: ...
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView: ...
 
 
@@ -567,6 +594,7 @@ __all__ = [
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
     "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStreamItem", "ExecutionView",
+    "ExecutionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
     "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "RuntimeServices", "SessionService", "SessionView",

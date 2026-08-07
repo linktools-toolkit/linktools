@@ -27,10 +27,10 @@ from .validation import (
     validate_resource_id, validate_shell_timeout, validate_tenant_id, validate_tool_arguments,
 )
 from .value import (
-    ApprovalDecision, ApprovalStatus, BlobStatus, CaptureState, EvaluationStatus,
-    ExecutionEventType, ExecutionProfile, ExecutionStatus, ExternalCallStatus,
+    ApprovalDecision, ApprovalStatus, BlobStatus, EvaluationStatus,
+    ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, ExternalCallStatus,
     IdempotencyStatus, OperationKind, OperationStatus, Principal, PrincipalKind,
-    ResourceKind, SessionStatus, StopReason, TaskStatus, ToolOperationStatus, TraceKind,
+    ResourceKind, SessionStatus, StopReason, TaskStatus, ToolOperationStatus,
     profile_available, require_profile_available,
 )
 
@@ -68,10 +68,10 @@ __all__ = [
     "deterministic_id",
     "profile_available",
     "require_profile_available",
-    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "CaptureState", "EvaluationStatus",
-    "ExecutionEventType", "ExecutionStatus", "ExternalCallStatus", "IdempotencyStatus",
+    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
+    "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus", "IdempotencyStatus",
     "OperationKind", "OperationStatus", "ResourceKind", "SessionStatus", "StopReason",
-    "TaskStatus", "ToolOperationStatus", "TraceKind",
+    "TaskStatus", "ToolOperationStatus",
     "validate_agent_id", "validate_enum", "validate_external_payload", "validate_idempotency_key",
     "validate_observation_payload", "validate_page_limit", "validate_principal_id", "validate_prompt",
     "validate_resource_id", "validate_shell_timeout", "validate_tenant_id", "validate_tool_arguments",

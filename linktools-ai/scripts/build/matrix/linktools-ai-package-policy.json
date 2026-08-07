@@ -17,17 +17,12 @@
     "entry": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "local", "adapter", "temporal"]
   },
   "module_dependencies": {
-    "adapter.execution": ["core", "runtime", "observe"],
-    "adapter.session": ["core", "storage", "runtime"],
-    "adapter.task": ["core", "storage", "task"],
-    "adapter.evaluation": ["core", "storage", "runtime"],
-    "adapter.blob": ["core"],
+    "adapter.sql": ["core", "storage", "runtime", "capability", "task"],
     "adapter.nats": ["core", "observe"],
     "adapter.logfire": ["core", "observe"],
     "adapter.provider": ["core", "model"],
     "adapter.principal": ["core"],
     "adapter.schema": ["core", "storage"],
-    "adapter.tool": ["core", "storage", "capability"],
     "runtime.factory": ["core", "spec", "model", "observe", "capability", "task", "agent"],
     "runtime.services": ["core", "observe", "task", "agent"],
     "agent.context": ["core", "spec", "model"]

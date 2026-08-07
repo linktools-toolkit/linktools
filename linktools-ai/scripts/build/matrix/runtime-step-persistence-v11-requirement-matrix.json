@@ -1,0 +1,22 @@
+{
+  "spec": "linktools-ai-runtime-step-persistence-spec-v11-final.md",
+  "baseline_commit": "6c1d4a25f2312c3c8827503b290f730d489e5a4f",
+  "status": "complete",
+  "requirements": [
+    {"id": "G-01", "status": "implemented", "evidence": ["pydantic-ai-harness==0.9.0", "tests/ai/persistence/test_harness_contract.py"]},
+    {"id": "G-02", "status": "implemented", "evidence": ["tests/ai/persistence/test_runtime_store_bundle.py", "local/step.py", "adapter/step.py"]},
+    {"id": "G-03", "status": "implemented", "evidence": ["import linktools.ai loads without SQL optional modules"]},
+    {"id": "G-04", "status": "implemented", "evidence": ["tests/ai/persistence/test_architecture_v11.py"]},
+    {"id": "G-05", "status": "implemented", "evidence": ["ExecutionStartClaim", "claim_next_agent_run", "DurableFileStepStore"]},
+    {"id": "G-06", "status": "implemented_not_live", "evidence": ["tests/ai/persistence/test_mysql.py", "tests/ai/persistence/test_postgresql.py", "not_run_no_environment_accepted"]},
+    {"id": "STEP_IDS", "status": "implemented", "evidence": ["core/ids.py", "tests/ai/persistence/test_harness_contract.py"]},
+    {"id": "FILE_DURABILITY", "status": "implemented", "evidence": ["local/step.py", "tests/ai/persistence/test_file_step_store.py"]},
+    {"id": "SQL_NAMESPACE", "status": "implemented", "evidence": ["adapter/schema.py", "adapter/sql.py", "adapter/step.py"]},
+    {"id": "HISTORY_PROJECTION", "status": "implemented", "evidence": ["entry/services.py::_StepExecutionHistoryReader"]},
+    {"id": "SESSION_HEAD", "status": "implemented", "evidence": ["runtime/persistence.py", "runtime/session.py", "local/runtime.py"]}
+  ],
+  "live_database_evidence": {
+    "mysql": "not_run_no_environment_accepted",
+    "postgresql": "not_run_no_environment_accepted"
+  }
+}

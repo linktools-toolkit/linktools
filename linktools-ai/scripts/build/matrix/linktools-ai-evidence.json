@@ -1,47 +1,30 @@
 {
-  "spec": ".docs/linktools-ai-comprehensive-repair-spec-824af4b-final.md",
-  "base_commit": "824af4bca603ed33758ebfe52e1ca3934ec7d0a1",
-  "linktools_ai_commit": null,
-  "working_tree_source_digest": "e671a66d9b82add8d5a9c6329e570d46205e651e1847f4e1044b21ebb0a5a352",
-  "status": "COMPLETE",
+  "spec": ".docs/linktools-ai-runtime-step-persistence-spec-v11-final.md",
+  "baseline_commit": "6c1d4a25f2312c3c8827503b290f730d489e5a4f",
+  "status": "CLEAN",
+  "open_findings": [],
   "environment": {
     "python": "3.13",
-    "database": "sqlite+aiosqlite",
-    "temporal": "1.31.0 installed and import-verified",
-    "profile": "local-coding"
+    "pydantic_ai_harness": "0.9.0",
+    "pydantic_ai_slim": "2.15.0",
+    "ruff": "passed",
+    "mysql_server": "not_run_no_environment_accepted",
+    "postgresql_server": "not_run_no_environment_accepted"
   },
-  "results": {
-    "ai_tests": "34 passed",
-    "compileall": "passed",
-    "git_diff_check": "passed",
-    "architecture_names_cohesion": "passed",
-    "dangerous_pattern_scan": "passed: 0 matches",
-    "cold_start_imports": "passed: 120 modules, 0 failures",
-    "sql_schema_manifest": "passed: e251630002967bd2bbf5c7721ac125367e19649474b9e8d18cb2c48dc9e378e6 (24 tables)",
-    "sqlite_schema_create_all": "passed",
-    "file_sql_restart_and_cross_instance": "passed",
-    "local_start_cancel_reconcile": "passed",
-    "cursor_tenant_redaction_profile_checks": "passed",
-    "downstream_import_baseline": "excluded by user scope: migration and compatibility work are not part of this implementation",
-    "migration_tests": "excluded by user scope: migration and compatibility work are not part of this implementation",
-    "cold_start_review": "passed: independent architecture, import, persistence, lifecycle, cursor, redaction, profile-boundary and test review",
-    "evidence_commit_binding": "passed: reviewed HEAD plus working_tree_source_digest"
+  "runtime_backends": {
+    "memory": "passed",
+    "file": "passed",
+    "sqlite": "passed",
+    "mysql": "implemented_not_run_no_environment_accepted",
+    "postgresql": "implemented_not_run_no_environment_accepted"
   },
-  "artifact_hashes": {
-    "scripts/build/matrix/agent-golden.json": "7b685646d987054c3c2fa864571ca3b1ed703b6b2388e4bcdd8dd8bcda3309ca",
-    "scripts/build/matrix/asset-file-layout.json": "3c14955d00724213a996bc21d2ec9eba82fd79ece65aebd1327cb15ff1bbecd1",
-    "scripts/build/matrix/codec-manifest.json": "b0bd2a5de40d965906fe09102b842a9ca4bb31c8e3953d5537886d5d619d4a9f",
-    "scripts/build/matrix/linktools-ai-package-policy.json": "72cf9b50b1f29e1ead6d3132c586af211260d5288f817b732680d60669609d6a",
-    "scripts/build/matrix/linktools-ai-review-coverage.json": "beca750f50be2b7e99dababb60b56056859e60e7a556259afc9cc6176cb3b688",
-    "scripts/build/matrix/linktools-ai-traceability.json": "9c34409d459a3f45c8bdf661ecf9718f29ceb8a7183f74511914ad1410a491f7",
-    "scripts/build/matrix/requirements-lock.json": "e01281b8b18fd7ca7d876b3435e6b9a4093a2ddd50881f18f4ad736178266eb7",
-    "scripts/build/matrix/sql-data-manifest.json": "89abd69a9bf98e1b2be9c5f09a1d0365cd846eb3955f94dc69b90727982430d5",
-    "scripts/build/matrix/sql-schema-manifest.json": "bc67cee93fd739995a9c5fd18866054ba04e742c9ed83e7b10ae0dfa25d1d993",
-    "scripts/build/matrix/spec-field-manifest.json": "9f35005b1a6834b63a0eeee6d7a2ed44d2ad9b1aa854e3a923421fe7ea62f0f3"
-  },
-  "scope_exclusions": [
-    "downstream repository migration and compatibility changes, explicitly excluded by the user",
-    "legacy compatibility-only tests and migration fixtures, explicitly excluded by the user"
-  ],
-  "open_findings": []
+  "mandatory": {
+    "conformance": "passed: 54 tests, 2 optional live tests skipped without environment",
+    "concurrency": "passed: service claim_start winner, memory and durable store checks",
+    "fault_injection": "passed: FILE runtime mutation rollback/reload boundary",
+    "security": "passed: hashed FILE paths and SQL URL repr redaction",
+    "public_api": "passed: baseline import does not load SQL optional modules",
+    "architecture": "passed: compileall, ruff, architecture gate",
+    "schema": "implemented: separate runtime/step metadata registries; fresh digest manifest"
+  }
 }

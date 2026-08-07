@@ -37,11 +37,11 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
     for table_name, table in database.metadata.tables.items():
         primary_key = set(inspector.get_pk_constraint(table_name).get("constrained_columns", ()))
         actual_columns = {
-            f"{column['name']}:{_type_name(column['type'])}:{int(bool(column['nullable']))}:{int(column['name'] in primary_key)}"
+            f"{column['name']}:{_type_name(column['type'], column['name'])}:{int(bool(column['nullable']))}:{int(column['name'] in primary_key)}"
             for column in inspector.get_columns(table_name)
         }
         expected_columns = {
-            f"{column.name}:{_type_name(column.type.dialect_impl(connection.dialect))}:{int(bool(column.nullable))}:{int(column.primary_key)}"
+            f"{column.name}:{_type_name(column.type.dialect_impl(connection.dialect), column.name)}:{int(bool(column.nullable))}:{int(column.primary_key)}"
             for column in table.columns
         }
         if actual_columns != expected_columns:
@@ -70,6 +70,7 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
         actual_indexes = {
             f"{item.get('name') or ''}:{','.join(item.get('column_names', ())) }"
             for item in inspector.get_indexes(table_name)
+            if not item.get("unique")
         }
         expected_indexes = {
             index.name + ":" + ",".join(column.name for column in index.columns)
@@ -79,9 +80,15 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
         if actual_indexes != expected_indexes:
             raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-def _type_name(value: _SqlTypeValue) -> str:
+
+def _type_name(value: _SqlTypeValue, column_name: "str | None" = None) -> str:
     name = str(value)
-    return "JSON" if name == "_SQliteJson()" else name
+    normalized = name.upper()
+    if "JSON" in normalized or (column_name == "payload" and normalized in {"LONGTEXT", "TEXT"}):
+        return "JSON"
+    if normalized in {"DATETIME", "TIMESTAMP"}:
+        return "TIMESTAMP"
+    return name
 
 
 __all__ = ["initialize_storage"]

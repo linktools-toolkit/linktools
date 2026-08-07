@@ -9,9 +9,9 @@ from linktools.core import environ
 
 from ..core import Principal
 from ..core.errors import ErrorCode, LinktoolsAIError
-from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
+from ..core.principal import AuthorizationAction, AuthorizationPolicy
 from ..core.value import ApprovalStatus
-from .persistence import ApprovalRecord, RuntimePersistence
+from .persistence import RuntimePersistence
 from .services import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, WorkflowGateway
 
 _logger = environ.get_logger("ai.runtime.approval")

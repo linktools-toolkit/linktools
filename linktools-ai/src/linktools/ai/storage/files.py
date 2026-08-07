@@ -31,6 +31,7 @@ def read_bytes(path: Path) -> bytes:
 def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    replaced = False
     try:
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(value)
@@ -38,14 +39,17 @@ def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None
                 handle.flush()
                 os.fsync(handle.fileno())
         os.replace(temporary, path)
+        replaced = True
         if fsync:
             directory = os.open(path.parent, os.O_DIRECTORY)
             try:
                 os.fsync(directory)
             finally:
                 os.close(directory)
-    except BaseException:
+    except BaseException as error:
         Path(temporary).unlink(missing_ok=True)
+        if replaced:
+            raise LinktoolsAIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
         raise
 
 

@@ -9,11 +9,11 @@ from .model import CapabilityManifest, CapabilityRef
 from .retrieval import RetrievalProvider
 from .sandbox import Sandbox
 from .skill import SkillProvider, SkillSpec
-from .subagent import AgentBackedSubagentProvider, RunLauncher, SubagentProvider, SubagentRunRequest, SubagentRunResult
+from .subagent import RunLauncher, SubagentProvider, SubagentRunRequest, SubagentRunResult
 from .tool import ToolOperationRecord, ToolPolicy, ToolStateStore
 
 __all__ = [
-    "AgentBackedSubagentProvider", "CapabilityCodec", "CapabilityManifest", "CapabilityRef",
+    "CapabilityCodec", "CapabilityManifest", "CapabilityRef",
     "ExtensionProvider", "MCPCallRequest", "MCPConnectionPool", "MCPServerSpec", "MCPToolProvider", "validate_mcp_response",
     "MCPServerSpecCodec", "RetrievalProvider", "RunLauncher", "Sandbox", "SkillProvider", "SkillSpec",
     "SkillSpecCodec",

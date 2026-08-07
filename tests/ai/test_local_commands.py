@@ -18,7 +18,7 @@ from linktools.ai.core.json import JsonValue
 from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
 from linktools.ai.capability.tool import ToolOperationRecord
 from linktools.ai.core.value import ToolOperationStatus
-from linktools.ai.local import LocalAgentRuntime, LocalExecutionRecord, LocalProject, LocalRecordStore, LocalRunResult, build_file_runtime
+from linktools.ai.local import LocalAgentRuntime, LocalProject, LocalRunResult, build_file_runtime
 from linktools.ai.local.tool import build_local_tools
 from linktools.commands.ai.run import command as run_command
 
@@ -32,7 +32,7 @@ def test_ai_run_executes_the_local_test_model(tmp_path: Path, capsys, monkeypatc
     monkeypatch.chdir(tmp_path)
     assert run_command.run(args) == 0
     assert "success (no tool calls)" in capsys.readouterr().out
-    assert (tmp_path / ".linktools/sessions/main.json").is_file()
+    assert (tmp_path / ".linktools/runtime").is_dir()
 
 
 def test_ai_run_separates_work_and_runtime_storage(tmp_path: Path, capsys, monkeypatch) -> None:
@@ -59,9 +59,9 @@ def test_ai_run_separates_work_and_runtime_storage(tmp_path: Path, capsys, monke
     monkeypatch.chdir(tmp_path)
     assert run_command.run(args) == 0
     capsys.readouterr()
-    assert (storage_root / ".linktools/sessions/main.json").is_file()
-    assert (storage_root / ".linktools/records").is_dir()
-    assert not (work_root / ".linktools/sessions/main.json").exists()
+    assert (storage_root / ".linktools/runtime").is_dir()
+    assert (storage_root / "steps").is_dir()
+    assert not (work_root / ".linktools/runtime").exists()
 
 
 def test_local_runtime_forwards_each_text_delta(tmp_path: Path) -> None:
@@ -134,7 +134,7 @@ def test_local_runtime_idempotency_and_observer_isolation(tmp_path: Path) -> Non
         await asyncio.sleep(0.01)
         yield "answer"
 
-    async def run() -> tuple[LocalRunResult, LocalRunResult]:
+    async def run() -> tuple[LocalRunResult, LocalRunResult, LocalAgentRuntime]:
         project = LocalProject.discover(tmp_path)
         runtime = LocalAgentRuntime(
             project,
@@ -148,11 +148,12 @@ def test_local_runtime_idempotency_and_observer_isolation(tmp_path: Path) -> Non
             runtime.run("main", "hello", idempotency_key="same", on_event=broken_observer),
             runtime.run("main", "hello", idempotency_key="same"),
         )
-        return first, second
+        return first, second, runtime
 
-    first, second = asyncio.run(run())
+    first, second, runtime = asyncio.run(run())
     assert first.execution_id == second.execution_id
     assert calls == 1
+    asyncio.run(runtime.close())
 
     async def conflict() -> None:
         project = LocalProject.discover(tmp_path)
@@ -174,32 +175,6 @@ def test_local_runtime_idempotency_and_observer_isolation(tmp_path: Path) -> Non
     asyncio.run(conflict())
 
 
-def test_local_record_store_marks_interrupted_runs_after_restart(tmp_path: Path) -> None:
-    async def run() -> LocalExecutionRecord | None:
-        timestamp = datetime.now(timezone.utc)
-        store = LocalRecordStore(tmp_path, "project")
-        await store.save(
-            LocalExecutionRecord(
-                "project",
-                "session",
-                0,
-                str(tmp_path),
-                "execution",
-                "STARTED",
-                timestamp,
-                timestamp,
-                None,
-            )
-        )
-        restarted = LocalRecordStore(tmp_path, "project")
-        return await restarted.get("execution")
-
-    record = asyncio.run(run())
-    assert record is not None
-    assert record.status == "CANCELLED"
-    assert record.stop_reason == "PROCESS_RESTARTED"
-
-
 def test_local_tool_state_survives_restart(tmp_path: Path) -> None:
     async def run() -> ToolOperationRecord | None:
         timestamp = datetime.now(timezone.utc)
@@ -207,7 +182,7 @@ def test_local_tool_state_survives_restart(tmp_path: Path) -> None:
         await first.initialize()
         await first.persistence.tools.reserve(
             ToolOperationRecord(
-                "operation", "project", "run", "call", "idempotency", "tool", "arguments", "binding", True,
+                "operation", "project", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
                     ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
             )
         )
