@@ -49,6 +49,8 @@ single-node database. MySQL uses
 `RuntimeStoreConfig.mysql("mysql+asyncmy://...", namespace=..., deployment_id=...)`.
 SQL drivers are loaded only when the corresponding backend is opened.
 
-See `.docs/linktools-ai-cc2beeb-fix-spec-v5-final.md` and the checked-in
-manifests under `scripts/build/matrix` for the architecture and release
-contract.
+The checked-in architecture and release contract is maintained under
+`scripts/build/matrix`. For profile-removal upgrades, drain unfinished affected
+start/create requests and snapshot FILE/SQL durable state first. If rollback to
+the old binary is required after a durable mutation, restore that snapshot
+before rollback; no migration framework is introduced.

@@ -22,7 +22,7 @@ def test_source_graph_is_acyclic_and_static() -> None:
 
 def test_names_and_module_imports_are_clean() -> None:
     root = Path("linktools-ai/src/linktools/ai")
-    assert check_names(root, "linktools-ai/scripts/build/name-exceptions.json") == ()
+    assert check_names(root) == ()
     assert check_files(root) == ()
     for path in sorted(root.rglob("*.py")):
         name = "linktools.ai." + ".".join(path.relative_to(root).with_suffix("").parts)
@@ -49,11 +49,31 @@ def test_name_gate_allows_only_the_existing_asset_storage_duplicate_group(tmp_pa
     for package in ("asset", "storage"):
         (root / package).mkdir(parents=True)
         (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-        (root / package / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
+        for name in ("cache.py", "files.py", "model.py"):
+            (root / package / name).write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "model").mkdir()
+    (root / "model" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     assert check_names(root) == ()
     (root / "adapter").mkdir()
     (root / "adapter" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
     assert any(error.startswith("duplicate module basename: cache") for error in check_names(root))
+
+
+def test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision(tmp_path: Path) -> None:
+    root = tmp_path / "names"
+    for package in ("asset", "storage", "adapter", "task"):
+        (root / package).mkdir(parents=True)
+        (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    (root / "asset" / "new.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "storage" / "new.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "asset" / "task.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "asset" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "storage" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "adapter" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
+    errors = check_names(root)
+    assert any(error.startswith("duplicate module basename: new") for error in errors)
+    assert any(error.startswith("module/package stem collision:") and "asset/task.py" in error for error in errors)
+    assert any(error.startswith("duplicate module basename: cache") for error in errors)
 
 
 def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries(tmp_path: Path) -> None:

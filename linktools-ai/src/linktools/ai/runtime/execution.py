@@ -296,41 +296,60 @@ class DefaultExecutionService:
             )
             operation = await self._persistence.operations.append(operation)
         if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            await self._persistence.operations.compare_and_swap(
-                operation.operation_id,
-                tenant_id=request.principal.tenant_id,
-                expected_status=operation.status,
-                next_record=_operation_result(operation, execution.execution_id, execution.result_digest),
-            )
-            return CancelExecutionResult(execution_id, execution.status is ExecutionStatus.CANCELLED)
+            resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+            if resolved is not None:
+                return resolved
         try:
-            cancelling = await self._persistence.executions.request_cancel(
-                ExecutionCancelRequestCommit(
-                    execution_id=execution_id,
-                    tenant_id=request.principal.tenant_id,
-                    expected_revision=execution.revision,
-                    expected_event_sequence=execution.event_sequence,
-                    operation_id=operation.operation_id,
-                    requested_at=datetime.now(timezone.utc),
+            try:
+                cancelling = await self._persistence.executions.request_cancel(
+                    ExecutionCancelRequestCommit(
+                        execution_id=execution_id,
+                        tenant_id=request.principal.tenant_id,
+                        expected_revision=execution.revision,
+                        expected_event_sequence=execution.event_sequence,
+                        operation_id=operation.operation_id,
+                        requested_at=datetime.now(timezone.utc),
+                    )
                 )
-            )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+                resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+                if resolved is not None:
+                    return resolved
+                raise
             if self._launcher is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             outcome = await self._launcher.cancel(cancelling)
             if outcome is CancelEffectOutcome.UNKNOWN:
+                resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+                if resolved is not None:
+                    return resolved
                 current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                 if current is not None and current.status is OperationStatus.PENDING:
-                    await self._persistence.operations.compare_and_swap(
-                        operation.operation_id,
-                        tenant_id=request.principal.tenant_id,
-                        expected_status=OperationStatus.PENDING,
-                        next_record=_operation_status(current, OperationStatus.EFFECT_UNKNOWN),
-                    )
+                    try:
+                        await self._persistence.operations.compare_and_swap(
+                            operation.operation_id,
+                            tenant_id=request.principal.tenant_id,
+                            expected_status=OperationStatus.PENDING,
+                            next_record=_operation_status(current, OperationStatus.EFFECT_UNKNOWN),
+                        )
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_CONFLICT:
+                            raise
+                        resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+                        if resolved is not None:
+                            return resolved
                 _logger.warning("execution cancellation effect unknown: execution=%s operation=%s", execution_id, operation.operation_id)
                 return CancelExecutionResult(execution_id, False)
             cancelling_current = await self._persistence.executions.get(execution_id, tenant_id=request.principal.tenant_id)
             if cancelling_current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+            if resolved is not None:
+                return resolved
+            if cancelling_current.status is not ExecutionStatus.CANCELLING:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             now = datetime.now(timezone.utc)
             terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
             result = ResultRecord(execution_id, request.principal.tenant_id, ExecutionStatus.CANCELLED, "none", 1, "none", None, None, StopReason.CANCELLED, 0, 0, 0, now)
@@ -340,22 +359,36 @@ class DefaultExecutionService:
             identity = idempotency_records[0] if idempotency_records else None
             idempotency = None if identity is None else IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, IdempotencyStatus.CANCELLED, identity.request_digest, None, None)
             operation_update = OperationTerminalUpdate(operation.operation_id, OperationStatus.PENDING, OperationStatus.SUCCEEDED, None, None, None)
-            await self._persistence.results.commit_terminal(
-                ExecutionTerminalCommit(
-                    expected_revision=cancelling_current.revision,
-                    expected_event_sequence=cancelling_current.event_sequence,
-                    execution=terminal,
-                    result=result,
-                    terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
-                    terminal_event_payload={},
-                    idempotency=idempotency,
-                    operation=operation_update,
+            try:
+                await self._persistence.results.commit_terminal(
+                    ExecutionTerminalCommit(
+                        expected_revision=cancelling_current.revision,
+                        expected_event_sequence=cancelling_current.event_sequence,
+                        execution=terminal,
+                        result=result,
+                        terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
+                        terminal_event_payload={},
+                        idempotency=idempotency,
+                        operation=operation_update,
+                    )
                 )
-            )
+            except AIError as error:
+                if error.code not in {ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_RESULT_CONFLICT}:
+                    raise
+                resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+                if resolved is not None:
+                    return resolved
+                raise
             _logger.info("execution cancelled: execution=%s operation=%s", execution_id, operation.operation_id)
         except asyncio.CancelledError:
             raise
-        except BaseException:
+        except Exception as error:
+            resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
+            if resolved is not None:
+                return resolved
+            if isinstance(error, AIError) and error.code in {ErrorCode.STORAGE_CONFLICT, ErrorCode.EXECUTION_RESULT_CONFLICT}:
+                raise
+            error_code = error.code.value if isinstance(error, AIError) else ErrorCode.STORAGE_UNAVAILABLE.value
             try:
                 current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                 if current is not None and current.status is OperationStatus.PENDING:
@@ -363,12 +396,48 @@ class DefaultExecutionService:
                         operation.operation_id,
                         tenant_id=request.principal.tenant_id,
                         expected_status=OperationStatus.PENDING,
-                        next_record=_operation_failure(current, ErrorCode.STORAGE_UNAVAILABLE.value),
+                        next_record=_operation_failure(current, error_code),
                     )
             except Exception:
-                pass
+                _logger.error(
+                    "execution cancellation ledger update failed: execution=%s operation=%s",
+                    execution_id,
+                    operation.operation_id,
+                    exc_info=environ.debug,
+                )
             raise
         return CancelExecutionResult(execution_id, True)
+
+    async def _resolve_cancel_race(
+        self,
+        execution_id: str,
+        tenant_id: str,
+        operation: OperationLedgerRecord,
+    ) -> "CancelExecutionResult | None":
+        current = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
+        if current is None or current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            return None
+        current_operation = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+        if current_operation is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current_operation.status is OperationStatus.PENDING:
+            try:
+                await self._persistence.operations.compare_and_swap(
+                    operation.operation_id,
+                    tenant_id=tenant_id,
+                    expected_status=OperationStatus.PENDING,
+                    next_record=_operation_result(current_operation, current.execution_id, current.result_digest),
+                )
+            except AIError as error:
+                if error.code is not ErrorCode.STORAGE_CONFLICT:
+                    raise
+        _logger.info(
+            "execution cancellation race resolved: execution=%s status=%s operation=%s",
+            execution_id,
+            current.status.value,
+            operation.operation_id,
+        )
+        return CancelExecutionResult(execution_id, current.status is ExecutionStatus.CANCELLED)
 
 
     async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[TraceItem]:

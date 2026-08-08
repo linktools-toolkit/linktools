@@ -1,37 +1,509 @@
 {
-  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
   "status": "COMPLETE",
   "requirements": [
-    {"id": "R-01", "owner": "runtime/adapter/workbench", "implementation": ["runtime/persistence.py", "runtime/execution.py", "app/workbench.py", "adapter/memory.py", "adapter/repository.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head", "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite", "tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"]},
-    {"id": "R-02", "owner": "app/facade", "implementation": ["app/facade.py", "runtime/execution.py", "runtime/session.py", "task/service.py", "runtime/approval.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"]},
-    {"id": "R-03", "owner": "app/workbench", "implementation": ["app/workbench.py", "runtime/services.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page", "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page", "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"]},
-    {"id": "R-04", "owner": "adapter/history", "implementation": ["adapter/history.py", "app/assembly.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency", "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
-    {"id": "R-05", "owner": "evidence", "implementation": ["scripts/build/matrix/linktools-ai-evidence.json", "scripts/build/matrix/linktools-ai-review-coverage.json", "scripts/build/matrix/linktools-ai-traceability.json"], "tests": ["cold-start evidence audit"]},
-    {"id": "R-06", "owner": "adapter/history", "implementation": ["adapter/history.py", "core/errors.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
-    {"id": "R-07", "owner": "architecture", "implementation": ["scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py::test_names_and_module_imports_are_clean", "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"]},
-    {"id": "R-08", "owner": "architecture", "implementation": ["scripts/build/architecture.py", "scripts/build/matrix/linktools-ai-package-policy.json"], "tests": ["tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static", "tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"]},
-    {"id": "R-09", "owner": "runtime/app/capability", "implementation": ["core/value.py", "runtime/persistence.py", "runtime/services.py", "runtime/execution.py", "runtime/session.py", "runtime/evaluation.py", "app/assembly.py", "app/workbench.py", "workspace/root.py", "workspace/tools.py", "capability/tool.py", "temporal/gateway.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers", "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"]},
-    {"id": "R-10", "owner": "adapter", "implementation": ["adapter/memory.py", "adapter/repository.py", "adapter/schema.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite", "tests/ai/persistence/test_runtime_store_bundle.py::test_file_runtime_fault_does_not_publish_a_partial_mutation"]},
-    {"id": "R-11", "owner": "app/workbench", "implementation": ["app/workbench.py", "storage/lock.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page", "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"]},
-    {"id": "T-01", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head"]},
-    {"id": "T-02", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite"]},
-    {"id": "T-03", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"]},
-    {"id": "T-04", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"]},
-    {"id": "T-05", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page"]},
-    {"id": "T-06", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page"]},
-    {"id": "T-07", "owner": "tests", "implementation": ["app/workbench.py", "tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner", "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"]},
-    {"id": "T-08", "owner": "tests", "implementation": ["scripts/build/architecture.py", "scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py"]},
-    {"id": "T-09", "owner": "tests", "implementation": ["adapter/history.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
-    {"id": "T-10", "owner": "tests", "implementation": ["scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"]},
-    {"id": "T-11", "owner": "tests", "implementation": ["scripts/build/architecture.py"], "tests": ["tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"]},
-    {"id": "T-12", "owner": "temporal", "implementation": ["temporal/activity.py", "temporal/worker.py", "temporal/workflow"], "tests": ["tests/ai/test_contracts.py::test_temporal_registration_has_one_explicit_worker_surface"]},
-    {"id": "T-13", "owner": "profile-removal", "implementation": ["core/value.py", "runtime/persistence.py", "runtime/services.py", "app/assembly.py"], "tests": ["cold-start profile symbol audit"]},
-    {"id": "T-14", "owner": "profile-removal", "implementation": ["adapter/repository.py", "adapter/schema.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite"]},
-    {"id": "T-15", "owner": "profile-removal", "implementation": ["runtime/execution.py", "runtime/session.py", "runtime/evaluation.py"], "tests": ["cold-start digest and binding audit"]},
-    {"id": "T-16", "owner": "adapter", "implementation": ["adapter/memory.py", "adapter/repository.py"], "tests": ["cold-start FILE/SQL legacy payload audit"]},
-    {"id": "T-17", "owner": "composition", "implementation": ["app/assembly.py"], "tests": ["cold-start dependency matrix audit"]},
-    {"id": "T-18", "owner": "app/workbench", "implementation": ["app/workbench.py", "storage/lock.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page"]}
+    {
+      "id": "R-01",
+      "owner": "runtime/adapter/workbench",
+      "implementation": [
+        "runtime/persistence.py",
+        "runtime/execution.py",
+        "app/workbench.py",
+        "adapter/memory.py",
+        "adapter/repository.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head",
+        "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite",
+        "tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"
+      ],
+      "requirement": "Session resume/retry head CAS uses the correct expected head and keeps terminal aggregate atomic.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-02",
+      "owner": "app/facade",
+      "implementation": [
+        "app/facade.py",
+        "runtime/execution.py",
+        "runtime/session.py",
+        "task/service.py",
+        "runtime/approval.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
+      ],
+      "requirement": "RuntimeAccess exposes query-only wrappers while mutation APIs remain on RuntimeServices.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-03",
+      "owner": "app/workbench",
+      "implementation": [
+        "app/workbench.py",
+        "runtime/services.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page",
+        "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page",
+        "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"
+      ],
+      "requirement": "Workbench owns lifecycle admission, session pagination and durable shutdown cancellation.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-04",
+      "owner": "adapter/history",
+      "implementation": [
+        "adapter/history.py",
+        "app/assembly.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency",
+        "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
+      ],
+      "requirement": "Step history projection belongs to adapter/history and exposes stable cursor semantics.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-05",
+      "owner": "evidence",
+      "implementation": [
+        "scripts/build/matrix/linktools-ai-evidence.json",
+        "scripts/build/matrix/linktools-ai-review-coverage.json",
+        "scripts/build/matrix/linktools-ai-traceability.json"
+      ],
+      "tests": [
+        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json",
+        "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json"
+      ],
+      "requirement": "Release evidence is complete, deterministic and bound to the actual source commit.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-06",
+      "owner": "adapter/history",
+      "implementation": [
+        "adapter/history.py",
+        "core/errors.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
+      ],
+      "requirement": "History cursor failures use the stable CURSOR_INVALID contract.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-07",
+      "owner": "architecture",
+      "implementation": [
+        "scripts/build/names.py"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_names_and_module_imports_are_clean",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"
+      ],
+      "requirement": "Naming gate enforces exact module/package collisions with only the frozen v5 grandfather set.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-08",
+      "owner": "architecture",
+      "implementation": [
+        "scripts/build/architecture.py",
+        "scripts/build/matrix/linktools-ai-package-policy.json"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static",
+        "tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"
+      ],
+      "requirement": "Source graph, package SCC, dynamic import and module dependency policy gates are clean.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-09",
+      "owner": "runtime/app/capability",
+      "implementation": [
+        "core/value.py",
+        "runtime/persistence.py",
+        "runtime/services.py",
+        "runtime/execution.py",
+        "runtime/session.py",
+        "runtime/evaluation.py",
+        "app/assembly.py",
+        "app/workbench.py",
+        "workspace/root.py",
+        "workspace/tools.py",
+        "capability/tool.py",
+        "temporal/gateway.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers",
+        "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"
+      ],
+      "requirement": "Runtime topology is selected by injected launcher/gateway/storage dependencies without profile categories.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-10",
+      "owner": "adapter",
+      "implementation": [
+        "adapter/memory.py",
+        "adapter/repository.py",
+        "adapter/schema.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite",
+        "tests/ai/persistence/test_runtime_store_bundle.py::test_file_runtime_fault_does_not_publish_a_partial_mutation"
+      ],
+      "requirement": "Memory/FILE/SQL persistence preserves atomic CAS and rollback boundaries.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "R-11",
+      "owner": "app/workbench",
+      "implementation": [
+        "app/workbench.py",
+        "storage/lock.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page",
+        "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"
+      ],
+      "requirement": "Workbench, rather than generic composition, owns the SQLite local lifetime lock.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-01",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head"
+      ],
+      "requirement": "Session resume advances from the previous session head.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-02",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite"
+      ],
+      "requirement": "Memory and SQLite terminal session-head CAS are atomic on stale conflict.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-03",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"
+      ],
+      "requirement": "Concurrent resume has exactly one session-head winner.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-04",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
+      ],
+      "requirement": "RuntimeAccess wrappers are query-only.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-05",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page"
+      ],
+      "requirement": "Session listing consumes all pages.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-06",
+      "owner": "tests",
+      "implementation": [
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page"
+      ],
+      "requirement": "Shutdown cleans active executions discovered after the first session page.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-07",
+      "owner": "tests",
+      "implementation": [
+        "app/workbench.py",
+        "tests/ai/test_v5_conformance.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner",
+        "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"
+      ],
+      "requirement": "Admission and shutdown are serialized.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-08",
+      "owner": "tests",
+      "implementation": [
+        "scripts/build/architecture.py",
+        "scripts/build/names.py"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py"
+      ],
+      "requirement": "Architecture graph and static policy gates execute against the source tree.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-09",
+      "owner": "tests",
+      "implementation": [
+        "adapter/history.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
+      ],
+      "requirement": "History uses the stable cursor error.",
+      "constraints": "Preserve the v5 public and ownership boundary.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-10",
+      "owner": "tests",
+      "implementation": [
+        "scripts/build/names.py"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"
+      ],
+      "requirement": "Non-grandfathered names fail the naming gate.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-11",
+      "owner": "tests",
+      "implementation": [
+        "scripts/build/architecture.py"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"
+      ],
+      "requirement": "Module dependency policy normalizes relative imports and rejects stale entries.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-12",
+      "owner": "temporal",
+      "implementation": [
+        "temporal/activity.py",
+        "temporal/worker.py",
+        "temporal/workflow"
+      ],
+      "tests": [
+        "tests/ai/test_contracts.py::test_temporal_registration_has_one_explicit_worker_surface"
+      ],
+      "requirement": "Temporal registration has one explicit worker surface.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-13",
+      "owner": "profile-removal",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/core/value.py",
+        "linktools-ai/src/linktools/ai/runtime/persistence.py",
+        "linktools-ai/src/linktools/ai/app/assembly.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_public_runtime_contract_has_no_profile_or_replacement_category"
+      ],
+      "requirement": "Profile-free public runtime contracts and composition remain intact.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-14",
+      "owner": "profile-removal",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/app/assembly.py",
+        "linktools-ai/src/linktools/ai/app/workbench.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_runtime_composition_is_driven_by_injected_dependencies"
+      ],
+      "requirement": "Runtime composition is driven by injected dependencies.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-15",
+      "owner": "profile-removal",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/adapter/memory.py",
+        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/schema.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
+        "tests/ai/test_v5_conformance.py::test_sql_legacy_profile_tombstone_is_not_domain_semantic"
+      ],
+      "requirement": "FILE legacy payload and SQL profile tombstone are both executable and profile-free.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-16",
+      "owner": "adapter",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/runtime/session.py",
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
+      ],
+      "requirement": "Five profile-removal idempotency scopes preserve old-digest conflict and rollback boundaries.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-17",
+      "owner": "composition",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/temporal/activity.py",
+        "linktools-ai/src/linktools/ai/temporal/worker.py",
+        "linktools-ai/src/linktools/ai/temporal/workflow"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_temporal_contract_fields_and_registered_class_names_are_stable"
+      ],
+      "requirement": "Temporal durable fields and registered workflow/activity identities remain stable.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-18",
+      "owner": "app/workbench",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/app/workbench.py",
+        "linktools-ai/src/linktools/ai/storage/lock.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_workbench_owns_sqlite_lock_and_generic_services_do_not"
+      ],
+      "requirement": "Workbench SQLite lock evidence covers ownership, contention, cleanup and reopen.",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "status": "PASS"
+    },
+    {
+      "id": "T-19",
+      "owner": "tests/architecture/runtime",
+      "requirement": "cancel natural terminal race resolves by actual terminal",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/app/workbench.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
+        "tests/ai/test_v5_conformance.py::test_cancel_terminal_wins_before_request_cancel_cas"
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "T-20",
+      "owner": "tests/architecture/runtime",
+      "requirement": "confirmed cancellation and concurrent cancel request IDs converge",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/app/workbench.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_confirmed_cancel_requires_task_cancelled_and_closes_operation",
+        "tests/ai/test_v5_conformance.py::test_concurrent_cancel_request_ids_share_terminal_but_keep_ledgers"
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "T-21",
+      "owner": "tests/architecture/runtime",
+      "requirement": "Memory and SQLite request_cancel operation preconditions are equivalent",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/adapter/repository.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
+      ],
+      "status": "PASS"
+    },
+    {
+      "id": "T-22",
+      "owner": "tests/architecture/runtime",
+      "requirement": "Naming grandfather fixtures are exact and reject generic exceptions",
+      "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
+      "implementation": [
+        "linktools-ai/scripts/build/names.py",
+        "tests/ai/test_architecture.py"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_name_gate_allows_only_the_existing_asset_storage_duplicate_group",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
+      ],
+      "status": "PASS"
+    }
   ],
-  "scope_exclusions": ["Downstream migration and compatibility work are explicitly excluded by the user."],
-  "verification": {"status": "COMPLETE", "validated_source_commit": "c681220f", "open_findings": []}
+  "scope_exclusions": [
+    "Downstream compatibility and migration work are explicitly excluded by the user and this fix spec.",
+    "asset/** and storage/** source are unchanged."
+  ],
+  "verification": {
+    "status": "COMPLETE",
+    "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
+    "tests_ai": "passed: 62 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "architecture": "passed",
+    "open_findings": []
+  },
+  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
+  "review_scope": "linktools-ai-d218889-fix-spec-final"
 }

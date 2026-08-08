@@ -3,6 +3,7 @@
 """Focused regression coverage for the v5 Runtime convergence contract."""
 
 import asyncio
+import ast
 import contextlib
 import inspect
 import json
@@ -20,10 +21,11 @@ from linktools.ai.app.assembly import RuntimeStoreConfig, build_runtime_access, 
 from linktools.ai.app.workbench import open_workspace_runtime
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.core.errors import ErrorCode, AIError
-from linktools.ai.core.ids import idempotency_key_hash
-from linktools.ai.core.value import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
-from linktools.ai.runtime.persistence import ApprovalRecord, ExecutionRecord, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, RuntimePersistence, SessionHeadAdvance, SessionRecord
-from linktools.ai.runtime.services import ApprovalDecisionRequest, ExecutionHandle, ExecutionRequest, ExecutionView, RuntimeServiceIdentity, TaskGraphHandle, WorkflowQueryResult, WorkflowUpdateResult
+from linktools.ai.core.ids import canonical_sha256, idempotency_key_hash
+from linktools.ai.core.value import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason
+from linktools.ai.runtime.persistence import ApprovalRecord, ExecutionCancelRequestCommit, ExecutionRecord, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, OperationLedgerInput, ResultRecord, RuntimePersistence, SessionHeadAdvance, SessionRecord
+from linktools.ai.runtime.services import ApprovalDecisionRequest, CancelExecutionRequest, CreateSessionRequest, ExecutionHandle, ExecutionRequest, ExecutionView, ForkExecutionRequest, RetryExecutionRequest, RuntimeServiceIdentity, TaskGraphHandle, WorkflowQueryResult, WorkflowUpdateResult
+from linktools.ai.runtime.execution import CancelEffectOutcome
 from linktools.ai.task import TaskGraph, TaskGraphRequest, TaskNode
 from linktools.ai.agent.runner import WorkspaceAgentResult, WorkspaceAgentRunner
 from linktools.ai.workspace import Workspace, trusted_workspace_principal
@@ -133,6 +135,56 @@ class _BlockingRunner:
         return WorkspaceAgentResult(step_run_id, prompt, [])
 
 
+class _ReturnBarrierRunner:
+    def __init__(self) -> None:
+        self.ready = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def binding_digest(self, agent_id: str | None) -> str:
+        return "d" * 64
+
+    async def run(
+        self,
+        agent_id: str | None,
+        prompt: str,
+        history: list[object],
+        conversation_id: str,
+        *,
+        step_store: object,
+        step_run_id: str,
+        segment_sequence: int,
+        parent_step_run_id: str | None = None,
+        on_event: object | None = None,
+    ) -> WorkspaceAgentResult:
+        self.ready.set()
+        await self.release.wait()
+        return WorkspaceAgentResult(step_run_id, prompt, [])
+
+
+def _cancel_request(principal: Principal, request_id: str) -> CancelExecutionRequest:
+    return CancelExecutionRequest(principal, request_id, True)
+
+
+def _cancel_operation(operation_id: str, execution_id: str, tenant_id: str, status: OperationStatus = OperationStatus.PENDING) -> OperationLedgerInput:
+    now = datetime.now(timezone.utc)
+    return OperationLedgerInput(
+        operation_id,
+        tenant_id,
+        ResourceKind.EXECUTION,
+        execution_id,
+        execution_id,
+        OperationKind.EXECUTION_CANCEL,
+        status,
+        f"digest-{operation_id}",
+        None,
+        None,
+        None,
+        True,
+        now,
+        now,
+    )
+
+
 def _terminal_fixture(now: datetime, *, tenant_id: str, session_id: str, execution_id: str) -> tuple[SessionRecord, ExecutionRecord, ExecutionRecord, IdempotencyRecord, ResultRecord]:
     session = SessionRecord(session_id, tenant_id, "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None, "head-a")
     execution = ExecutionRecord(execution_id, tenant_id, session_id, "binding", None, execution_id, None, "head-a", ExecutionLineageKind.SESSION_RESUME, ExecutionStatus.STARTED, 1, 0, 1, None, None, None, {}, now, now)
@@ -237,6 +289,204 @@ async def test_concurrent_resume_has_one_session_head_winner(tmp_path: Path) -> 
     assert session is not None and session.head_execution_id == successful[0].execution_id
     assert sum(item.status is ExecutionStatus.SUCCEEDED for item in executions) == 1
     assert sum(item.status is ExecutionStatus.FAILED for item in executions) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    runner = _ReturnBarrierRunner()
+    principal = trusted_workspace_principal(workspace.workspace_id)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        run_task = asyncio.create_task(runtime.run("main", "natural", idempotency_key="natural"))
+        await runner.ready.wait()
+        execution = (await runtime._stores.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
+        cancel_entered = asyncio.Event()
+        allow_cancel = asyncio.Event()
+
+        async def observe_cancel(record: ExecutionRecord) -> CancelEffectOutcome:
+            cancel_entered.set()
+            await allow_cancel.wait()
+            assert not runtime._launcher._tasks[record.execution_id].cancelled()
+            return CancelEffectOutcome.UNKNOWN
+
+        runtime._launcher.cancel = observe_cancel
+        cancel_task = asyncio.create_task(
+            runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "natural-cancel"))
+        )
+        await cancel_entered.wait()
+        runner.release.set()
+        completed = await run_task
+        current = await runtime._stores.domain.executions.get(completed.execution_id, tenant_id=workspace.workspace_id)
+        assert current is not None and current.status is ExecutionStatus.SUCCEEDED
+        allow_cancel.set()
+        cancel_result = await cancel_task
+        operation = await runtime._stores.domain.operations.get(idempotency_key_hash("natural-cancel"), tenant_id=workspace.workspace_id)
+        assert not cancel_result.cancelled
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+        assert operation.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_workspace_launcher_cancel_uses_final_task_state(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=_BlockingRunner()) as runtime:
+        now = datetime.now(timezone.utc)
+        execution = ExecutionRecord("launcher-state", workspace.workspace_id, None, "b" * 64, None, "launcher-state", None, None, ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 1, 0, 0, None, None, None, {}, now, now)
+
+        async def natural() -> WorkspaceAgentResult:
+            return WorkspaceAgentResult("run", "", [])
+
+        natural_task = asyncio.create_task(natural())
+        await natural_task
+        runtime._launcher._tasks[execution.execution_id] = natural_task
+        assert await runtime._launcher.cancel(execution) is CancelEffectOutcome.UNKNOWN
+
+        async def failed() -> WorkspaceAgentResult:
+            raise RuntimeError("runner failure")
+
+        failed_task = asyncio.create_task(failed())
+        await asyncio.gather(failed_task, return_exceptions=True)
+        runtime._launcher._tasks[execution.execution_id] = failed_task
+        assert await runtime._launcher.cancel(execution) is CancelEffectOutcome.UNKNOWN
+        runtime._launcher._tasks.pop(execution.execution_id, None)
+
+
+@pytest.mark.asyncio
+async def test_confirmed_cancel_requires_task_cancelled_and_closes_operation(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    runner = _BlockingRunner()
+    principal = trusted_workspace_principal(workspace.workspace_id)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        run_task = asyncio.create_task(runtime.run("main", "cancel", idempotency_key="cancel"))
+        await runner.started.wait()
+        execution = (await runtime._stores.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
+        cancel_result = await runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "confirmed-cancel"))
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+        current = await runtime._stores.domain.executions.get(execution.execution_id, tenant_id=workspace.workspace_id)
+        operation = await runtime._stores.domain.operations.get(idempotency_key_hash("confirmed-cancel"), tenant_id=workspace.workspace_id)
+        assert cancel_result.cancelled
+        assert current is not None and current.status is ExecutionStatus.CANCELLED
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_cancel_backend_failure_keeps_stable_error_in_operation_ledger(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    runner = _ReturnBarrierRunner()
+    principal = trusted_workspace_principal(workspace.workspace_id)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        run_task = asyncio.create_task(runtime.run("main", "backend", idempotency_key="backend"))
+        await runner.ready.wait()
+        execution = (await runtime._stores.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
+
+        async def fail_cancel(record: ExecutionRecord) -> CancelEffectOutcome:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        runtime._launcher.cancel = fail_cancel
+        with pytest.raises(AIError) as error:
+            await runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "backend-cancel"))
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        operation = await runtime._stores.domain.operations.get(idempotency_key_hash("backend-cancel"), tenant_id=workspace.workspace_id)
+        assert operation is not None and operation.status is OperationStatus.FAILED
+        assert operation.error_code == ErrorCode.STORAGE_INTEGRITY_ERROR.value
+        runner.release.set()
+        await run_task
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminal_wins_before_request_cancel_cas(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    runner = _ReturnBarrierRunner()
+    principal = trusted_workspace_principal(workspace.workspace_id)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        run_task = asyncio.create_task(runtime.run("main", "cas", idempotency_key="cas"))
+        await runner.ready.wait()
+        execution = (await runtime._stores.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
+        cas_entered = asyncio.Event()
+        continue_cas = asyncio.Event()
+        request_cancel = runtime._stores.domain.executions.request_cancel
+
+        async def delayed_request_cancel(commit: ExecutionCancelRequestCommit) -> ExecutionRecord:
+            cas_entered.set()
+            await continue_cas.wait()
+            return await request_cancel(commit)
+
+        runtime._stores.domain.executions.request_cancel = delayed_request_cancel
+        cancel_task = asyncio.create_task(
+            runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "cas-cancel"))
+        )
+        await cas_entered.wait()
+        runner.release.set()
+        await run_task
+        continue_cas.set()
+        cancel_result = await cancel_task
+        operation = await runtime._stores.domain.operations.get(idempotency_key_hash("cas-cancel"), tenant_id=workspace.workspace_id)
+        current = await runtime._stores.domain.executions.get(execution.execution_id, tenant_id=workspace.workspace_id)
+        assert not cancel_result.cancelled
+        assert current is not None and current.status is ExecutionStatus.SUCCEEDED
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cancel_request_ids_share_terminal_but_keep_ledgers(tmp_path: Path) -> None:
+    workspace = Workspace.load(tmp_path)
+    runner = _BlockingRunner()
+    principal = trusted_workspace_principal(workspace.workspace_id)
+    async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        run_task = asyncio.create_task(runtime.run("main", "concurrent-cancel", idempotency_key="concurrent-cancel"))
+        await runner.started.wait()
+        execution = (await runtime._stores.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
+        results = await asyncio.gather(
+            runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "cancel-a")),
+            runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "cancel-b")),
+        )
+        with contextlib.suppress(asyncio.CancelledError):
+            await run_task
+        current = await runtime._stores.domain.executions.get(execution.execution_id, tenant_id=workspace.workspace_id)
+        operations = [
+            await runtime._stores.domain.operations.get(idempotency_key_hash(request_id), tenant_id=workspace.workspace_id)
+            for request_id in ("cancel-a", "cancel-b")
+        ]
+        assert [item.cancelled for item in results] == [True, True]
+        assert current is not None and current.status is ExecutionStatus.CANCELLED
+        assert all(item is not None and item.status is OperationStatus.SUCCEEDED and item.error_code is None for item in operations)
+
+
+async def _assert_request_cancel_operation_parity(persistence: RuntimePersistence) -> None:
+    now = datetime.now(timezone.utc)
+    execution_id = "cancelling-execution"
+    tenant_id = "tenant"
+    execution = ExecutionRecord(execution_id, tenant_id, None, "b" * 64, None, execution_id, None, None, ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 1, 0, 0, None, None, None, {}, now, now)
+    await persistence.executions.create(execution)
+    first = await persistence.operations.append(_cancel_operation("cancel-first", execution_id, tenant_id))
+    current = await persistence.executions.request_cancel(ExecutionCancelRequestCommit(execution_id, tenant_id, 1, 0, first.operation_id, now))
+    assert current.status is ExecutionStatus.CANCELLING
+    with pytest.raises(AIError) as missing:
+        await persistence.executions.request_cancel(ExecutionCancelRequestCommit(execution_id, tenant_id, 1, 0, "missing", now))
+    assert missing.value.code is ErrorCode.STORAGE_CONFLICT
+    completed = await persistence.operations.append(_cancel_operation("cancel-completed", execution_id, tenant_id, OperationStatus.SUCCEEDED))
+    with pytest.raises(AIError) as non_pending:
+        await persistence.executions.request_cancel(ExecutionCancelRequestCommit(execution_id, tenant_id, 1, 0, completed.operation_id, now))
+    assert non_pending.value.code is ErrorCode.STORAGE_CONFLICT
+    mismatch = await persistence.operations.append(_cancel_operation("cancel-mismatch", "other-execution", tenant_id))
+    with pytest.raises(AIError) as wrong_execution:
+        await persistence.executions.request_cancel(ExecutionCancelRequestCommit(execution_id, tenant_id, 1, 0, mismatch.operation_id, now))
+    assert wrong_execution.value.code is ErrorCode.STORAGE_CONFLICT
+    second = await persistence.operations.append(_cancel_operation("cancel-second", execution_id, tenant_id))
+    assert await persistence.executions.request_cancel(ExecutionCancelRequestCommit(execution_id, tenant_id, 1, 0, second.operation_id, now)) == current
+
+
+@pytest.mark.asyncio
+async def test_memory_and_sqlite_request_cancel_operation_preconditions_match(tmp_path: Path) -> None:
+    memory = build_memory_runtime(namespace="cancel-parity-memory")
+    await memory.initialize()
+    try:
+        await _assert_request_cancel_operation_parity(memory.persistence)
+    finally:
+        await memory.close()
+    async with open_runtime_store(RuntimeStoreConfig.sqlite(str(tmp_path / "cancel-parity.db"), namespace="cancel-parity-sql", deployment_id="test")) as stores:
+        await _assert_request_cancel_operation_parity(stores.domain)
 
 
 @pytest.mark.asyncio
@@ -407,6 +657,127 @@ async def test_file_decoder_ignores_legacy_profile_fields(tmp_path: Path) -> Non
         await reopened.close()
 
 
+@pytest.mark.asyncio
+async def test_sql_legacy_profile_tombstone_is_not_domain_semantic(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    config = RuntimeStoreConfig.sqlite(str(path), namespace="legacy-sql", deployment_id="test")
+    now = datetime.now(timezone.utc)
+    session = SessionRecord("legacy-sql-session", "legacy-sql", "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None, None)
+    async with open_runtime_store(config) as stores:
+        await stores.domain.sessions.create(session)
+        with sqlite3.connect(path) as connection:
+            connection.execute("update ai_runtime_sessions set profile = ? where session_id = ?", ("local-coding", session.session_id))
+            connection.commit()
+    async with open_runtime_store(config) as stores:
+        loaded = await stores.domain.sessions.get(session.session_id, tenant_id=session.tenant_id)
+        assert loaded is not None and not hasattr(loaded, "profile")
+        updated = replace(loaded, revision=loaded.revision + 1, updated_at=datetime.now(timezone.utc))
+        await stores.domain.sessions.compare_and_swap(session.session_id, tenant_id=session.tenant_id, expected_revision=loaded.revision, next_record=updated)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("select profile from ai_runtime_sessions where session_id = ?", (session.session_id,)).fetchone() == ("",)
+    source = Path("linktools-ai/src/linktools/ai/adapter/repository.py").read_text(encoding="utf-8")
+    assert source.count('profile=""') == 2
+    assert "profile" not in source.replace('profile=""', "")
+    ast.parse(source)
+
+
+@pytest.mark.asyncio
+async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope() -> None:
+    runtime = build_memory_runtime(namespace="profile-boundary")
+    await runtime.initialize()
+    try:
+        principal = Principal("owner", "tenant")
+        binding_digest = "b" * 64
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"profile-boundary-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            execution_launcher=_Launcher(),
+        )
+        now = datetime.now(timezone.utc)
+        await runtime.persistence.sessions.create(SessionRecord("resume", "tenant", "owner", binding_digest, SessionStatus.OPEN, 0, 0, None, {}, now, now, None, None))
+        await runtime.persistence.executions.create(ExecutionRecord("source", "tenant", None, binding_digest, None, "source", None, None, ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 1, 0, 0, None, None, None, {}, now, now))
+
+        async def reserve_old(scope: str, key: str, execution_id: str) -> None:
+            await runtime.persistence.idempotency.reserve(
+                IdempotencyRecord("tenant", scope, idempotency_key_hash(key), canonical_sha256({"scope": scope, "profile": "local-coding", "legacy": True}), execution_id, IdempotencyStatus.STARTED, None, None, now, now)
+            )
+
+        for scope, key, execution_id in (
+            ("execution.run", "old-run", "old-run-execution"),
+            ("execution.retry", "old-retry", "old-retry-execution"),
+            ("execution.fork", "old-fork", "old-fork-execution"),
+            ("session.resume", "old-resume", "old-resume-execution"),
+        ):
+            await reserve_old(scope, key, execution_id)
+        old_create = OperationLedgerInput(
+            idempotency_key_hash("old-create"),
+            "tenant",
+            ResourceKind.SESSION,
+            "old-session",
+            None,
+            OperationKind.SESSION_CREATE,
+            OperationStatus.PENDING,
+            canonical_sha256({"scope": "session.create", "profile": "local-coding", "legacy": True}),
+            None,
+            None,
+            None,
+            True,
+            now,
+            now,
+        )
+        await runtime.persistence.operations.append(old_create)
+        old_calls = (
+            services.execution.run(binding_digest, ExecutionRequest("run", principal, "old-run")),
+            services.execution.retry(binding_digest, "source", RetryExecutionRequest("retry", principal, "old-retry")),
+            services.execution.fork(binding_digest, "source", ForkExecutionRequest("fork", principal, "old-fork")),
+            services.execution.run_for_session(binding_digest, "resume", ExecutionRequest("resume", principal, "old-resume")),
+            services.session.create(binding_digest, CreateSessionRequest(principal, "old-session", "old-create")),
+        )
+        for call in old_calls:
+            with pytest.raises(AIError) as error:
+                await call
+            assert error.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        assert await runtime.persistence.sessions.get("old-session", tenant_id="tenant") is None
+        assert await runtime.persistence.executions.get("old-run-execution", tenant_id="tenant") is None
+
+        fresh = await services.execution.run(binding_digest, ExecutionRequest("fresh", principal, "fresh-run"))
+        identity = await runtime.persistence.idempotency.get("execution.run", idempotency_key_hash("fresh-run"), tenant_id="tenant")
+        assert identity is not None
+        assert identity.request_digest == canonical_sha256(
+            {
+                "prompt": "fresh",
+                "binding_digest": binding_digest,
+                "scope": "execution",
+                "principal_id": "owner",
+                "tenant_id": "tenant",
+                "session_id": None,
+                "source_execution_id": None,
+                "base_execution_id": None,
+                "parent_execution_id": None,
+                "root_identity": "$self",
+                "lineage_kind": ExecutionLineageKind.RUN.value,
+            }
+        )
+        assert fresh.execution_id != "source"
+        created = await services.session.create(binding_digest, CreateSessionRequest(principal, "fresh-session", "fresh-create"))
+        create_operation = await runtime.persistence.operations.get(idempotency_key_hash("fresh-create"), tenant_id="tenant")
+        assert created.session_id == "fresh-session" and create_operation is not None
+        assert create_operation.request_digest == canonical_sha256({"action": "session.create", "tenant_id": "tenant", "principal_id": "owner", "session_id": "fresh-session", "binding": binding_digest})
+
+        graph_request = TaskGraphRequest(TaskGraph("profile-graph", (TaskNode("node"),)), principal, "fresh-graph")
+        await services.task.run_graph(binding_digest, graph_request)
+        graph_operation = await runtime.persistence.operations.get(idempotency_key_hash("fresh-graph"), tenant_id="tenant")
+        assert graph_operation is not None
+        expected_graph_digest = canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
+        assert graph_operation.request_digest == expected_graph_digest
+        assert graph_operation.request_digest != canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "profile": "local-coding", "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
+    finally:
+        await runtime.close()
+
+
 def test_temporal_contract_fields_and_registered_class_names_are_stable() -> None:
     from linktools.ai.temporal.activity import ExecuteActivity, EvaluationActivity, SessionActivity, TaskActivity
     from linktools.ai.temporal.workflow.dag import TaskWorkflowInput
@@ -422,6 +793,15 @@ def test_temporal_contract_fields_and_registered_class_names_are_stable() -> Non
     assert "profile" not in {item.name for item in fields(TaskWorkflowInput)}
     assert tuple(item.__name__ for item in (ExecutionWorkflow, EvaluationWorkflow, SessionWorkflow, TaskWorkflow)) == ("ExecutionWorkflow", "EvaluationWorkflow", "SessionWorkflow", "TaskWorkflow")
     assert tuple(item.__name__ for item in (ExecuteActivity, EvaluationActivity, SessionActivity, TaskActivity)) == ("ExecuteActivity", "EvaluationActivity", "SessionActivity", "TaskActivity")
+    activity_source = Path("linktools-ai/src/linktools/ai/temporal/activity.py").read_text(encoding="utf-8")
+    assert all(f'_temporal_activity.defn(name="{name}")' in activity_source for name in (
+        "execute", "load_input", "fix_bundle_route", "fix_binding", "load_prompt", "reserve_budget", "run_agent", "process_deferred", "commit_result", "settle_budget", "evaluation", "session_mutation", "task_graph",
+    ))
+    workflow_sources = tuple(
+        Path("linktools-ai/src/linktools/ai/temporal/workflow", name).read_text(encoding="utf-8")
+        for name in ("run.py", "suite.py", "mutation.py", "dag.py")
+    )
+    assert all(f'_temporal_workflow.defn(name="{name}")' in source for source, name in zip(workflow_sources, ("ExecutionWorkflow", "EvaluationWorkflow", "SessionWorkflow", "TaskWorkflow"), strict=True))
 
 
 @pytest.mark.asyncio

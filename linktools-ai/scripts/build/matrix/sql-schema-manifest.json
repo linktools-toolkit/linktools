@@ -1,5 +1,4 @@
 {
-  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
   "runtime_owner": "adapter.sql",
   "step_owner": "adapter.step",
   "runtime_digest": "e4b926efa6940529736e410ac768e5585308eb22bbc5bdc60d55cf332f02f634",
@@ -23,8 +22,20 @@
     "ai_runtime_tasks",
     "ai_runtime_tools"
   ],
-  "step_tables": ["ai_step_runs", "ai_step_events", "ai_step_snapshots", "ai_step_effects", "ai_step_media"],
-  "forbidden_runtime_tables": ["ai_runtime_session_turns", "ai_runtime_traces", "ai_runtime_repository_records"],
+  "step_tables": [
+    "ai_step_runs",
+    "ai_step_events",
+    "ai_step_snapshots",
+    "ai_step_effects",
+    "ai_step_media"
+  ],
+  "forbidden_runtime_tables": [
+    "ai_runtime_session_turns",
+    "ai_runtime_traces",
+    "ai_runtime_repository_records"
+  ],
   "live_mysql": "not_run_no_environment_accepted",
-  "live_postgresql": "not_run_no_environment_accepted"
+  "live_postgresql": "not_run_no_environment_accepted",
+  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
+  "review_scope": "linktools-ai-d218889-fix-spec-final"
 }

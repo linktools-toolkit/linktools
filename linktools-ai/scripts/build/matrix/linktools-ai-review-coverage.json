@@ -1,14 +1,26 @@
 {
-  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
-  "validated_source_commit": "c681220f",
+  "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
-  "scope_exclusions": ["Downstream migration and compatibility work are explicitly excluded by the user."],
+  "scope_exclusions": [
+    "Downstream migration and compatibility work are explicitly excluded by the user.",
+    "asset/** and storage/** source are unchanged."
+  ],
   "verification": {
-    "memory_file_sqlite": "passed: 68 AI tests and persistence checks",
+    "memory_file_sqlite": "passed: 62 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
-    "full_spec_review": "passed: independent cold-start review; Critical: 0, Important: 0, Minor: 0, Notes: 0, Verdict: CLEAN"
-  }
+    "source_commit": "passed: 878830d6734158ce430d0f1844b070118ed6bf23",
+    "full_spec_review": {
+      "Critical": 0,
+      "Important": 0,
+      "Minor": 0,
+      "Notes": 1,
+      "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 1\nVerdict: CLEAN"
+    }
+  },
+  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
+  "review_scope": "linktools-ai-d218889-fix-spec-final",
+  "review_mode": "cold-start self-review from full specification, current repository, d218889..878830d6 source diff, and fresh verification; no reviewer subagent was available"
 }

@@ -1,11 +1,11 @@
 {
-  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
-  "baseline_commit": "cc2beeb5",
-  "validated_source_commit": "c681220f",
+  "baseline_commit": "d21888993ab2dd193405710c1d07c872f2c8cbe4",
+  "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
   "status": "COMPLETE",
   "open_findings": [],
   "environment": {
     "python": "3.13",
+    "debug": "false",
     "pydantic_ai_harness": "0.9.0",
     "pydantic_ai_slim": "2.15.0",
     "ruff": "passed",
@@ -20,11 +20,15 @@
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 68 tests, 2 optional live tests skipped without database environment",
-    "concurrency": "passed: stale CAS, concurrent resume and shutdown admission suite",
-    "fault_injection": "passed: FILE rollback and legacy payload suite",
-    "public_api": "passed: import-all and query-only access suite",
-    "architecture": "passed: compileall, Ruff, architecture, name and dependency gates",
-    "schema": "passed: separate runtime/step metadata registries and SQL profile tombstone checks"
-  }
+    "conformance": "passed: 62 tests, 2 optional live tests skipped without MySQL/PostgreSQL environment",
+    "cancellation": "passed: natural terminal race, confirmed cancellation, CAS race, concurrent cancel ledgers, and backend error ledger",
+    "concurrency": "passed: stale CAS, concurrent resume, cancellation and shutdown admission suite",
+    "fault_injection": "passed: FILE rollback and FILE/SQL legacy payload suite",
+    "public_api": "passed: import-all, profile-free contract and query-only access suite",
+    "architecture": "passed: compileall, Ruff, architecture, SCC, dynamic import, naming, cohesion and dependency gates",
+    "schema": "passed: separate runtime/step metadata registries and SQL profile tombstone checks",
+    "provenance": "passed: source commit 878830d6734158ce430d0f1844b070118ed6bf23 is the exact verification target"
+  },
+  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
+  "review_scope": "linktools-ai-d218889-fix-spec-final"
 }

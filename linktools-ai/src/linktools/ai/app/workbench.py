@@ -131,10 +131,13 @@ class WorkspaceExecutionLauncher:
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome":
         task = self._tasks.get(execution.execution_id)
         if task is None:
+            _logger.info("workspace cancellation effect unknown: execution=%s reason=task_missing", execution.execution_id)
             return CancelEffectOutcome.UNKNOWN
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        return CancelEffectOutcome.CONFIRMED
+        outcome = CancelEffectOutcome.CONFIRMED if task.cancelled() else CancelEffectOutcome.UNKNOWN
+        _logger.info("workspace cancellation effect resolved: execution=%s outcome=%s", execution.execution_id, outcome.value)
+        return outcome
 
     async def wait(self, execution_id: str) -> WorkspaceAgentResult:
         task = self._tasks.get(execution_id)

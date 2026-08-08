@@ -504,9 +504,11 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 current = _decode_payload("executions", execution_row["payload"])
                 if not isinstance(operation, OperationLedgerRecord) or not isinstance(current, ExecutionRecord):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if operation.status is not OperationStatus.PENDING or operation.execution_id != commit.execution_id:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 if current.status is ExecutionStatus.CANCELLING:
                     return current
-                if operation.status is not OperationStatus.PENDING or operation.execution_id != commit.execution_id or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
+                if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 updated = replace(current, status=ExecutionStatus.CANCELLING, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.requested_at)
                 outcome = await session.execute(update(self._table).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == commit.tenant_id, self._table.c.record_id == commit.execution_id, self._table.c.revision == commit.expected_revision, self._table.c.sequence == commit.expected_event_sequence, self._table.c.status.notin_({ExecutionStatus.SUCCEEDED.value, ExecutionStatus.FAILED.value, ExecutionStatus.CANCELLED.value})).values(payload=_encode_payload(updated), revision=updated.revision, sequence=updated.event_sequence, status=updated.status.value, updated_at=updated.updated_at))
