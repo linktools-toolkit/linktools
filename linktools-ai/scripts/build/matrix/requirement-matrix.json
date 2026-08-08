@@ -1,77 +1,37 @@
 {
-  "spec": ".docs/linktools-ai-integrated-spec.md",
-  "baseline": {
-    "upstream_commit": "d07172da6bfb915ed57bd6465c5c801407658ebb",
-    "downstream_root": "/workspace/projects/linktools3",
-    "downstream_commit": "2afc0e1dc686e0133e63985421d16aa99d345a24",
-    "status": "baseline-frozen-observed"
-  },
-  "architecture": {
-    "top_level_packages": [
-      "core", "storage", "asset", "spec", "model", "observe", "capability",
-      "task", "agent", "runtime", "local", "adapter", "temporal", "entry"
-    ],
-    "execution_profiles": ["production-service", "production-sandboxed", "local-coding"],
-    "durable_engine": "temporal",
-    "compatibility_shims": 0,
-    "spec_store_symbols": 0
-  },
-  "requirement_groups": {
-    "global": "T-GLO-01..12",
-    "storage": "T-STO-01..34",
-    "asset": "T-AST-01..33",
-    "runtime_api": "T-API-01..16",
-    "session": "T-SES-01..10",
-    "model": "T-MOD-01..04",
-    "task": "T-TSK-01..06",
-    "evaluation": "T-EVL-01..04",
-    "local": "T-LOC-01..07",
-    "observe": "T-OBS-01..06",
-    "capability": "T-CAP-01..12",
-    "production": "T-PRD-01..08",
-    "architecture": "T-ARC-01..15",
-    "cohesion": "T-COH-01..05",
-    "downstream": "T-DM-01..25",
-    "release": "T-REL-01..04",
-    "data": "T-DATA-01..07",
-    "evidence": "T-EVD-01..04",
-    "migration_tests": "MT-01..52"
-  },
-  "baseline_findings": {
-    "v2": 15,
-    "v4": 11,
-    "v5": 10,
-    "v6": 8,
-    "v7": 9,
-    "v8": 5
-  },
-  "requirements": {
-    "global": {"ids": ["T-GLO-01", "T-GLO-02", "T-GLO-03", "T-GLO-04", "T-GLO-05", "T-GLO-06", "T-GLO-07", "T-GLO-08", "T-GLO-09", "T-GLO-10", "T-GLO-11", "T-GLO-12"], "implementation": ["core/errors.py", "scripts/build/agent_bundle.py", "temporal/gateway.py"], "tests": ["T-GLO-01", "T-GLO-03", "T-GLO-07", "T-GLO-12"]},
-    "storage": {"ids": ["T-STO-01", "T-STO-02", "T-STO-03", "T-STO-04", "T-STO-05", "T-STO-06", "T-STO-07", "T-STO-08", "T-STO-09", "T-STO-10", "T-STO-11", "T-STO-12", "T-STO-13", "T-STO-14", "T-STO-15", "T-STO-16", "T-STO-17", "T-STO-18", "T-STO-19", "T-STO-20", "T-STO-21", "T-STO-22", "T-STO-23", "T-STO-24", "T-STO-25", "T-STO-26", "T-STO-27", "T-STO-28", "T-STO-29", "T-STO-30", "T-STO-31", "T-STO-32", "T-STO-33", "T-STO-34"], "implementation": ["storage/model.py", "storage/composition.py", "storage/cache.py", "storage/revision.py", "storage/files.py", "storage/database.py", "storage/initialize.py", "storage/lock.py", "storage/dialects.py", "storage/names.py"], "tests": ["T-STO-01", "T-STO-06", "T-STO-16", "T-STO-19", "T-STO-22", "T-STO-24", "T-STO-34"]},
-    "asset": {"ids": ["T-AST-01", "T-AST-02", "T-AST-03", "T-AST-04", "T-AST-05", "T-AST-06", "T-AST-07", "T-AST-08", "T-AST-09", "T-AST-10", "T-AST-11", "T-AST-12", "T-AST-13", "T-AST-14", "T-AST-15", "T-AST-16", "T-AST-17", "T-AST-18", "T-AST-19", "T-AST-20", "T-AST-21", "T-AST-22", "T-AST-23", "T-AST-24", "T-AST-25", "T-AST-26", "T-AST-27", "T-AST-28", "T-AST-29", "T-AST-30", "T-AST-31", "T-AST-32", "T-AST-33"], "implementation": ["asset/model.py", "asset/codec.py", "asset/store.py", "asset/files.py", "asset/sql.py", "asset/path.py", "asset/config.py", "asset/content.py", "asset/contracts.py", "asset/parsing.py", "asset/source.py", "asset/index.py", "asset/cache.py", "asset/local.py"], "tests": ["T-AST-01", "T-AST-06", "T-AST-12", "T-AST-16", "T-AST-19", "T-AST-28", "T-AST-33"]},
-    "runtime_api": {"ids": ["T-API-01", "T-API-02", "T-API-03", "T-API-04", "T-API-05", "T-API-06", "T-API-07", "T-API-08", "T-API-09", "T-API-10", "T-API-11", "T-API-12", "T-API-13", "T-API-14", "T-API-15", "T-API-16"], "implementation": ["runtime/container.py", "runtime/factory.py", "runtime/services.py"], "tests": ["T-API-01", "T-API-04", "T-API-07", "T-API-12", "T-API-16"]},
-    "session": {"ids": ["T-SES-01", "T-SES-02", "T-SES-03", "T-SES-04", "T-SES-05", "T-SES-06", "T-SES-07", "T-SES-08", "T-SES-09", "T-SES-10"], "implementation": ["local/runtime.py", "local/record.py", "runtime/session.py"], "tests": ["T-SES-01", "T-SES-03", "T-SES-09", "T-SES-10"]},
-    "model": {"ids": ["T-MOD-01", "T-MOD-02", "T-MOD-03", "T-MOD-04"], "implementation": ["model/registry.py", "model/resolver.py"], "tests": ["T-MOD-01", "T-MOD-03", "T-MOD-04"]},
-    "task": {"ids": ["T-TSK-01", "T-TSK-02", "T-TSK-03", "T-TSK-04", "T-TSK-05", "T-TSK-06"], "implementation": ["task/model.py", "task/graph.py", "task/service.py"], "tests": ["T-TSK-01", "T-TSK-02", "T-TSK-03", "T-TSK-04", "T-TSK-05", "T-TSK-06"]},
-    "evaluation": {"ids": ["T-EVL-01", "T-EVL-02", "T-EVL-03", "T-EVL-04"], "implementation": ["runtime/evaluation.py", "runtime/factory.py"], "tests": ["T-EVL-01", "T-EVL-02", "T-EVL-03", "T-EVL-04"]},
-    "local": {"ids": ["T-LOC-01", "T-LOC-02", "T-LOC-03", "T-LOC-04", "T-LOC-05", "T-LOC-06", "T-LOC-07"], "implementation": ["local/runtime.py", "local/record.py", "local/index.py", "src/linktools/commands/ai/run.py"], "tests": ["T-LOC-01", "T-LOC-02", "T-LOC-03", "T-LOC-04", "T-LOC-05", "T-LOC-06", "T-LOC-07"]},
-    "observe": {"ids": ["T-OBS-01", "T-OBS-02", "T-OBS-03", "T-OBS-04", "T-OBS-05", "T-OBS-06"], "implementation": ["observe/middleware.py", "observe/context.py", "observe/trace.py", "observe/snapshot.py"], "tests": ["T-OBS-01", "T-OBS-02", "T-OBS-03", "T-OBS-06"]},
-    "capability": {"ids": ["T-CAP-01", "T-CAP-02", "T-CAP-03", "T-CAP-04", "T-CAP-05", "T-CAP-06", "T-CAP-07", "T-CAP-08", "T-CAP-09", "T-CAP-10", "T-CAP-11", "T-CAP-12"], "implementation": ["capability/mcp.py", "capability/skill.py", "capability/subagent.py", "capability/sandbox.py", "capability/tool.py"], "tests": ["T-CAP-01", "T-CAP-04", "T-CAP-06", "T-CAP-08", "T-CAP-12"]},
-    "production": {"ids": ["T-PRD-01", "T-PRD-02", "T-PRD-03", "T-PRD-04", "T-PRD-05", "T-PRD-06", "T-PRD-07", "T-PRD-08"], "implementation": ["entry/http.py", "entry/worker.py", "temporal/gateway.py", "temporal/worker.py", "temporal/workflow/execution.py", "temporal/activity/execution.py"], "tests": ["T-PRD-01", "T-PRD-02", "T-PRD-04", "T-PRD-07", "T-PRD-08"]},
-    "architecture": {"ids": ["T-ARC-01", "T-ARC-02", "T-ARC-03", "T-ARC-04", "T-ARC-05", "T-ARC-06", "T-ARC-07", "T-ARC-08", "T-ARC-09", "T-ARC-10", "T-ARC-11", "T-ARC-12", "T-ARC-13", "T-ARC-14", "T-ARC-15"], "implementation": ["scripts/build/architecture.py", "scripts/build/names.py", "scripts/build/cohesion.py"], "tests": ["T-ARC-01", "T-ARC-02", "T-ARC-05", "T-ARC-09", "T-ARC-10"]},
-    "cohesion": {"ids": ["T-COH-01", "T-COH-02", "T-COH-03", "T-COH-04", "T-COH-05"], "implementation": ["scripts/build/cohesion.py", "scripts/build/architecture.py"], "tests": ["T-COH-01", "T-COH-02", "T-COH-04", "T-COH-05"]},
-    "downstream": {"ids": ["T-DM-01", "T-DM-02", "T-DM-03", "T-DM-04", "T-DM-05", "T-DM-06", "T-DM-07", "T-DM-08", "T-DM-09", "T-DM-10", "T-DM-11", "T-DM-12", "T-DM-13", "T-DM-14", "T-DM-15", "T-DM-16", "T-DM-17", "T-DM-18", "T-DM-19", "T-DM-20", "T-DM-21", "T-DM-22", "T-DM-23", "T-DM-24", "T-DM-25"], "implementation": ["scripts/build/imports.py", "scripts/build/matrix/downstream-linktools-imports.json"], "tests": ["T-DM-01", "T-DM-02", "T-DM-19", "T-DM-20", "T-DM-24"]},
-    "release": {"ids": ["T-REL-01", "T-REL-02", "T-REL-03", "T-REL-04"], "implementation": ["scripts/build/matrix/requirements-lock.json", "requirements.yml", "scripts/build/requirements.py"], "tests": ["T-REL-01", "T-REL-02", "T-REL-04"]},
-    "data": {"ids": ["T-DATA-01", "T-DATA-02", "T-DATA-03", "T-DATA-04", "T-DATA-05", "T-DATA-06", "T-DATA-07"], "implementation": ["scripts/build/matrix/sql-schema-manifest.json", "scripts/build/matrix/sql-data-manifest.json", "scripts/build/matrix/asset-file-layout.json", "scripts/build/matrix/spec-field-manifest.json", "scripts/build/matrix/codec-manifest.json", "scripts/build/matrix/output-manifest.json"], "tests": ["T-DATA-01", "T-DATA-03", "T-DATA-07"]},
-    "evidence": {"ids": ["T-EVD-01", "T-EVD-02", "T-EVD-03", "T-EVD-04"], "implementation": ["scripts/build/matrix/linktools-ai-traceability.json", "scripts/build/matrix/linktools-ai-review-coverage.json"], "tests": ["T-EVD-01", "T-EVD-02", "T-EVD-03", "T-EVD-04"]},
-    "migration_tests": {"ids": ["MT-01", "MT-02", "MT-03", "MT-04", "MT-05", "MT-06", "MT-07", "MT-08", "MT-09", "MT-10", "MT-11", "MT-12", "MT-13", "MT-14", "MT-15", "MT-16", "MT-17", "MT-18", "MT-19", "MT-20", "MT-21", "MT-22", "MT-23", "MT-24", "MT-25", "MT-26", "MT-27", "MT-28", "MT-29", "MT-30", "MT-31", "MT-32", "MT-33", "MT-34", "MT-35", "MT-36", "MT-37", "MT-38", "MT-39", "MT-40", "MT-41", "MT-42", "MT-43", "MT-44", "MT-45", "MT-46", "MT-47", "MT-48", "MT-49", "MT-50", "MT-51", "MT-52"], "implementation": ["scripts/build/imports.py", "local/runtime.py", "asset/store.py", "runtime/factory.py"], "tests": ["MT-01", "MT-19", "MT-37", "MT-51", "MT-52"]}
-  },
-  "verification": {
-    "implementation": "complete",
-    "cold_start_review": "complete",
-    "required_verdict": "CLEAN"
-  },
-  "scope_exclusions": [
-    "Downstream migration and compatibility work are explicitly excluded by the user."
-  ]
+  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
+  "status": "COMPLETE",
+  "requirements": [
+    {"id": "R-01", "owner": "runtime/adapter/workbench", "implementation": ["runtime/persistence.py", "runtime/execution.py", "app/workbench.py", "adapter/memory.py", "adapter/repository.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head", "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite", "tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"]},
+    {"id": "R-02", "owner": "app/facade", "implementation": ["app/facade.py", "runtime/execution.py", "runtime/session.py", "task/service.py", "runtime/approval.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"]},
+    {"id": "R-03", "owner": "app/workbench", "implementation": ["app/workbench.py", "runtime/services.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page", "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page", "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"]},
+    {"id": "R-04", "owner": "adapter/history", "implementation": ["adapter/history.py", "app/assembly.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency", "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
+    {"id": "R-05", "owner": "evidence", "implementation": ["scripts/build/matrix/linktools-ai-evidence.json", "scripts/build/matrix/linktools-ai-review-coverage.json", "scripts/build/matrix/linktools-ai-traceability.json"], "tests": ["cold-start evidence audit"]},
+    {"id": "R-06", "owner": "adapter/history", "implementation": ["adapter/history.py", "core/errors.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
+    {"id": "R-07", "owner": "architecture", "implementation": ["scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py::test_names_and_module_imports_are_clean", "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"]},
+    {"id": "R-08", "owner": "architecture", "implementation": ["scripts/build/architecture.py", "scripts/build/matrix/linktools-ai-package-policy.json"], "tests": ["tests/ai/test_architecture.py::test_source_graph_is_acyclic_and_static", "tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"]},
+    {"id": "R-09", "owner": "runtime/app/capability", "implementation": ["core/value.py", "runtime/persistence.py", "runtime/services.py", "runtime/execution.py", "runtime/session.py", "runtime/evaluation.py", "app/assembly.py", "app/workbench.py", "workspace/root.py", "workspace/tools.py", "capability/tool.py", "temporal/gateway.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers", "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"]},
+    {"id": "R-10", "owner": "adapter", "implementation": ["adapter/memory.py", "adapter/repository.py", "adapter/schema.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite", "tests/ai/persistence/test_runtime_store_bundle.py::test_file_runtime_fault_does_not_publish_a_partial_mutation"]},
+    {"id": "R-11", "owner": "app/workbench", "implementation": ["app/workbench.py", "storage/lock.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page", "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"]},
+    {"id": "T-01", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head"]},
+    {"id": "T-02", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite"]},
+    {"id": "T-03", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner"]},
+    {"id": "T-04", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"]},
+    {"id": "T-05", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page"]},
+    {"id": "T-06", "owner": "tests", "implementation": ["tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page"]},
+    {"id": "T-07", "owner": "tests", "implementation": ["app/workbench.py", "tests/ai/test_v5_conformance.py"], "tests": ["tests/ai/test_v5_conformance.py::test_concurrent_resume_has_one_session_head_winner", "tests/ai/test_v5_conformance.py::test_shutdown_rejects_new_mutations_after_admission_closes"]},
+    {"id": "T-08", "owner": "tests", "implementation": ["scripts/build/architecture.py", "scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py"]},
+    {"id": "T-09", "owner": "tests", "implementation": ["adapter/history.py"], "tests": ["tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"]},
+    {"id": "T-10", "owner": "tests", "implementation": ["scripts/build/names.py"], "tests": ["tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"]},
+    {"id": "T-11", "owner": "tests", "implementation": ["scripts/build/architecture.py"], "tests": ["tests/ai/test_architecture.py::test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries"]},
+    {"id": "T-12", "owner": "temporal", "implementation": ["temporal/activity.py", "temporal/worker.py", "temporal/workflow"], "tests": ["tests/ai/test_contracts.py::test_temporal_registration_has_one_explicit_worker_surface"]},
+    {"id": "T-13", "owner": "profile-removal", "implementation": ["core/value.py", "runtime/persistence.py", "runtime/services.py", "app/assembly.py"], "tests": ["cold-start profile symbol audit"]},
+    {"id": "T-14", "owner": "profile-removal", "implementation": ["adapter/repository.py", "adapter/schema.py"], "tests": ["tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite"]},
+    {"id": "T-15", "owner": "profile-removal", "implementation": ["runtime/execution.py", "runtime/session.py", "runtime/evaluation.py"], "tests": ["cold-start digest and binding audit"]},
+    {"id": "T-16", "owner": "adapter", "implementation": ["adapter/memory.py", "adapter/repository.py"], "tests": ["cold-start FILE/SQL legacy payload audit"]},
+    {"id": "T-17", "owner": "composition", "implementation": ["app/assembly.py"], "tests": ["cold-start dependency matrix audit"]},
+    {"id": "T-18", "owner": "app/workbench", "implementation": ["app/workbench.py", "storage/lock.py"], "tests": ["tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page"]}
+  ],
+  "scope_exclusions": ["Downstream migration and compatibility work are explicitly excluded by the user."],
+  "verification": {"status": "COMPLETE", "validated_source_commit": "c681220f", "open_findings": []}
 }

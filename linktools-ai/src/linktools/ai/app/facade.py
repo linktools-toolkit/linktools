@@ -16,9 +16,9 @@ from ..model import ModelResolver
 from ..observe.middleware import MiddlewarePipeline
 from ..observe.snapshot import RunSnapshot
 from ..spec import AgentSpec, OutputTypeRegistry, PromptSpec
-from ..task.model import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
-from ..task.service import TaskApi
-from ..runtime.approval import ApprovalApi
+from ..task.graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ..task.service import TaskApi, TaskQueryApi
+from ..runtime.approval import ApprovalApi, ApprovalQueryApi
 from ..runtime.artifact import ArtifactApi
 from ..runtime.event import EventApi
 from ..runtime.evaluation import EvaluationApi, EvaluationQueryApi, validate_compare_request
@@ -85,10 +85,10 @@ class Runtime:
 class RuntimeAccess:
     service_identity: RuntimeServiceIdentity
     execution: ExecutionQueryApi
-    session: SessionApi
-    task: TaskApi
+    session: SessionQueryApi
+    task: TaskQueryApi
     evaluation: EvaluationQueryApi
-    approval: ApprovalApi
+    approval: ApprovalQueryApi
     event: EventApi
     artifact: ArtifactApi
 
@@ -166,7 +166,7 @@ def build_runtime(
         dependencies.sandbox.fingerprint,
         dependencies.middleware.fingerprint,
     )
-    logger = environ.get_logger("ai.app.runtime")
+    logger = environ.get_logger("ai.app.facade")
     logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, route.route_id)
     return Runtime(
         dependencies.services.identity,
@@ -190,7 +190,7 @@ def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
         _SessionAccess(services.session),
         _TaskAccess(services.task),
         _EvaluationAccess(services.evaluation),
-        _ApprovalApi(services.approval),
+        _ApprovalAccess(services.approval),
         _EventApi(services.event),
         _ArtifactApi(services.artifact),
     )
@@ -337,7 +337,7 @@ class _TaskApi:
         return await self._service.cancel_graph(graph_id, request)
 
 
-class _TaskAccess:
+class _TaskAccess(TaskQueryApi):
     def __init__(self, service: TaskService) -> None:
         self._service = service
 
@@ -382,7 +382,7 @@ class _EvaluationAccess(EvaluationQueryApi):
         return await self._service.snapshot(evaluation_id, principal=principal)
 
 
-class _ApprovalApi:
+class _ApprovalApi(ApprovalApi):
     def __init__(self, service: ApprovalService) -> None:
         self._service = service
 
@@ -391,6 +391,14 @@ class _ApprovalApi:
 
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult:
         return await self._service.decide(execution_id, request)
+
+
+class _ApprovalAccess(ApprovalQueryApi):
+    def __init__(self, service: ApprovalService) -> None:
+        self._service = service
+
+    async def list(self, execution_id: str, *, principal: Principal) -> 'tuple[ApprovalView, ...]':
+        return await self._service.list(execution_id, principal=principal)
 
 
 class _EventApi:

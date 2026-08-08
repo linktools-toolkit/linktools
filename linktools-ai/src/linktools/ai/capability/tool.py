@@ -9,7 +9,7 @@ from typing import Protocol
 
 from ..core.principal import ResourceRef
 from ..core.value import Principal
-from ..core.value import ExecutionProfile, ToolOperationStatus
+from ..core.value import ToolOperationStatus
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +66,6 @@ class ToolPolicy(Protocol):
         tool: ToolDescriptor,
         arguments_digest: str,
     ) -> ToolAuthorization: ...
-
-    def allowed(self, tool_id: str, profile: ExecutionProfile) -> bool: ...
 
 
 __all__ = ["ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore"]

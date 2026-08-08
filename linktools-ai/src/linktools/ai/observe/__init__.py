@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Observation lifecycle and trace contracts."""
 
-from .context import RunContext, context_for, current_context, reset_context, set_context
+from .scope import RunContext, context_for, current_context, reset_context, set_context
 from .middleware import Middleware, MiddlewarePipeline
 from .snapshot import RunSnapshot, snapshot_digest
 from .trace import InMemoryTraceRecorder, TraceItem, TraceRecorder

@@ -9,14 +9,11 @@ from typing import TYPE_CHECKING, Protocol, cast
 from linktools.core import environ
 
 from ..core.errors import ErrorCode, AIError
-from .activity.evaluation import EvaluationActivity
-from .activity.execution import ExecuteActivity
-from .activity.session import SessionActivity
-from .activity.task import TaskActivity
-from .workflow.evaluation import EvaluationWorkflow
-from .workflow.execution import ExecutionWorkflow
-from .workflow.session import SessionWorkflow
-from .workflow.task import TaskWorkflow
+from .activity import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
+from .workflow.suite import EvaluationWorkflow
+from .workflow.run import ExecutionWorkflow
+from .workflow.mutation import SessionWorkflow
+from .workflow.dag import TaskWorkflow
 
 if TYPE_CHECKING:
     from temporalio.api.common.v1 import Payload

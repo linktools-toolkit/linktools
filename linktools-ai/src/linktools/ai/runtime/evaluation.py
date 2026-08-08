@@ -13,7 +13,7 @@ from ..core import Principal
 from ..core.errors import ErrorCode, AIError
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.ids import canonical_sha256, idempotency_key_hash
-from ..core.value import EvaluationStatus, ExecutionProfile, IdempotencyStatus, ResourceKind
+from ..core.value import EvaluationStatus, IdempotencyStatus, ResourceKind
 from ..observe.snapshot import RunSnapshot
 from .persistence import EvaluationRecord, IdempotencyRecord, RuntimePersistence
 from .services import (
@@ -85,7 +85,14 @@ class DefaultEvaluationService:
         now = datetime.now(timezone.utc)
         await self._persistence.idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
         try:
-            execution = await self._execution.run(binding_digest, ExecutionRequest(f"evaluation:{request.dataset_digest}", request.principal, ExecutionProfile.LOCAL_CODING, f"evaluation:{request.idempotency_key}"))
+            execution = await self._execution.run(
+                binding_digest,
+                ExecutionRequest(
+                    prompt=f"evaluation:{request.dataset_digest}",
+                    principal=request.principal,
+                    idempotency_key=f"evaluation:{request.idempotency_key}",
+                ),
+            )
             record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
             await self._persistence.evaluations.create(record)
         except asyncio.CancelledError:
@@ -139,8 +146,15 @@ class DefaultEvaluationService:
     async def replay(self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle:
         record = await self._authorized(snapshot_id, request.principal, AuthorizationAction.EVALUATION_READ)
         if record.binding_digest != binding_digest:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
-        return await self._execution.run(binding_digest, ExecutionRequest(f"replay:{record.evaluation_id}", request.principal, ExecutionProfile.LOCAL_CODING, request.idempotency_key))
+            raise AIError(ErrorCode.EVALUATION_INCOMPATIBLE)
+        return await self._execution.run(
+            binding_digest,
+            ExecutionRequest(
+                prompt=f"replay:{record.evaluation_id}",
+                principal=request.principal,
+                idempotency_key=request.idempotency_key,
+            ),
+        )
 
     async def _synchronize(self, record: EvaluationRecord) -> EvaluationRecord:
         execution = await self._persistence.executions.get(record.execution_id, tenant_id=record.tenant_id)

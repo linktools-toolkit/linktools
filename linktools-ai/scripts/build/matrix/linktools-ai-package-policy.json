@@ -17,15 +17,15 @@
     "app": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal"]
   },
   "module_dependencies": {
-    "adapter.sql": ["core", "storage", "runtime", "capability", "task"],
+    "adapter.repository": ["core", "storage", "runtime", "capability", "task"],
     "adapter.nats": ["core", "observe"],
     "adapter.logfire": ["core", "observe"],
     "adapter.provider": ["core", "model"],
-    "adapter.principal": ["core"],
+    "adapter.identity": ["core"],
     "adapter.schema": ["core", "storage"],
-    "app.runtime": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
-    "app.services": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
-    "app.workspace": ["core", "storage", "agent", "runtime", "workspace"],
+    "app.facade": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "app.assembly": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "adapter"],
+    "app.workbench": ["core", "storage", "agent", "runtime", "workspace", "adapter"],
     "agent.binding": ["core", "spec", "model"],
     "temporal.context": ["core", "agent"]
   },

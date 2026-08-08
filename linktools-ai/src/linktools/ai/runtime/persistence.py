@@ -12,17 +12,16 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..core.errors import ErrorCode, AIError
 from ..core.json import JsonValue
 from ..core.paging import Page
 from ..core.principal import ResourceRef
 from ..core.value import (
     ApprovalDecision, ApprovalStatus, BlobStatus, EvaluationStatus,
-    ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, ExternalCallStatus,
+    ExecutionEventType, ExecutionLineageKind, ExecutionStatus, ExternalCallStatus,
     IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus,
     StopReason, TaskStatus, ToolOperationStatus,
 )
-from ..task.model import TaskGraph, TaskGraphView, TaskTerminalRecord
+from ..task.graph import TaskGraph, TaskGraphView, TaskTerminalRecord
 
 
 class RuntimePersistenceMode(StrEnum):
@@ -47,21 +46,6 @@ def backend_mode(backend: RuntimeBackend) -> RuntimePersistenceMode:
     return RuntimePersistenceMode.SQL
 
 
-def validate_runtime_profile(
-    backend: RuntimeBackend,
-    profile: ExecutionProfile,
-    *,
-    temporal_enabled: bool,
-    local_trusted: bool = False,
-) -> None:
-    """Reject profile and durable-engine combinations that cannot be safe."""
-    if profile is ExecutionProfile.PRODUCTION_SERVICE:
-        if backend not in {RuntimeBackend.SQLITE, RuntimeBackend.MYSQL, RuntimeBackend.POSTGRESQL} or not temporal_enabled or local_trusted:
-            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
-    elif profile is ExecutionProfile.LOCAL_CODING and backend not in {RuntimeBackend.MEMORY, RuntimeBackend.FILE, RuntimeBackend.SQLITE}:
-        raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
-
-
 @dataclass(frozen=True, slots=True)
 class BlobRef:
     tenant_id: str
@@ -84,7 +68,6 @@ class SessionRecord:
     created_at: datetime
     updated_at: datetime
     closed_at: "datetime | None"
-    profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING
     head_execution_id: "str | None" = None
 
 
@@ -93,7 +76,6 @@ class ExecutionRecord:
     execution_id: str
     tenant_id: str
     session_id: "str | None"
-    profile: ExecutionProfile
     binding_digest: str
     parent_execution_id: "str | None"
     root_execution_id: str
@@ -564,5 +546,5 @@ __all__ = [
     "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository",
     "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeBackend", "RuntimePersistence",
     "RuntimePersistenceMode", "RuntimeRepository", "ManagedToolStateRepository", "SessionRecord", "SessionRepository", "backend_mode",
-    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus", "validate_runtime_profile",
+    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus",
 ]

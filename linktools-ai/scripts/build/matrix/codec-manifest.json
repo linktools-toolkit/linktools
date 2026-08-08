@@ -3,7 +3,7 @@
   "entries": [
     {
       "kind": "agent",
-      "value_type": "linktools.ai.spec.model.AgentSpec",
+      "value_type": "linktools.ai.spec.contract.AgentSpec",
       "fingerprint": "agent-spec",
       "codec_version": 1
     },
@@ -15,7 +15,7 @@
     },
     {
       "kind": "prompt",
-      "value_type": "linktools.ai.spec.model.PromptSpec",
+      "value_type": "linktools.ai.spec.contract.PromptSpec",
       "fingerprint": "prompt-spec",
       "codec_version": 1
     },

@@ -17,7 +17,7 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.paging import CursorPayload, CursorSigner
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core.value import ExecutionProfile, ExecutionStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus
+from ..core.value import ExecutionStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus
 from .persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence, SessionRecord
 from .services import (
     CloseSessionRequest,
@@ -54,31 +54,44 @@ class SessionApi(SessionQueryApi, Protocol):
 class DefaultSessionService:
     """Enforce session ownership, binding immutability, and revision CAS."""
 
-    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, service_profile: ExecutionProfile) -> None:
+    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._execution = execution
         self._cursor_signer = cursor_signer
-        self._service_profile = service_profile
 
     async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
         resource = ResourceRef(ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
-        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest, "profile": self._service_profile.value})
+        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest})
         operation = await self._begin_operation(request.create_request_id, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
         if operation.result_ref:
             current = await self._persistence.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
             if current is not None:
                 return await self._view(current, request.principal)
         now = datetime.now(timezone.utc)
-        record = SessionRecord(request.session_id, request.principal.tenant_id, request.principal.principal_id, binding_digest, SessionStatus.OPEN, 0, 0, request.cwd, {}, now, now, None, self._service_profile, None)
+        record = SessionRecord(
+            session_id=request.session_id,
+            tenant_id=request.principal.tenant_id,
+            owner_principal_id=request.principal.principal_id,
+            binding_digest=binding_digest,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=request.cwd,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            head_execution_id=None,
+        )
         try:
             await self._persistence.sessions.create(record)
         except AIError as error:
             if error.code is not ErrorCode.SESSION_CONFLICT:
                 raise
             current = await self._persistence.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
-            if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding_digest or current.profile is not self._service_profile:
+            if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             record = current
         await self._complete_operation(operation, request.principal.tenant_id, record.session_id, canonical_sha256({"session_id": record.session_id, "revision": record.revision}))
@@ -114,9 +127,13 @@ class DefaultSessionService:
         await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id))
         if record.status is not SessionStatus.OPEN:
             raise AIError(ErrorCode.SESSION_CONFLICT)
-        if record.binding_digest != binding_digest or record.profile is not self._service_profile:
+        if record.binding_digest != binding_digest:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-        return await self._execution.run_for_session(binding_digest, session_id, ExecutionRequest(request.prompt, request.principal, record.profile, request.idempotency_key))
+        return await self._execution.run_for_session(
+            binding_digest,
+            session_id,
+            ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key),
+        )
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
         source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
@@ -127,10 +144,24 @@ class DefaultSessionService:
             current = await self._persistence.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
             if current is not None:
                 return await self._view(current, request.principal)
-        if source.binding_digest != binding_digest or source.profile is not self._service_profile:
+        if source.binding_digest != binding_digest:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         now = datetime.now(timezone.utc)
-        target = SessionRecord(request.new_session_id, source.tenant_id, source.owner_principal_id, source.binding_digest, SessionStatus.OPEN, 0, 0, source.cwd if request.cwd is None else request.cwd, {}, now, now, None, source.profile, source.head_execution_id)
+        target = SessionRecord(
+            session_id=request.new_session_id,
+            tenant_id=source.tenant_id,
+            owner_principal_id=source.owner_principal_id,
+            binding_digest=source.binding_digest,
+            status=SessionStatus.OPEN,
+            revision=0,
+            resource_generation=0,
+            cwd=source.cwd if request.cwd is None else request.cwd,
+            metadata={},
+            created_at=now,
+            updated_at=now,
+            closed_at=None,
+            head_execution_id=source.head_execution_id,
+        )
         try:
             await self._persistence.sessions.create(target)
         except AIError as error:
@@ -154,7 +185,7 @@ class DefaultSessionService:
 
     async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
-        if current.binding_digest != binding_digest or current.profile is not self._service_profile:
+        if current.binding_digest != binding_digest:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
         operation = await self._begin_operation(request.mutation_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
@@ -262,8 +293,6 @@ class DefaultSessionService:
         record = await self._persistence.sessions.get(session_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        if record.profile is not self._service_profile:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         return record
 
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:

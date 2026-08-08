@@ -9,7 +9,7 @@ from .external import DefaultExternalService
 from .evaluation import DefaultEvaluationService, EvaluationApi, EvaluationQueryApi
 from .execution import DefaultExecutionService, ExecutionApi, ExecutionQueryApi
 from .session import DefaultSessionService, SessionApi, SessionQueryApi
-from .task import DefaultTaskService
+from .planner import DefaultTaskService
 from .services import RuntimeServiceIdentity, RuntimeServices
 from .persistence import RuntimeBackend, RuntimePersistence, RuntimePersistenceMode
 

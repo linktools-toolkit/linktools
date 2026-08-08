@@ -12,11 +12,11 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.value import OperationKind, OperationStatus, Principal, ResourceKind, TaskStatus
-from ..task.model import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ..task.graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
 from .persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence
 from .services import WorkflowGateway
 
-_logger = environ.get_logger("ai.runtime.task")
+_logger = environ.get_logger("ai.runtime.planner")
 
 
 class DefaultTaskService:
@@ -41,7 +41,7 @@ class DefaultTaskService:
         operation = await self._persistence.operations.append(OperationLedgerInput(operation_id, request.principal.tenant_id, ResourceKind.TASK_GRAPH, request.graph.graph_id, None, OperationKind.TASK_NODE, OperationStatus.PENDING, digest, None, None, None, True, now, now))
         try:
             view = await self._persistence.tasks.create_plan(request.graph, tenant_id=request.principal.tenant_id)
-            if self._workflow_gateway is not None and request.requested_profile.value == "production-service":
+            if self._workflow_gateway is not None:
                 await self._workflow_gateway.start_task_graph(request.graph.graph_id, request)
         except asyncio.CancelledError:
             raise
@@ -59,7 +59,7 @@ class DefaultTaskService:
             )
             raise
         await self._persistence.operations.compare_and_swap(operation_id, tenant_id=request.principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, view.graph_id, canonical_sha256({"graph_id": view.graph_id, "status": view.status.value}), None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
-        _logger.info("task graph submitted: graph=%s tenant=%s profile=%s", view.graph_id, request.principal.tenant_id, request.requested_profile)
+        _logger.info("task graph submitted: graph=%s tenant=%s gateway=%s", view.graph_id, request.principal.tenant_id, self._workflow_gateway is not None)
         return TaskGraphResult(view.graph_id, view.status, ())
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:

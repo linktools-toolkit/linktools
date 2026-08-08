@@ -186,9 +186,9 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
         elif relative[0] == "temporal":
-            if len(relative) == 2 and relative[1] in {"context.py", "gateway.py", "worker.py"}:
+            if len(relative) == 2 and relative[1] in {"activity.py", "context.py", "gateway.py", "worker.py"}:
                 continue
-            if len(relative) != 3 or relative[1] not in {"workflow", "activity"}:
+            if len(relative) != 3 or relative[1] != "workflow":
                 errors.append(f"invalid temporal depth: {path}")
         elif len(relative) != 2:
             errors.append(f"invalid module depth: {path}")
@@ -279,25 +279,30 @@ class ArchitecturePolicyChecker:
         if isinstance(module_dependencies, dict):
             runtime_graph = report["runtime"]
             if isinstance(runtime_graph, dict):
+                modules = set(report["modules"]) if isinstance(report.get("modules"), list) else set()
                 for source_module, allowed_value in module_dependencies.items():
                     if not isinstance(source_module, str):
+                        continue
+                    normalized_source = source_module if source_module.startswith("linktools.ai.") else f"linktools.ai.{source_module}"
+                    if normalized_source not in modules:
+                        errors.append(f"stale module dependency policy: {source_module}")
                         continue
                     allowed = (
                         {item for item in allowed_value if isinstance(item, str)}
                         if isinstance(allowed_value, list)
                         else set()
                     )
-                    targets = runtime_graph.get(source_module, [])
+                    targets = runtime_graph.get(normalized_source, [])
                     if not isinstance(targets, list):
                         continue
                     for target in targets:
                         if not isinstance(target, str):
                             continue
                         target_package = target.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
-                        source_package = source_module.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
+                        source_package = normalized_source.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
                         if target_package != source_package and target_package not in allowed:
                             errors.append(
-                                f"module dependency policy: {source_module} -> {target}"
+                                f"module dependency policy: {normalized_source} -> {target}"
                             )
         forbidden_nodes = {"Spec" + "Store", "__getattr__"}
         for path in root.rglob("*.py"):

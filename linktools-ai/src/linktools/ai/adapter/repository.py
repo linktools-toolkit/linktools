@@ -19,7 +19,7 @@ from ..core.json import JsonValue, canonical_json_bytes
 from ..core.paging import Page
 from ..core.principal import ResourceRef
 from ..core.value import (
-    ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionProfile,
+    ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType,
     ExecutionStatus, ExternalCallStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind,
     SessionStatus, StopReason, TaskStatus, ToolOperationStatus, ExecutionLineageKind,
 )
@@ -30,7 +30,7 @@ from ..runtime.persistence import (
     ResultRecord, RuntimePersistence, RuntimePersistenceMode, RuntimeRepository, SessionRecord,
     TaskLease, TaskNodeView,
 )
-from ..task.model import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ..task.graph import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage.database import StorageDatabase
 from linktools.core import environ
 from .schema import SqlRuntimeTables
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 _MAX_SQL_BLOB_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_SQL_BLOB_CHUNK = 1024 * 1024
 _MAX_SQL_INLINE_BLOB_BYTES = 4 * 1024 * 1024
-_logger = environ.get_logger("ai.adapter.sql")
+_logger = environ.get_logger("ai.adapter.repository")
 
 
 class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
@@ -89,7 +89,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         now = _record_time(record)
         values = {"namespace_key": self.namespace_key, "tenant_id": tenant_id, "record_id": record_id, "sequence": sequence, "revision": revision, "status": status, "payload": _encode_payload(record), "created_at": now, "updated_at": now}
         if isinstance(record, SessionRecord):
-            values.update(session_id=record.session_id, profile=record.profile.value, head_execution_id=record.head_execution_id)
+            values.update(session_id=record.session_id, profile="", head_execution_id=record.head_execution_id)
         if isinstance(record, ExecutionRecord):
             values.update(session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
         if isinstance(record, ToolOperationRecord):
@@ -114,7 +114,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             async with session.begin():
                 values = {"payload": _encode_payload(record), "revision": revision, "status": status, "updated_at": now}
                 if isinstance(record, SessionRecord):
-                    values.update(session_id=record.session_id, profile=record.profile.value, head_execution_id=record.head_execution_id)
+                    values.update(session_id=record.session_id, profile="", head_execution_id=record.head_execution_id)
                 if isinstance(record, ExecutionRecord):
                     values.update(session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
                 if isinstance(record, ToolOperationRecord):
@@ -566,6 +566,15 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
                 if not isinstance(current, ExecutionRecord) or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or execution.revision != commit.expected_revision + 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                locked_session = None
+                if commit.session_head is not None:
+                    locked_session_row = (await session.execute(select(session_table).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id).with_for_update())).mappings().first()
+                    if locked_session_row is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    locked_session = _decode_payload("sessions", locked_session_row["payload"])
+                    if not isinstance(locked_session, SessionRecord) or locked_session.status is not SessionStatus.OPEN or locked_session.head_execution_id != commit.session_head.expected_head_execution_id:
+                        _logger.warning("session head CAS rejected: session=%s expected=%s", commit.session_head.session_id, commit.session_head.expected_head_execution_id)
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
                 identity = None
                 if commit.idempotency is not None:
                     identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id, idempotency_table.c.scope == commit.idempotency.scope, idempotency_table.c.key_hash == commit.idempotency.key_hash).with_for_update())).mappings().first()
@@ -604,15 +613,12 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     if outcome.rowcount != 1:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                 if commit.session_head is not None:
-                    expected_head = commit.session_head.expected_head_execution_id
-                    head_match = session_table.c.head_execution_id.is_(None) if expected_head is None else session_table.c.head_execution_id == expected_head
-                    session_row = (await session.execute(select(session_table).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id, session_table.c.status == SessionStatus.OPEN.value, head_match).with_for_update())).mappings().first()
-                    if session_row is not None:
-                        current_session = _decode_payload("sessions", session_row["payload"])
-                        if not isinstance(current_session, SessionRecord):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        updated_session = replace(current_session, revision=current_session.revision + 1, head_execution_id=commit.session_head.next_head_execution_id, updated_at=_record_time(execution))
-                        await session.execute(update(session_table).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id, session_table.c.revision == current_session.revision).values(payload=_encode_payload(updated_session), head_execution_id=updated_session.head_execution_id, revision=updated_session.revision, updated_at=updated_session.updated_at))
+                    if not isinstance(locked_session, SessionRecord):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    updated_session = replace(locked_session, revision=locked_session.revision + 1, head_execution_id=commit.session_head.next_head_execution_id, updated_at=_record_time(execution))
+                    outcome = await session.execute(update(session_table).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id, session_table.c.revision == locked_session.revision).values(payload=_encode_payload(updated_session), head_execution_id=updated_session.head_execution_id, revision=updated_session.revision, updated_at=updated_session.updated_at))
+                    if outcome.rowcount != 1:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
         return ExecutionTerminalCommitResult(execution, commit.result)
 
     async def _append_event(self, execution_id: str, *, tenant_id: str, expected_sequence: int, event_type: "ExecutionEventType | None" = None, payload: JsonValue) -> "ExecutionEventRecord":
@@ -1010,11 +1016,11 @@ def _enum(enum_type: "type[object]", value: object) -> object:
 
 
 def _session_record(value: "dict[str, JsonValue]") -> SessionRecord:
-    return SessionRecord(str(value["session_id"]), str(value["tenant_id"]), str(value["owner_principal_id"]), str(value["binding_digest"]), _enum(SessionStatus, value["status"]), int(value["revision"]), int(value["resource_generation"]), None if value.get("cwd") is None else str(value["cwd"]), value.get("metadata", {}), _utc(value["created_at"]), _utc(value["updated_at"]), None if value.get("closed_at") is None else _utc(value["closed_at"]), _enum(ExecutionProfile, value.get("profile", ExecutionProfile.LOCAL_CODING.value)), None if value.get("head_execution_id") is None else str(value["head_execution_id"]))
+    return SessionRecord(session_id=str(value["session_id"]), tenant_id=str(value["tenant_id"]), owner_principal_id=str(value["owner_principal_id"]), binding_digest=str(value["binding_digest"]), status=_enum(SessionStatus, value["status"]), revision=int(value["revision"]), resource_generation=int(value["resource_generation"]), cwd=None if value.get("cwd") is None else str(value["cwd"]), metadata=value.get("metadata", {}), created_at=_utc(value["created_at"]), updated_at=_utc(value["updated_at"]), closed_at=None if value.get("closed_at") is None else _utc(value["closed_at"]), head_execution_id=None if value.get("head_execution_id") is None else str(value["head_execution_id"]))
 
 
 def _execution_record(value: "dict[str, JsonValue]") -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), profile=_enum(ExecutionProfile, value["profile"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=_enum(ExecutionLineageKind, value.get("lineage_kind", "RUN")), status=_enum(ExecutionStatus, value["status"]), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_utc(value["created_at"]), updated_at=_utc(value["updated_at"]))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=_enum(ExecutionLineageKind, value.get("lineage_kind", "RUN")), status=_enum(ExecutionStatus, value["status"]), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_utc(value["created_at"]), updated_at=_utc(value["updated_at"]))
 
 
 def _result_record(value: "dict[str, JsonValue]") -> ResultRecord:

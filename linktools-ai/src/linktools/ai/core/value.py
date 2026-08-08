@@ -6,13 +6,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .paging import Page
-from .errors import ErrorCode, AIError
-
-
-class ExecutionProfile(StrEnum):
-    PRODUCTION_SERVICE = "production-service"
-    PRODUCTION_SANDBOXED = "production-sandboxed"
-    LOCAL_CODING = "local-coding"
 
 
 class ResourceKind(StrEnum):
@@ -186,19 +179,10 @@ class PrincipalKind(StrEnum):
     LOCAL_TRUSTED = "LOCAL_TRUSTED"
 
 
-def profile_available(profile: ExecutionProfile) -> bool:
-    return profile is not ExecutionProfile.PRODUCTION_SANDBOXED
-
-
-def require_profile_available(profile: ExecutionProfile) -> None:
-    if not profile_available(profile):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "production-sandboxed is blocked by the Harness release")
-
-
 __all__ = [
     "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
-    "ExecutionEventType", "ExecutionLineageKind", "ExecutionProfile", "ExecutionStatus", "ExternalCallStatus",
+    "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",
-    "ToolOperationStatus", "profile_available", "require_profile_available",
+    "ToolOperationStatus",
 ]

@@ -1,5 +1,5 @@
 {
-  "spec": ".docs/linktools-ai-integrated-spec.md",
+  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
   "downstream_root": "/workspace/projects/linktools3",
   "downstream_commit": "2afc0e1dc686e0133e63985421d16aa99d345a24",
   "expected": {"files": 12, "imports": 49},

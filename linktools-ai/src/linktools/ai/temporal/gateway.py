@@ -8,7 +8,6 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core.json import JsonValue
-from ..core import ExecutionProfile, require_profile_available
 from ..core.errors import ErrorCode, AIError
 from ..runtime.services import (
     CancelExecutionResult,
@@ -17,7 +16,7 @@ from ..runtime.services import (
     WorkflowQueryResult,
     WorkflowUpdateResult,
 )
-from ..task.model import TaskGraphHandle, TaskGraphRequest, TaskGraphView
+from ..task.graph import TaskGraphHandle, TaskGraphRequest, TaskGraphView
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})
@@ -61,9 +60,6 @@ class WorkflowGateway:
     async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
-        require_profile_available(request.requested_profile)
-        if request.requested_profile is not ExecutionProfile.PRODUCTION_SERVICE or request.principal.kind == "LOCAL_TRUSTED":
-            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
         _logger.info("starting durable execution workflow: workflow_id=%s", workflow_id)
         return await self._client.start_workflow("execution", request, workflow_id=workflow_id)
 
@@ -98,9 +94,6 @@ class WorkflowGateway:
     async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
-        require_profile_available(request.requested_profile)
-        if request.requested_profile is not ExecutionProfile.PRODUCTION_SERVICE or request.principal.kind == "LOCAL_TRUSTED":
-            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
         _logger.info("starting durable task workflow: workflow_id=%s", workflow_id)
         return await self._client.start_task_graph(request, workflow_id=workflow_id)
 

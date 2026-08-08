@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """Task graph and swarm contracts."""
 
-from .graph import ready_nodes
-from .model import (
+from .graph import (
     CancelGraphRequest,
     Job,
     Swarm,
@@ -17,6 +16,7 @@ from .model import (
     TaskNode,
     TaskStatus,
     TaskTerminalRecord,
+    ready_nodes,
 )
 from .service import TaskApi, TaskQueryApi
 

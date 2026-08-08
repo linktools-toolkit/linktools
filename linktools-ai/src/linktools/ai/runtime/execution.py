@@ -14,7 +14,7 @@ from ..core import Page, Principal
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core.value import ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, StopReason
+from ..core.value import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, StopReason
 from linktools.core import environ
 from .persistence import (
     ExecutionRecord,
@@ -80,14 +80,12 @@ class DefaultExecutionService:
         *,
         launcher: "ExecutionLauncher | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
-        service_profile: "ExecutionProfile",
         history_reader: ExecutionHistoryReader,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
-        self._service_profile = service_profile
         self._history_reader = history_reader
 
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
@@ -101,8 +99,6 @@ class DefaultExecutionService:
     async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if request.requested_profile is not self._service_profile:
-            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
@@ -127,7 +123,7 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.RESERVED:
                 pending = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
-                    return ExecutionHandle(existing.execution_id, request.requested_profile)
+                    return ExecutionHandle(existing.execution_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
@@ -136,20 +132,19 @@ class DefaultExecutionService:
                     current = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
-                    return ExecutionHandle(existing.execution_id, request.requested_profile)
+                    return ExecutionHandle(existing.execution_id)
                 await self._launch_claim(request, existing.execution_id, request.principal.tenant_id, scope, key_hash)
-                return ExecutionHandle(existing.execution_id, request.requested_profile)
+                return ExecutionHandle(existing.execution_id)
             if existing.status is IdempotencyStatus.FAILED:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_START_PERSISTENCE_FAILED)
             if existing.status is IdempotencyStatus.CANCELLED:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_CANCELLED)
-            return ExecutionHandle(existing.execution_id, request.requested_profile)
+            return ExecutionHandle(existing.execution_id)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
             tenant_id=request.principal.tenant_id,
             session_id=session_id,
-            profile=request.requested_profile,
             binding_digest=binding_digest,
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id or execution_id,
@@ -183,15 +178,15 @@ class DefaultExecutionService:
                     current = await self._persistence.executions.get(reservation.execution.execution_id, tenant_id=reservation.execution.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
-                    return ExecutionHandle(reservation.execution.execution_id, request.requested_profile)
+                    return ExecutionHandle(reservation.execution.execution_id)
                 await self._launch_claim(request, reservation.execution.execution_id, reservation.execution.tenant_id, scope, key_hash)
             elif reservation.execution.status is ExecutionStatus.STARTED and reservation.idempotency.status is IdempotencyStatus.STARTED:
-                return ExecutionHandle(reservation.execution.execution_id, request.requested_profile)
+                return ExecutionHandle(reservation.execution.execution_id)
             elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ExecutionHandle(reservation.execution.execution_id, request.requested_profile)
+            return ExecutionHandle(reservation.execution.execution_id)
         execution_id = reservation.execution.execution_id
         try:
             await self._persistence.executions.claim_start(
@@ -202,8 +197,8 @@ class DefaultExecutionService:
                 raise
             raise AIError(ErrorCode.EXECUTION_START_PERSISTENCE_FAILED) from error
         await self._launch_claim(request, execution_id, request.principal.tenant_id, scope, key_hash)
-        _logger.info("execution started: execution=%s scope=%s profile=%s", execution_id, scope, request.requested_profile)
-        return ExecutionHandle(execution_id, request.requested_profile)
+        _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
+        return ExecutionHandle(execution_id)
 
     async def _launch_claim(self, request: ExecutionRequest, execution_id: str, tenant_id: str, scope: str, key_hash: str) -> None:
         if self._launcher is None:
@@ -227,7 +222,7 @@ class DefaultExecutionService:
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
-        return ExecutionView(execution.execution_id, execution.status, execution.profile)
+        return ExecutionView(execution.execution_id, execution.status)
 
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
@@ -238,25 +233,23 @@ class DefaultExecutionService:
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
-        if previous.binding_digest != binding_digest or previous.profile is not self._service_profile:
+        if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
-            request.prompt,
-            request.principal,
-            previous.profile,
-            request.idempotency_key,
+            prompt=request.prompt,
+            principal=request.principal,
+            idempotency_key=request.idempotency_key,
         )
         return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
-        if previous.binding_digest != binding_digest or previous.profile is not self._service_profile:
+        if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
-            request.prompt,
-            request.principal,
-            previous.profile,
-            request.idempotency_key,
+            prompt=request.prompt,
+            principal=request.principal,
+            idempotency_key=request.idempotency_key,
         )
         return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
@@ -411,7 +404,6 @@ def _request_digest(
     return canonical_sha256(
         {
             "prompt": request.prompt,
-            "profile": request.requested_profile.value,
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal_id": request.principal.principal_id,
@@ -495,7 +487,6 @@ def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datet
         execution_id=record.execution_id,
         tenant_id=record.tenant_id,
         session_id=record.session_id,
-        profile=record.profile,
         binding_digest=record.binding_digest,
         parent_execution_id=record.parent_execution_id,
         root_execution_id=record.root_execution_id,

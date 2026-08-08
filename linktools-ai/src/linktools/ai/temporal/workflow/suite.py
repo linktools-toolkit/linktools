@@ -14,7 +14,7 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from .execution import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
+from .run import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
 
 
 @dataclass(frozen=True, slots=True)

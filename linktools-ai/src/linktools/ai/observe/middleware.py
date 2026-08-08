@@ -9,7 +9,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core.errors import ErrorCode, AIError
-from .context import RunContext
+from .scope import RunContext
 
 
 class Middleware(Protocol):

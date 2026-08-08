@@ -17,7 +17,7 @@ from linktools.ai.adapter.step import DurableFileStepStore
 from linktools.ai.adapter.memory import build_file_runtime, build_memory_runtime
 from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.core.ids import idempotency_key_hash
-from linktools.ai.core.value import ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
+from linktools.ai.core.value import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
 from linktools.ai.runtime.persistence import ExecutionRecord, ExecutionStartClaim, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, SessionHeadAdvance, SessionRecord
 
 
@@ -54,7 +54,7 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
     runtime = build_memory_runtime(namespace="claim")
     await runtime.initialize()
     now = datetime.now(timezone.utc)
-    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, profile=ExecutionProfile.LOCAL_CODING, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     key_hash = idempotency_key_hash("request")
     await runtime.persistence.executions.create(execution)
     await runtime.persistence.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
@@ -71,7 +71,7 @@ async def test_sqlite_claim_start_updates_the_runtime_bundle_atomically(tmp_path
     now = datetime.now(timezone.utc)
     config = RuntimeStoreConfig.sqlite(str(tmp_path / "claim.db"), namespace="claim", deployment_id="test")
     async with open_runtime_store(config) as stores:
-        execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, profile=ExecutionProfile.LOCAL_CODING, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+        execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
         key_hash = idempotency_key_hash("request")
         await stores.domain.executions.create(execution)
         await stores.domain.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
@@ -85,12 +85,12 @@ async def test_memory_terminal_aggregate_commits_event_idempotency_and_session_h
     runtime = build_memory_runtime(namespace="terminal")
     await runtime.initialize()
     now = datetime.now(timezone.utc)
-    await runtime.persistence.sessions.create(SessionRecord("session", "tenant", "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None, ExecutionProfile.LOCAL_CODING, None))
-    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", profile=ExecutionProfile.LOCAL_CODING, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.STARTED, revision=1, event_sequence=0, agent_run_sequence=1, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    await runtime.persistence.sessions.create(SessionRecord(session_id="session", tenant_id="tenant", owner_principal_id="owner", binding_digest="binding", status=SessionStatus.OPEN, revision=0, resource_generation=0, cwd=None, metadata={}, created_at=now, updated_at=now, closed_at=None, head_execution_id=None))
+    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.STARTED, revision=1, event_sequence=0, agent_run_sequence=1, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     await runtime.persistence.executions.create(execution)
     key_hash = idempotency_key_hash("terminal")
     await runtime.persistence.idempotency.reserve(IdempotencyRecord("tenant", "execution.run", key_hash, "request", "execution", IdempotencyStatus.STARTED, None, None, now, now))
-    terminal = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", profile=ExecutionProfile.LOCAL_CODING, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=1, agent_run_sequence=1, result_ref="digest", result_digest="digest", error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    terminal = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=1, agent_run_sequence=1, result_ref="digest", result_digest="digest", error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     result = ResultRecord("execution", "tenant", ExecutionStatus.SUCCEEDED, "none", 1, "none", "digest", "digest", StopReason.END_TURN, 0, 0, 0, now)
     await runtime.persistence.results.commit_terminal(ExecutionTerminalCommit(1, 0, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED, {}, IdempotencyTerminalUpdate("execution.run", key_hash, IdempotencyStatus.STARTED, IdempotencyStatus.COMPLETED, "request", "digest", None), None, SessionHeadAdvance("session", None, "execution")))
     assert (await runtime.persistence.idempotency.get("execution.run", key_hash, tenant_id="tenant")).status is IdempotencyStatus.COMPLETED

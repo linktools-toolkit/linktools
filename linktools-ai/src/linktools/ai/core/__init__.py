@@ -28,16 +28,14 @@ from .validation import (
 )
 from .value import (
     ApprovalDecision, ApprovalStatus, BlobStatus, EvaluationStatus,
-    ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, ExternalCallStatus,
+    ExecutionEventType, ExecutionLineageKind, ExecutionStatus, ExternalCallStatus,
     IdempotencyStatus, OperationKind, OperationStatus, Principal, PrincipalKind,
     ResourceKind, SessionStatus, StopReason, TaskStatus, ToolOperationStatus,
-    profile_available, require_profile_available,
 )
 
 __all__ = [
     "ErrorCode",
     "SafeError",
-    "ExecutionProfile",
     "AIError",
     "AssetConflictError",
     "AssetError",
@@ -66,8 +64,6 @@ __all__ = [
     "canonical_sha256",
     "canonical_json_bytes",
     "deterministic_id",
-    "profile_available",
-    "require_profile_available",
     "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
     "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus", "IdempotencyStatus",
     "OperationKind", "OperationStatus", "ResourceKind", "SessionStatus", "StopReason",

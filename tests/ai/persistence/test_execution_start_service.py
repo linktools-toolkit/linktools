@@ -8,7 +8,6 @@ import asyncio
 import pytest
 
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
-from linktools.ai.core.value import ExecutionProfile
 from linktools.ai.adapter.memory import build_memory_runtime
 from linktools.ai.runtime.execution import DefaultExecutionService
 from linktools.ai.runtime.services import ExecutionRequest
@@ -44,10 +43,9 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
         TenantAuthorizationPolicy(),
         launcher=launcher,
         operation_ids=iter(("execution-a", "execution-b")).__next__,
-        service_profile=ExecutionProfile.LOCAL_CODING,
         history_reader=_History(),
     )
-    request = ExecutionRequest("hello", Principal("owner", "tenant"), ExecutionProfile.LOCAL_CODING, "same")
+    request = ExecutionRequest(prompt="hello", principal=Principal("owner", "tenant"), idempotency_key="same")
     first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
     assert first.execution_id == second.execution_id
     assert launcher.calls == 1

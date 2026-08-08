@@ -127,7 +127,7 @@ class SqlRuntimeSchema:
                 table.append_column(Column("content", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False, default=b""))
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "digest", "chunk_index", name=storage_name("runtime_blob_chunks_uk_chunk")))
             if name == "sessions":
-                table.append_column(Column("profile", _text_key(64), nullable=False, default="local-coding"))
+                table.append_column(Column("profile", _text_key(64), nullable=False, default=""))
                 table.append_column(Column("head_execution_id", _text_key(256), nullable=True))
             if name == "executions":
                 table.append_column(Column("agent_run_sequence", BigInteger, nullable=False, default=0))

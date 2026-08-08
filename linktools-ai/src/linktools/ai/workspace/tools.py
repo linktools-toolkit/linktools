@@ -12,15 +12,14 @@ from linktools.core import environ
 
 from ..core.json import JsonValue
 from ..core.ids import canonical_sha256
-from ..core.errors import ErrorCode, AIError
-from ..core.value import ExecutionProfile
+from ..core.errors import ErrorCode
 from ..storage.files import write_bytes_atomic
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pydantic_ai.capabilities import AgentCapability
 
-_logger = environ.get_logger("ai.workspace.tool")
+_logger = environ.get_logger("ai.workspace.tools")
 
 
 class WorkspaceTool(Protocol):
@@ -132,9 +131,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     return cast(tuple[WorkspaceTool, ...], (list_dir, read_file, write_file, bash))
 
 
-def build_workspace_capabilities(root: 'str | Path', *, profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING) -> 'tuple[AgentCapability[None], ...]':
-    if profile is not ExecutionProfile.LOCAL_CODING:
-        raise AIError(ErrorCode.CAPABILITY_DISABLED_FOR_PROFILE)
+def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[None], ...]':
     from pydantic_ai_harness.filesystem import FileSystem
     from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 

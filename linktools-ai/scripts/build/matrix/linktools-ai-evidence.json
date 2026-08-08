@@ -1,7 +1,7 @@
 {
-  "spec": ".docs/linktools-ai-architecture-runtime-convergence-spec-v23-final.md",
-  "baseline_commit": "6dd48064f74ca109b97527c1bd1056eed5ec6923",
-  "final_commit": "d4f17677",
+  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
+  "baseline_commit": "cc2beeb5",
+  "validated_source_commit": "c681220f",
   "status": "COMPLETE",
   "open_findings": [],
   "environment": {
@@ -20,12 +20,11 @@
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 50 tests, 2 optional live tests skipped without environment",
-    "concurrency": "passed: service claim_start winner, memory and durable store checks",
-    "fault_injection": "passed: FILE runtime mutation rollback/reload boundary",
-    "security": "passed: hashed FILE paths and SQL URL repr redaction",
-    "public_api": "passed: baseline import does not load SQL optional modules",
-    "architecture": "passed: compileall, ruff, architecture gate",
-    "schema": "passed: separate runtime/step metadata registries; fresh digest manifest"
+    "conformance": "passed: 68 tests, 2 optional live tests skipped without database environment",
+    "concurrency": "passed: stale CAS, concurrent resume and shutdown admission suite",
+    "fault_injection": "passed: FILE rollback and legacy payload suite",
+    "public_api": "passed: import-all and query-only access suite",
+    "architecture": "passed: compileall, Ruff, architecture, name and dependency gates",
+    "schema": "passed: separate runtime/step metadata registries and SQL profile tombstone checks"
   }
 }

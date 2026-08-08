@@ -4,7 +4,7 @@
 
 from .logfire import LogfireSink
 from .nats import NatsPublisher
-from .principal import StaticPrincipalProvider
+from .identity import StaticPrincipalProvider
 from .provider import ProviderClient
 
 __all__ = [

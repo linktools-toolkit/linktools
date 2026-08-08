@@ -11,7 +11,7 @@ from linktools.ai.agent import AgentDeps
 from scripts.build.agent_bundle import build_bundle
 from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.model import ModelRegistry, ModelRoute
-from linktools.ai.observe.context import RunContext
+from linktools.ai.observe.scope import RunContext
 from linktools.ai.observe.middleware import MiddlewarePipeline
 from linktools.ai.observe.snapshot import RunSnapshot, snapshot_digest
 from linktools.ai.observe.trace import InMemoryTraceRecorder, TraceItem
@@ -21,15 +21,12 @@ from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.temporal import WorkerActivities, WorkerRegistration, production_registration
 from linktools.ai.temporal.gateway import WorkflowGateway
-from linktools.ai.temporal.activity.evaluation import EvaluationActivity
-from linktools.ai.temporal.activity.execution import ExecuteActivity
-from linktools.ai.temporal.activity.session import SessionActivity
-from linktools.ai.temporal.activity.task import TaskActivity
+from linktools.ai.temporal.activity import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
 from linktools.ai.temporal.worker import ActivityType, WorkflowType
-from linktools.ai.temporal.workflow.evaluation import EvaluationWorkflowInput, EvaluationWorkflowResult
-from linktools.ai.temporal.workflow.execution import ExecutionWorkflowInput, ExecutionWorkflowResult
-from linktools.ai.temporal.workflow.session import SessionWorkflowInput, SessionWorkflowResult
-from linktools.ai.temporal.workflow.task import TaskWorkflowInput, TaskWorkflowResult
+from linktools.ai.temporal.workflow.suite import EvaluationWorkflowInput, EvaluationWorkflowResult
+from linktools.ai.temporal.workflow.run import ExecutionWorkflowInput, ExecutionWorkflowResult
+from linktools.ai.temporal.workflow.mutation import SessionWorkflowInput, SessionWorkflowResult
+from linktools.ai.temporal.workflow.dag import TaskWorkflowInput, TaskWorkflowResult
 
 
 def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
@@ -165,6 +162,21 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     registration = production_registration(activities)
     assert isinstance(registration, WorkerRegistration)
     assert len(registration.workflows) == len(registration.activities) == 4
+    assert tuple(item.__name__ for item in registration.workflows) == ("ExecutionWorkflow", "SessionWorkflow", "TaskWorkflow", "EvaluationWorkflow")
+    assert tuple(type(item).__name__ for item in registration.activities) == ("ExecuteActivity", "SessionActivity", "TaskActivity", "EvaluationActivity")
+    assert ExecuteActivity.run.__name__ == "run"
+    assert ExecuteActivity.load_input.__name__ == "load_input"
+    assert ExecuteActivity.fix_bundle_route.__name__ == "fix_bundle_route"
+    assert ExecuteActivity.fix_binding.__name__ == "fix_binding"
+    assert ExecuteActivity.load_prompt.__name__ == "load_prompt"
+    assert ExecuteActivity.reserve_budget.__name__ == "reserve_budget"
+    assert ExecuteActivity.run_agent.__name__ == "run_agent"
+    assert ExecuteActivity.process_deferred.__name__ == "process_deferred"
+    assert ExecuteActivity.commit_result.__name__ == "commit_result"
+    assert ExecuteActivity.settle_budget.__name__ == "settle_budget"
+    assert EvaluationActivity.run.__name__ == "run"
+    assert SessionActivity.run.__name__ == "run"
+    assert TaskActivity.run.__name__ == "run"
 
     class Worker:
         def configure(
@@ -191,7 +203,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
 
 
 @pytest.mark.asyncio
-async def test_production_gateway_rejects_local_and_unknown_operations() -> None:
+async def test_workflow_gateway_validates_contract_and_unknown_operations() -> None:
     class Client:
         async def start_workflow(self, workflow: str, request, *, workflow_id: str):
             return None
@@ -210,8 +222,6 @@ async def test_production_gateway_rejects_local_and_unknown_operations() -> None
 
     gateway = WorkflowGateway(Client())
     local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key")
-    with pytest.raises(AIError) as profile_error:
-        await gateway.start_execution("execution", local)
-    assert profile_error.value.code == ErrorCode.PROFILE_NOT_ALLOWED
+    await gateway.start_execution("execution", local)
     with pytest.raises(ValueError):
         await gateway.query_execution("execution", "unknown")

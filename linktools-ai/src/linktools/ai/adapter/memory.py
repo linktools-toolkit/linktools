@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Reference runtime persistence for local MEMORY and FILE profiles."""
+"""Reference runtime persistence for local MEMORY and FILE backends."""
 
 import asyncio
 import base64
@@ -26,7 +26,7 @@ from ..core.principal import ResourceRef
 from ..core.validation import validate_observation_payload
 from ..core.value import (
     ApprovalDecision, ApprovalStatus,
-    ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, ExternalCallStatus, IdempotencyStatus,
+    ExecutionEventType, ExecutionLineageKind, ExecutionStatus, ExternalCallStatus, IdempotencyStatus,
     OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason,
     EvaluationStatus, TaskStatus, ToolOperationStatus,
 )
@@ -36,7 +36,7 @@ from ..runtime.persistence import (
     IdempotencyRecord, MemoryRecord, OperationLedgerInput, OperationLedgerRecord, ResultRecord, RuntimePersistence,
     RuntimeBackend, RuntimePersistenceMode, RuntimeRepository, SessionRecord, TaskLease, TaskNodeView,
 )
-from ..task.model import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ..task.graph import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage.files import read_json, write_json_atomic
 from ..storage.lock import FileLeaseCoordinator, FileWriterLock
 from linktools.core import environ
@@ -501,6 +501,11 @@ class _ResultRepository(_Base):
             current = self._executions._records.get(key)
             if current is None or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if commit.session_head is not None:
+                session = self._sessions._records.get((execution.tenant_id, commit.session_head.session_id))
+                if session is None or session.status is not SessionStatus.OPEN or session.head_execution_id != commit.session_head.expected_head_execution_id:
+                    _logger.warning("session head CAS rejected: session=%s expected=%s", commit.session_head.session_id, commit.session_head.expected_head_execution_id)
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             identity = self._find_idempotency(commit, execution)
             self._validate_idempotency(identity, commit.idempotency, execution)
             self._validate_operation(commit.operation, execution)
@@ -516,9 +521,8 @@ class _ResultRepository(_Base):
                 current_operation = self._operations._records[(execution.tenant_id, commit.operation.operation_id)]
                 self._operations._records[(execution.tenant_id, commit.operation.operation_id)] = replace(current_operation, status=commit.operation.next_status, result_ref=commit.operation.result_ref, result_digest=commit.operation.result_digest, error_code=commit.operation.error_code, updated_at=execution.updated_at)
             if commit.session_head is not None:
-                session = self._sessions._records.get((execution.tenant_id, commit.session_head.session_id))
-                if session is not None and session.status is SessionStatus.OPEN and session.head_execution_id == commit.session_head.expected_head_execution_id:
-                    self._sessions._records[(execution.tenant_id, session.session_id)] = replace(session, revision=session.revision + 1, head_execution_id=commit.session_head.next_head_execution_id, updated_at=execution.updated_at)
+                session = self._sessions._records[(execution.tenant_id, commit.session_head.session_id)]
+                self._sessions._records[(execution.tenant_id, session.session_id)] = replace(session, revision=session.revision + 1, head_execution_id=commit.session_head.next_head_execution_id, updated_at=execution.updated_at)
             self._mark_changed()
             return ExecutionTerminalCommitResult(execution, result)
 
@@ -1718,11 +1722,11 @@ def _time(value: str) -> datetime:
 
 
 def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
-    return SessionRecord(str(value["session_id"]), str(value["tenant_id"]), str(value["owner_principal_id"]), str(value["binding_digest"]), SessionStatus(str(value["status"])), int(value["revision"]), int(value["resource_generation"]), None if value.get("cwd") is None else str(value["cwd"]), value.get("metadata", {}), _time(value["created_at"]), _time(value["updated_at"]), None if value.get("closed_at") is None else _time(value["closed_at"]), ExecutionProfile(str(value.get("profile", ExecutionProfile.LOCAL_CODING.value))), None if value.get("head_execution_id") is None else str(value["head_execution_id"]))
+    return SessionRecord(session_id=str(value["session_id"]), tenant_id=str(value["tenant_id"]), owner_principal_id=str(value["owner_principal_id"]), binding_digest=str(value["binding_digest"]), status=SessionStatus(str(value["status"])), revision=int(value["revision"]), resource_generation=int(value["resource_generation"]), cwd=None if value.get("cwd") is None else str(value["cwd"]), metadata=value.get("metadata", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), closed_at=None if value.get("closed_at") is None else _time(value["closed_at"]), head_execution_id=None if value.get("head_execution_id") is None else str(value["head_execution_id"]))
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), profile=ExecutionProfile(str(value["profile"])), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]))
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:

@@ -15,9 +15,9 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from .execution import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
+from .run import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
 from ...core.errors import ErrorCode, AIError
-from ...task.model import SwarmLimits
+from ...task.graph import SwarmLimits
 
 
 @dataclass(frozen=True, slots=True)

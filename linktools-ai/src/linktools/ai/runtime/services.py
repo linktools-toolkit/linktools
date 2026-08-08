@@ -9,20 +9,20 @@ import uuid
 import secrets
 import time
 
-from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionProfile, ExecutionStatus, Page, Principal, SessionStatus
+from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionStatus, Page, Principal, SessionStatus
 from ..core.errors import ErrorCode, AIError
 from ..core.validation import validate_idempotency_key, validate_prompt, validate_resource_id
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
 from ..observe.snapshot import RunSnapshot
-from ..task.model import (
+from ..task.graph import (
     CancelGraphRequest,
     TaskGraphRequest,
     TaskGraphHandle,
     TaskGraphResult,
     TaskGraphView,
 )
-from .persistence import BlobRef, BlobStore, RuntimeBackend, validate_runtime_profile
+from .persistence import BlobRef, BlobStore, RuntimeBackend
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,7 +30,6 @@ class RuntimeServiceIdentity:
     service_id: str
     persistence_digest: str
     backend: RuntimeBackend
-    profile: ExecutionProfile
 
     def __post_init__(self) -> None:
         if not self.service_id.strip() or not self.persistence_digest.strip():
@@ -43,13 +42,9 @@ def new_runtime_service_identity(
     namespace: str = "default",
     atomic_domain_id: str = "default",
     schema_digest: str = "memory",
-    profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING,
-    temporal_enabled: bool = False,
-    local_trusted: bool = False,
 ) -> RuntimeServiceIdentity:
-    validate_runtime_profile(backend, profile, temporal_enabled=temporal_enabled, local_trusted=local_trusted)
     persistence_digest = canonical_sha256({"backend": backend.value, "namespace": namespace, "atomic_domain_id": atomic_domain_id, "schema_digest": schema_digest, "blob_schema_version": 1})
-    return RuntimeServiceIdentity(_uuid7(), persistence_digest, backend, profile)
+    return RuntimeServiceIdentity(_uuid7(), persistence_digest, backend)
 
 
 def _uuid7() -> str:
@@ -65,7 +60,6 @@ def _uuid7() -> str:
 class ExecutionRequest:
     prompt: str
     principal: Principal
-    requested_profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING
     idempotency_key: "str | None" = None
 
     def __post_init__(self) -> None:
@@ -116,14 +110,12 @@ class CancelExecutionResult:
 @dataclass(frozen=True, slots=True)
 class ExecutionHandle:
     execution_id: str
-    profile: ExecutionProfile
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionView:
     execution_id: str
     status: ExecutionStatus
-    profile: ExecutionProfile
 
 
 @dataclass(frozen=True, slots=True)

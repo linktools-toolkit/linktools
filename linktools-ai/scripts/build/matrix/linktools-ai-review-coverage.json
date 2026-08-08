@@ -1,16 +1,14 @@
 {
-  "spec": ".docs/linktools-ai-architecture-runtime-convergence-spec-v23-final.md",
-  "final_commit": "d4f17677",
+  "spec": ".docs/linktools-ai-cc2beeb-fix-spec-v5-final.md",
+  "validated_source_commit": "c681220f",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
-  "scope_exclusions": [
-    "migration and compatibility work explicitly excluded by the user"
-  ],
+  "scope_exclusions": ["Downstream migration and compatibility work are explicitly excluded by the user."],
   "verification": {
-    "memory_file_sqlite": "passed",
+    "memory_file_sqlite": "passed: 68 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
-    "full_spec_review": "passed: independent cold-start architecture, dependency, schema, lifecycle, lineage, and terminal aggregate review"
+    "full_spec_review": "passed: independent cold-start review; Critical: 0, Important: 0, Minor: 0, Notes: 0, Verdict: CLEAN"
   }
 }

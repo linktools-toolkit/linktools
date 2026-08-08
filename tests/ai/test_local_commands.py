@@ -12,8 +12,8 @@ from pathlib import Path
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.agent.runner import WorkspaceAgentRunner
-from linktools.ai.app.services import RuntimeStoreConfig
-from linktools.ai.app.workspace import open_workspace_runtime
+from linktools.ai.app.assembly import RuntimeStoreConfig
+from linktools.ai.app.workbench import open_workspace_runtime
 from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai.run import command as run_command

@@ -22,8 +22,8 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, step_conversation_id, step_run_id
 from ..core.json import JsonValue
 from ..core.principal import TenantAuthorizationPolicy
-from ..core.value import ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
-from ..runtime.persistence import BlobRef, ExecutionRecord, ExecutionTerminalCommit, IdempotencyTerminalUpdate, ResultRecord, SessionHeadAdvance
+from ..core.value import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
+from ..runtime.persistence import BlobRef, ExecutionRecord, ExecutionTerminalCommit, IdempotencyTerminalUpdate, ResultRecord, RuntimeBackend, SessionHeadAdvance
 from ..runtime.execution import CancelEffectOutcome
 from ..runtime.services import (
     CancelExecutionRequest,
@@ -33,18 +33,20 @@ from ..runtime.services import (
     ListSessionRequest,
     ResumeSessionRequest,
     RuntimeServices,
+    SessionView,
 )
-from .services import (
+from .assembly import (
     RuntimeStoreConfig,
     RuntimeStores,
-    StepExecutionHistoryReader,
     build_runtime_services,
     open_runtime_store,
 )
+from ..adapter.history import StepExecutionHistoryReader
+from ..storage.lock import FileWriterLock
 from ..workspace.root import Workspace, trusted_workspace_principal
 
 
-_logger = environ.get_logger("ai.app.workspace")
+_logger = environ.get_logger("ai.app.workbench")
 
 
 class TextHandler(Protocol):
@@ -103,6 +105,10 @@ class WorkspaceExecutionLauncher:
         if existing is not None and existing != context:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._contexts[key] = context
+
+    def active_execution_ids(self) -> tuple[str, ...]:
+        """Return the stable snapshot of process-local execution handles."""
+        return tuple(sorted(self._tasks))
 
     def release_context(self, tenant_id: str, session_id: str, idempotency_key: str) -> None:
         key = (tenant_id, session_id, hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest())
@@ -314,8 +320,17 @@ class WorkspaceExecutionLauncher:
         terminal = _terminal_record(current, ExecutionStatus.SUCCEEDED, now, result_ref=blob.digest, result_digest=blob.digest)
         idempotency = await self._terminal_idempotency(current, IdempotencyStatus.COMPLETED, blob.digest, None)
         head = None
-        if current.session_id is not None and current.lineage_kind in {ExecutionLineageKind.SESSION_RESUME, ExecutionLineageKind.RETRY}:
-            head = SessionHeadAdvance(current.session_id, current.source_execution_id, current.execution_id)
+        if current.session_id is not None:
+            if current.lineage_kind is ExecutionLineageKind.SESSION_RESUME:
+                expected_head_execution_id = current.base_execution_id
+            elif current.lineage_kind is ExecutionLineageKind.RETRY:
+                if current.source_execution_id is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                expected_head_execution_id = current.source_execution_id
+            else:
+                expected_head_execution_id = None
+            if current.lineage_kind in {ExecutionLineageKind.SESSION_RESUME, ExecutionLineageKind.RETRY}:
+                head = SessionHeadAdvance(current.session_id, expected_head_execution_id, current.execution_id)
         await self._stores.domain.results.commit_terminal(
             ExecutionTerminalCommit(
                 expected_revision=current.revision,
@@ -369,8 +384,16 @@ class WorkspaceAgentRuntime:
         self._services = services
         self._launcher = launcher
         self._principal = trusted_workspace_principal(workspace.workspace_id)
+        self._lifecycle_lock = asyncio.Lock()
+        self._closed = False
+        self._shutdown_complete = False
 
     async def open_session(self, session_id: str, *, cwd: str | Path | None = None, agent_id: str | None = None) -> WorkspaceSession:
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            return await self._open_session(session_id, cwd=cwd, agent_id=agent_id)
+
+    async def _open_session(self, session_id: str, *, cwd: str | Path | None = None, agent_id: str | None = None) -> WorkspaceSession:
         _validate_identifier(session_id)
         normalized_cwd = self._normalize_cwd(cwd)
         binding_digest = await self._runner.binding_digest(agent_id)
@@ -406,9 +429,11 @@ class WorkspaceAgentRuntime:
         binding_digest = await self._runner.binding_digest(agent_id)
         _validate_identifier(session_id)
         try:
-            self._launcher.register_context(self._principal.tenant_id, session_id, effective_key, _LaunchContext(agent_id, on_text, on_event))
-            session = await self.open_session(session_id, cwd=cwd, agent_id=agent_id)
-            handle = await self._services.session.resume(binding_digest, session_id, ResumeSessionRequest(self._principal, prompt, effective_key))
+            async with self._lifecycle_lock:
+                self._ensure_open()
+                self._launcher.register_context(self._principal.tenant_id, session_id, effective_key, _LaunchContext(agent_id, on_text, on_event))
+                session = await self._open_session(session_id, cwd=cwd, agent_id=agent_id)
+                handle = await self._services.session.resume(binding_digest, session_id, ResumeSessionRequest(self._principal, prompt, effective_key))
             try:
                 result = await self._launcher.wait(handle.execution_id)
             except AIError as error:
@@ -420,19 +445,19 @@ class WorkspaceAgentRuntime:
             self._launcher.release_context(self._principal.tenant_id, session_id, effective_key)
 
     async def cancel(self, session_id: str) -> bool:
-        loaded = await self._services.session.load(session_id, principal=self._principal)
-        if not loaded.active_execution_ids:
-            return False
-        for execution_id in loaded.active_execution_ids:
-            request_id = canonical_sha256(["workspace-cancel", self.workspace.workspace_id, execution_id])
-            await self._services.execution.cancel(execution_id, CancelExecutionRequest(self._principal, request_id, True))
-        return True
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            loaded = await self._services.session.load(session_id, principal=self._principal)
+            if not loaded.active_execution_ids:
+                return False
+            for execution_id in loaded.active_execution_ids:
+                await self._cancel_execution(execution_id)
+            return True
 
     async def list_sessions(self, *, cwd: str | Path | None = None) -> tuple[WorkspaceSession, ...]:
         normalized = None if cwd is None else self._normalize_cwd(cwd)
-        page = await self._services.session.list(ListSessionRequest(self._principal, None, 200))
         result: list[WorkspaceSession] = []
-        for view in page.items:
+        for view in await self._session_views():
             if view.cwd is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             persisted = self._normalize_cwd(view.cwd)
@@ -443,26 +468,66 @@ class WorkspaceAgentRuntime:
         return tuple(result)
 
     async def fork_session(self, source_id: str, *, cwd: str | Path | None = None, agent_id: str | None = None) -> WorkspaceSession:
-        source = await self.open_session(source_id, agent_id=agent_id)
-        target_id = str(uuid4())
-        target_cwd = None if cwd is None else self._normalize_cwd(cwd).as_posix()
-        binding_digest = await self._runner.binding_digest(agent_id)
-        view = await self._services.session.fork(binding_digest, source_id, ForkSessionRequest(self._principal, target_id, secrets.token_urlsafe(32), target_cwd))
-        return WorkspaceSession(view.session_id, self._normalize_cwd(view.cwd or source.cwd), view.revision)
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            source = await self._open_session(source_id, agent_id=agent_id)
+            target_id = str(uuid4())
+            target_cwd = None if cwd is None else self._normalize_cwd(cwd).as_posix()
+            binding_digest = await self._runner.binding_digest(agent_id)
+            view = await self._services.session.fork(binding_digest, source_id, ForkSessionRequest(self._principal, target_id, secrets.token_urlsafe(32), target_cwd))
+            return WorkspaceSession(view.session_id, self._normalize_cwd(view.cwd or source.cwd), view.revision)
 
     async def close_session(self, session_id: str, *, force: bool = False) -> None:
-        request_id = canonical_sha256(["workspace-close", self.workspace.workspace_id, session_id, force])
-        from ..runtime.services import CloseSessionRequest
-
-        await self._services.session.close(session_id, CloseSessionRequest(self._principal, request_id, force))
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            request_id = canonical_sha256(["workspace-close", self.workspace.workspace_id, session_id, force])
+            from ..runtime.services import CloseSessionRequest
+            await self._services.session.close(session_id, CloseSessionRequest(self._principal, request_id, force))
 
     async def shutdown(self) -> None:
-        sessions = await self._services.session.list(ListSessionRequest(self._principal, None, 200))
-        for session in sessions.items:
-            for execution_id in session.active_execution_ids:
-                request_id = canonical_sha256(["workspace-cancel", self.workspace.workspace_id, execution_id])
-                await self._services.execution.cancel(execution_id, CancelExecutionRequest(self._principal, request_id, True))
-        await self._launcher.shutdown()
+        async with self._lifecycle_lock:
+            if self._shutdown_complete:
+                return
+            self._closed = True
+            failures: list[Exception] = []
+            for execution_id in self._launcher.active_execution_ids():
+                try:
+                    await self._cancel_execution(execution_id)
+                except Exception as error:
+                    failures.append(error)
+            try:
+                for session in await self._session_views():
+                    for execution_id in session.active_execution_ids:
+                        try:
+                            await self._cancel_execution(execution_id)
+                        except Exception as error:
+                            failures.append(error)
+                remaining = tuple(execution_id for session in await self._session_views() for execution_id in session.active_execution_ids)
+                if remaining or failures:
+                    raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+            finally:
+                await self._launcher.shutdown()
+            self._shutdown_complete = True
+
+    async def _session_views(self) -> tuple[SessionView, ...]:
+        cursor = None
+        values: list[SessionView] = []
+        while True:
+            page = await self._services.session.list(ListSessionRequest(self._principal, cursor, 200))
+            values.extend(page.items)
+            if page.next_cursor is None:
+                return tuple(values)
+            if page.next_cursor == cursor or (not page.items and page.next_cursor is not None):
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            cursor = page.next_cursor
+
+    async def _cancel_execution(self, execution_id: str) -> None:
+        request_id = canonical_sha256(["workspace-cancel", self.workspace.workspace_id, execution_id])
+        await self._services.execution.cancel(execution_id, CancelExecutionRequest(self._principal, request_id, True))
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     def _normalize_cwd(self, cwd: str | Path | None) -> Path:
         candidate = Path(cwd or self.workspace.root).expanduser().resolve()
@@ -474,31 +539,38 @@ class WorkspaceAgentRuntime:
 
 
 @asynccontextmanager
-async def open_workspace_runtime(workspace: Workspace, *, config: RuntimeStoreConfig | None = None, runner: WorkspaceAgentRunner | None = None, model: "str | Model | None" = None, base_url: str | None = None, api_key: str | None = None, temporal_enabled: bool = False, grant_key: bytes | None = None) -> AsyncIterator[WorkspaceAgentRuntime]:
+async def open_workspace_runtime(workspace: Workspace, *, config: RuntimeStoreConfig | None = None, runner: WorkspaceAgentRunner | None = None, model: "str | Model | None" = None, base_url: str | None = None, api_key: str | None = None, grant_key: bytes | None = None) -> AsyncIterator[WorkspaceAgentRuntime]:
     store_config = config or RuntimeStoreConfig.file(str(workspace.storage_root), workspace_id=workspace.workspace_id)
-    workspace_runner = runner or WorkspaceAgentRunner(workspace.root, workspace.config, model=model, base_url=base_url, api_key=api_key)
     authorization = TenantAuthorizationPolicy()
     key = grant_key or hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
-    async with open_runtime_store(store_config) as stores:
-        launcher = WorkspaceExecutionLauncher(workspace, workspace_runner, stores)
-        await launcher.reconcile()
-        history_reader = StepExecutionHistoryReader(store_config.namespace, stores.domain, stores.steps)
-        services = build_runtime_services(
-            stores.domain,
-            authorization,
-            profile=ExecutionProfile.LOCAL_CODING,
-            temporal_enabled=temporal_enabled,
-            grant_key=key,
-            history_reader=history_reader,
-            schema_digest=stores.domain.atomic_domain_id,
-            execution_launcher=launcher,
-        )
-        runtime = WorkspaceAgentRuntime(workspace, runner=workspace_runner, stores=stores, services=services, launcher=launcher)
-        _logger.info("workspace runtime opened: workspace=%s backend=%s", workspace.workspace_id, store_config.backend)
-        try:
-            yield runtime
-        finally:
-            await runtime.shutdown()
+    local_lock = None
+    if store_config.backend is RuntimeBackend.SQLITE:
+        path = Path(str(store_config.location))
+        local_lock = FileWriterLock(path.with_name(f"{path.name}.local.lock"))
+        await local_lock.acquire()
+    try:
+        workspace_runner = runner or WorkspaceAgentRunner(workspace.root, workspace.config, model=model, base_url=base_url, api_key=api_key)
+        async with open_runtime_store(store_config) as stores:
+            launcher = WorkspaceExecutionLauncher(workspace, workspace_runner, stores)
+            await launcher.reconcile()
+            history_reader = StepExecutionHistoryReader(store_config.namespace, stores.domain, stores.steps)
+            services = build_runtime_services(
+                stores.domain,
+                authorization,
+                grant_key=key,
+                history_reader=history_reader,
+                schema_digest=stores.domain.atomic_domain_id,
+                execution_launcher=launcher,
+            )
+            runtime = WorkspaceAgentRuntime(workspace, runner=workspace_runner, stores=stores, services=services, launcher=launcher)
+            _logger.info("workspace runtime opened: workspace=%s backend=%s", workspace.workspace_id, store_config.backend)
+            try:
+                yield runtime
+            finally:
+                await runtime.shutdown()
+    finally:
+        if local_lock is not None:
+            await local_lock.release()
 
 
 def _terminal_record(record: ExecutionRecord, status: ExecutionStatus, now: datetime, *, result_ref: str | None = None, result_digest: str | None = None, error_code: str | None = None, safe_error_details: dict[str, JsonValue] | None = None) -> ExecutionRecord:
@@ -506,7 +578,6 @@ def _terminal_record(record: ExecutionRecord, status: ExecutionStatus, now: date
         execution_id=record.execution_id,
         tenant_id=record.tenant_id,
         session_id=record.session_id,
-        profile=record.profile,
         binding_digest=record.binding_digest,
         parent_execution_id=record.parent_execution_id,
         root_execution_id=record.root_execution_id,

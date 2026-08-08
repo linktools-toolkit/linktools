@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 
 from ..core.ids import canonical_sha256
-from ..spec.model import AgentSpec, PromptSpec
+from ..spec.contract import AgentSpec, PromptSpec
 
 
 @dataclass(frozen=True, slots=True)

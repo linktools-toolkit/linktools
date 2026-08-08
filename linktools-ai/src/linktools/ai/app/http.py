@@ -8,7 +8,7 @@ from typing import Protocol
 
 from ..core import Principal
 from ..core.errors import ErrorCode, AIError
-from .services import AppServices
+from .assembly import AppServices
 
 REQUIRED_ROUTE_NAMES = frozenset({
     "execution",

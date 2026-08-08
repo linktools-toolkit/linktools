@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """Spec DTOs, codecs and output schemas; no storage owner."""
 
-from .codec import AgentSpecCodec, PromptSpecCodec
-from .model import AgentFeatureRef, AgentSpec, PromptSpec
+from .contract import AgentFeatureRef, AgentSpec, AgentSpecCodec, PromptSpec, PromptSpecCodec
 from .output import OutputSchemaManifest, OutputSchemaManifestEntry, OutputTypeRegistry
 
 __all__ = [

@@ -1,17 +1,13 @@
 # linktools-ai
 
-`linktools-ai` is the agent runtime for local coding and durable service
-profiles. Its public storage abstraction is `AssetStore`; specification DTOs
-and codecs live in `linktools.ai.spec`, while the concrete SQL asset backend is
-available from `linktools.ai.asset.sql`.
+`linktools-ai` is the agent runtime for local workspace execution and durable
+service integrations. Runtime topology is selected by the concrete launcher,
+workflow gateway and persistence dependencies supplied by the application; the
+runtime does not expose an execution profile or deployment category.
 
-The three execution profiles are:
-
-- `production-service`: durable Temporal workflows with explicitly assembled
-  self-hosted storage and runtime services;
-- `production-sandboxed`: blocked until the official Harness wheel provides
-  the required Modal capability;
-- `local-coding`: direct local execution with project, file and shell tools.
+Its public storage abstraction is `AssetStore`; specification DTOs and codecs
+live in `linktools.ai.spec`, while the concrete SQL asset backend is available
+from `linktools.ai.asset.sql`.
 
 Storage builders are lazy. Callers explicitly initialize the SQL schema and
 then construct the storage composition and asset store. The `ai run` command
@@ -53,5 +49,6 @@ single-node database. MySQL uses
 `RuntimeStoreConfig.mysql("mysql+asyncmy://...", namespace=..., deployment_id=...)`.
 SQL drivers are loaded only when the corresponding backend is opened.
 
-See `.docs/linktools-ai-integrated-spec.md` and the checked-in manifests under
-`scripts/build/matrix` for the architecture and release contract.
+See `.docs/linktools-ai-cc2beeb-fix-spec-v5-final.md` and the checked-in
+manifests under `scripts/build/matrix` for the architecture and release
+contract.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace discovery, identity and local profile policy."""
+"""Workspace discovery and identity."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +12,7 @@ try:
 except ImportError:
     _yaml = None
 
-from ..core import ExecutionProfile, Principal
+from ..core import Principal
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
@@ -82,11 +82,6 @@ def trusted_workspace_principal(workspace_id: str, principal_id: str = "workspac
     return Principal(principal_id, workspace_id, "LOCAL_TRUSTED")
 
 
-def require_workspace_profile(profile: ExecutionProfile) -> None:
-    if profile is not ExecutionProfile.LOCAL_CODING:
-        raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
-
-
 def load_config(path: Path) -> "dict[str, JsonValue]":
     if not path.exists() or _yaml is None:
         return {}
@@ -98,4 +93,4 @@ def _normalized_root(root: Path) -> str:
     return unicodedata.normalize("NFC", root.as_posix())
 
 
-__all__ = ["Workspace", "WorkspacePolicy", "load_config", "require_workspace_profile", "trusted_workspace_principal"]
+__all__ = ["Workspace", "WorkspacePolicy", "load_config", "trusted_workspace_principal"]

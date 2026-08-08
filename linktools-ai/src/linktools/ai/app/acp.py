@@ -19,7 +19,7 @@ except ModuleNotFoundError:
 
 from ..core import JsonValue
 from ..workspace import Workspace
-from .workspace import WorkspaceAgentRuntime, open_workspace_runtime
+from .workbench import WorkspaceAgentRuntime, open_workspace_runtime
 
 _logger = environ.get_logger("ai.app.acp")
 
