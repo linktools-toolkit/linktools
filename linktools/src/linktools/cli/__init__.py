@@ -29,7 +29,7 @@
 
 from . import argparse
 
-from .command import \
+from ._command import \
     BaseCommand, BaseCommandGroup, CommandError, \
     SubCommand, SubCommandGroup, SubCommandWrapper, \
     subcommand, subcommand_argument, SubCommandError, NotFoundSubCommand, \

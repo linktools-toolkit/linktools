@@ -5,10 +5,10 @@
 import json
 from typing import Protocol, TypeVar
 
-from ..asset.codec import AssetCodec
+from ..asset import AssetCodec
 from ..asset.model import AssetKey
-from .skill import SkillSpec
-from .mcp import MCPServerSpec
+from ._skill import SkillSpec
+from ._mcp import MCPServerSpec
 
 CapabilityAsset = TypeVar("CapabilityAsset", SkillSpec, MCPServerSpec)
 

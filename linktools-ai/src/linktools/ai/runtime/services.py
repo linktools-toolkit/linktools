@@ -15,7 +15,7 @@ from ..core.validation import validate_idempotency_key, validate_prompt, validat
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
 from ..observe.snapshot import RunSnapshot
-from ..task.graph import (
+from ..task import (
     CancelGraphRequest,
     TaskGraphRequest,
     TaskGraphHandle,

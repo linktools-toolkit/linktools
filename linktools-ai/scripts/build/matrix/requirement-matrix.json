@@ -394,8 +394,8 @@
       "owner": "adapter",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/execution.py",
-        "linktools-ai/src/linktools/ai/runtime/session.py",
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_session.py",
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
@@ -498,7 +498,7 @@
       "requirement": "Task run 相同 operation key 只有一个 side-effect owner，loser 不重复 create/gateway effect，完成后同-key replay 成功。",
       "constraints": "通过 OperationLedger PENDING→RUNNING CAS，不使用进程级锁或自动重试。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner"
@@ -512,7 +512,7 @@
       "requirement": "Task FAILED operation 保存真实稳定 ErrorCode，重复请求 replay 同一错误且不返回 TaskGraphResult。",
       "constraints": "AIError 保留原 code，普通异常只映射 STORAGE_UNAVAILABLE，不覆盖真实 FAILED。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error"
@@ -526,7 +526,7 @@
       "requirement": "Task cancel 相同 cancel_request_id 只有一个 side-effect owner，完成后 replay 不重复 cancel effect。",
       "constraints": "使用同一 OperationLedger CAS ownership，不新增 status 或 lock。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner"
@@ -569,8 +569,8 @@
       "constraints": "不创建第二 record，不执行 launcher，不改变 durable state。",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/execution.py",
-        "linktools-ai/src/linktools/ai/runtime/session.py",
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_session.py",
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"

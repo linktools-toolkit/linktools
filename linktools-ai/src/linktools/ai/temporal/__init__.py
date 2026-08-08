@@ -3,7 +3,7 @@
 """Temporal durable production boundary."""
 
 from .gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
-from .context import RunContext, TemporalRunContext
+from ._context import RunContext, TemporalRunContext
 from .worker import (
     ActivityType,
     AssetPayloadCodec,

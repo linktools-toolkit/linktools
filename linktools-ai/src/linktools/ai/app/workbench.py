@@ -43,7 +43,7 @@ from .assembly import (
 )
 from ..adapter.history import StepExecutionHistoryReader
 from ..storage.lock import FileWriterLock
-from ..workspace.root import Workspace, trusted_workspace_principal
+from ..workspace import Workspace, trusted_workspace_principal
 
 
 _logger = environ.get_logger("ai.app.workbench")

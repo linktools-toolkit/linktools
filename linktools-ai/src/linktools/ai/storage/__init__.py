@@ -19,7 +19,7 @@ from .dialects import (
     resolve_dialect,
 )
 from .files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child
-from .initialize import initialize_storage
+from ._initialize import initialize_storage
 from .layer import LayerRefreshPolicy, StorageWriteVisibility
 from .model import (
     BatchStorageReader,
@@ -45,7 +45,7 @@ from .model import (
     VersionedStorage,
 )
 from .names import TABLE_PREFIX, storage_name
-from .revision import BackendRevisionSource, LayerMetadataView, RevisionSource
+from ._revision import BackendRevisionSource, LayerMetadataView, RevisionSource
 from .lock import FileLeaseCoordinator, FileWriterLock, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
 
 __all__ = [

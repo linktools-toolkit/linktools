@@ -21,7 +21,7 @@ from ..core.value import (
     IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus,
     StopReason, TaskStatus, ToolOperationStatus,
 )
-from ..task.graph import TaskGraph, TaskGraphView, TaskTerminalRecord
+from ..task import TaskGraph, TaskGraphView, TaskTerminalRecord
 
 
 class RuntimePersistenceMode(StrEnum):

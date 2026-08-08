@@ -5,7 +5,7 @@
 from typing import Protocol
 
 from ..core.value import Principal
-from .graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ._graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
 
 class TaskQueryApi(Protocol):
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...

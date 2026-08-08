@@ -18,7 +18,7 @@ from ..storage.composition import CacheAdapter, StorageAdapter, StorageCompositi
 from ..storage.layer import StorageWriteVisibility
 from ..storage.model import StorageChange, StorageDeleteResult, StorageOperation
 from ..storage.model import StorageBatchPartialError
-from .codec import AssetCodecManifest, AssetCodecRegistry
+from ._codec import AssetCodecManifest, AssetCodecRegistry
 from .model import (
     AssetBatchResult,
     AssetBatchPartialError,

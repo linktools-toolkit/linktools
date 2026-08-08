@@ -5,7 +5,7 @@
 from typing import Protocol
 
 from ..core.errors import ErrorCode, AIError
-from .registry import ModelRegistrySnapshot, ModelRoute
+from ._registry import ModelRegistrySnapshot, ModelRoute
 
 
 class ModelResolver(Protocol):

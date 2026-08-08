@@ -27,5 +27,5 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from .adb import Adb, AdbDevice, AdbError
-from .types import App, Permission, Component, Activity, Service, Receiver, Provider, IntentFilter
+from ._adb import Adb, AdbDevice, AdbError
+from ._types import App, Permission, Component, Activity, Service, Receiver, Provider, IntentFilter

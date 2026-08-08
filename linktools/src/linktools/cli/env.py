@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
     from ..core import BaseEnviron
-    from .command import SubCommand, CommandParser
+    from ._command import SubCommand, CommandParser
 
 
 def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
@@ -60,7 +60,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
         CommandStub,
     )
     from ..runtime import popen
-    from .command import SubCommand, CommandError, iter_entry_points_capabilities
+    from ._command import SubCommand, CommandError, iter_entry_points_capabilities
 
     commands: "list[SubCommand]" = []
 
@@ -147,7 +147,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
                 return 0
 
             from ..cli.argparse import ArgParseComplete
-            from ..cli.command import iter_entry_point_commands
+            from ._command import iter_entry_point_commands
             from ..core._tools import get_tool_stub_path
 
             stub_path = get_stub_path()
@@ -310,7 +310,7 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 if __name__ == '__main__':
     import functools
     import logging
-    from .command import BaseCommand, CommandParser, CommandMain
+    from ._command import BaseCommand, CommandParser, CommandMain
 
 
     class Command(BaseCommand):

@@ -41,7 +41,7 @@ if typing.TYPE_CHECKING:
     from collections.abc import Callable
 
 if typing.TYPE_CHECKING:
-    from .command import CommandParser
+    from ._command import CommandParser
 
 if sys.version_info < (3, 10):
     _orig_get_action_name = getattr(argparse, "_get_action_name", None)
@@ -128,7 +128,7 @@ class ConfigLoader:
         self, parser: "CommandParser", action: "ConfigAction", namespace, value=MISSING
     ):
 
-        from .command import CommandParser
+        from ._command import CommandParser
 
         if not isinstance(parser, CommandParser) or not parser.command:
             raise argparse.ArgumentError(

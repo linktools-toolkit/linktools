@@ -282,7 +282,7 @@ class TestGit(unittest.TestCase):
         # repository).
         from unittest import mock
 
-        with mock.patch("linktools.git.repository.porcelain.clone",
+        with mock.patch("linktools.git._repository.porcelain.clone",
                         side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
                 GitRepository.clone(environ, self.remote_path, self.clone_path)
@@ -298,7 +298,7 @@ class TestGit(unittest.TestCase):
         from unittest import mock
         from dulwich.errors import GitProtocolError
 
-        with mock.patch("linktools.git.repository.porcelain.clone",
+        with mock.patch("linktools.git._repository.porcelain.clone",
                         side_effect=GitProtocolError("bad refs")):
             with self.assertRaises(GitError):
                 GitRepository.clone(environ, self.remote_path, self.clone_path)
@@ -472,7 +472,7 @@ class TestGit(unittest.TestCase):
         from unittest import mock
 
         GitRepository.clone(environ, self.remote_path, self.clone_path)
-        with mock.patch("linktools.git.repository.DulwichRepo",
+        with mock.patch("linktools.git._repository.DulwichRepo",
                         side_effect=RuntimeError("corrupt object store")):
             self.assertIsNone(GitRepository.open_if_valid(environ, self.clone_path))
 

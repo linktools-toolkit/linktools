@@ -29,7 +29,7 @@ def test_converged_roots_and_owners_exist() -> None:
     assert (root / "app" / "facade.py").is_file()
     assert (root / "app" / "assembly.py").is_file()
     assert (root / "app" / "workbench.py").is_file()
-    assert (root / "app" / "bootstrap.py").is_file()
+    assert (root / "app" / "_bootstrap.py").is_file()
     assert (root / "adapter" / "repository.py").is_file()
     assert (root / "adapter" / "history.py").is_file()
     assert (root / "adapter" / "step.py").is_file()

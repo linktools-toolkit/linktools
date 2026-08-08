@@ -16,7 +16,7 @@ from ..runtime.services import (
     WorkflowQueryResult,
     WorkflowUpdateResult,
 )
-from ..task.graph import TaskGraphHandle, TaskGraphRequest, TaskGraphView
+from ..task import TaskGraphHandle, TaskGraphRequest, TaskGraphView
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})

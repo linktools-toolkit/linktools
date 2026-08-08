@@ -8,17 +8,17 @@ network, ports, wait, interpreter) and adds the §14.2 platform/arch
 normalisation API. Consumers import from ``linktools.system``.
 """
 
-from .platform import (
+from ._platform import (
     get_system, get_machine, is_unix_like, is_windows,
     normalize_platform, normalize_arch,
 )
-from .user import get_user, get_uid, get_gid, get_shell_path
-from .network import get_lan_ip, get_wan_ip
-from .ports import bind, is_port_free, get_free_port, reserve_tcp_port
-from .wait import wait_event, wait_thread, wait_process
-from .interpreter import get_interpreter, get_interpreter_ident
-from .shell import SUPPORTED_SHELLS, ShellScript, get_default_shell, get_shell
-from .stub import CommandStub
+from ._user import get_user, get_uid, get_gid, get_shell_path
+from ._network import get_lan_ip, get_wan_ip
+from ._ports import bind, is_port_free, get_free_port, reserve_tcp_port
+from ._wait import wait_event, wait_thread, wait_process
+from ._interpreter import get_interpreter, get_interpreter_ident
+from ._shell import SUPPORTED_SHELLS, ShellScript, get_default_shell, get_shell
+from ._stub import CommandStub
 
 __all__ = [
     # platform

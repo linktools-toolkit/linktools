@@ -33,7 +33,7 @@ from .model import (
     VersionSummary,
     VersionedStorage,
 )
-from .revision import BackendRevisionSource, LayerMetadataView, RevisionSource
+from ._revision import BackendRevisionSource, LayerMetadataView, RevisionSource
 
 DomainKeyT = TypeVar("DomainKeyT")
 DomainValueT = TypeVar("DomainValueT")

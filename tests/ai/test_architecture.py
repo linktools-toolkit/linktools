@@ -51,14 +51,14 @@ def test_name_gate_allows_only_the_existing_asset_storage_duplicate_group(tmp_pa
     for package in ("asset", "storage"):
         (root / package).mkdir(parents=True)
         (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-        for name in ("cache.py", "files.py", "model.py"):
+        for name in ("files.py", "model.py"):
             (root / package / name).write_text("VALUE = 1\n", encoding="utf-8")
     (root / "model").mkdir()
     (root / "model" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     assert check_names(root) == ()
     (root / "adapter").mkdir()
-    (root / "adapter" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert any(error.startswith("duplicate module basename: cache") for error in check_names(root))
+    (root / "adapter" / "files.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert any(error.startswith("duplicate module basename: files") for error in check_names(root))
 
 
 def test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision(tmp_path: Path) -> None:

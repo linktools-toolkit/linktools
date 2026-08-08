@@ -7,7 +7,7 @@ from typing import Generic, Protocol, TypeVar
 
 from linktools.core import environ
 
-from .content import AssetContent, AssetContentInfo
+from ._content import AssetContent, AssetContentInfo
 
 TAsset = TypeVar("TAsset")
 _logger = environ.get_logger("ai.asset.cache")

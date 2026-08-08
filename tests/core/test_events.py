@@ -2,7 +2,7 @@
 """Tests for EventBus."""
 import pytest
 
-from linktools.runtime.events import (
+from linktools.runtime import (
     EventBus, LOG_AND_CONTINUE, RAISE_FIRST, COLLECT, STOP,
 )
 

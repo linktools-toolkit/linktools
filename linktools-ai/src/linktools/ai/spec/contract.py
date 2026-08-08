@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-from ..asset.codec import AssetCodec
+from ..asset import AssetCodec
 from ..asset.model import AssetKey, AssetValue
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256

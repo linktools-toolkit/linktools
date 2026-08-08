@@ -5,7 +5,7 @@
 from typing import Generic, TypeVar
 
 from .contracts import AssetCodec, AssetSource
-from .parsing import AssetLoader
+from ._parsing import AssetLoader
 from .source import AssetLoaderSource
 
 TAsset = TypeVar("TAsset")

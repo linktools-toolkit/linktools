@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Task graph and swarm contracts."""
 
-from .graph import (
+from ._graph import (
     CancelGraphRequest,
     Job,
     Swarm,
@@ -18,7 +18,7 @@ from .graph import (
     TaskTerminalRecord,
     ready_nodes,
 )
-from .service import TaskApi, TaskQueryApi
+from ._service import TaskApi, TaskQueryApi
 
 __all__ = [
     "CancelGraphRequest", "Job", "Swarm", "SwarmLimits", "TaskApi", "TaskCompletionLedger", "TaskGraph",

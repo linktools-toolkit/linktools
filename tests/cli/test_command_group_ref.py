@@ -11,7 +11,7 @@ import argparse
 import pytest
 
 from linktools.cli import BaseCommand, CommandGroupRef
-from linktools.cli.command import (
+from linktools.cli._command import (
     SubCommand,
     SubCommandGroup,
     SubCommandWrapper,
@@ -129,7 +129,7 @@ def _info(name, parent_value):
 
 
 def _normalize_parent_pub(parent):
-    from linktools.cli.command import _normalize_parent
+    from linktools.cli._command import _normalize_parent
     return _normalize_parent(parent)
 
 

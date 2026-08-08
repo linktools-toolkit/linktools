@@ -123,7 +123,7 @@ def test_inspect_corrupted_repo_fails_closed_not_raises(fresh_manager, tmp_path,
     reading head_sha()/is_dirty() must be reported structurally, not
     propagate -- inspect() is used by describe()/validate(), which promise
     one bad repo can never hide the rest of a multi-repo status/validate."""
-    from linktools.git.repository import GitRepository
+    from linktools.git._repository import GitRepository
 
     git = RepoGit(fresh_manager)
     repo_path = tmp_path / "repo"
@@ -152,7 +152,7 @@ def test_inspect_corrupted_repo_fails_closed_not_raises(fresh_manager, tmp_path,
 def test_describe_isolates_one_bad_repo_from_others(fresh_manager, tmp_path, monkeypatch):
     """A repo whose Git inspection raises must not prevent describe()/
     validate() from reporting every other repository."""
-    from linktools.git.repository import GitRepository
+    from linktools.git._repository import GitRepository
     from dulwich import porcelain
 
     good_repo = tmp_path / "good"

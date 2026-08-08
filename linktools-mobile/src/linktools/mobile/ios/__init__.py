@@ -7,6 +7,6 @@
 # Product   : PyCharm
 # Project   : link
 
-from .ipa import IPA, IPAError
-from .sib import SibError, Sib, SibDevice
-from .ios import GoIOSError, GoIOS, GoIOSDevice
+from ._ipa import IPA, IPAError
+from ._sib import SibError, Sib, SibDevice
+from ._ios import GoIOSError, GoIOS, GoIOSDevice

@@ -27,4 +27,4 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from .hdc import Hdc, HdcDevice
+from ._hdc import Hdc, HdcDevice

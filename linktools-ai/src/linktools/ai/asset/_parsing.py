@@ -12,7 +12,7 @@ from typing import Protocol
 
 from ..core import JsonValue
 from ..core.errors import AssetNotFoundError, AssetParseError
-from .content import AssetContent, AssetContentInfo
+from ._content import AssetContent, AssetContentInfo
 
 
 class TextAssetStore(Protocol):

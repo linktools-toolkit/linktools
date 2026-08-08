@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from linktools.cli import command as command_module
+from linktools.cli import _command as command_module
 from linktools.cli.env import get_commands
 
 
@@ -72,7 +72,7 @@ def test_alias_does_not_initialize_tools_or_load_capabilities(tmp_path, monkeypa
 
 
 def test_non_alias_entry_point_discovery_still_warns(monkeypatch):
-    from linktools.cli.command import _iter_entry_points
+    from linktools.cli._command import _iter_entry_points
 
     class Broken:
         name = "broken"
@@ -81,7 +81,7 @@ def test_non_alias_entry_point_discovery_still_warns(monkeypatch):
             raise RuntimeError("broken entry point")
 
     warnings = []
-    monkeypatch.setattr("linktools.cli.command.environ",
+    monkeypatch.setattr("linktools.cli._command.environ",
                         SimpleNamespace(logger=SimpleNamespace(warning=lambda message, **kwargs: warnings.append(message)),
                                          debug=False))
     # The discovery backend is patched locally so this test checks the warning
@@ -92,7 +92,7 @@ def test_non_alias_entry_point_discovery_still_warns(monkeypatch):
 
 
 def test_broken_entry_point_is_silent_when_alias_requests_ignore(monkeypatch):
-    from linktools.cli.command import _iter_entry_points
+    from linktools.cli._command import _iter_entry_points
 
     class Broken:
         name = "broken"
@@ -101,7 +101,7 @@ def test_broken_entry_point_is_silent_when_alias_requests_ignore(monkeypatch):
             raise RuntimeError("broken entry point")
 
     warnings = []
-    monkeypatch.setattr("linktools.cli.command.environ",
+    monkeypatch.setattr("linktools.cli._command.environ",
                         SimpleNamespace(logger=SimpleNamespace(warning=lambda message, **kwargs: warnings.append(message)),
                                          debug=False))
     monkeypatch.setattr("linktools.core._entrypoint.select_entry_points", lambda group: (Broken(),))

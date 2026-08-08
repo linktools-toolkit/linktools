@@ -196,7 +196,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -322,7 +322,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -332,7 +332,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -410,7 +410,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -489,7 +489,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -556,7 +556,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -612,7 +612,7 @@
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/schema.py",
         "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/app/bootstrap.py"
+        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
@@ -792,7 +792,7 @@
         "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner",
         "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error",
         "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner",
-        "linktools-ai/src/linktools/ai/runtime/planner.py"
+        "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ]
     },
     {

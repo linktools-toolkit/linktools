@@ -17,7 +17,7 @@ except ModuleNotFoundError as error:
 
 from .run import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
 from ...core.errors import ErrorCode, AIError
-from ...task.graph import SwarmLimits
+from ...task import SwarmLimits
 
 
 @dataclass(frozen=True, slots=True)

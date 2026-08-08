@@ -2,11 +2,11 @@
 """Tests for the CLI exit-code mapping."""
 import pytest
 
-from linktools.cli.exitcodes import (
+from linktools.cli._exitcodes import (
     exit_code_for, EXIT_SUCCESS, EXIT_USER_INPUT, EXIT_CONFIG, EXIT_NETWORK,
     EXIT_TOOL, EXIT_INTERNAL, EXIT_INTERRUPT,
 )
-from linktools.cli.command import CommandError
+from linktools.cli._command import CommandError
 from linktools.errors import (
     Error, ConfigError, DownloadError, GitError, SSHError, ToolError,
     CacheError, EnvironmentError,

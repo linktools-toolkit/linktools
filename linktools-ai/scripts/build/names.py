@@ -9,7 +9,6 @@ from pathlib import Path
 
 _GRANDFATHERED_DUPLICATES = frozenset(
     {
-        frozenset({"asset/cache.py", "storage/cache.py"}),
         frozenset({"asset/files.py", "storage/files.py"}),
         frozenset({"asset/model.py", "storage/model.py"}),
     }
@@ -29,7 +28,7 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
     for path in modules:
         if "__pycache__" in path.parts:
             continue
-        if not re.fullmatch(r"[a-z][a-z0-9]*", path.stem):
+        if not re.fullmatch(r"_?[a-z][a-z0-9]*", path.stem):
             errors.append(str(path))
     by_stem: dict[str, list[Path]] = {}
     for path in modules:
@@ -51,7 +50,7 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
     for path in root.rglob("*"):
         if not path.is_dir() or path.name == "__pycache__":
             continue
-        if not re.fullmatch(r"[a-z][a-z0-9]*", path.name):
+        if not re.fullmatch(r"_?[a-z][a-z0-9]*", path.name):
             errors.append(str(path))
     return tuple(errors)
 

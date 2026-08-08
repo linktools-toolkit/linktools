@@ -20,16 +20,16 @@ if TYPE_CHECKING:
     from linktools.core import CacheNamespace, ConfigStore, Environ
     from .registry.registry import ContainerResolver
     from .registry.loader import ContainerLoader
-    from .operations import ComposeOperations
+    from ._operations import ComposeOperations
     from .runtime.compose import ComposeRunner
     from .runtime.process import RuntimeProcessFactory
     from .runtime.structured import StructuredCommandRunner
     from .runtime.inspect import DockerInspector
-    from .runtime.images import ImagePreparer
+    from .runtime import ImagePreparer
     from .lifecycle.dispatcher import LifecycleDispatcher
     from .lifecycle.hooks import HookListView, HookRegistry
     from .state.running import RunningStateStore
-    from .state.installed import InstalledStateStore
+    from .state import InstalledStateStore
     from .repo.service import RepoService
     from .artifacts import ArtifactIndex
     from .execution.planner import ExecutionPlanner
@@ -251,7 +251,7 @@ class ContainerManager:
     def compose_operations(self) -> "ComposeOperations":
         # Root up/restart/down and the `compose` command both dispatch
         # through this so they can never drift from each other.
-        from .operations import ComposeOperations
+        from ._operations import ComposeOperations
         return ComposeOperations(self)
 
     @cached_property
@@ -281,7 +281,7 @@ class ContainerManager:
 
     @cached_property
     def image_preparer(self) -> "ImagePreparer":
-        from .runtime.images import ImagePreparer
+        from .runtime import ImagePreparer
         return ImagePreparer(self)
 
     @cached_property
@@ -306,7 +306,7 @@ class ContainerManager:
 
     @cached_property
     def installed_state(self) -> "InstalledStateStore":
-        from .state.installed import InstalledStateStore
+        from .state import InstalledStateStore
         return InstalledStateStore(self)
 
     @cached_property

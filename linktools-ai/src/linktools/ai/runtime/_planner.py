@@ -12,7 +12,7 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.value import OperationKind, OperationStatus, Principal, ResourceKind
-from ..task.graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ..task import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
 from .persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence
 from .services import WorkflowGateway
 

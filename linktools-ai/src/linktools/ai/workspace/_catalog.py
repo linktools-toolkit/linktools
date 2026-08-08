@@ -10,7 +10,7 @@ from pathlib import Path
 from linktools.core import environ
 
 from ..core.errors import ErrorCode, AIError
-from .root import WorkspacePolicy
+from ._root import WorkspacePolicy
 
 
 @dataclass(frozen=True, slots=True)

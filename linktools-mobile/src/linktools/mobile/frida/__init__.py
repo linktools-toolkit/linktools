@@ -27,7 +27,7 @@
  /_==__==========__==_ooo__ooo=_/'   /___________,"
 """
 
-from .app import FridaApplication, FridaReactor, FridaSession, FridaScript, \
+from ._app import FridaApplication, FridaReactor, FridaSession, FridaScript, \
     FridaDeviceHandler, FridaSessionHandler, FridaScriptHandler, FridaFileHandler
-from .script import FridaUserScript, FridaScriptFile, FridaShareScript, FridaEvalCode
-from .server import FridaServer, FridaAndroidServer, FridaIOSServer
+from ._script import FridaUserScript, FridaScriptFile, FridaShareScript, FridaEvalCode
+from ._server import FridaServer, FridaAndroidServer, FridaIOSServer

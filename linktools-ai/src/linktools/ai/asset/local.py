@@ -11,7 +11,7 @@ from linktools.core import environ
 
 from ..core.errors import AssetConflictError
 from ..storage.files import atomic_write_bytes, read_bytes
-from .content import AssetContent, AssetContentInfo, compute_asset_etag
+from ._content import AssetContent, AssetContentInfo, compute_asset_etag
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

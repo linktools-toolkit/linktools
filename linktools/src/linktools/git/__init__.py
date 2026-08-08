@@ -5,13 +5,13 @@
 
 from linktools.errors import GitError, GitDivergedError, GitUnavailableError, missing_optional_class
 
-from .support import (
+from ._support import (
     get_git_unavailable_reason,
     is_git_available,
     require_git_available,
 )
-from .sync import GitSyncPolicy
-from .progress import GitProgressStream
+from ._sync import GitSyncPolicy
+from ._progress import GitProgressStream
 
 try:
     require_git_available()
@@ -19,7 +19,7 @@ except GitUnavailableError as exc:
     GitRepository = missing_optional_class("GitRepository", "git", exc)
     GitHead = missing_optional_class("GitHead", "git", exc)
 else:
-    from .repository import GitHead, GitRepository
+    from ._repository import GitHead, GitRepository
 
 __all__ = [
     "GitRepository",

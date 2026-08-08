@@ -31,11 +31,11 @@ __all__ = [
 
 
 # paramiko-free at import time (paramiko is imported lazily inside methods).
-from .forward import SSHForward, SSHReverse
-from .hostkey import SSHHostKeyPolicy, host_key_policy_class
+from ._forward import SSHForward, SSHReverse
+from ._hostkey import SSHHostKeyPolicy, host_key_policy_class
 
 try:
-    from .client import SSHClient
+    from ._client import SSHClient
 except ImportError as _exc:  # paramiko/scp not installed
     # Only swallow a missing paramiko/scp; re-raise internal ImportErrors so a
     # real bug in client.py is not masked as "optional dependency absent".

@@ -18,16 +18,16 @@
   },
   "module_dependencies": {
     "adapter.repository": ["core", "storage", "runtime", "capability", "task"],
-    "adapter.nats": ["core", "observe"],
-    "adapter.logfire": ["core", "observe"],
-    "adapter.provider": ["core", "model"],
-    "adapter.identity": ["core"],
+    "adapter._nats": ["core", "observe"],
+    "adapter._logfire": ["core", "observe"],
+    "adapter._provider": ["core", "model"],
+    "adapter._identity": ["core"],
     "adapter.schema": ["core", "storage"],
     "app.facade": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
     "app.assembly": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "adapter"],
     "app.workbench": ["core", "storage", "agent", "runtime", "workspace", "adapter"],
     "agent.binding": ["core", "spec", "model"],
-    "temporal.context": ["core", "agent"]
+    "temporal._context": ["core", "agent"]
   },
   "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
   "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""linktools.git.support: Python-version + Dulwich-presence gating (spec
+"""linktools.git._support: Python-version + Dulwich-presence gating (spec
 Part I). Importing linktools.git must never require dulwich itself --
 only actually using GitRepository/GitHead does."""
 import sys
@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from linktools.errors import GitUnavailableError
-from linktools.git import support
+from linktools.git import _support as support
 
 
 def test_git_support_py_lt_310(monkeypatch):

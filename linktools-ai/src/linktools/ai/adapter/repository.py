@@ -30,7 +30,7 @@ from ..runtime.persistence import (
     ResultRecord, RuntimePersistence, RuntimePersistenceMode, RuntimeRepository, SessionRecord,
     TaskLease, TaskNodeView,
 )
-from ..task.graph import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage.database import StorageDatabase
 from linktools.core import environ
 from .schema import SqlRuntimeTables

@@ -36,7 +36,7 @@ from ..runtime.persistence import (
     IdempotencyRecord, MemoryRecord, OperationLedgerInput, OperationLedgerRecord, ResultRecord, RuntimePersistence,
     RuntimeBackend, RuntimePersistenceMode, RuntimeRepository, SessionRecord, TaskLease, TaskNodeView,
 )
-from ..task.graph import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage.files import read_json, write_json_atomic
 from ..storage.lock import FileLeaseCoordinator, FileWriterLock
 from linktools.core import environ

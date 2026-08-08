@@ -20,7 +20,7 @@ from .ids import canonical_sha256, deterministic_id
 from .json import JsonValue, canonical_json_bytes
 from .paging import CursorPayload, CursorSigner, HmacCursorSigner, Page
 from .principal import AuthorizationAction, AuthorizationPolicy, PrincipalProvider, ResourceRef, TenantAuthorizationPolicy
-from .redaction import RedactedValue, RedactionClass, RedactionPolicy, StructuredRedactor
+from ._redaction import RedactedValue, RedactionClass, RedactionPolicy, StructuredRedactor
 from .validation import (
     validate_agent_id, validate_enum, validate_external_payload, validate_idempotency_key,
     validate_observation_payload, validate_page_limit, validate_principal_id, validate_prompt,
