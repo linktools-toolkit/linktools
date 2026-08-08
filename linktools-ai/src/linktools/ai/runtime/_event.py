@@ -9,7 +9,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import AuthorizationAction, AuthorizationPolicy
 from ..core import ExecutionEventType, ExecutionStatus
 from ._persistence import RuntimePersistence

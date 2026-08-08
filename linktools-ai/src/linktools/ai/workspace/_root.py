@@ -13,7 +13,7 @@ except ImportError:
     _yaml = None
 
 from ..core import Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..core import JsonValue
 

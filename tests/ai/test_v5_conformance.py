@@ -14,12 +14,13 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.models.test import TestModel
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from linktools.ai.adapter import StepExecutionHistoryReader, build_filesystem_runtime, build_in_memory_runtime
-from linktools.ai.app import RuntimePersistenceConfig, build_runtime_access, build_runtime_services, open_runtime_services, open_runtime_resources
+from linktools.ai.app import RuntimePersistenceConfig, build_runtime_access, build_runtime_services, open_runtime_services
 from linktools.ai.app import open_workspace_runtime
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
-from linktools.ai.core import ErrorCode, AIError
+from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai.core import canonical_sha256, idempotency_key_hash
 from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason, TaskStatus
 from linktools.ai.runtime import ApprovalRecord, ExecutionCancelRequestCommit, ExecutionRecord, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, OperationLedgerInput, ResultRecord, RuntimePersistence, SessionHeadAdvance, SessionRecord
@@ -28,6 +29,7 @@ from linktools.ai.runtime import CancelEffectOutcome
 from linktools.ai.task import CancelGraphRequest, TaskGraph, TaskGraphHandle, TaskGraphRequest, TaskNode
 from linktools.ai.agent import WorkspaceAgentResult, WorkspaceAgentRunner
 from linktools.ai.workspace import Workspace, trusted_workspace_principal
+from tests.ai.persistence.helper import _open_sql_workspace, open_sql_resources
 
 
 class _History:
@@ -290,7 +292,7 @@ async def test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite(t
 
     path = tmp_path / "runtime.db"
     config = RuntimePersistenceConfig.sqlite(str(path), namespace="v5-sql", deployment_id="test")
-    async with open_runtime_resources(config) as resources:
+    async with open_sql_resources(config) as resources:
         await _assert_stale_terminal_is_atomic(resources.domain)
     with sqlite3.connect(path) as connection:
         assert connection.execute("select profile from ai_runtime_sessions where session_id = ?", ("session",)).fetchone() == ("",)
@@ -302,7 +304,8 @@ async def test_workspace_resume_advances_head_from_the_previous_session_head(tmp
     workspace = Workspace.load(tmp_path / backend)
     runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
     config = RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id) if backend == "memory" else RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace=workspace.workspace_id, deployment_id="test")
-    async with open_workspace_runtime(workspace, config=config, runner=runner) as runtime:
+    runtime_context = open_workspace_runtime(workspace, config=config, runner=runner) if backend == "memory" else _open_sql_workspace(workspace, config, runner=runner)
+    async with runtime_context as runtime:
         results = [
             await runtime.run("main", prompt, idempotency_key=key)
             for prompt, key in (("one", "k1"), ("two", "k2"), ("three", "k3"))
@@ -534,7 +537,8 @@ async def test_memory_and_sqlite_request_cancel_operation_preconditions_match(tm
         await _assert_request_cancel_operation_parity(memory.persistence)
     finally:
         await memory.close()
-    async with open_runtime_resources(RuntimePersistenceConfig.sqlite(str(tmp_path / "cancel-parity.db"), namespace="cancel-parity-sql", deployment_id="test")) as resources:
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "cancel-parity.db"), namespace="cancel-parity-sql", deployment_id="test")
+    async with open_sql_resources(config) as resources:
         await _assert_request_cancel_operation_parity(resources.domain)
 
 
@@ -712,19 +716,19 @@ async def test_sql_legacy_profile_tombstone_is_not_domain_semantic(tmp_path: Pat
     config = RuntimePersistenceConfig.sqlite(str(path), namespace="legacy-sql", deployment_id="test")
     now = datetime.now(timezone.utc)
     session = SessionRecord("legacy-sql-session", "legacy-sql", "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None, None)
-    async with open_runtime_resources(config) as resources:
+    async with open_sql_resources(config) as resources:
         await resources.domain.sessions.create(session)
         with sqlite3.connect(path) as connection:
             connection.execute("update ai_runtime_sessions set profile = ? where session_id = ?", ("local-coding", session.session_id))
             connection.commit()
-    async with open_runtime_resources(config) as resources:
+    async with open_sql_resources(config) as resources:
         loaded = await resources.domain.sessions.get(session.session_id, tenant_id=session.tenant_id)
         assert loaded is not None and not hasattr(loaded, "profile")
         updated = replace(loaded, revision=loaded.revision + 1, updated_at=datetime.now(timezone.utc))
         await resources.domain.sessions.compare_and_swap(session.session_id, tenant_id=session.tenant_id, expected_revision=loaded.revision, next_record=updated)
     with sqlite3.connect(path) as connection:
         assert connection.execute("select profile from ai_runtime_sessions where session_id = ?", (session.session_id,)).fetchone() == ("",)
-    source = Path("linktools-ai/src/linktools/ai/adapter/_repository.py").read_text(encoding="utf-8")
+    source = Path("linktools-ai/src/linktools/ai/adapter/_sql.py").read_text(encoding="utf-8")
     assert source.count('profile=""') == 2
     assert "profile" not in source.replace('profile=""', "")
     ast.parse(source)
@@ -1120,7 +1124,7 @@ def test_temporal_contract_fields_and_registered_class_names_are_stable() -> Non
     ))
     workflow_sources = tuple(
         Path("linktools-ai/src/linktools/ai/temporal/workflow", name).read_text(encoding="utf-8")
-        for name in ("_run.py", "_suite.py", "_mutation.py", "_dag.py")
+        for name in ("_execution.py", "_evaluation.py", "_session.py", "_graph.py")
     )
     assert all(f'_temporal_workflow.defn(name="{name}")' in source for source, name in zip(workflow_sources, ("ExecutionWorkflow", "EvaluationWorkflow", "SessionWorkflow", "TaskWorkflow"), strict=True))
 
@@ -1129,15 +1133,18 @@ def test_temporal_contract_fields_and_registered_class_names_are_stable() -> Non
 async def test_workbench_owns_sqlite_lock_and_generic_services_do_not(tmp_path: Path) -> None:
     workspace = Workspace.load(tmp_path)
     config = RuntimePersistenceConfig.sqlite(str(tmp_path / "lock.db"), namespace=workspace.workspace_id, deployment_id="test")
-    owner_context = open_workspace_runtime(workspace, config=config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel()))
+    owner_context = _open_sql_workspace(workspace, config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel()))
     owner = await owner_context.__aenter__()
-    contender = open_workspace_runtime(workspace, config=config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel()))
+    contender = _open_sql_workspace(workspace, config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel()))
     with pytest.raises(AIError) as error:
         await contender.__aenter__()
     assert error.value.code is ErrorCode.STORAGE_CONFLICT
-    services_context = open_runtime_services(config, TenantAuthorizationPolicy(), grant_key=b"v5-lock-key", execution_launcher=_Launcher())
+    service_engine = create_async_engine(f"sqlite+aiosqlite:///{config.location}")
+    service_factory = async_sessionmaker(service_engine, expire_on_commit=False)
+    services_context = open_runtime_services(config, TenantAuthorizationPolicy(), grant_key=b"v5-lock-key", execution_launcher=_Launcher(), engine=service_engine, session_factory=service_factory)
     await services_context.__aenter__()
     await services_context.__aexit__(None, None, None)
+    await service_engine.dispose()
     memory_root = tmp_path / "memory"
     memory_workspace = Workspace.load(memory_root)
     async with open_workspace_runtime(memory_workspace, config=RuntimePersistenceConfig.in_memory(namespace=memory_workspace.workspace_id), runner=WorkspaceAgentRunner(memory_workspace.root, memory_workspace.config, model=TestModel())):
@@ -1150,7 +1157,7 @@ async def test_workbench_owns_sqlite_lock_and_generic_services_do_not(tmp_path: 
     owner.shutdown = broken_shutdown
     with pytest.raises(RuntimeError):
         await owner_context.__aexit__(None, None, None)
-    async with open_workspace_runtime(workspace, config=config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())):
+    async with _open_sql_workspace(workspace, config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())):
         pass
 
 
@@ -1172,7 +1179,7 @@ async def test_shutdown_cleans_active_execution_on_the_second_session_page(tmp_p
     runner = _BlockingRunner()
     target_id = "session-200"
     execution_id = ""
-    async with open_workspace_runtime(workspace, config=config, runner=runner) as runtime:
+    async with _open_sql_workspace(workspace, config, runner=runner) as runtime:
         for index in range(201):
             await runtime.open_session(f"session-{index:03d}")
         run_task = asyncio.create_task(runtime.run(target_id, "block", idempotency_key="blocking"))
@@ -1183,7 +1190,7 @@ async def test_shutdown_cleans_active_execution_on_the_second_session_page(tmp_p
         with contextlib.suppress(asyncio.CancelledError):
             await run_task
         assert runtime._launcher.active_execution_ids() == ()
-    async with open_workspace_runtime(workspace, config=config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())) as reopened:
+    async with _open_sql_workspace(workspace, config, runner=WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())) as reopened:
         record = await reopened._resources.domain.executions.get(execution_id, tenant_id=workspace.workspace_id)
         assert record is not None and record.status is ExecutionStatus.CANCELLED
         assert reopened._launcher.active_execution_ids() == ()

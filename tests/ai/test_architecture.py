@@ -35,101 +35,68 @@ def test_names_and_module_imports_are_clean() -> None:
         importlib.import_module(name)
 
 
-def test_name_gate_allows_cross_package_names_and_rejects_package_collision(tmp_path: Path) -> None:
-    root = tmp_path / "names"
-    for package in ("app", "task", "runtime"):
+def test_name_gate_allows_parallel_names_and_rejects_namespace_collisions(tmp_path: Path) -> None:
+    root = tmp_path / "parallel"
+    for package in ("aaa", "ccc"):
         (root / package).mkdir(parents=True)
         (root / package / "__init__.py").write_text("", encoding="utf-8")
-    (root / "app" / "data.py").write_text("", encoding="utf-8")
-    (root / "task" / "data.py").write_text("", encoding="utf-8")
-    (root / "app" / "runtime.py").write_text("", encoding="utf-8")
-    (root / "runtime" / "_runtime.py").write_text("", encoding="utf-8")
+    (root / "aaa" / "_bbb.py").write_text("", encoding="utf-8")
+    (root / "ccc" / "bbb.py").write_text("", encoding="utf-8")
+    assert check_names(root) == ()
+
+    (root / "bbb.py").write_text("", encoding="utf-8")
     errors = check_names(root)
-    assert not any(error.startswith("duplicate module basename:") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "runtime/_runtime.py" in error for error in errors)
+    assert sum(error.startswith("namespace semantic-name collision:\n") for error in errors) == 2
 
 
-def test_name_gate_rejects_nested_module_shadowing(tmp_path: Path) -> None:
-    root = tmp_path / "names"
-    (root / "ai" / "aaa").mkdir(parents=True)
-    (root / "ai" / "aaa" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (root / "ai" / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "ai" / "aaa" / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
-    errors = check_names(root)
-    assert any(error.startswith("nested module basename collision:") and "ai/aaa/bbb.py" in error and "bbb.py" in error for error in errors)
+def test_name_gate_includes_modules_and_packages_in_namespace_model(tmp_path: Path) -> None:
+    module_root = tmp_path / "module"
+    (module_root / "aaa").mkdir(parents=True)
+    (module_root / "aaa" / "_bbb.py").write_text("", encoding="utf-8")
+    (module_root / "bbb.py").write_text("", encoding="utf-8")
+    errors = check_names(module_root)
+    assert len(errors) == 1
+    assert errors[0].startswith("namespace semantic-name collision:\n")
 
+    package_root = tmp_path / "package"
+    (package_root / "aaa").mkdir(parents=True)
+    (package_root / "aaa" / "_bbb.py").write_text("", encoding="utf-8")
+    (package_root / "bbb").mkdir()
+    (package_root / "bbb" / "__init__.py").write_text("", encoding="utf-8")
+    errors = check_names(package_root)
+    assert len(errors) == 1
+    assert errors[0].startswith("namespace semantic-name collision:\n")
 
-def test_name_gate_allows_parent_namespace_same_basename(tmp_path: Path) -> None:
-    namespace = tmp_path / "linktools"
-    ai_package = namespace / "ai" / "aaa"
-    ai_package.mkdir(parents=True)
-    (namespace / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (ai_package / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert check_names(namespace / "ai") == ()
+    same_parent_root = tmp_path / "same-parent"
+    (same_parent_root / "aaa").mkdir(parents=True)
+    (same_parent_root / "aaa" / "_bbb.py").write_text("", encoding="utf-8")
+    (same_parent_root / "aaa" / "bbb").mkdir()
+    (same_parent_root / "aaa" / "bbb" / "__init__.py").write_text("", encoding="utf-8")
+    errors = check_names(same_parent_root)
+    assert len(errors) == 1
+    assert errors[0].startswith("namespace semantic-name collision:\n")
 
-
-def test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision(tmp_path: Path) -> None:
-    root = tmp_path / "names"
-    for package in ("asset", "storage"):
-        (root / package).mkdir(parents=True)
-        (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-        for name in ("files.py", "model.py"):
-            (root / package / name).write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "model").mkdir()
-    (root / "model" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (root / "model" / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
-    errors = check_names(root)
-    assert not any(error.startswith("duplicate module basename:") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "model/model.py" in error for error in errors)
-    (root / "adapter").mkdir()
-    (root / "adapter" / "files.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert not any(error.startswith("duplicate module basename:") for error in check_names(root))
-    (root / "asset" / "files").mkdir()
-    (root / "asset" / "files" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    assert any(error.startswith("module/package stem collision:") and "asset/files.py" in error for error in check_names(root))
-    (root / "_internal").mkdir()
-    (root / "_internal" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    assert str(root / "_internal") in check_names(root)
+    nested_root = tmp_path / "nested"
+    (nested_root / "aaa" / "ccc").mkdir(parents=True)
+    (nested_root / "aaa" / "_bbb.py").write_text("", encoding="utf-8")
+    (nested_root / "aaa" / "ccc" / "_bbb.py").write_text("", encoding="utf-8")
+    errors = check_names(nested_root)
+    assert len(errors) == 1
+    assert errors[0].startswith("namespace semantic-name collision:\n")
 
 
 def test_name_gate_treats_private_marker_as_semantic_only(tmp_path: Path) -> None:
     root = tmp_path / "names"
-    for package in ("app", "runtime", "asset", "storage"):
+    for package in ("app", "runtime"):
         (root / package).mkdir(parents=True)
-        (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (root / "app" / "_data.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "runtime" / "data.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "app" / "_runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "runtime" / "_runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "asset" / "_cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "storage" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    errors = check_names(root)
-    assert not any(error.startswith("duplicate module basename:") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "runtime/_runtime.py" in error for error in errors)
-    clean = tmp_path / "clean"
-    (clean / "app").mkdir(parents=True)
-    (clean / "app" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (clean / "app" / "_helper.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert check_names(clean) == ()
+        (root / package / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "_data.py").write_text("", encoding="utf-8")
+    (root / "runtime" / "data.py").write_text("", encoding="utf-8")
+    assert check_names(root) == ()
 
-
-def test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision(tmp_path: Path) -> None:
-    root = tmp_path / "names"
-    for package in ("asset", "storage", "adapter", "task"):
-        (root / package).mkdir(parents=True)
-        (root / package / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (root / "asset" / "new.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "storage" / "new.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "asset" / "task.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "asset" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "storage" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "adapter" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (root / "asset" / "task").mkdir()
-    (root / "asset" / "task" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (root / "asset" / "task" / "task.py").write_text("VALUE = 1\n", encoding="utf-8")
-    errors = check_names(root)
-    assert not any(error.startswith("duplicate module basename:") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "asset/task/task.py" in error for error in errors)
+    (root / "_internal").mkdir()
+    (root / "_internal" / "__init__.py").write_text("", encoding="utf-8")
+    assert str(root / "_internal") in check_names(root)
 
 
 def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries(tmp_path: Path) -> None:
@@ -202,9 +169,9 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
         directory.mkdir(parents=True)
         (directory / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     (source_root / "adapter" / "_persistence.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (source_root / "temporal" / "workflow" / "_run.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source_root / "temporal" / "workflow" / "_execution.py").write_text("VALUE = 1\n", encoding="utf-8")
     worker = source_root / "temporal" / "_worker.py"
-    worker.write_text("from .workflow._run import VALUE\n", encoding="utf-8")
+    worker.write_text("from .workflow._execution import VALUE\n", encoding="utf-8")
     app = source_root / "app" / "foo.py"
     app.write_text(
         "from typing import TYPE_CHECKING\n"
@@ -231,7 +198,7 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
     app.write_text("from ..adapter import build_in_memory_runtime\n", encoding="utf-8")
     worker.write_text("from .workflow import ExecutionWorkflow\n", encoding="utf-8")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check(source_root).errors)
-    (source_root / "temporal" / "workflow" / "__init__.py").write_text("from ._run import ExecutionWorkflow\n", encoding="utf-8")
+    (source_root / "temporal" / "workflow" / "__init__.py").write_text("from ._execution import ExecutionWorkflow\n", encoding="utf-8")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check(source_root).errors)
 
 
@@ -246,7 +213,6 @@ def test_private_conversion_tree_is_exact() -> None:
         "asset/store.py": "asset/_store.py",
         "asset/sql.py": "asset/_sql.py",
         "capability/tool.py": "capability/_tool.py",
-        "core/errors.py": "core/_errors.py",
         "core/ids.py": "core/_ids.py",
         "core/json.py": "core/_json.py",
         "core/paging.py": "core/_paging.py",
@@ -277,9 +243,11 @@ def test_private_conversion_tree_is_exact() -> None:
         if old != new:
             assert not (root / old).is_file(), old
         assert (root / new).is_file(), new
+    assert (root / "errors.py").is_file()
+    assert not (root / "core" / "errors.py").is_file()
     assert check_names(root) == ()
     policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
-    assert policy["public_modules"] == []
+    assert policy["public_modules"] == ["errors"]
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:

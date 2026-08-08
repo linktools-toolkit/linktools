@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Production workflow registrations."""
 
-from ._suite import EvaluationWorkflow, EvaluationWorkflowInput, EvaluationWorkflowResult
-from ._run import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState
-from ._mutation import SessionWorkflow, SessionWorkflowInput, SessionWorkflowResult
-from ._dag import TaskWorkflow, TaskWorkflowInput, TaskWorkflowResult
+from ._evaluation import EvaluationWorkflow, EvaluationWorkflowInput, EvaluationWorkflowResult
+from ._execution import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState
+from ._session import SessionWorkflow, SessionWorkflowInput, SessionWorkflowResult
+from ._graph import TaskWorkflow, TaskWorkflowInput, TaskWorkflowResult
 
 __all__ = [
     "EvaluationWorkflow",

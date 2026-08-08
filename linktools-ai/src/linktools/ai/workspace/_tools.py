@@ -12,7 +12,7 @@ from linktools.core import environ
 
 from ..core import JsonValue
 from ..core import canonical_sha256
-from ..core import ErrorCode
+from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
 
 if TYPE_CHECKING:

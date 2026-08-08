@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 
 from ..storage import SqlSchemaRegistry
 from ..storage import storage_name
-from ..core import ErrorCode, AIError
 
 runtime_metadata: object | None = None
 step_metadata: object | None = None
@@ -30,11 +29,8 @@ class SqlRuntimeSchema:
     @classmethod
     def register_schema(cls, registry: SqlSchemaRegistry) -> SqlRuntimeTables:
         global runtime_metadata
-        try:
-            from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, UniqueConstraint
-            from sqlalchemy.dialects import mysql
-        except ModuleNotFoundError as error:
-            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Runtime storage") from error
+        from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, UniqueConstraint
+        from sqlalchemy.dialects import mysql
 
         runtime_metadata = registry.metadata
         integer_id = BigInteger().with_variant(Integer, "sqlite")
@@ -151,20 +147,14 @@ def _hex64() -> "CHAR":
 def ensure_step_metadata() -> "MetaData":
     global step_metadata
     if step_metadata is None:
-        try:
-            from sqlalchemy import MetaData
-        except ModuleNotFoundError as error:
-            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Step storage") from error
+        from sqlalchemy import MetaData
         step_metadata = MetaData()
     return step_metadata
 
 
 def new_step_metadata() -> "MetaData":
     global step_metadata
-    try:
-        from sqlalchemy import MetaData
-    except ModuleNotFoundError as error:
-        raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL Step storage") from error
+    from sqlalchemy import MetaData
     metadata = MetaData()
     if step_metadata is None:
         step_metadata = metadata

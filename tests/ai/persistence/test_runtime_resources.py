@@ -14,10 +14,11 @@ from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepSt
 
 from linktools.ai import RuntimePersistenceConfig, RuntimeResources, namespace_scoped_step_db_path, open_runtime_resources
 from linktools.ai.adapter import DurableFilesystemStepStore, build_filesystem_runtime, build_in_memory_runtime
-from linktools.ai.core import ErrorCode, AIError
+from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai.core import idempotency_key_hash
 from linktools.ai.core import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
 from linktools.ai.runtime import ExecutionRecord, ExecutionStartClaim, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, SessionHeadAdvance, SessionRecord
+from tests.ai.persistence.helper import open_sql_resources
 
 
 @pytest.mark.asyncio
@@ -32,20 +33,31 @@ async def test_in_memory_resources_owns_harness_store() -> None:
 async def test_filesystem_resources_uses_shared_runtime_writer_and_durable_step_store(tmp_path: Path) -> None:
     async with open_runtime_resources(RuntimePersistenceConfig.filesystem(str(tmp_path), workspace_id="project")) as resources:
         assert isinstance(resources.steps, DurableFilesystemStepStore)
-        assert (tmp_path / "steps").is_dir()
+        runtime_root = tmp_path / ".linktools" / "runtime" / hashlib.sha256(b"project").hexdigest()
+        assert (runtime_root / "steps").is_dir()
+        assert not (tmp_path / "steps").exists()
 
 
 @pytest.mark.asyncio
 async def test_sqlite_resources_uses_sibling_harness_database(tmp_path: Path) -> None:
     primary = tmp_path / "runtime.db"
     config = RuntimePersistenceConfig.sqlite(str(primary), namespace="namespace", deployment_id="deployment")
-    async with open_runtime_resources(config) as resources:
+    async with open_sql_resources(config) as resources:
         assert isinstance(resources.steps, SqliteStepStore)
     with sqlite3.connect(primary) as connection:
         tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
     assert not any(name.startswith("ai_step_") for name in tables)
     sibling = tmp_path / f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
     assert namespace_scoped_step_db_path(primary, "namespace") == sibling
+
+
+@pytest.mark.asyncio
+async def test_sql_resources_require_downstream_session_factory(tmp_path: Path) -> None:
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace="namespace", deployment_id="deployment")
+    with pytest.raises(AIError) as error:
+        async with open_runtime_resources(config):
+            pass
+    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
 
 
 @pytest.mark.asyncio
@@ -69,7 +81,7 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
 async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
     config = RuntimePersistenceConfig.sqlite(str(tmp_path / "claim.db"), namespace="claim", deployment_id="test")
-    async with open_runtime_resources(config) as resources:
+    async with open_sql_resources(config) as resources:
         execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
         key_hash = idempotency_key_hash("request")
         await resources.domain.executions.create(execution)

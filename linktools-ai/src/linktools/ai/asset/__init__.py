@@ -32,7 +32,7 @@ from ._sql import SqlAssetBackend, SqlAssetTables
 from ._backend import FilesystemAssetBackend, InMemoryAssetBackend
 from ._filesystem import AssetPathAdapter, FilesystemAssetContentStore, PrefixAssetPathAdapter
 from ._parsing import AssetLoader, AssetLoaderSource, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
-from ..core import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
+from ..errors import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
 
 __all__ = [
     "AssetBackend",

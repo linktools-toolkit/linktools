@@ -10,7 +10,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core import canonical_sha256, idempotency_key_hash
 from ..core import EvaluationStatus, IdempotencyStatus, ResourceKind

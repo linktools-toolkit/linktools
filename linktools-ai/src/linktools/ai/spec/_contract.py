@@ -10,7 +10,7 @@ from typing import Literal
 
 from ..asset import AssetCodec
 from ..asset import AssetKey, AssetValue
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..core import JsonValue
 

@@ -8,7 +8,7 @@ from enum import StrEnum
 from collections.abc import Mapping, Sequence
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")

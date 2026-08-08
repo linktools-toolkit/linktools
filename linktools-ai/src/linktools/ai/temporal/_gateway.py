@@ -8,7 +8,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import JsonValue
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..runtime import (
     CancelExecutionResult,
     ExecutionHandle,

@@ -10,7 +10,7 @@ import secrets
 import time
 
 from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionStatus, Page, Principal, SessionStatus
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import validate_idempotency_key, validate_prompt, validate_resource_id
 from ..core import canonical_sha256
 from ..core import JsonValue

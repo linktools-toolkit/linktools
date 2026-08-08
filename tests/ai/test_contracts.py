@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.agent import AgentDeps
 from scripts.build.agent_bundle import build_bundle
-from linktools.ai.core import ErrorCode, AIError
+from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai.model import ModelRegistry, ModelRoute
 from linktools.ai.observe import RunContext
 from linktools.ai.observe import MiddlewarePipeline

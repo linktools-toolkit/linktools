@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from ..core import JsonValue
-from ..core import AssetNotFoundError, AssetParseError
+from ..errors import AssetNotFoundError, AssetParseError
 from ._content import AssetContentSource
 from ._domain import AssetSource
 

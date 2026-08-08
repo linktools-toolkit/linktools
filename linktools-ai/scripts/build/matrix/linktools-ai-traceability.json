@@ -1,6 +1,6 @@
 {
   "status": "COMPLETE",
-  "validated_source_commit": "71576909",
+  "validated_source_commit": "e5d5735a",
   "open_findings": [],
   "entries": [
     {
@@ -35,7 +35,7 @@
       "implementation": [
         "adapter/_history.py",
         "adapter/_persistence.py",
-        "adapter/_repository.py",
+        "adapter/_sql.py",
         "adapter/_schema.py"
       ],
       "tests": [
@@ -84,7 +84,7 @@
       "requirements": "R-09,R-10,T-13,T-14,T-15,T-16,T-17",
       "implementation": [
         "core/_value.py",
-        "core/_errors.py",
+        "errors.py",
         "runtime",
         "adapter",
         "app/_assembly.py",
@@ -120,7 +120,7 @@
       "implementation": [
         "runtime/_execution.py",
         "app/_workbench.py",
-        "adapter/_repository.py"
+        "adapter/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
@@ -132,15 +132,15 @@
     },
     {
       "owner": "naming",
-      "requirements": "R-07,T-22",
+      "requirements": "R-07,T-32",
       "implementation": [
         "scripts/build/names.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename",
+        "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model",
         "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model"
       ]
     },
     {
@@ -193,6 +193,6 @@
   "scope_exclusions": [
     "Downstream migration and compatibility work are explicitly excluded by the user."
   ],
-  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
-  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
+  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
+  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
 }

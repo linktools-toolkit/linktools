@@ -17,7 +17,7 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...core import ErrorCode, AIError
+from ...errors import ErrorCode, AIError
 from ...core import JsonValue
 from ...core import ApprovalDecision, ExecutionStatus
 

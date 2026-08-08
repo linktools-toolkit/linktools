@@ -14,14 +14,21 @@ from pydantic_ai.models.test import TestModel
 from linktools.ai.agent import WorkspaceAgentRunner
 from linktools.ai.app import RuntimePersistenceConfig
 from linktools.ai.app import open_workspace_runtime
-from linktools.ai.core import ErrorCode, AIError
+from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai.workspace import Workspace
+from linktools.cli.argparse import ConfigAction
 from linktools.commands.ai.run import command as run_command
+from tests.ai.persistence.helper import _open_sql_workspace
 
 
 def test_ai_run_executes_the_workspace_test_model(tmp_path: Path, capsys, monkeypatch) -> None:
     parser = run_command.create_parser()
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     args = parser.parse_args(["--model", "test", "hello"])
+    actions = {action.dest: action for action in parser._actions}
+    assert all(isinstance(actions[name], ConfigAction) for name in ("api_key", "base_url", "model"))
+    assert args.model == "test"
     monkeypatch.chdir(tmp_path)
     assert run_command.run(args) == 0
     assert "success (no tool calls)" in capsys.readouterr().out
@@ -32,7 +39,7 @@ def test_workspace_runtime_uses_database_storage(tmp_path: Path) -> None:
         workspace = Workspace.load(tmp_path)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
         config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace=workspace.workspace_id, deployment_id="workspace")
-        async with open_workspace_runtime(workspace, config=config, runner=runner) as runtime:
+        async with _open_sql_workspace(workspace, config, runner=runner) as runtime:
             result = await runtime.run("main", "hello", idempotency_key="database-key")
             return result.output
 

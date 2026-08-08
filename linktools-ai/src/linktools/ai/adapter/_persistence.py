@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..capability import ToolOperationRecord, ToolStateStore
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..core import JsonValue
 from ..core import Page
@@ -1395,6 +1395,10 @@ class _DurableRuntime(InMemoryRuntime):
     @property
     def writer_lock(self) -> FilesystemWriterLock:
         return self._writer_lock
+
+    @property
+    def runtime_root(self) -> Path:
+        return Path(self._state_path).parent
 
     async def initialize(self) -> None:
         async with self._durable_initialize_lock:

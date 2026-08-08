@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core import AssetConflictError
+from ..errors import AssetConflictError
 
 
 @dataclass(frozen=True, slots=True)

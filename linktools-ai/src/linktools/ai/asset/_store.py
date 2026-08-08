@@ -12,7 +12,7 @@ from typing import TypeVar
 from linktools.core import environ
 
 from ..core import CursorPayload, CursorSigner, Page
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..storage import CacheAdapter, StorageAdapter, StorageComposition
 from ..storage import StorageWriteVisibility

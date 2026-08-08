@@ -22,8 +22,9 @@ The package is deliberately small and has one owner per concern:
 | `scripts/build` | Bundle compilation, architecture, import, dependency and data gates |
 | `app` | Runtime/workspace composition, HTTP, CLI, ACP and the only composition root |
 
-Normal library modules are directly under `linktools/ai/<package>/`. Build-time
-gates live under `scripts/build/`. Only Temporal
+Normal library modules are directly under `linktools/ai/<package>/`. A
+cross-package public boundary module may live directly under `linktools/ai/`
+only when listed in `public_modules`. Build-time gates live under `scripts/build/`. Only Temporal
 may use `workflow/` and `activity/` subpackages. `AssetStore` is the only
 typed asset storage abstraction; the spec package contains DTOs and codecs.
 
@@ -44,6 +45,12 @@ typed asset storage abstraction; the spec package contains DTOs and codecs.
   cross-package access.
 - Workflow code is deterministic. External effects belong to Activities.
 - File and SQL initialization is explicit; builders do not perform I/O.
+- Module naming is namespace-scoped, not globally unique. A semantic leaf may
+  repeat under parallel package namespaces, such as
+  `linktools.ai.aaa.bbb` and `linktools.ai.ccc.bbb`, but it must not shadow the
+  same leaf in an ancestor namespace, such as `linktools.ai.aaa.bbb` and
+  `linktools.ai.bbb`. The same rule applies to packages; a leading `_` is
+  visibility-only and ignored when comparing names.
 
 ## Verification
 

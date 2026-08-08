@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Lazy SQLAlchemy database construction and frozen schema registration."""
+"""Borrowed SQLAlchemy database metadata and frozen schema registration."""
 
 import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
-from urllib.parse import urlsplit, unquote
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_json_bytes
 
 if TYPE_CHECKING:
     from sqlalchemy import Constraint, Index, MetaData, Table
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 class CoordinationScope(StrEnum):
     PROCESS = "process"
@@ -113,26 +111,9 @@ class SqlSchemaRegistry:
 @dataclass(frozen=True, slots=True)
 class StorageDatabase:
     engine: "AsyncEngine"
-    session_factory: "async_sessionmaker[AsyncSession]"
     coordination_scope: CoordinationScope
     metadata: "MetaData"
-    target_identity: str
     schema_manifest_digest: str
-
-
-def dialect_for_url(url: str) -> str:
-    scheme = url.split(":", 1)[0]
-    if scheme == "sqlite+aiosqlite":
-        return "sqlite"
-    if scheme == "mysql+asyncmy":
-        return "mysql"
-    if scheme == "postgresql+asyncpg":
-        return "postgresql"
-    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "unsupported SQL storage dialect")
-
-
-def scope_for_url(url: str) -> CoordinationScope:
-    return CoordinationScope.PROCESS if url.startswith("sqlite") else CoordinationScope.SHARED_DATABASE
 
 
 def sql_constraint_signature(constraint: "Constraint") -> str:
@@ -151,61 +132,30 @@ def _index_signature(index: "Index") -> str:
 
 
 def build_storage(
-    async_url: str,
     *,
+    engine: "AsyncEngine",
     metadata: "MetaData",
     schema_manifest_digest: str,
+    coordination_scope: CoordinationScope = CoordinationScope.SHARED_DATABASE,
 ) -> StorageDatabase:
-    dialect = dialect_for_url(async_url)
-    try:
-        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-    except ModuleNotFoundError as error:
-        if error.name == "sqlalchemy":
-            raise AIError(
-                ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
-                "SQLAlchemy is required for SQL storage",
-            ) from error
-        raise
-    try:
-        engine = create_async_engine(async_url)
-    except ModuleNotFoundError as error:
-        if error.name in {"aiosqlite", "asyncmy", "asyncpg"}:
-            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, f"SQL driver is required for {dialect} storage") from error
-        raise
-    if dialect == "sqlite":
-        from sqlalchemy import event
-
-        @event.listens_for(engine.sync_engine, "connect")
-        def _configure_sqlite(connection: object, _: object) -> None:
-            cursor = connection.cursor()
-            try:
-                cursor.execute("PRAGMA journal_mode=WAL")
-                if str(cursor.fetchone()[0]).lower() != "wal":
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
-                cursor.execute("PRAGMA foreign_keys=ON")
-                cursor.execute("PRAGMA busy_timeout=5000")
-            finally:
-                cursor.close()
-    parsed = urlsplit(async_url)
-    target = str(Path(unquote(parsed.path)).expanduser().resolve()) if dialect == "sqlite" else f"{dialect}:{parsed.hostname}:{parsed.port or 0}:{parsed.path.lstrip('/')}"
     return StorageDatabase(
         engine,
-        async_sessionmaker(engine, expire_on_commit=False),
-        scope_for_url(async_url),
+        coordination_scope,
         metadata,
-        target,
         schema_manifest_digest,
     )
 
 
 def build_sqlite_storage(
-    path: Path,
     *,
+    engine: "AsyncEngine",
     metadata: "MetaData",
     schema_manifest_digest: str,
 ) -> StorageDatabase:
+    _configure_sqlite_engine(engine)
     return build_storage(
-        f"sqlite+aiosqlite:///{path}",
+        engine=engine,
+        coordination_scope=CoordinationScope.PROCESS,
         metadata=metadata,
         schema_manifest_digest=schema_manifest_digest,
     )
@@ -216,16 +166,24 @@ async def close_storage(database: StorageDatabase) -> None:
 
 
 def _new_metadata() -> "MetaData":
-    try:
-        from sqlalchemy import MetaData
-    except ModuleNotFoundError as error:
-        if error.name == "sqlalchemy":
-            raise AIError(
-                ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
-                "SQLAlchemy is required for SQL schema registration",
-            ) from error
-        raise
+    from sqlalchemy import MetaData
     return MetaData()
+
+
+def _configure_sqlite_engine(engine: "AsyncEngine") -> None:
+    from sqlalchemy import event
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite(connection: object, _: object) -> None:
+        cursor: Any = connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            if str(cursor.fetchone()[0]).lower() != "wal":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
 
 
 __all__ = [
@@ -238,7 +196,5 @@ __all__ = [
     "build_sqlite_storage",
     "build_storage",
     "close_storage",
-    "dialect_for_url",
     "sql_constraint_signature",
-    "scope_for_url",
 ]

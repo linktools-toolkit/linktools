@@ -9,7 +9,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ._root import WorkspacePolicy
 
 
@@ -44,7 +44,7 @@ def parse_skill(path: "str | Path", *, revision: int = 1) -> Skill:
             agents.append(PrivateAgent(agent_path.stem, agent_path, agent_content, hashlib.sha256(agent_content.encode("utf-8")).hexdigest(), skill_id))
     return Skill(skill_id, skill_path, content, hashlib.sha256(content.encode("utf-8")).hexdigest(), revision, tuple(agents))
 
-logger = environ.get_logger("ai.workspace.catalog")
+logger = environ.get_logger("ai.workspace.index")
 
 
 class SkillIndex:

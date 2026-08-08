@@ -4,10 +4,12 @@
 
 from typing import TYPE_CHECKING, Protocol
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ._database import StorageDatabase, sql_constraint_signature
 
 if TYPE_CHECKING:
+    from sqlalchemy import MetaData
+    from sqlalchemy.ext.asyncio import AsyncEngine
     from sqlalchemy.engine import Connection
 
 
@@ -17,18 +19,18 @@ class _SqlTypeValue(Protocol):
 async def initialize_storage(database: StorageDatabase) -> None:
     if not database.schema_manifest_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    await initialize_schema(database.engine, database.metadata)
     async with database.engine.begin() as connection:
-        await connection.run_sync(database.metadata.create_all)
         await connection.run_sync(_validate_schema, database)
 
 
+async def initialize_schema(engine: "AsyncEngine", metadata: "MetaData") -> None:
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
+
+
 def _validate_schema(connection: "Connection", database: StorageDatabase) -> None:
-    try:
-        from sqlalchemy import inspect
-    except ModuleNotFoundError as error:
-        if error.name == "sqlalchemy":
-            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL storage") from error
-        raise
+    from sqlalchemy import inspect
     inspector = inspect(connection)
     actual_tables = set(inspector.get_table_names())
     expected_tables = set(database.metadata.tables)
@@ -91,4 +93,4 @@ def _type_name(value: _SqlTypeValue, column_name: "str | None" = None) -> str:
     return name
 
 
-__all__ = ["initialize_storage"]
+__all__ = ["initialize_schema", "initialize_storage"]

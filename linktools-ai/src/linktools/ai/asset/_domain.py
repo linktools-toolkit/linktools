@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..storage import (
     BatchStorageReader,
     BatchStorageWriter,

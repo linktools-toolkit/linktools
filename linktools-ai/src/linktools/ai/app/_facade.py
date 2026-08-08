@@ -10,7 +10,7 @@ from linktools.core import environ
 from ..agent import AgentBinding
 from ..capability import MCPToolProvider, SkillProvider, SubagentProvider, ToolPolicy, ToolStateStore, Sandbox
 from ..core import Page, Principal, PrincipalProvider
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..model import ModelResolver
 from ..observe import MiddlewarePipeline

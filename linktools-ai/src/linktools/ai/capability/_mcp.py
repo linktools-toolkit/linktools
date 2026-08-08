@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Protocol
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import JsonValue, canonical_json_bytes
 from ..core import ResourceRef
 from ..core import Principal

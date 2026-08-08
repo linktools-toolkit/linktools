@@ -4,7 +4,7 @@
 
 from datetime import datetime, timezone
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import AuthorizationAction, AuthorizationPolicy
 from ..core import ExternalCallStatus
 from ._persistence import RuntimePersistence

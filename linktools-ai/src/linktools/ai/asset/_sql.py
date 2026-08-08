@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, TypeAlias
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
-from ..storage import SqlSchemaRegistry
+from ..errors import ErrorCode, AIError
+from ..storage import SqlSchemaRegistry, initialize_schema
 from ..storage import SqlAlchemyDialect, resolve_dialect
 from ..storage import storage_name
 from ..storage import (
@@ -39,15 +39,7 @@ SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 
 
 def _load_sqlalchemy():
-    try:
-        import sqlalchemy
-    except ModuleNotFoundError as error:
-        if error.name == "sqlalchemy":
-            raise AIError(
-                ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
-                "SQLAlchemy is required for the SQL asset backend",
-            ) from error
-        raise
+    import sqlalchemy
     return sqlalchemy
 
 
@@ -87,8 +79,7 @@ class SqlAssetBackend:
 
     async def initialize_storage(self, engine: "AsyncEngine") -> None:
         """Create the asset tables using the backend's historical API."""
-        async with engine.begin() as connection:
-            await connection.run_sync(self._tables.root.metadata.create_all)
+        await initialize_schema(engine, self._tables.root.metadata)
         _logger.info("SQL asset schema initialized")
 
     @property

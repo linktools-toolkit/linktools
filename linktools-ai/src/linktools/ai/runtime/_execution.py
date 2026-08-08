@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from ..core import Page, Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256, idempotency_key_hash
 from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, StopReason

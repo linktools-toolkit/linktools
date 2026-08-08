@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import ResourceRef
 from ..core import Principal
 

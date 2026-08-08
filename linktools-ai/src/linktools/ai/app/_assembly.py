@@ -7,8 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
-from urllib.parse import urlsplit
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from linktools.core import environ
 
@@ -35,12 +34,17 @@ from ..runtime import RuntimeBackend, RuntimePersistence
 from ..runtime import ExecutionRecord
 from ..runtime import ExecutionHistoryReader, ExecutionRequest, WorkflowGateway, new_runtime_service_identity
 from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..spec import AgentSpecCodec, PromptSpecCodec
 from ..capability import MCPServerSpecCodec, SkillSpecCodec
 from ..spec import OutputTypeRegistry
 
 _logger = environ.get_logger("ai.app.assembly")
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+    from ..storage import StorageDatabase
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,9 +68,11 @@ class RuntimePersistenceConfig:
             if self.location is None or self.location == ":memory:" or not Path(self.location).is_absolute():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.MYSQL:
-            _validate_url(self.location or "", "mysql+asyncmy")
+            if self.location is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.POSTGRESQL:
-            _validate_url(self.location or "", "postgresql+asyncpg")
+            if self.location is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
     @classmethod
     def in_memory(cls, *, namespace: str, deployment_id: str = "memory") -> "RuntimePersistenceConfig":
@@ -85,20 +91,12 @@ class RuntimePersistenceConfig:
         return cls(backend=RuntimeBackend.SQLITE, namespace=namespace, deployment_id=deployment_id, location=str(Path(path).expanduser().resolve()))
 
     @classmethod
-    def mysql(cls, url: str, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
-        _validate_url(url, "mysql+asyncmy")
-        return cls(backend=RuntimeBackend.MYSQL, namespace=namespace, deployment_id=deployment_id, location=url)
+    def mysql(cls, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
+        return cls(backend=RuntimeBackend.MYSQL, namespace=namespace, deployment_id=deployment_id)
 
     @classmethod
-    def postgresql(cls, url: str, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
-        _validate_url(url, "postgresql+asyncpg")
-        return cls(backend=RuntimeBackend.POSTGRESQL, namespace=namespace, deployment_id=deployment_id, location=url)
-
-
-def _validate_url(url: str, scheme: str) -> None:
-    parsed = urlsplit(url)
-    if parsed.scheme != scheme or not parsed.hostname:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    def postgresql(cls, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
+        return cls(backend=RuntimeBackend.POSTGRESQL, namespace=namespace, deployment_id=deployment_id)
 
 
 def _has_control(value: str) -> bool:
@@ -118,8 +116,12 @@ class RuntimeResources:
     steps: StepStore
 
 
-async def _open_sql_step_store(database: object, config: RuntimePersistenceConfig) -> StepStore:
-    return SqlStepStore(database, config.namespace)
+async def _open_sql_step_store(
+    database: "StorageDatabase",
+    session_factory: "async_sessionmaker[AsyncSession]",
+    config: RuntimePersistenceConfig,
+) -> StepStore:
+    return SqlStepStore(database, session_factory, config.namespace)
 
 
 def _validate_persistence_config(config: RuntimePersistenceConfig) -> None:
@@ -127,7 +129,12 @@ def _validate_persistence_config(config: RuntimePersistenceConfig) -> None:
 
 
 @asynccontextmanager
-async def open_runtime_resources(config: RuntimePersistenceConfig) -> AsyncIterator[RuntimeResources]:
+async def open_runtime_resources(
+    config: RuntimePersistenceConfig,
+    *,
+    engine: "AsyncEngine | None" = None,
+    session_factory: "async_sessionmaker[AsyncSession] | None" = None,
+) -> AsyncIterator[RuntimeResources]:
     _validate_persistence_config(config)
     if config.backend is RuntimeBackend.IN_MEMORY:
         runtime = build_in_memory_runtime(namespace=config.namespace)
@@ -140,7 +147,7 @@ async def open_runtime_resources(config: RuntimePersistenceConfig) -> AsyncItera
         return
     if config.backend is RuntimeBackend.FILESYSTEM:
         runtime = build_filesystem_runtime(str(config.location), workspace_id=config.namespace)
-        steps = DurableFilesystemStepStore(str(config.location), config.namespace, writer_lock=runtime.writer_lock)
+        steps = DurableFilesystemStepStore(runtime.runtime_root, config.namespace, writer_lock=runtime.writer_lock)
         await runtime.initialize()
         await steps.initialize()
         try:
@@ -149,15 +156,18 @@ async def open_runtime_resources(config: RuntimePersistenceConfig) -> AsyncItera
             await steps.close()
             await runtime.close()
         return
-    from ..storage import SqlSchemaRegistry, build_sqlite_storage, build_storage, close_storage, initialize_storage
+    from ..storage import SqlSchemaRegistry, build_sqlite_storage, build_storage, initialize_storage
+    if engine is None or session_factory is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires an injected session factory and engine")
+    _logger.debug("SQL runtime dependencies injected: backend=%s engine=%s session_factory=%s", config.backend, type(engine).__name__, type(session_factory).__name__)
     registry = SqlSchemaRegistry()
     tables = SqlRuntimeSchema.register_schema(registry)
     manifest = registry.freeze()
-    database = build_sqlite_storage(Path(str(config.location)), metadata=registry.metadata, schema_manifest_digest=manifest.digest) if config.backend is RuntimeBackend.SQLITE else build_storage(str(config.location), metadata=registry.metadata, schema_manifest_digest=manifest.digest)
+    database = build_sqlite_storage(engine=engine, metadata=registry.metadata, schema_manifest_digest=manifest.digest) if config.backend is RuntimeBackend.SQLITE else build_storage(engine=engine, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
     try:
         await initialize_storage(database)
-        persistence = await open_sql_runtime(database, backend=config.backend, namespace=config.namespace, deployment_id=config.deployment_id, tables=tables)
-        steps: StepStore = SqliteStepStore(database=namespace_scoped_step_db_path(str(config.location), config.namespace)) if config.backend is RuntimeBackend.SQLITE else await _open_sql_step_store(database, config)
+        persistence = await open_sql_runtime(database, session_factory=session_factory, backend=config.backend, namespace=config.namespace, deployment_id=config.deployment_id, tables=tables)
+        steps: StepStore = SqliteStepStore(database=namespace_scoped_step_db_path(str(config.location), config.namespace)) if config.backend is RuntimeBackend.SQLITE else await _open_sql_step_store(database, session_factory, config)
         if config.backend is not RuntimeBackend.SQLITE:
             await steps.initialize()
         await persistence.sessions.initialize()
@@ -169,7 +179,7 @@ async def open_runtime_resources(config: RuntimePersistenceConfig) -> AsyncItera
                 await steps.close()
             await persistence.sessions.close()
     finally:
-        await close_storage(database)
+        _logger.info("runtime resources released: backend=%s namespace=%s external SQL engine retained", config.backend, config.namespace)
 
 
 @asynccontextmanager
@@ -180,8 +190,10 @@ async def open_runtime_services(
     grant_key: bytes,
     workflow_gateway: "WorkflowGateway | None" = None,
     execution_launcher: "ExecutionLauncher | None" = None,
+    engine: "AsyncEngine | None" = None,
+    session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[RuntimeServices]:
-    async with open_runtime_resources(config) as resources:
+    async with open_runtime_resources(config, engine=engine, session_factory=session_factory) as resources:
         history_reader = StepExecutionHistoryReader(config.namespace, resources.domain, resources.steps)
         yield build_runtime_services(
             resources.domain,

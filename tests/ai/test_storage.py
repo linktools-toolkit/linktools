@@ -10,14 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core import ErrorCode, AIError
-from linktools.ai import RuntimePersistenceConfig, open_runtime_resources
+from linktools.ai.errors import ErrorCode, AIError
+from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.capability import ToolOperationRecord
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
 from linktools.ai.storage import StorageAdapter, StorageComposition
 from linktools.ai.storage import StorageLayer
 from linktools.ai.storage import MetadataChange, MetadataLoad, MetadataLoadMode, StorageOwnedInfo
+from tests.ai.persistence.helper import open_sql_resources
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,7 +147,8 @@ async def test_read_only_write_is_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
     timestamp = datetime.now(timezone.utc)
-    async with open_runtime_resources(RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime", deployment_id="test")) as runtime:
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime", deployment_id="test")
+    async with open_sql_resources(config) as runtime:
         record = ToolOperationRecord(
             "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
             ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,

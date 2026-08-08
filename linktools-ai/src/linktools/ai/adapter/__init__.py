@@ -8,7 +8,7 @@ from ._identity import StaticPrincipalProvider
 from ._provider import ProviderClient
 from ._history import StepExecutionHistoryReader
 from ._persistence import FilesystemBlobStore, FilesystemRuntime, InMemoryBlobStore, InMemoryRuntime, build_filesystem_runtime, build_in_memory_runtime
-from ._repository import open_sql_runtime
+from ._sql import open_sql_runtime
 from ._schema import SqlRuntimeSchema, SqlRuntimeTables
 from ._step import DurableFilesystemStepStore, SqlMediaStore, SqlStepStore
 

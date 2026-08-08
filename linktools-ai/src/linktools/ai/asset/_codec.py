@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ._domain import AssetKey, AssetValue
 

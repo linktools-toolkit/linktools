@@ -9,7 +9,7 @@ from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ._cache import ContentCache, contains_many, read_cache, write_cache
 from ._layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility

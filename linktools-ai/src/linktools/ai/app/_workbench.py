@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
 from linktools.core import environ
@@ -18,7 +18,7 @@ from pydantic_ai.models import Model
 from pydantic_ai_harness.step_persistence import continue_run, fork_run
 
 from ..agent import WorkspaceAgentResult, WorkspaceAgentRunner
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256, step_conversation_id, step_run_id
 from ..core import JsonValue
 from ..core import TenantAuthorizationPolicy
@@ -47,6 +47,9 @@ from ..workspace import Workspace, trusted_workspace_principal
 
 
 _logger = environ.get_logger("ai.app.workbench")
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 class TextHandler(Protocol):
@@ -542,7 +545,18 @@ class WorkspaceAgentRuntime:
 
 
 @asynccontextmanager
-async def open_workspace_runtime(workspace: Workspace, *, config: RuntimePersistenceConfig | None = None, runner: WorkspaceAgentRunner | None = None, model: "str | Model | None" = None, base_url: str | None = None, api_key: str | None = None, grant_key: bytes | None = None) -> AsyncIterator[WorkspaceAgentRuntime]:
+async def open_workspace_runtime(
+    workspace: Workspace,
+    *,
+    config: RuntimePersistenceConfig | None = None,
+    runner: WorkspaceAgentRunner | None = None,
+    model: "str | Model | None" = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    grant_key: bytes | None = None,
+    engine: "AsyncEngine | None" = None,
+    session_factory: "async_sessionmaker[AsyncSession] | None" = None,
+) -> AsyncIterator[WorkspaceAgentRuntime]:
     persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.storage_root), workspace_id=workspace.workspace_id)
     authorization = TenantAuthorizationPolicy()
     key = grant_key or hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
@@ -553,7 +567,7 @@ async def open_workspace_runtime(workspace: Workspace, *, config: RuntimePersist
         await local_lock.acquire()
     try:
         workspace_runner = runner or WorkspaceAgentRunner(workspace.root, workspace.config, model=model, base_url=base_url, api_key=api_key)
-        async with open_runtime_resources(persistence_config) as resources:
+        async with open_runtime_resources(persistence_config, engine=engine, session_factory=session_factory) as resources:
             launcher = WorkspaceExecutionLauncher(workspace, workspace_runner, resources)
             await launcher.reconcile()
             history_reader = StepExecutionHistoryReader(persistence_config.namespace, resources.domain, resources.steps)

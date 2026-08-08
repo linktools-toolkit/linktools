@@ -5,17 +5,17 @@
 
 import asyncio
 import json
-import os
 import sys
 from argparse import Namespace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
+from linktools.cli.argparse import ConfigAction
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.agent import WorkspaceAgentRunner
-from ...ai.app import open_workspace_runtime
+from ...ai.app import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, open_workspace_runtime
 from ...ai.core import JsonValue
 from ...ai.workspace import Workspace, build_workspace_capabilities
 
@@ -31,19 +31,17 @@ class Command(BaseCommand):
         return super().known_errors + [ModelAPIError, UserError]
 
     def init_arguments(self, parser: "CommandParser") -> None:
-        parser.add_argument("prompt", nargs="?", help="the prompt")
+        parser.add_argument("prompt", help="the prompt")
         parser.add_argument("--project", type=Path, default=None, help="working directory")
         parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--agent", default=None, help="agent id (default: project default)")
         parser.add_argument("--session", default="main", help="session id (default main)")
-        parser.add_argument("--base-url", default=os.getenv("OPENAI_BASE_URL"))
-        parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
-        parser.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY"))
+        parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
+        parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
+        parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
         parser.add_argument("--json", action="store_true", help="emit one JSON event per line")
 
     def run(self, args: Namespace) -> int:
-        if args.prompt is None:
-            raise CommandError("a prompt is required")
         workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
         capabilities = () if args.model == "test" else build_workspace_capabilities(workspace.root)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=args.model, base_url=args.base_url, api_key=args.api_key, capabilities=capabilities)

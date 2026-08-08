@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 from linktools.core import environ
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 
 
 _logger = environ.get_logger("ai.storage.lock")

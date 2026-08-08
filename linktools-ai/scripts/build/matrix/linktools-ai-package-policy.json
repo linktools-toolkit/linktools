@@ -17,7 +17,7 @@
     "app": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal"]
   },
   "module_dependencies": {
-    "adapter._repository": ["core", "storage", "runtime", "capability", "task"],
+    "adapter._sql": ["core", "storage", "runtime", "capability", "task"],
     "adapter._nats": ["core", "observe"],
     "adapter._logfire": ["core", "observe"],
     "adapter._provider": ["core", "model"],
@@ -29,7 +29,7 @@
     "agent._binding": ["core", "spec", "model"],
     "temporal._context": ["core", "agent"]
   },
-  "public_modules": [],
+  "public_modules": ["errors"],
   "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
   "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],
   "asset_invariants": ["immutable-root", "typed-codec-freeze", "etag-validation", "entry-cas", "store-cas", "tombstone", "stable-cursor", "sql-backend", "file-journal"]

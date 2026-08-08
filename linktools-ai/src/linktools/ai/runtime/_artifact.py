@@ -15,7 +15,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_json_bytes, canonical_sha256
 from ..core import CursorPayload, CursorSigner
 from ..core import AuthorizationAction, AuthorizationPolicy

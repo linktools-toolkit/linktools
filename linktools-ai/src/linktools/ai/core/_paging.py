@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
-from ._errors import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ._json import JsonValue, canonical_json_bytes
 
 ItemT = TypeVar("ItemT")

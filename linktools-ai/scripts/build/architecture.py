@@ -81,6 +81,17 @@ def _internal_target(target: str, modules: 'dict[str, Path]') -> 'str | None':
     return package if package in modules else None
 
 
+def _module_package(module: str, modules: 'dict[str, Path]') -> str:
+    relative = module.removeprefix("linktools.ai").strip(".")
+    if not relative:
+        return ""
+    parts = relative.split(".")
+    path = modules.get(module)
+    if path is not None and path.name == "__init__.py":
+        return parts[0]
+    return parts[0] if len(parts) > 1 else ""
+
+
 def _import_targets(node: ast.ImportFrom, current: str, path: Path, modules: 'dict[str, Path]') -> 'tuple[str, ...]':
     if node.level == 0 and node.module and node.module.startswith("linktools.ai"):
         return (f"absolute:{path}:{node.lineno}",)
@@ -128,7 +139,8 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
                     for child in ast.walk(statement)
                     if isinstance(child, (ast.Import, ast.ImportFrom))
                 )
-        source_package = name.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
+        relative = path.relative_to(root).parts
+        source_package = relative[0] if len(relative) > 1 else ""
         if source_package:
             package_runtime.setdefault(source_package, set())
         for node in ast.walk(tree):
@@ -146,8 +158,8 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
                     continue
                 target_graph = type_checking if _is_type_checking_import(node, checking_lines) else runtime
                 target_graph[name].add(resolved)
-                target_package = resolved.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
-                if source_package and target_package != source_package:
+                target_package = _module_package(resolved, modules)
+                if source_package and target_package and target_package != source_package:
                     package_runtime[source_package].add(target_package)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.func.id}")
@@ -169,7 +181,7 @@ def _source_packages(root: Path) -> 'tuple[str, ...]':
     return tuple(sorted(path.name for path in root.iterdir() if path.is_dir() and any(path.glob("*.py"))))
 
 
-def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[str]':
+def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]', public_modules: 'set[str]') -> 'list[str]':
     errors: list[str] = []
     actual = _source_packages(root)
     packages = expected_packages
@@ -182,6 +194,11 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
             continue
         relative = path.relative_to(root).parts
         if path.name == "__init__.py":
+            continue
+        if len(relative) == 1:
+            module = path.relative_to(root).with_suffix("").as_posix().replace("/", ".")
+            if module not in public_modules:
+                errors.append(f"module outside package: {path}")
             continue
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
@@ -312,19 +329,19 @@ class ArchitecturePolicyChecker:
                     policy = cast("dict[str, JsonValue]", loaded)
         packages_value = policy.get("top_level_packages", [])
         expected_packages = tuple(item for item in packages_value if isinstance(item, str)) if isinstance(packages_value, list) else ()
-        errors = [
-            *policy_errors,
-            *_layout_errors(root, expected_packages),
-            *_init_errors(root),
-            *check_names(root),
-            *check_files(root),
-        ]
         public_modules_value = policy.get("public_modules", [])
         public_modules = (
             {item for item in public_modules_value if isinstance(item, str)}
             if isinstance(public_modules_value, list)
             else set()
         )
+        errors = [
+            *policy_errors,
+            *_layout_errors(root, expected_packages, public_modules),
+            *_init_errors(root),
+            *check_names(root),
+            *check_files(root),
+        ]
         errors.extend(_public_module_errors(root, public_modules))
         commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
         errors.extend(_private_import_errors(((root, "linktools.ai"), (commands_root, "linktools.commands.ai"))))
@@ -349,6 +366,11 @@ class ArchitecturePolicyChecker:
             runtime_graph = report["runtime"]
             if isinstance(runtime_graph, dict):
                 modules = set(report["modules"]) if isinstance(report.get("modules"), list) else set()
+                module_paths = {
+                    module_name(path, root): path
+                    for path in root.rglob("*.py")
+                    if "__pycache__" not in path.parts
+                }
                 for source_module, allowed_value in module_dependencies.items():
                     if not isinstance(source_module, str):
                         continue
@@ -367,9 +389,9 @@ class ArchitecturePolicyChecker:
                     for target in targets:
                         if not isinstance(target, str):
                             continue
-                        target_package = target.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
-                        source_package = normalized_source.removeprefix("linktools.ai").strip(".").split(".", 1)[0]
-                        if target_package != source_package and target_package not in allowed:
+                        target_package = _module_package(target, module_paths)
+                        source_package = _module_package(normalized_source, module_paths)
+                        if target_package and target_package != source_package and target_package not in allowed:
                             errors.append(
                                 f"module dependency policy: {normalized_source} -> {target}"
                             )

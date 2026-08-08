@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from linktools.core import environ
 
-from ..core import AssetConflictError
+from ..errors import AssetConflictError
 from ..storage import atomic_write_bytes, read_bytes
 from ._content import AssetContent, AssetContentInfo, compute_asset_etag
 

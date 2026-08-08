@@ -16,9 +16,11 @@ from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai_harness.media import MediaContext, media_uri_for, parse_media_uri
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
 
-from ..core import ErrorCode, AIError
+from linktools.core import environ
+
+from ..errors import ErrorCode, AIError
 from ..core import canonical_json_bytes
-from ..storage import StorageDatabase
+from ..storage import StorageDatabase, initialize_schema
 from ..storage import read_json, write_json_atomic
 from ..storage import FilesystemWriterLock
 from ..storage import storage_name
@@ -26,6 +28,10 @@ from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+_logger = environ.get_logger("ai.adapter.step")
 
 
 class DurableFilesystemStepStore:
@@ -34,9 +40,11 @@ class DurableFilesystemStepStore:
     def __init__(self, root: str | Path, namespace: str, *, writer_lock: FilesystemWriterLock | None = None) -> None:
         if not namespace.strip():
             raise ValueError("StepStore namespace is required")
-        self._root = Path(root).expanduser().resolve() / "steps" / _file_digest(namespace)
+        runtime_root = Path(root).expanduser().resolve()
+        self._namespace = namespace
+        self._root = runtime_root / "steps" / _file_digest(namespace)
         self._lock = asyncio.Lock()
-        self._writer_lock = writer_lock or FilesystemWriterLock(self._root.parent.parent / ".linktools" / "runtime" / _file_digest(namespace) / "step.lock")
+        self._writer_lock = writer_lock or FilesystemWriterLock(runtime_root / "step.lock")
         self._owns_writer_lock = writer_lock is None
         self._closed = True
 
@@ -48,6 +56,7 @@ class DurableFilesystemStepStore:
             if self._owns_writer_lock:
                 await self._writer_lock.acquire()
             self._closed = False
+            _logger.info("filesystem step store initialized: root=%s namespace=%s", self._root, self._namespace)
 
     async def close(self) -> None:
         if self._owns_writer_lock:
@@ -250,21 +259,21 @@ def _fsync_directory(path: Path) -> None:
 class SqlStepStore:
     """Namespace-bound MySQL/PostgreSQL StepStore implementation."""
 
-    def __init__(self, database: StorageDatabase, namespace: str) -> None:
+    def __init__(self, database: StorageDatabase, session_factory: "async_sessionmaker[AsyncSession]", namespace: str) -> None:
         self._database = database
+        self._sessions = session_factory
         self._namespace = namespace
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         self._metadata, self._tables = _build_tables()
         self._schema_digest = _schema_digest(self._metadata)
-        self._media = SqlMediaStore(database, namespace, metadata=self._metadata, tables=self._tables)
+        self._media = SqlMediaStore(database, session_factory, namespace, metadata=self._metadata, tables=self._tables)
 
     @property
     def schema_digest(self) -> str:
         return self._schema_digest
 
     async def initialize(self) -> None:
-        async with self._database.engine.begin() as connection:
-            await connection.run_sync(self._metadata.create_all)
+        await initialize_schema(self._database.engine, self._metadata)
 
     async def close(self) -> None:
         return None
@@ -273,7 +282,7 @@ class SqlStepStore:
         from sqlalchemy import insert
         table = self._tables["runs"]
         try:
-            async with self._database.session_factory() as session:
+            async with self._sessions() as session:
                 async with session.begin():
                     await session.execute(insert(table).values(_run_values(self._namespace_key, record)))
         except Exception as error:
@@ -284,7 +293,7 @@ class SqlStepStore:
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         from sqlalchemy import select
         table = self._tables["runs"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id))).mappings().first()
         return None if row is None else _run_from_row(row)
 
@@ -296,42 +305,42 @@ class SqlStepStore:
             predicates.append(table.c.parent_run_id == parent_run_id)
         if conversation_id is not None:
             predicates.append(table.c.conversation_id == conversation_id)
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             rows = (await session.execute(select(table).where(*predicates).order_by(table.c.started_at, table.c.run_id))).mappings().all()
         return [_run_from_row(row) for row in rows]
 
     async def append_event(self, event: StepEvent) -> None:
         from sqlalchemy import insert
         table = self._tables["events"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             async with session.begin():
                 await session.execute(insert(table).values(_event_values(self._namespace_key, event)))
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         from sqlalchemy import select
         table = self._tables["events"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq))).mappings().all()
         return [_event_from_row(row) for row in rows]
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         from sqlalchemy import insert
         table = self._tables["snapshots"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             async with session.begin():
                 await session.execute(insert(table).values(_snapshot_values(self._namespace_key, snapshot)))
 
     async def latest_snapshot(self, *, run_id: str) -> ContinuableSnapshot | None:
         from sqlalchemy import select
         table = self._tables["snapshots"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq.desc()).limit(1))).mappings().first()
         return None if row is None else _snapshot_from_row(row)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         from sqlalchemy import delete, insert
         table = self._tables["effects"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             async with session.begin():
                 await session.execute(delete(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == record.run_id, table.c.tool_call_id == record.tool_call_id))
                 await session.execute(insert(table).values(_effect_values(self._namespace_key, record)))
@@ -339,14 +348,14 @@ class SqlStepStore:
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
         from sqlalchemy import select
         table = self._tables["effects"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.tool_call_id == tool_call_id))).mappings().first()
         return None if row is None else _effect_from_row(row)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         from sqlalchemy import select
         table = self._tables["effects"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.status == "started"))).mappings().all()
         return [_effect_from_row(row) for row in rows]
 
@@ -354,8 +363,9 @@ class SqlStepStore:
 class SqlMediaStore:
     """Content-addressed SQL media store used by Harness snapshots."""
 
-    def __init__(self, database: StorageDatabase, namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
+    def __init__(self, database: StorageDatabase, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
         self._database = database
+        self._sessions = session_factory
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         if metadata is None or tables is None:
             self._metadata, self._tables = _build_tables()
@@ -373,7 +383,7 @@ class SqlMediaStore:
         digest = parse_media_uri(uri)
         table = self._tables["media"]
         values = {"namespace_key": self._namespace_key, "sha256": digest, "media_type": context.media_type, "bytes": data, "size_bytes": len(data), "metadata_json": dict(context.metadata)}
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             async with session.begin():
                 try:
                     await session.execute(insert(table).values(values))
@@ -411,7 +421,7 @@ class SqlMediaStore:
         from sqlalchemy import select
         digest = parse_media_uri(uri)
         table = self._tables["media"]
-        async with self._database.session_factory() as session:
+        async with self._sessions() as session:
             return (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.sha256 == digest))).mappings().first()
 
 
@@ -484,10 +494,7 @@ def _validate_media(row: Mapping[str, object], data: bytes) -> None:
 
 
 def _is_integrity(error: BaseException) -> bool:
-    try:
-        from sqlalchemy.exc import IntegrityError
-    except ModuleNotFoundError:
-        return False
+    from sqlalchemy.exc import IntegrityError
     return isinstance(error, IntegrityError)
 
 

@@ -13,7 +13,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256, idempotency_key_hash
 from ..core import CursorPayload, CursorSigner
 from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef

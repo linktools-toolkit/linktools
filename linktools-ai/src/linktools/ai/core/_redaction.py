@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from ._errors import ErrorCode, AIError, SafeError
+from ..errors import ErrorCode, AIError, SafeError
 from ._ids import canonical_sha256
 from ._json import JsonValue
 

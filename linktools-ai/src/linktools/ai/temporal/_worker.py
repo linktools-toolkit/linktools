@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ._activity import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
 from .workflow import EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow
 

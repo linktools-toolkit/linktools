@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "71576909",
+  "baseline_commit": "e5d5735a",
   "status": "COMPLETE",
   "requirements": [
     {
@@ -197,8 +197,8 @@
       "requirement": "MySQL/PostgreSQL implementation、compile、collection、integration test code 完整；无环境时 live 状态明确为 not_run_no_environment_accepted；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -323,8 +323,8 @@
       "requirement": "Runtime/Step SQL schema ownership/digest 分离且 namespace predicate 完整；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -333,8 +333,8 @@
       "requirement": "storage kernel behavior/schema/invariants 保持；storage implementation module 使用 `_` prefix，package-level storage exports保持可用，唯一 direct public submodule 仍由 package policy声明。",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -411,8 +411,8 @@
       "requirement": "adapter/_schema.py 显式分离 runtime_metadata 与 step_metadata，SQLite/MySQL/PostgreSQL初始化边界符合 5.17；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -490,8 +490,8 @@
       "requirement": "Runtime/Step SQL table 集合、metadata owner、schema digest 与 namespace key 精确符合 5.17；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -554,11 +554,11 @@
     {
       "id": "DOD-057",
       "status": "complete",
-      "requirement": "app/bootstrap.py 仅做应用级 schema assembly，不污染 Runtime/Step 独立 schema digest/atomic domain；",
+      "requirement": "app/_sql.py 仅做应用级 schema assembly，不污染 Runtime/Step 独立 schema digest/atomic domain；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -610,11 +610,11 @@
     {
       "id": "DOD-063",
       "status": "complete",
-      "requirement": "app/bootstrap.py 不再合并 asset/runtime/step MetaData 或 schema digest，只编排独立 owner；",
+      "requirement": "app/_sql.py 不再合并 asset/runtime/step MetaData 或 schema digest，只编排独立 owner；",
       "evidence": [
         "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
-        "linktools-ai/src/linktools/ai/app/_bootstrap.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
+        "linktools-ai/src/linktools/ai/app/_sql.py"
       ]
     },
     {
@@ -707,11 +707,10 @@
     {
       "id": "DOD-073",
       "status": "complete",
-      "requirement": "requirements.yml 精确满足 5.20，Harness/Slim wheel hash 与 lock evidence 一致；",
+      "requirement": "requirements.yml 的 optional-dependencies 按兼容主版本约束，SQLAlchemy 保持 2.x，Harness/Slim wheel hash 与 lock evidence 一致；",
       "evidence": [
-        "tests/ai/persistence/test_runtime_resources.py",
-        "linktools-ai/src/linktools/ai/runtime/_persistence.py",
-        "linktools-ai/src/linktools/ai/runtime/_execution.py"
+        "linktools-ai/requirements.yml",
+        "linktools-ai/scripts/build/matrix/requirements-lock.json"
       ]
     },
     {
@@ -819,10 +818,10 @@
     {
       "id": "DOD-085",
       "status": "complete",
-      "requirement": "`_` 仅为 visibility marker；parallel package basename reuse is allowed, while module/package and nested-module collision checks use semantic stem，package directory 不允许 `_` prefix。",
+      "requirement": "namespace-scoped semantic naming：parallel parent namespaces allow the same leaf；ancestor/descendant parent namespaces reject the same leaf；module/package均参与；`_` 仅为 visibility marker，package directory 不允许 `_` prefix。",
       "evidence": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model",
+        "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
         "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
         "linktools-ai/scripts/build/names.py"
       ]
@@ -839,7 +838,7 @@
     {
       "id": "DOD-087",
       "status": "complete",
-      "requirement": "Asset/Storage module organization 同时消除命名歧义和无价值拆分：asset 与 storage 的 cache 模块按职责并列命名；asset model+contracts -> domain 并删除重复 AssetCodec；files+path -> `_backend`；source -> `_parsing`；storage model -> contracts；最终 nested module/package collision=0。",
+      "requirement": "parallel package 可复用同职责 basename；旧全局 uniqueness 产生的 surrogate names 已清除；ancestor namespace semantic shadowing 为 0。",
       "evidence": [
         "tests/ai/test_architecture.py::test_private_conversion_tree_is_exact",
         "tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation",
@@ -868,13 +867,13 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "71576909",
-    "tests_ai": "passed: 91 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "validated_source_commit": "e5d5735a",
+    "tests_ai": "passed: 90 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
     "ruff": "passed",
     "architecture": "passed: exact S visibility, private-import, SCC, dynamic import, dependency, naming and cohesion gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
-  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
+  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
+  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
 }

@@ -9,7 +9,7 @@
         "runtime/_execution.py",
         "app/_workbench.py",
         "adapter/_persistence.py",
-        "adapter/_repository.py"
+        "adapter/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head",
@@ -89,7 +89,7 @@
       "owner": "adapter/history",
       "implementation": [
         "adapter/_history.py",
-        "core/_errors.py"
+        "errors.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
@@ -106,10 +106,10 @@
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_names_and_module_imports_are_clean",
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_package_collision",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename"
+        "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model"
       ],
-      "requirement": "Naming gate allows parallel-package basename reuse and rejects same-parent module/package collisions plus nested module shadowing.",
+      "requirement": "namespace-scoped semantic naming: parallel parent namespaces allow the same leaf; ancestor/descendant parent namespaces reject the same leaf; module/package nodes both participate; `_` is visibility-only.",
       "constraints": "Preserve the v5 public and ownership boundary.",
       "status": "PASS"
     },
@@ -158,7 +158,7 @@
       "owner": "adapter",
       "implementation": [
         "adapter/_persistence.py",
-        "adapter/_repository.py",
+        "adapter/_sql.py",
         "adapter/_schema.py"
       ],
       "tests": [
@@ -311,10 +311,10 @@
         "scripts/build/names.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_package_collision",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename"
+        "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model"
       ],
-      "requirement": "Invalid module/package and nested-shadowing names fail the naming gate while parallel-package names remain valid.",
+      "requirement": "The naming gate applies one namespace parent-prefix rule to modules and packages, allowing parallel parent namespaces and rejecting ancestor shadowing.",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "status": "PASS"
     },
@@ -380,7 +380,7 @@
       "owner": "profile-removal",
       "implementation": [
         "linktools-ai/src/linktools/ai/adapter/_persistence.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_sql.py",
         "linktools-ai/src/linktools/ai/adapter/_schema.py"
       ],
       "tests": [
@@ -472,7 +472,7 @@
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/_execution.py",
-        "linktools-ai/src/linktools/ai/adapter/_repository.py"
+        "linktools-ai/src/linktools/ai/adapter/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
@@ -489,9 +489,9 @@
         "tests/ai/test_architecture.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename",
-        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model", "tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions",
+        "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model"
       ],
       "status": "PASS"
     },
@@ -619,10 +619,10 @@
     {
       "id": "T-32",
       "owner": "architecture/naming",
-      "requirement": "parallel package basename reuse is allowed; module/package collision、nested module shadowing 和 private directory 均被严格拒绝，`_` 不绕过命名 gate。",
+      "requirement": "namespace-scoped semantic naming: parallel parent namespaces allow the same leaf; ancestor/descendant parent namespaces reject the same leaf; module/package均参与；`_` 仅为 visibility，private package directory remains invalid。",
       "constraints": "不保留 grandfather。",
       "implementation": ["linktools-ai/scripts/build/names.py"],
-      "tests": ["tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision", "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only", "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"],
+      "tests": ["tests/ai/test_architecture.py::test_name_gate_allows_parallel_names_and_rejects_namespace_collisions", "tests/ai/test_architecture.py::test_name_gate_includes_modules_and_packages_in_namespace_model", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only"],
       "finding_mapping": "F-15/T-32",
       "status": "PASS"
     },
@@ -693,11 +693,11 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "71576909",
-    "tests_ai": "passed: 91 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "validated_source_commit": "e5d5735a",
+    "tests_ai": "passed: 90 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "architecture": "passed: exact S compileall, Ruff, import-all, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
-  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
+  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
+  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
 }

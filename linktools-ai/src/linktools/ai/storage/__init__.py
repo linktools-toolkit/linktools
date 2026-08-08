@@ -4,7 +4,7 @@
 
 from ._cache import ContentCache, FilesystemContentCache, InMemoryContentCache, TieredContentCache
 from ._composition import CacheAdapter, StorageAdapter, StorageComposition, StorageLayer
-from ._database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage, dialect_for_url
+from ._database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage
 from ._dialects import (
     IntegrityViolationKind,
     InsertResult,
@@ -19,7 +19,7 @@ from ._dialects import (
     resolve_dialect,
 )
 from ._files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child, write_bytes_atomic, write_json_atomic
-from ._initialize import initialize_storage
+from ._initialize import initialize_schema, initialize_storage
 from ._layer import LayerRefreshPolicy, StorageWriteVisibility
 from ._contracts import (
     BatchStorageReader,
@@ -111,8 +111,8 @@ __all__ = [
     "build_sqlite_storage",
     "build_storage",
     "close_storage",
-    "dialect_for_url",
     "initialize_storage",
+    "initialize_schema",
     "read_bytes",
     "read_json",
     "resolve_dialect",

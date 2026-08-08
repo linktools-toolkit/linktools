@@ -11,7 +11,7 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
 
-from linktools.ai.core import ErrorCode, AIError
+from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai.adapter import DurableFilesystemStepStore
 
 

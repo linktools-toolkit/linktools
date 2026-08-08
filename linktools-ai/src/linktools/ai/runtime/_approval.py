@@ -8,7 +8,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Principal
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import AuthorizationAction, AuthorizationPolicy
 from ..core import ApprovalStatus
 from ._persistence import RuntimePersistence

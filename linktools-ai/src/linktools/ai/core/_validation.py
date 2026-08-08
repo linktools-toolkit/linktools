@@ -5,7 +5,7 @@
 import re
 from enum import Enum
 
-from ._errors import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ._json import JsonValue, canonical_json_bytes
 
 

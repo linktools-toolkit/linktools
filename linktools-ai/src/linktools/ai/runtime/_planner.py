@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256, idempotency_key_hash
 from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core import OperationKind, OperationStatus, Principal, ResourceKind

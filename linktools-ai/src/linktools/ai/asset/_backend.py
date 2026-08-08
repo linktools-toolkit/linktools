@@ -13,7 +13,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..storage import read_bytes, read_json, write_bytes_atomic, write_json_atomic
 from ..storage import (
     MetadataChange,

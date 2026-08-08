@@ -5,7 +5,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import validate_idempotency_key
 from ..core import Principal, TaskStatus
 

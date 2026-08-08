@@ -1,70 +1,76 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Single-word filename and package-boundary policy."""
+"""Single-word filename and namespace-scoped package policy."""
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True, slots=True)
+class _NameNode:
+    semantic_leaf: str
+    parent_namespace: tuple[str, ...]
+    path: Path
 
 
 def _semantic_stem(path: Path) -> str:
     return path.stem.removeprefix("_")
 
 
-def _namespace_root(root: Path) -> Path:
-    current = root
-    while (current.parent / "__init__.py").is_file():
-        current = current.parent
-    return current
+def _is_prefix(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    return right[: len(left)] == left
+
+
+def _module_nodes(root: Path) -> tuple[_NameNode, ...]:
+    nodes: list[_NameNode] = []
+    for path in sorted(root.rglob("*.py")):
+        if "__pycache__" in path.parts or path.stem == "__init__":
+            continue
+        relative = path.relative_to(root).with_suffix("")
+        nodes.append(_NameNode(_semantic_stem(path), relative.parts[:-1], path))
+    return tuple(nodes)
+
+
+def _package_nodes(root: Path) -> tuple[_NameNode, ...]:
+    nodes: list[_NameNode] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_dir() or path.name == "__pycache__" or not (path / "__init__.py").is_file():
+            continue
+        relative = path.relative_to(root)
+        nodes.append(_NameNode(path.name, relative.parts[:-1], path))
+    return tuple(nodes)
+
+
+def _collision_errors(nodes: tuple[_NameNode, ...]) -> tuple[str, ...]:
+    errors: list[str] = []
+    for index, left in enumerate(nodes):
+        for right in nodes[index + 1 :]:
+            if left.semantic_leaf != right.semantic_leaf:
+                continue
+            if not (_is_prefix(left.parent_namespace, right.parent_namespace) or _is_prefix(right.parent_namespace, left.parent_namespace)):
+                continue
+            errors.append(
+                "namespace semantic-name collision:\n"
+                f"  {left.path}\n"
+                f"  {right.path}"
+            )
+    return tuple(errors)
 
 
 def check_names(source_root: "str | Path") -> "tuple[str, ...]":
-    root = _namespace_root(Path(source_root))
+    root = Path(source_root)
+    modules = _module_nodes(root)
+    packages = _package_nodes(root)
     errors: list[str] = []
-    modules = [path for path in root.rglob("*.py") if "__pycache__" not in path.parts and path.stem != "__init__"]
-    for path in modules:
-        if "__pycache__" in path.parts:
-            continue
-        if not re.fullmatch(r"_?[a-z][a-z0-9]*", path.stem):
-            errors.append(str(path))
-    package_paths = tuple(
-        path.relative_to(root).parts
-        for path in root.rglob("*")
-        if path.is_dir() and path.name != "__pycache__" and (path / "__init__.py").is_file()
-    )
-    for path in modules:
-        module_parts = path.relative_to(root).with_suffix("").parts
-        parent_parts = module_parts[:-1]
-        stem = _semantic_stem(path)
-        if any(
-            package_path[-1] == stem
-            and (
-                package_path == (*parent_parts, stem)
-                or parent_parts[: len(package_path)] == package_path
-            )
-            for package_path in package_paths
-        ):
-            errors.append(f"module/package stem collision: {path}")
-    for path in modules:
-        module_parts = path.relative_to(root).with_suffix("").parts
-        parent_parts = module_parts[:-1]
-        stem = _semantic_stem(path)
-        conflicts = tuple(
-            other
-            for other in modules
-            if other != path
-            and _semantic_stem(other) == stem
-            and len(other.relative_to(root).parts) < len(module_parts)
-            and parent_parts[: len(other.relative_to(root).parts) - 1] == other.relative_to(root).with_suffix("").parts[:-1]
-        )
-        if conflicts:
-            names = ", ".join(str(item) for item in sorted(conflicts))
-            errors.append(f"nested module basename collision: {path}: {names}")
-    for path in root.rglob("*"):
-        if not path.is_dir() or path.name == "__pycache__":
-            continue
-        if not re.fullmatch(r"[a-z][a-z0-9]*", path.name):
-            errors.append(str(path))
+    for node in modules:
+        if not re.fullmatch(r"_?[a-z][a-z0-9]*", node.path.stem):
+            errors.append(str(node.path))
+    for node in packages:
+        if not re.fullmatch(r"[a-z][a-z0-9]*", node.path.name):
+            errors.append(str(node.path))
+    errors.extend(_collision_errors(tuple(sorted((*modules, *packages), key=lambda node: str(node.path)))))
     return tuple(errors)
 
 

@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Stable errors exposed at package boundaries."""
+"""Stable errors exposed at the AI package boundary."""
 
+import hashlib
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
-from ._json import JsonValue
+from linktools.errors import Error
+
+if TYPE_CHECKING:
+    from .core import JsonValue
+
+
+def _cause_digest(value: Mapping[str, str]) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 class ErrorCode(StrEnum):
@@ -111,11 +122,11 @@ class SafeError:
     category: str
     retryable: bool
     operation_id: str
-    safe_details: Mapping[str, JsonValue]
+    safe_details: "Mapping[str, JsonValue]"
     cause_digest: str
 
 
-class AIError(Exception):
+class AIError(Error):
     """An error with a stable machine-readable code."""
 
     def __init__(
@@ -144,15 +155,13 @@ class AIError(Exception):
         self.safe_details = dict(safe_details or {})
 
     def to_safe_error(self, *, operation_id: str) -> SafeError:
-        from ._ids import canonical_sha256
-
         return SafeError(
             self.code.value,
             self.category,
             self.retryable,
             operation_id,
             self.safe_details,
-            canonical_sha256({"type": type(self).__name__, "code": self.code.value}),
+            _cause_digest({"type": type(self).__name__, "code": self.code.value}),
         )
 
 

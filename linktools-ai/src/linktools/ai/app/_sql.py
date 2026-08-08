@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Application-level SQL bootstrap plan without shared schema ownership."""
+"""Application-level SQL schema plan without shared schema ownership."""
 
 from dataclasses import dataclass
 
 from linktools.core import environ
 
 
-_logger = environ.get_logger("ai.app.bootstrap")
+_logger = environ.get_logger("ai.app.sql")
 
 
 @dataclass(frozen=True, slots=True)

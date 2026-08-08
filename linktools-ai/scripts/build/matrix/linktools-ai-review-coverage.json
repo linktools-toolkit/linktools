@@ -1,5 +1,5 @@
 {
-  "validated_source_commit": "71576909",
+  "validated_source_commit": "e5d5735a",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
@@ -8,10 +8,10 @@
     "asset/storage behavior and durable invariants are unchanged; private-module organization changes are explicitly in scope."
   ],
   "verification": {
-    "memory_file_sqlite": "passed: exact S 91 AI tests and persistence checks",
+    "memory_file_sqlite": "passed: exact S 90 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
-    "source_commit": "passed: 71576909 exact source validation; squash-compatible logical/source revision",
+    "source_commit": "passed: e5d5735a exact source validation; squash-compatible logical/source revision",
     "full_spec_review": {
       "Critical": 0,
       "Important": 0,
@@ -20,7 +20,7 @@
       "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 0\nVerdict: CLEAN"
     }
   },
-  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
-  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
+  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final",
   "review_mode": "cold-start self-review from the full specification, current repository, and fresh exact-S verification; no reviewer subagent was available"
 }

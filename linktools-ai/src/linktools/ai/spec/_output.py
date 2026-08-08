@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ..core import ErrorCode, AIError
+from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 
 
