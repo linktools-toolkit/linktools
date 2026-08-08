@@ -16,10 +16,9 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..storage.composition import CacheAdapter, StorageAdapter, StorageComposition
 from ..storage.layer import StorageWriteVisibility
-from ..storage.model import StorageChange, StorageDeleteResult, StorageOperation
-from ..storage.model import StorageBatchPartialError
+from ..storage import StorageBatchPartialError, StorageChange, StorageDeleteResult, StorageOperation
 from ._codec import AssetCodecManifest, AssetCodecRegistry
-from .model import (
+from .domain import (
     AssetBatchResult,
     AssetBatchPartialError,
     AssetChange,

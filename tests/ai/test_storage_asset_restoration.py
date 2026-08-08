@@ -10,19 +10,20 @@ from types import SimpleNamespace
 import pytest
 
 from linktools.ai.asset import (
+    AssetCodec,
     AssetContent,
     AssetContentInfo,
     AssetIndex,
     AssetLoader,
+    AssetLoaderSource,
+    LocalAssetBackend,
     AssetObjectCache,
+    PrefixAssetPathAdapter,
     StrictConfigReader,
     compute_asset_etag,
     parse_json_text,
 )
-from linktools.ai.asset.contracts import AssetCodec
-from linktools.ai.asset.local import LocalAssetBackend, PrefixAssetPathAdapter
 from linktools.ai.asset.sql import SqlAlchemyAssetBackend
-from linktools.ai.asset.source import AssetLoaderSource
 from linktools.ai.storage.dialects import (
     MySQLDialect,
     PostgreSQLDialect,

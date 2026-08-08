@@ -14,7 +14,7 @@ from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence, StepStore, continue_run, fork_run
 
 from linktools.ai.core.ids import step_conversation_id, step_run_id
-from linktools.ai.adapter.step import DurableFileStepStore
+from linktools.ai.adapter import DurableFileStepStore
 
 
 def test_harness_versions_and_public_step_store() -> None:

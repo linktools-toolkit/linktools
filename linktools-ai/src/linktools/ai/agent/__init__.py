@@ -4,8 +4,8 @@
 """Static Agent runtime support API."""
 
 from .binding import AgentBinding
-from .deps import AgentDeps
-from .runner import AgentRunner, WorkspaceAgentResult, WorkspaceAgentRunner
+from ._deps import AgentDeps
+from ._runner import AgentRunner, WorkspaceAgentResult, WorkspaceAgentRunner
 
 __all__ = [
     "AgentBinding", "AgentDeps", "AgentRunner", "WorkspaceAgentResult", "WorkspaceAgentRunner",

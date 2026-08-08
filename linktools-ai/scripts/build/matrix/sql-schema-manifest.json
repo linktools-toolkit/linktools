@@ -1,6 +1,6 @@
 {
   "runtime_owner": "adapter.sql",
-  "step_owner": "adapter.step",
+  "step_owner": "adapter._step",
   "runtime_digest": "e4b926efa6940529736e410ac768e5585308eb22bbc5bdc60d55cf332f02f634",
   "step_digest": "bed3e48b59dede415436327a8a279b9c3f6114f18b289d381890e9476899d7d8",
   "runtime_tables": [

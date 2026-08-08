@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
 from ..core.errors import ErrorCode, AIError
-from ..storage.model import (
+from ..storage import (
     BatchStorageReader,
     BatchStorageWriter,
     StorageMetadataBackend,
@@ -29,6 +29,15 @@ class AssetValue(Protocol):
 
     @property
     def asset_id(self) -> str: ...
+
+
+@runtime_checkable
+class AssetSource(Protocol):
+    async def list_ids(self, suffix: str) -> "tuple[str, ...]": ...
+
+    async def read(self, path: str) -> str: ...
+
+    def identity(self, raw: str) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +194,6 @@ class VersionedAssetBackend(VersionedStorage[AssetKey, bytes, AssetRevision], Pr
 __all__ = [
     "AssetBackend", "AssetBatchPartialError", "AssetBatchResult", "AssetChange", "AssetDeleteResult", "AssetInfo",
     "AssetKey", "AssetRequest", "AssetRevision", "AssetRoot", "AssetStoreRevision",
-    "AssetValue", "AssetVersion", "BatchAssetReader", "BatchAssetWriter", "OwnedAssetInfo",
+    "AssetSource", "AssetValue", "AssetVersion", "BatchAssetReader", "BatchAssetWriter", "OwnedAssetInfo",
     "TAsset", "VersionedAssetBackend",
 ]

@@ -17,7 +17,7 @@ from linktools.ai.core.value import ToolOperationStatus
 from linktools.ai.storage.cache import FilesystemContentCache, MemoryContentCache
 from linktools.ai.storage.composition import StorageAdapter, StorageComposition
 from linktools.ai.storage.layer import StorageLayer
-from linktools.ai.storage.model import MetadataChange, MetadataLoad, MetadataLoadMode, StorageOwnedInfo
+from linktools.ai.storage import MetadataChange, MetadataLoad, MetadataLoadMode, StorageOwnedInfo
 
 
 @dataclass(frozen=True, slots=True)

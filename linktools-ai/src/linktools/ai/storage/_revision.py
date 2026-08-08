@@ -8,7 +8,7 @@ from typing import Generic, Protocol, TypeVar
 
 from linktools.core import environ
 
-from .model import (
+from .contracts import (
     InfoT,
     InitializableStorage,
     KeyT,

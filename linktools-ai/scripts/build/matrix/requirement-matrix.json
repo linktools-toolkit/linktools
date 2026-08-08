@@ -8,8 +8,8 @@
         "runtime/persistence.py",
         "runtime/execution.py",
         "app/workbench.py",
-        "adapter/memory.py",
-        "adapter/repository.py"
+        "adapter/_memory.py",
+        "adapter/_repository.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head",
@@ -26,7 +26,7 @@
       "implementation": [
         "app/facade.py",
         "runtime/execution.py",
-        "runtime/session.py",
+        "runtime/_session.py",
         "task/service.py",
         "runtime/approval.py"
       ],
@@ -57,7 +57,7 @@
       "id": "R-04",
       "owner": "adapter/history",
       "implementation": [
-        "adapter/history.py",
+        "adapter/_history.py",
         "app/assembly.py"
       ],
       "tests": [
@@ -88,7 +88,7 @@
       "id": "R-06",
       "owner": "adapter/history",
       "implementation": [
-        "adapter/history.py",
+        "adapter/_history.py",
         "core/errors.py"
       ],
       "tests": [
@@ -135,7 +135,7 @@
         "runtime/persistence.py",
         "runtime/services.py",
         "runtime/execution.py",
-        "runtime/session.py",
+        "runtime/_session.py",
         "runtime/evaluation.py",
         "app/assembly.py",
         "app/workbench.py",
@@ -156,9 +156,9 @@
       "id": "R-10",
       "owner": "adapter",
       "implementation": [
-        "adapter/memory.py",
-        "adapter/repository.py",
-        "adapter/schema.py"
+        "adapter/_memory.py",
+        "adapter/_repository.py",
+        "adapter/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite",
@@ -294,7 +294,7 @@
       "id": "T-09",
       "owner": "tests",
       "implementation": [
-        "adapter/history.py"
+        "adapter/_history.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
@@ -333,8 +333,8 @@
       "id": "T-12",
       "owner": "temporal",
       "implementation": [
-        "temporal/activity.py",
-        "temporal/worker.py",
+        "temporal/_activity.py",
+        "temporal/_worker.py",
         "temporal/workflow"
       ],
       "tests": [
@@ -377,9 +377,9 @@
       "id": "T-15",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/adapter/memory.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
-        "linktools-ai/src/linktools/ai/adapter/schema.py"
+        "linktools-ai/src/linktools/ai/adapter/_memory.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
@@ -408,8 +408,8 @@
       "id": "T-17",
       "owner": "composition",
       "implementation": [
-        "linktools-ai/src/linktools/ai/temporal/activity.py",
-        "linktools-ai/src/linktools/ai/temporal/worker.py",
+        "linktools-ai/src/linktools/ai/temporal/_activity.py",
+        "linktools-ai/src/linktools/ai/temporal/_worker.py",
         "linktools-ai/src/linktools/ai/temporal/workflow"
       ],
       "tests": [
@@ -470,7 +470,7 @@
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/execution.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py"
+        "linktools-ai/src/linktools/ai/adapter/_repository.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
@@ -487,7 +487,7 @@
         "tests/ai/test_architecture.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_only_the_existing_asset_storage_duplicate_group",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory",
         "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
       ],
       "status": "PASS"
@@ -581,7 +581,7 @@
     {
       "id": "T-29",
       "owner": "architecture/evidence",
-      "requirement": "DOD-001～DOD-083 current contract 连续、evidence path/test node 存在、stale profile/category wording 清除、DOD-072 boundary evidence 正确。",
+      "requirement": "DOD-001～DOD-089 current contract 连续、evidence path/test node 存在、stale profile/category wording 清除、private/public module contract 与 provenance 一致。",
       "constraints": "Source S 阶段 DOD-023/DOD-024 不得 complete，E 阶段由 provenance test 验证。",
       "implementation": [
         "linktools-ai/scripts/build/matrix/runtime-step-requirements.json",
@@ -593,18 +593,108 @@
       "finding_mapping": "F-05/provenance",
       "status": "PASS"
     }
+    ,{
+      "id": "T-30",
+      "owner": "architecture/visibility",
+      "requirement": "所有 unprefixed source module 精确属于 public_modules，private module 不得进入 policy，stale policy entry 必须失败。",
+      "constraints": "真实 tree 与 synthetic classification gate 均必须验证。",
+      "implementation": ["linktools-ai/scripts/build/architecture.py", "linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json"],
+      "tests": ["tests/ai/test_architecture.py::test_public_private_classification_gate_is_exact"],
+      "finding_mapping": "F-15/T-30",
+      "status": "PASS"
+    },
+    {
+      "id": "T-31",
+      "owner": "architecture/visibility",
+      "requirement": "跨 package 目录 direct private import 在 runtime、TYPE_CHECKING 与 nested package 场景均失败，package surface import 通过。",
+      "constraints": "不允许通过放宽 dependency allowlist 绕过 private boundary。",
+      "implementation": ["linktools-ai/scripts/build/architecture.py"],
+      "tests": ["tests/ai/test_architecture.py::test_private_cross_package_import_gate_covers_runtime_type_checking_and_nested_packages"],
+      "finding_mapping": "F-15/T-31",
+      "status": "PASS"
+    },
+    {
+      "id": "T-32",
+      "owner": "architecture/naming",
+      "requirement": "semantic duplicate、module/package collision 和 private directory 均被严格拒绝，`_` 不绕过命名 gate。",
+      "constraints": "不保留 grandfather。",
+      "implementation": ["linktools-ai/scripts/build/names.py"],
+      "tests": ["tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only", "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"],
+      "finding_mapping": "F-15/T-32",
+      "status": "PASS"
+    },
+    {
+      "id": "T-33",
+      "owner": "architecture/rename",
+      "requirement": "最终 private conversion tree 精确完成，旧路径消失，新路径和唯一 public_modules 清单一致。",
+      "constraints": "不得新增 compatibility forwarding module 或 private package directory。",
+      "implementation": ["linktools-ai/src/linktools/ai", "linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json"],
+      "tests": ["tests/ai/test_architecture.py::test_private_conversion_tree_is_exact"],
+      "finding_mapping": "F-15/T-33",
+      "status": "PASS"
+    },
+    {
+      "id": "T-34",
+      "owner": "architecture/import",
+      "requirement": "package public surface 完整，asset.sql 保持 dotted path，adapter/asset/app/temporal 基础 import 不 eager-load sqlalchemy/temporalio/acp。",
+      "constraints": "optional dependency blocker 必须在独立 subprocess 中执行。",
+      "implementation": ["linktools-ai/src/linktools/ai/adapter/__init__.py", "linktools-ai/src/linktools/ai/asset/__init__.py", "linktools-ai/src/linktools/ai/app/__init__.py", "linktools-ai/src/linktools/ai/temporal/__init__.py"],
+      "tests": ["tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation"],
+      "finding_mapping": "F-15/T-34",
+      "status": "PASS"
+    },
+    {
+      "id": "T-35",
+      "owner": "temporal/compatibility",
+      "requirement": "Temporal registered workflow/activity names、field set、registration order and type surface remain unchanged after module rename.",
+      "constraints": "不改变 durable identity 或 payload format。",
+      "implementation": ["linktools-ai/src/linktools/ai/temporal/_activity.py", "linktools-ai/src/linktools/ai/temporal/_worker.py", "linktools-ai/src/linktools/ai/temporal/workflow"],
+      "tests": ["tests/ai/test_v5_conformance.py::test_temporal_contract_fields_and_registered_class_names_are_stable"],
+      "finding_mapping": "F-15/T-35",
+      "status": "PASS"
+    },
+    {
+      "id": "T-36",
+      "owner": "asset/storage",
+      "requirement": "Asset backend、path validation、journal/recovery、local/source parsing、SQL backend 与 storage contract behavior 在 organization merge 后保持。",
+      "constraints": "不改变 durable data format、schema owner literal 或 backend behavior。",
+      "implementation": ["linktools-ai/src/linktools/ai/asset/_backend.py", "linktools-ai/src/linktools/ai/asset/_parsing.py", "linktools-ai/src/linktools/ai/storage/contracts.py"],
+      "tests": ["tests/ai/test_asset_and_commands.py::test_memory_asset_store_cas_tombstone_and_history", "tests/ai/test_asset_and_commands.py::test_file_asset_store_recovers_history_after_restart", "tests/ai/test_storage_asset_restoration.py::test_local_content_backend_restores_atomic_path_mapping_and_batch_io", "tests/ai/test_storage_asset_restoration.py::test_sql_asset_backend_keeps_lightweight_asset_surface", "tests/ai/test_storage_asset_restoration.py::test_asset_loader_index_and_config_are_available"],
+      "finding_mapping": "F-15/T-36",
+      "status": "PASS"
+    },
+    {
+      "id": "T-37",
+      "owner": "runtime/regression",
+      "requirement": "前几轮 Runtime/Task correctness、cancellation、effect ownership、profile-free contract、history 与 Workbench regression 全部保持。",
+      "constraints": "本轮不得重设计 state machine 或 cancellation semantics。",
+      "implementation": ["linktools-ai/src/linktools/ai/runtime", "linktools-ai/src/linktools/ai/app/workbench.py"],
+      "tests": ["tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner", "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges", "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"],
+      "finding_mapping": "F-15/T-37",
+      "status": "PASS"
+    },
+    {
+      "id": "T-38",
+      "owner": "release/provenance",
+      "requirement": "S 可解析且 exact validation 后，E direct parent=S 且相对 S 仅 evidence/status metadata；source DOD-023/024 在 S 中保持 pending。",
+      "constraints": "source SHA 不可解析、非 direct parent 或 source/test/checker diff 均必须失败。",
+      "implementation": ["linktools-ai/scripts/build/matrix"],
+      "tests": ["tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"],
+      "finding_mapping": "F-15/T-38",
+      "status": "PASS"
+    }
   ],
   "scope_exclusions": [
     "Downstream compatibility and migration work are explicitly excluded by the user and this fix spec.",
-    "asset/** and storage/** source are unchanged."
+    "asset/storage behavior and durable invariants are unchanged; private-module organization changes are explicitly in scope."
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
-    "tests_ai": "passed: 86 passed, 2 skipped (MySQL/PostgreSQL live not available)",
-    "architecture": "passed: compileall, Ruff, import-all, SCC, dynamic import, dependency, naming and cohesion gates",
+    "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+    "tests_ai": "passed: 91 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "architecture": "passed: exact S compileall, Ruff, import-all, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
-  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
+  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
+  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
 }

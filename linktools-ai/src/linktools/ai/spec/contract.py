@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Literal
 
 from ..asset import AssetCodec
-from ..asset.model import AssetKey, AssetValue
+from ..asset.domain import AssetKey, AssetValue
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue

@@ -4,9 +4,9 @@
 
 from typing import Generic, TypeVar
 
-from .contracts import AssetCodec, AssetSource
-from ._parsing import AssetLoader
-from .source import AssetLoaderSource
+from ._codec import AssetCodec
+from ._parsing import AssetLoader, AssetLoaderSource
+from .domain import AssetSource
 
 TAsset = TypeVar("TAsset")
 

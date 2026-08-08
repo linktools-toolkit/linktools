@@ -6,7 +6,7 @@ import json
 from typing import Protocol, TypeVar
 
 from ..asset import AssetCodec
-from ..asset.model import AssetKey
+from ..asset.domain import AssetKey
 from ._skill import SkillSpec
 from ._mcp import MCPServerSpec
 

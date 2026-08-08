@@ -15,8 +15,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from linktools.ai.adapter.history import StepExecutionHistoryReader
-from linktools.ai.adapter.memory import build_file_runtime, build_memory_runtime
+from linktools.ai.adapter import StepExecutionHistoryReader, build_file_runtime, build_memory_runtime
 from linktools.ai.app.assembly import RuntimeStoreConfig, build_runtime_access, build_runtime_services, open_runtime_services, open_runtime_store
 from linktools.ai.app.workbench import open_workspace_runtime
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
@@ -27,7 +26,7 @@ from linktools.ai.runtime.persistence import ApprovalRecord, ExecutionCancelRequ
 from linktools.ai.runtime.services import ApprovalDecisionRequest, CancelExecutionRequest, CreateSessionRequest, ExecutionHandle, ExecutionRequest, ExecutionView, ForkExecutionRequest, RetryExecutionRequest, RuntimeServiceIdentity, TaskGraphHandle, WorkflowQueryResult, WorkflowUpdateResult
 from linktools.ai.runtime.execution import CancelEffectOutcome
 from linktools.ai.task import CancelGraphRequest, TaskGraph, TaskGraphRequest, TaskNode
-from linktools.ai.agent.runner import WorkspaceAgentResult, WorkspaceAgentRunner
+from linktools.ai.agent import WorkspaceAgentResult, WorkspaceAgentRunner
 from linktools.ai.workspace import Workspace, trusted_workspace_principal
 
 
@@ -725,7 +724,7 @@ async def test_sql_legacy_profile_tombstone_is_not_domain_semantic(tmp_path: Pat
         await stores.domain.sessions.compare_and_swap(session.session_id, tenant_id=session.tenant_id, expected_revision=loaded.revision, next_record=updated)
     with sqlite3.connect(path) as connection:
         assert connection.execute("select profile from ai_runtime_sessions where session_id = ?", (session.session_id,)).fetchone() == ("",)
-    source = Path("linktools-ai/src/linktools/ai/adapter/repository.py").read_text(encoding="utf-8")
+    source = Path("linktools-ai/src/linktools/ai/adapter/_repository.py").read_text(encoding="utf-8")
     assert source.count('profile=""') == 2
     assert "profile" not in source.replace('profile=""', "")
     ast.parse(source)
@@ -1106,13 +1105,8 @@ async def test_execution_cancel_effect_unknown_resolves_actual_terminal(executio
 
 
 def test_temporal_contract_fields_and_registered_class_names_are_stable() -> None:
-    from linktools.ai.temporal.activity import ExecuteActivity, EvaluationActivity, SessionActivity, TaskActivity
-    from linktools.ai.temporal.workflow.dag import TaskWorkflowInput
-    from linktools.ai.temporal.workflow.dag import TaskWorkflow
-    from linktools.ai.temporal.workflow.mutation import SessionWorkflow
-    from linktools.ai.temporal.workflow.run import ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState
-    from linktools.ai.temporal.workflow.run import ExecutionWorkflow
-    from linktools.ai.temporal.workflow.suite import EvaluationWorkflow
+    from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
+    from linktools.ai.temporal.workflow import EvaluationWorkflow, ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState, SessionWorkflow, TaskWorkflow, TaskWorkflowInput
 
     assert "profile" not in {item.name for item in fields(ExecutionWorkflowInput)}
     assert "profile" not in {item.name for item in fields(ExecutionWorkflowState)}
@@ -1120,13 +1114,13 @@ def test_temporal_contract_fields_and_registered_class_names_are_stable() -> Non
     assert "profile" not in {item.name for item in fields(TaskWorkflowInput)}
     assert tuple(item.__name__ for item in (ExecutionWorkflow, EvaluationWorkflow, SessionWorkflow, TaskWorkflow)) == ("ExecutionWorkflow", "EvaluationWorkflow", "SessionWorkflow", "TaskWorkflow")
     assert tuple(item.__name__ for item in (ExecuteActivity, EvaluationActivity, SessionActivity, TaskActivity)) == ("ExecuteActivity", "EvaluationActivity", "SessionActivity", "TaskActivity")
-    activity_source = Path("linktools-ai/src/linktools/ai/temporal/activity.py").read_text(encoding="utf-8")
+    activity_source = Path("linktools-ai/src/linktools/ai/temporal/_activity.py").read_text(encoding="utf-8")
     assert all(f'_temporal_activity.defn(name="{name}")' in activity_source for name in (
         "execute", "load_input", "fix_bundle_route", "fix_binding", "load_prompt", "reserve_budget", "run_agent", "process_deferred", "commit_result", "settle_budget", "evaluation", "session_mutation", "task_graph",
     ))
     workflow_sources = tuple(
         Path("linktools-ai/src/linktools/ai/temporal/workflow", name).read_text(encoding="utf-8")
-        for name in ("run.py", "suite.py", "mutation.py", "dag.py")
+        for name in ("_run.py", "_suite.py", "_mutation.py", "_dag.py")
     )
     assert all(f'_temporal_workflow.defn(name="{name}")' in source for source, name in zip(workflow_sources, ("ExecutionWorkflow", "EvaluationWorkflow", "SessionWorkflow", "TaskWorkflow"), strict=True))
 
@@ -1228,4 +1222,4 @@ async def test_history_trace_and_transcript_use_the_stable_cursor_error(tmp_path
 
 @pytest.mark.asyncio
 async def test_history_projection_has_no_app_dependency() -> None:
-    assert StepExecutionHistoryReader.__module__ == "linktools.ai.adapter.history"
+    assert StepExecutionHistoryReader.__module__ == "linktools.ai.adapter._history"

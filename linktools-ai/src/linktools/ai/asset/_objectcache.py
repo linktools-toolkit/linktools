@@ -10,7 +10,7 @@ from linktools.core import environ
 from ._content import AssetContent, AssetContentInfo
 
 TAsset = TypeVar("TAsset")
-_logger = environ.get_logger("ai.asset.cache")
+_logger = environ.get_logger("ai.asset.objectcache")
 
 
 class AssetCacheStore(Protocol):

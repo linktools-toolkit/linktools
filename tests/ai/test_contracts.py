@@ -21,12 +21,8 @@ from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.temporal import WorkerActivities, WorkerRegistration, production_registration
 from linktools.ai.temporal.gateway import WorkflowGateway
-from linktools.ai.temporal.activity import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
-from linktools.ai.temporal.worker import ActivityType, WorkflowType
-from linktools.ai.temporal.workflow.suite import EvaluationWorkflowInput, EvaluationWorkflowResult
-from linktools.ai.temporal.workflow.run import ExecutionWorkflowInput, ExecutionWorkflowResult
-from linktools.ai.temporal.workflow.mutation import SessionWorkflowInput, SessionWorkflowResult
-from linktools.ai.temporal.workflow.dag import TaskWorkflowInput, TaskWorkflowResult
+from linktools.ai.temporal import ActivityType, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, WorkflowType
+from linktools.ai.temporal.workflow import EvaluationWorkflowInput, EvaluationWorkflowResult, ExecutionWorkflowInput, ExecutionWorkflowResult, SessionWorkflowInput, SessionWorkflowResult, TaskWorkflowInput, TaskWorkflowResult
 
 
 def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:

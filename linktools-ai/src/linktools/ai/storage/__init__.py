@@ -21,7 +21,7 @@ from .dialects import (
 from .files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child
 from ._initialize import initialize_storage
 from .layer import LayerRefreshPolicy, StorageWriteVisibility
-from .model import (
+from .contracts import (
     BatchStorageReader,
     BatchStorageWriter,
     MetadataChange,

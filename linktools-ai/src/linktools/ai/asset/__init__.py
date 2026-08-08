@@ -3,12 +3,12 @@
 """Typed asset values, codecs and the single AssetStore boundary."""
 
 from ._codec import AssetCodec, AssetCodecManifest, AssetCodecManifestEntry, AssetCodecRegistry
-from ._cache import AssetCacheCodec, AssetCacheStore, AssetObjectCache
+from ._objectcache import AssetCacheCodec, AssetCacheStore, AssetObjectCache
 from ._config import StrictConfigReader, resolved_name
 from ._content import AssetContent, AssetContentInfo, compute_asset_etag
-from .contracts import AssetSource
+from .domain import AssetSource
 from ._index import AssetIndex
-from .model import (
+from .domain import (
     AssetBackend,
     AssetBatchPartialError,
     AssetBatchResult,
@@ -28,8 +28,9 @@ from .model import (
     VersionedAssetBackend,
 )
 from .store import AssetStore
-from ._parsing import AssetLoader, TextAssetStore, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
-from .local import AssetPathAdapter, LocalAssetBackend, PrefixAssetPathAdapter
+from ._backend import FileAssetBackend, MemoryAssetBackend
+from ._local import AssetPathAdapter, LocalAssetBackend, PrefixAssetPathAdapter
+from ._parsing import AssetLoader, AssetLoaderSource, TextAssetStore, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
 from ..core.errors import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
 
 __all__ = [
@@ -50,8 +51,11 @@ __all__ = [
     "AssetIndex",
     "AssetKey",
     "AssetLoader",
+    "AssetLoaderSource",
     "AssetNotFoundError",
     "AssetObjectCache",
+    "FileAssetBackend",
+    "MemoryAssetBackend",
     "AssetPathAdapter",
     "AssetParseError",
     "AssetRequest",

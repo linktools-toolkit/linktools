@@ -33,7 +33,7 @@ from ..runtime.persistence import (
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage.database import StorageDatabase
 from linktools.core import environ
-from .schema import SqlRuntimeTables
+from ._schema import SqlRuntimeTables
 
 if TYPE_CHECKING:
     from sqlalchemy import Table

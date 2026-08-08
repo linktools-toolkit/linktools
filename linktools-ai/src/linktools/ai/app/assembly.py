@@ -13,6 +13,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..asset import AssetCodecRegistry, AssetStore
+from ..adapter import DurableFileStepStore, SqlRuntimeSchema, SqlStepStore, StepExecutionHistoryReader, build_file_runtime, build_memory_runtime, open_sql_runtime
 from ..capability import MCPToolProvider, Sandbox, SkillProvider, SubagentProvider, ToolPolicy, ToolStateStore
 from ..model import ModelRegistry, ModelResolver
 from ..observe import MiddlewarePipeline
@@ -35,9 +36,8 @@ from ..runtime.persistence import ExecutionRecord
 from ..runtime.services import ExecutionHistoryReader, ExecutionRequest, WorkflowGateway, new_runtime_service_identity
 from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
 from ..core.errors import ErrorCode, AIError
-from ..adapter.history import StepExecutionHistoryReader
 from ..spec import AgentSpecCodec, PromptSpecCodec
-from ..capability.encoding import MCPServerSpecCodec, SkillSpecCodec
+from ..capability import MCPServerSpecCodec, SkillSpecCodec
 from ..spec.output import OutputTypeRegistry
 
 _logger = environ.get_logger("ai.app.assembly")
@@ -119,7 +119,6 @@ class RuntimeStores:
 
 
 async def _open_sql_step_store(database: object, config: RuntimeStoreConfig) -> StepStore:
-    from ..adapter.step import SqlStepStore
     return SqlStepStore(database, config.namespace)
 
 
@@ -131,7 +130,6 @@ def _validate_store_config(config: RuntimeStoreConfig) -> None:
 async def open_runtime_store(config: RuntimeStoreConfig) -> AsyncIterator[RuntimeStores]:
     _validate_store_config(config)
     if config.backend is RuntimeBackend.MEMORY:
-        from ..adapter.memory import build_memory_runtime
         runtime = build_memory_runtime(namespace=config.namespace)
         steps = InMemoryStepStore()
         await runtime.initialize()
@@ -141,8 +139,6 @@ async def open_runtime_store(config: RuntimeStoreConfig) -> AsyncIterator[Runtim
             await runtime.close()
         return
     if config.backend is RuntimeBackend.FILE:
-        from ..adapter.memory import build_file_runtime
-        from ..adapter.step import DurableFileStepStore
         runtime = build_file_runtime(str(config.location), workspace_id=config.namespace)
         steps = DurableFileStepStore(str(config.location), config.namespace, writer_lock=runtime.writer_lock)
         await runtime.initialize()
@@ -153,8 +149,6 @@ async def open_runtime_store(config: RuntimeStoreConfig) -> AsyncIterator[Runtim
             await steps.close()
             await runtime.close()
         return
-    from ..adapter.schema import SqlRuntimeSchema
-    from ..adapter.repository import open_sql_runtime
     from ..storage import SqlSchemaRegistry, build_sqlite_storage, build_storage, close_storage, initialize_storage
     registry = SqlSchemaRegistry()
     tables = SqlRuntimeSchema.register_schema(registry)

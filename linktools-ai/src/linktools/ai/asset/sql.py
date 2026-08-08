@@ -14,7 +14,7 @@ from ..core.errors import ErrorCode, AIError
 from ..storage.database import SqlSchemaRegistry
 from ..storage.dialects import SqlAlchemyDialect, resolve_dialect
 from ..storage.names import storage_name
-from ..storage.model import (
+from ..storage import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
@@ -26,7 +26,7 @@ from ..storage.model import (
     StorageResetResult,
     VersionSummary,
 )
-from .model import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
+from .domain import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
 
 try:
     from sqlalchemy import (

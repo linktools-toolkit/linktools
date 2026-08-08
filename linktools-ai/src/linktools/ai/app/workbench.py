@@ -17,7 +17,7 @@ from linktools.core import environ
 from pydantic_ai.models import Model
 from pydantic_ai_harness.step_persistence import continue_run, fork_run
 
-from ..agent.runner import WorkspaceAgentResult, WorkspaceAgentRunner
+from ..agent import WorkspaceAgentResult, WorkspaceAgentRunner
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, step_conversation_id, step_run_id
 from ..core.json import JsonValue
@@ -41,7 +41,7 @@ from .assembly import (
     build_runtime_services,
     open_runtime_store,
 )
-from ..adapter.history import StepExecutionHistoryReader
+from ..adapter import StepExecutionHistoryReader
 from ..storage.lock import FileWriterLock
 from ..workspace import Workspace, trusted_workspace_principal
 

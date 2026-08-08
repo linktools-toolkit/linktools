@@ -12,7 +12,7 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
 
 from linktools.ai.core.errors import ErrorCode, AIError
-from linktools.ai.adapter.step import DurableFileStepStore
+from linktools.ai.adapter import DurableFileStepStore
 
 
 def _run(run_id: str) -> RunRecord:

@@ -4,7 +4,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..agent.deps import AgentDeps
+from ..agent import AgentDeps
 from ..core.json import canonical_json_bytes
 
 

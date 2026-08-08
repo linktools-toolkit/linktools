@@ -186,7 +186,7 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
         elif relative[0] == "temporal":
-            if len(relative) == 2 and relative[1] in {"activity.py", "_context.py", "gateway.py", "worker.py"}:
+            if len(relative) == 2 and relative[1] in {"_activity.py", "_context.py", "gateway.py", "_worker.py"}:
                 continue
             if len(relative) != 3 or relative[1] != "workflow":
                 errors.append(f"invalid temporal depth: {path}")
@@ -196,6 +196,66 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
         init = root / package / "__init__.py"
         if not init.is_file():
             errors.append(f"missing package init: {init}")
+    return errors
+
+
+def _public_module_errors(root: Path, public_modules: "set[str]") -> "list[str]":
+    errors: list[str] = []
+    actual_modules: set[str] = set()
+    for path in root.rglob("*.py"):
+        if "__pycache__" in path.parts or path.name == "__init__.py":
+            continue
+        module = path.relative_to(root).with_suffix("").as_posix().replace("/", ".")
+        actual_modules.add(module)
+        if path.stem.startswith("_"):
+            if module in public_modules:
+                errors.append(f"private module listed as public: {module}")
+        elif module not in public_modules:
+            errors.append(f"unclassified public module: {module}")
+    for module in sorted(public_modules - actual_modules):
+        errors.append(f"stale public module policy entry: {module}")
+    for module in sorted(public_modules):
+        if module.rsplit(".", 1)[-1].startswith("_"):
+            errors.append(f"private module listed as public: {module}")
+    return errors
+
+
+def _private_import_errors(
+    source_roots: "tuple[tuple[Path, str], ...]",
+) -> "list[str]":
+    errors: list[str] = []
+    for root, prefix in source_roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            relative = path.relative_to(root).with_suffix("")
+            current = f"{prefix}." + ".".join(relative.parts)
+            current_is_package = path.name == "__init__.py"
+            if current_is_package:
+                current = current.rsplit(".__init__", 1)[0]
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            for node in ast.walk(tree):
+                targets: tuple[tuple[str, int], ...] = ()
+                if isinstance(node, ast.Import):
+                    targets = tuple((alias.name, node.lineno) for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    base = _resolve(node.module or "", node.level, current, current_is_package=current_is_package)
+                    if node.module:
+                        targets = (
+                            (base, node.lineno),
+                            *((f"{base}.{alias.name}", node.lineno) for alias in node.names if alias.name.startswith("_")),
+                        )
+                    else:
+                        targets = tuple((f"{base}.{alias.name}", node.lineno) for alias in node.names if alias.name != "*")
+                for target, lineno in targets:
+                    if not target.startswith("linktools.ai.") or not target.rsplit(".", 1)[-1].startswith("_"):
+                        continue
+                    source_parent = current if current_is_package else current.rsplit(".", 1)[0]
+                    target_parent = target.rsplit(".", 1)[0]
+                    if source_parent != target_parent:
+                        errors.append(f"private cross-package import: {path}:{lineno}: {current} -> {target}")
     return errors
 
 
@@ -259,6 +319,15 @@ class ArchitecturePolicyChecker:
             *check_names(root),
             *check_files(root),
         ]
+        public_modules_value = policy.get("public_modules", [])
+        public_modules = (
+            {item for item in public_modules_value if isinstance(item, str)}
+            if isinstance(public_modules_value, list)
+            else set()
+        )
+        errors.extend(_public_module_errors(root, public_modules))
+        commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
+        errors.extend(_private_import_errors(((root, "linktools.ai"), (commands_root, "linktools.commands.ai"))))
         errors.extend(f"runtime SCC: {component}" for component in report["scc"] if isinstance(component, list))
         errors.extend(f"package SCC: {component}" for component in report["package_scc"] if isinstance(component, list))
         errors.extend(f"forbidden import or reflection: {item}" for item in report["dynamic_imports"] if isinstance(item, str))

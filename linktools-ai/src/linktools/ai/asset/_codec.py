@@ -7,7 +7,7 @@ from typing import Protocol, TypeVar, runtime_checkable
 
 from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
-from .model import AssetKey, AssetValue
+from .domain import AssetKey, AssetValue
 
 TAsset = TypeVar("TAsset", bound=AssetValue)
 

@@ -15,7 +15,7 @@ from linktools.core import environ
 
 from ..core.errors import ErrorCode, AIError
 from ..storage.files import read_bytes, read_json, write_bytes_atomic, write_json_atomic
-from ..storage.model import (
+from ..storage.contracts import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
@@ -24,11 +24,11 @@ from ..storage.model import (
     StorageResetResult,
     VersionSummary,
 )
-from .model import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
-from .path import asset_path, file_root
+from .domain import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
 
-_logger = environ.get_logger("ai.asset.files")
+_logger = environ.get_logger("ai.asset.backend")
 _EMPTY_ETAG = hashlib.sha256(b"").hexdigest()
+_RESERVED_ROOT_NAMES = frozenset({".asset-revision", ".history", ".txn"})
 
 
 class MemoryAssetBackend:
@@ -730,6 +730,40 @@ def _positive_int(value: 'str | int | bool | None', code: ErrorCode) -> int:
 
 def _metadata_path(content: Path) -> Path:
     return content.with_name(f"{content.name}.meta")
+
+
+def file_root(locator: str) -> AssetRoot:
+    path = Path(locator).resolve()
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
+
+
+def asset_path(root: AssetRoot, key: AssetKey) -> Path:
+    if root.scheme != "file" or not key.kind or not key.id:
+        raise AIError(ErrorCode.ASSET_PATH_ABSOLUTE)
+    if key.kind in _RESERVED_ROOT_NAMES:
+        raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
+    for index, value in enumerate((key.kind, key.id)):
+        if (
+            not value
+            or len(value.encode("utf-8")) > 512
+            or "\x00" in value
+            or "\\" in value
+            or (index == 0 and "/" in value)
+            or value in {".", ".."}
+            or any(part in {".", ".."} for part in Path(value).parts)
+        ):
+            raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
+        if Path(value).is_absolute() or (len(value) > 1 and value[1] == ":"):
+            raise AIError(ErrorCode.ASSET_PATH_ABSOLUTE)
+    root_path = Path(root.locator).resolve()
+    relative = Path(key.kind) / key.id
+    candidate = (root_path / relative).resolve()
+    try:
+        candidate.relative_to(root_path)
+    except ValueError as exc:
+        raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from exc
+    return candidate
 
 
 __all__ = ["FileAssetBackend", "MemoryAssetBackend"]

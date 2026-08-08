@@ -22,7 +22,7 @@ from ..storage.database import StorageDatabase
 from ..storage.files import read_json, write_json_atomic
 from ..storage.lock import FileWriterLock
 from ..storage.names import storage_name
-from .schema import new_step_metadata
+from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -499,4 +499,4 @@ def _schema_digest(metadata: "MetaData") -> str:
     return hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
 
 
-__all__ = ["SqlMediaStore", "SqlStepStore"]
+__all__ = ["DurableFileStepStore", "SqlMediaStore", "SqlStepStore"]

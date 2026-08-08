@@ -13,6 +13,7 @@ from typing import Protocol
 from ..core import JsonValue
 from ..core.errors import AssetNotFoundError, AssetParseError
 from ._content import AssetContent, AssetContentInfo
+from .domain import AssetSource
 
 
 class TextAssetStore(Protocol):
@@ -103,6 +104,20 @@ class AssetLoader:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+class AssetLoaderSource(AssetSource):
+    def __init__(self, loader: AssetLoader) -> None:
+        self._loader = loader
+
+    async def list_ids(self, suffix: str) -> "tuple[str, ...]":
+        return await self._loader.list_ids(suffix)
+
+    async def read(self, path: str) -> str:
+        return await self._loader.read(path)
+
+    def identity(self, raw: str) -> str:
+        return self._loader.identity(raw)
+
+
 def _yaml_load(text: str, source: str) -> JsonValue:
     try:
         import yaml
@@ -166,6 +181,7 @@ def _resolve_env_refs(value: JsonValue) -> JsonValue:
 
 __all__ = [
     "AssetLoader",
+    "AssetLoaderSource",
     "TextAssetStore",
     "load_markdown_text",
     "load_yaml_text",

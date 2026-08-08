@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Generic
 
-from .model import InfoT, KeyT, ReadableMetadataBackend, StoreRevisionT, ValueT
+from .contracts import InfoT, KeyT, ReadableMetadataBackend, StoreRevisionT, ValueT
 
 
 class LayerRefreshPolicy(StrEnum):

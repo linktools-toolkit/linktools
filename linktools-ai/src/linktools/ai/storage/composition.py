@@ -13,7 +13,7 @@ from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from .cache import ContentCache, contains_many, read_cache, write_cache
 from .layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility
-from .model import (
+from .contracts import (
     BatchStorageReader,
     BatchStorageWriter,
     InitializableStorage,

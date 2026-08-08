@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "d3968fe397362de2a29dcf0c3eefa2c08815c3e2",
+  "baseline_commit": "148a05a0b3a360061a2bdc837e521a8282933de7",
   "status": "COMPLETE",
   "requirements": [
     {
@@ -32,10 +32,12 @@
     {
       "id": "DOD-004",
       "status": "complete",
-      "requirement": "asset/**、storage/** 相对基线源码 diff=0；",
+      "requirement": "asset/storage 的行为、持久格式和已确认 invariants 不因 private-module organization 变化；private Python module path rename 属于本轮明确范围。",
       "evidence": [
-        "tests/ai/persistence/test_architecture.py",
-        "linktools-ai/scripts/build/architecture.py"
+        "tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation",
+        "tests/ai/test_asset_and_commands.py",
+        "tests/ai/test_storage_asset_restoration.py",
+        "tests/ai/test_storage.py"
       ]
     },
     {
@@ -51,13 +53,13 @@
     {
       "id": "DOD-006",
       "status": "complete",
-      "requirement": "StepExecutionHistoryReader 唯一归属 adapter/history.py，cursor 错误使用 CURSOR_INVALID。",
+      "requirement": "StepExecutionHistoryReader 唯一归属 adapter/_history.py，cursor 错误使用 CURSOR_INVALID。",
       "evidence": [
         "tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency",
         "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
       ],
       "implementation": [
-        "linktools-ai/src/linktools/ai/adapter/history.py",
+        "linktools-ai/src/linktools/ai/adapter/_history.py",
         "linktools-ai/src/linktools/ai/app/assembly.py"
       ]
     },
@@ -104,8 +106,8 @@
         "tests/ai/test_v5_conformance.py::test_temporal_contract_fields_and_registered_class_names_are_stable"
       ],
       "implementation": [
-        "linktools-ai/src/linktools/ai/temporal/activity.py",
-        "linktools-ai/src/linktools/ai/temporal/worker.py",
+        "linktools-ai/src/linktools/ai/temporal/_activity.py",
+        "linktools-ai/src/linktools/ai/temporal/_worker.py",
         "linktools-ai/src/linktools/ai/temporal/workflow"
       ]
     },
@@ -136,7 +138,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -146,7 +148,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -194,8 +196,8 @@
       "status": "complete",
       "requirement": "MySQL/PostgreSQL implementation、compile、collection、integration test code 完整；无环境时 live 状态明确为 not_run_no_environment_accepted；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -221,7 +223,7 @@
     {
       "id": "DOD-023",
       "status": "complete",
-      "requirement": "Source commit S 不自证为最终 evidence；仅 evidence-only E 在 exact S 验证和 final review 后绑定完整 SHA。",
+      "requirement": "Source S 不自证最终 evidence；E 只能绑定可解析且为其 direct parent 的 exact S。",
       "evidence": [
         "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json",
         "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
@@ -230,7 +232,7 @@
     {
       "id": "DOD-024",
       "status": "complete",
-      "requirement": "Evidence-only E 的 final review 必须没有 Critical/Important finding，且 open_findings=[]。",
+      "requirement": "E 记录 exact-S validation 与交付前 cold-start self-review；E 后的独立最终 Review 属于 release gate，发现问题必须进入新的 S/E 修复循环。",
       "evidence": [
         "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
       ]
@@ -272,7 +274,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -302,7 +304,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -312,7 +314,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -320,18 +322,18 @@
       "status": "complete",
       "requirement": "Runtime/Step SQL schema ownership/digest 分离且 namespace predicate 完整；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
     {
       "id": "DOD-034",
       "status": "complete",
-      "requirement": "MySQL utf8mb4/bin/InnoDB/UTC 与 PostgreSQL UTC contract 满足且 storage/** diff 仍为 0；",
+      "requirement": "storage kernel behavior/schema/invariants 保持；已确认 private module 可以 `_` prefix，public storage contract module 保持 public_modules 声明。",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -400,16 +402,16 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
       "id": "DOD-042",
       "status": "complete",
-      "requirement": "adapter/schema.py 显式分离 runtime_metadata 与 step_metadata，SQLite/MySQL/PostgreSQL初始化边界符合 5.17；",
+      "requirement": "adapter/_schema.py 显式分离 runtime_metadata 与 step_metadata，SQLite/MySQL/PostgreSQL初始化边界符合 5.17；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -479,7 +481,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -487,8 +489,8 @@
       "status": "complete",
       "requirement": "Runtime/Step SQL table 集合、metadata owner、schema digest 与 namespace key 精确符合 5.17；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -499,7 +501,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -509,7 +511,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -554,8 +556,8 @@
       "status": "complete",
       "requirement": "app/bootstrap.py 仅做应用级 schema assembly，不污染 Runtime/Step 独立 schema digest/atomic domain；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -610,8 +612,8 @@
       "status": "complete",
       "requirement": "app/bootstrap.py 不再合并 asset/runtime/step MetaData 或 schema digest，只编排独立 owner；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/schema.py",
-        "linktools-ai/src/linktools/ai/adapter/repository.py",
+        "linktools-ai/src/linktools/ai/adapter/_schema.py",
+        "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/app/_bootstrap.py"
       ]
     },
@@ -690,7 +692,7 @@
       "evidence": [
         "tests/ai/persistence/test_file_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py"
       ]
     },
     {
@@ -804,17 +806,74 @@
         "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal",
         "linktools-ai/src/linktools/ai/runtime/execution.py"
       ]
+    },
+    {
+      "id": "DOD-084",
+      "status": "complete",
+      "requirement": "所有 private implementation module 使用 `_` 前缀；所有 unprefixed module 精确属于 package policy public_modules。",
+      "evidence": [
+        "tests/ai/test_architecture.py::test_public_private_classification_gate_is_exact",
+        "linktools-ai/scripts/build/architecture.py"
+      ]
+    },
+    {
+      "id": "DOD-085",
+      "status": "complete",
+      "requirement": "`_` 仅为 visibility marker；duplicate/module-package collision 使用 semantic stem，package directory 不允许 `_` prefix。",
+      "evidence": [
+        "tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory",
+        "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
+        "linktools-ai/scripts/build/names.py"
+      ]
+    },
+    {
+      "id": "DOD-086",
+      "status": "complete",
+      "requirement": "跨 Python package directory 禁止 direct import `_private_module`；包括 nested package，跨目录消费必须经目标 package static re-export。",
+      "evidence": [
+        "tests/ai/test_architecture.py::test_private_cross_package_import_gate_covers_runtime_type_checking_and_nested_packages",
+        "linktools-ai/scripts/build/architecture.py"
+      ]
+    },
+    {
+      "id": "DOD-087",
+      "status": "complete",
+      "requirement": "Asset/Storage module organization 同时消除命名歧义和无价值拆分：`_cache` -> `_objectcache`；asset model+contracts -> domain 并删除重复 AssetCodec；files+path -> `_backend`；source -> `_parsing`；storage model -> contracts；最终 semantic duplicate/package collision=0。",
+      "evidence": [
+        "tests/ai/test_architecture.py::test_private_conversion_tree_is_exact",
+        "tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation",
+        "linktools-ai/scripts/build/names.py"
+      ]
+    },
+    {
+      "id": "DOD-088",
+      "status": "complete",
+      "requirement": "Temporal Python private module rename 不改变 durable workflow/activity registered identity。",
+      "evidence": [
+        "tests/ai/test_v5_conformance.py::test_temporal_contract_fields_and_registered_class_names_are_stable",
+        "linktools-ai/src/linktools/ai/temporal/_activity.py",
+        "linktools-ai/src/linktools/ai/temporal/_worker.py"
+      ]
+    },
+    {
+      "id": "DOD-089",
+      "status": "complete",
+      "requirement": "release 使用可解析 exact S -> validation -> evidence-only E；不存在或非 direct-parent source SHA 不得通过 provenance gate。",
+      "evidence": [
+        "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current",
+        "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
+      ]
     }
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
-    "tests_ai": "passed: 86 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+    "tests_ai": "passed: 91 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
     "ruff": "passed",
-    "architecture": "passed",
+    "architecture": "passed: exact S visibility, private-import, SCC, dynamic import, dependency, naming and cohesion gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
-  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
+  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
+  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
 }

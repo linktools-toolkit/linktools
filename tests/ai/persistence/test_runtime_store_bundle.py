@@ -13,8 +13,7 @@ import pytest
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
 
 from linktools.ai import RuntimeStoreConfig, RuntimeStores, namespace_scoped_step_db_path, open_runtime_store
-from linktools.ai.adapter.step import DurableFileStepStore
-from linktools.ai.adapter.memory import build_file_runtime, build_memory_runtime
+from linktools.ai.adapter import DurableFileStepStore, build_file_runtime, build_memory_runtime
 from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.core.ids import idempotency_key_hash
 from linktools.ai.core.value import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
@@ -104,7 +103,7 @@ async def test_memory_terminal_aggregate_commits_event_idempotency_and_session_h
 async def test_file_runtime_fault_does_not_publish_a_partial_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = build_file_runtime(str(tmp_path), workspace_id="fault")
     await runtime.initialize()
-    from linktools.ai.adapter import memory as runtime_persistence
+    from linktools.ai.adapter import _memory as runtime_persistence
     original = runtime_persistence.write_json_atomic
     failed = False
 

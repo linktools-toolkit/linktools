@@ -1,6 +1,6 @@
 {
   "status": "COMPLETE",
-  "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
+  "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
   "open_findings": [],
   "entries": [
     {
@@ -9,7 +9,7 @@
       "implementation": [
         "runtime/persistence.py",
         "runtime/execution.py",
-        "runtime/session.py",
+        "runtime/_session.py",
         "runtime/services.py",
         "app/facade.py"
       ],
@@ -33,10 +33,10 @@
       "owner": "adapter",
       "requirements": "R-01,R-04,R-06,R-10,T-15,T-21",
       "implementation": [
-        "adapter/history.py",
-        "adapter/memory.py",
-        "adapter/repository.py",
-        "adapter/schema.py"
+        "adapter/_history.py",
+        "adapter/_memory.py",
+        "adapter/_repository.py",
+        "adapter/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py",
@@ -71,8 +71,8 @@
       "owner": "temporal",
       "requirements": "T-12",
       "implementation": [
-        "temporal/activity.py",
-        "temporal/worker.py",
+        "temporal/_activity.py",
+        "temporal/_worker.py",
         "temporal/workflow"
       ],
       "tests": [
@@ -120,7 +120,7 @@
       "implementation": [
         "runtime/execution.py",
         "app/workbench.py",
-        "adapter/repository.py"
+        "adapter/_repository.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
@@ -137,7 +137,8 @@
         "scripts/build/names.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_allows_only_the_existing_asset_storage_duplicate_group",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory",
+        "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
         "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
       ]
     },
@@ -145,7 +146,7 @@
       "owner": "task-concurrency",
       "requirements": "F-13,R-01,R-02,R-03,T-23,T-24,T-25,DOD-082",
       "implementation": [
-        "runtime/planner.py"
+        "runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner",
@@ -169,8 +170,8 @@
       "requirements": "F-12,T-28",
       "implementation": [
         "runtime/execution.py",
-        "runtime/session.py",
-        "runtime/planner.py"
+        "runtime/_session.py",
+        "runtime/_planner.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
@@ -191,6 +192,6 @@
   "scope_exclusions": [
     "Downstream migration and compatibility work are explicitly excluded by the user."
   ],
-  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
-  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
+  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
+  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
 }

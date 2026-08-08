@@ -7,10 +7,17 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
-from .workflow.dag import TaskWorkflowInput, TaskWorkflowResult
-from .workflow.mutation import SessionWorkflowInput, SessionWorkflowResult
-from .workflow.run import ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState
-from .workflow.suite import EvaluationWorkflowInput, EvaluationWorkflowResult
+from .workflow import (
+    EvaluationWorkflowInput,
+    EvaluationWorkflowResult,
+    ExecutionWorkflowInput,
+    ExecutionWorkflowResult,
+    ExecutionWorkflowState,
+    SessionWorkflowInput,
+    SessionWorkflowResult,
+    TaskWorkflowInput,
+    TaskWorkflowResult,
+)
 
 try:
     from temporalio import activity as _temporal_activity

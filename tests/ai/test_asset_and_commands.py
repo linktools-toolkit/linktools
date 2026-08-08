@@ -11,10 +11,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from linktools.ai.asset import AssetCodecRegistry, AssetKey, AssetRequest, AssetRoot, AssetStore
-from linktools.ai.asset.files import FileAssetBackend, MemoryAssetBackend
-from linktools.ai.asset.path import file_root
-from linktools.ai.asset.model import AssetInfo, AssetRevision, AssetStoreRevision
+from linktools.ai.asset import AssetCodecRegistry, AssetInfo, AssetKey, AssetRequest, AssetRevision, AssetRoot, AssetStore, AssetStoreRevision, FileAssetBackend, MemoryAssetBackend
 from linktools.ai.core.paging import HmacCursorSigner
 from linktools.ai.storage.composition import StorageAdapter, StorageComposition
 from linktools.ai.storage.layer import StorageWriteVisibility
@@ -119,13 +116,14 @@ def test_asset_get_many_preserves_request_order() -> None:
 
 def test_file_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
     async def run() -> None:
-        backend = FileAssetBackend(file_root(str(tmp_path)))
+        root = AssetRoot("file:test", "file", str(tmp_path), "digest")
+        backend = FileAssetBackend(root)
         store, storage = make_store(backend)
         await storage.initialize()
         key = AssetKey("sample", "one")
         first = await store.put(key, SampleAsset("sample", "one", "first"))
         await store.put(key, SampleAsset("sample", "one", "second"), expected_entry_revision=first.entry_revision)
-        restarted = FileAssetBackend(file_root(str(tmp_path)))
+        restarted = FileAssetBackend(root)
         restarted_store, restarted_storage = make_store(restarted)
         await restarted_storage.initialize()
         assert await restarted_store.get(key, expected=SampleAsset) == SampleAsset("sample", "one", "second")
