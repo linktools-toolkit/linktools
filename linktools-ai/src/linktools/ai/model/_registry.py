@@ -9,8 +9,8 @@ from threading import Lock
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, AIError
-from ..core.ids import canonical_sha256
+from ..core import ErrorCode, AIError
+from ..core import canonical_sha256
 
 _logger = environ.get_logger("ai.model.registry")
 

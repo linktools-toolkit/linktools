@@ -8,18 +8,18 @@ from typing import Generic, Protocol, TypeVar
 
 from linktools.core import environ
 
-from .contracts import (
+from ._contracts import (
     InfoT,
     InitializableStorage,
     KeyT,
     StorageChange,
     MetadataLoad,
     MetadataLoadMode,
-    ReadableMetadataBackend,
+    ReadableStorageBackend,
     StoreRevisionT,
-    StorageMetadataBackend,
+    StorageMetadataReader,
 )
-from .layer import LayerRefreshPolicy
+from ._layer import LayerRefreshPolicy
 
 RevisionT = TypeVar("RevisionT")
 ValueT = TypeVar("ValueT")
@@ -31,10 +31,10 @@ class RevisionSource(Protocol[StoreRevisionT]):
     async def revision_bumped(self, revision: StoreRevisionT) -> None: ...
 
 
-class BackendRevisionSource(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
+class StorageRevisionSource(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
     """Live revision source for a metadata backend."""
 
-    def __init__(self, backend: 'ReadableMetadataBackend[KeyT, ValueT, InfoT, StoreRevisionT]') -> None:
+    def __init__(self, backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT, StoreRevisionT]') -> None:
         self._backend = backend
 
     async def head_revision(self) -> 'StoreRevisionT | None':
@@ -68,7 +68,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
 
     def __init__(
         self,
-        backend: 'ReadableMetadataBackend[KeyT, ValueT, InfoT, StoreRevisionT]',
+        backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT, StoreRevisionT]',
         policy: LayerRefreshPolicy,
         *,
         revision_source: 'RevisionSource[StoreRevisionT] | None' = None,
@@ -156,7 +156,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
 
 
 __all__ = [
-    "BackendRevisionSource",
+    "StorageRevisionSource",
     "LayerMetadataView",
     "LayerRefreshPolicy",
     "MetadataLoad",
@@ -164,6 +164,6 @@ __all__ = [
     "MetadataState",
     "RevisionSource",
     "StorageChange",
-    "StorageMetadataBackend",
+    "StorageMetadataReader",
     "apply_metadata_load",
 ]

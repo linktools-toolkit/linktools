@@ -13,15 +13,15 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence, StepStore, continue_run, fork_run
 
-from linktools.ai.core.ids import step_conversation_id, step_run_id
-from linktools.ai.adapter import DurableFileStepStore
+from linktools.ai.core import step_conversation_id, step_run_id
+from linktools.ai.adapter import DurableFilesystemStepStore
 
 
 def test_harness_versions_and_public_step_store() -> None:
     assert version("pydantic-ai-harness") == "0.9.0"
     assert version("pydantic-ai-slim") == "2.15.0"
     assert isinstance(InMemoryStepStore(), StepStore)
-    assert isinstance(DurableFileStepStore.__new__(DurableFileStepStore), StepStore)
+    assert isinstance(DurableFilesystemStepStore.__new__(DurableFilesystemStepStore), StepStore)
 
 
 def test_harness_public_signatures_are_the_locked_contract() -> None:
@@ -55,9 +55,9 @@ def test_step_ids_are_scoped_and_fixed_width() -> None:
     assert run != step_run_id(namespace="ns", tenant_id="tenant", execution_id="execution", segment_sequence=2)
 
 
-def test_file_step_store_uses_digest_only_paths(tmp_path: Path) -> None:
+def test_filesystem_step_store_uses_digest_only_paths(tmp_path: Path) -> None:
     async def run() -> list[Path]:
-        store = DurableFileStepStore(tmp_path, "tenant/unsafe")
+        store = DurableFilesystemStepStore(tmp_path, "tenant/unsafe")
         await store.initialize()
         paths = list((tmp_path / "steps").rglob("*"))
         await store.close()

@@ -13,9 +13,9 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, AIError
-from ..storage.files import read_bytes, read_json, write_bytes_atomic, write_json_atomic
-from ..storage.contracts import (
+from ..core import ErrorCode, AIError
+from ..storage import read_bytes, read_json, write_bytes_atomic, write_json_atomic
+from ..storage import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
@@ -24,14 +24,14 @@ from ..storage.contracts import (
     StorageResetResult,
     VersionSummary,
 )
-from .domain import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
+from ._domain import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
 
 _logger = environ.get_logger("ai.asset.backend")
 _EMPTY_ETAG = hashlib.sha256(b"").hexdigest()
 _RESERVED_ROOT_NAMES = frozenset({".asset-revision", ".history", ".txn"})
 
 
-class MemoryAssetBackend:
+class InMemoryAssetBackend:
     def __init__(self, root: 'AssetRoot | None' = None, *, writable: bool = True) -> None:
         self._root = root or AssetRoot("memory:default", "memory", "memory", "memory")
         self._writable = writable
@@ -186,11 +186,11 @@ class MemoryAssetBackend:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
 
-class FileAssetBackend:
+class FilesystemAssetBackend:
     def __init__(self, root: 'AssetRoot | str', *, writable: bool = True) -> None:
-        resolved = file_root(root) if isinstance(root, str) else root
+        resolved = filesystem_root(root) if isinstance(root, str) else root
         if resolved.scheme != "file":
-            raise ValueError("FileAssetBackend requires a file root")
+            raise ValueError("FilesystemAssetBackend requires a filesystem root")
         self._root = resolved
         self._directory = Path(resolved.locator)
         self._transaction_directory = self._directory / ".txn"
@@ -218,7 +218,7 @@ class FileAssetBackend:
             self._recover()
             self._load_history()
             self._load_entries()
-        _logger.info("file asset backend initialized: root=%s revision=%s", self._directory, self._revision)
+        _logger.info("filesystem asset backend initialized: root=%s revision=%s", self._directory, self._revision)
 
     async def initialize_storage(self) -> None:
         await self.initialize()
@@ -403,7 +403,7 @@ class FileAssetBackend:
             journal.unlink(missing_ok=True)
             self._transaction_directory_fdatasync()
         except BaseException:
-            _logger.error("file asset publish interrupted: operation=%s", operation_id, exc_info=environ.debug)
+            _logger.error("filesystem asset publish interrupted: operation=%s", operation_id, exc_info=environ.debug)
             raise
 
     def _recover(self) -> None:
@@ -732,7 +732,7 @@ def _metadata_path(content: Path) -> Path:
     return content.with_name(f"{content.name}.meta")
 
 
-def file_root(locator: str) -> AssetRoot:
+def filesystem_root(locator: str) -> AssetRoot:
     path = Path(locator).resolve()
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
     return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
@@ -766,4 +766,4 @@ def asset_path(root: AssetRoot, key: AssetKey) -> Path:
     return candidate
 
 
-__all__ = ["FileAssetBackend", "MemoryAssetBackend"]
+__all__ = ["FilesystemAssetBackend", "InMemoryAssetBackend"]

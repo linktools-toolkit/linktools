@@ -4,8 +4,9 @@
 
 import hashlib
 from dataclasses import dataclass
+from typing import Protocol
 
-from ..core.errors import AssetConflictError
+from ..core import AssetConflictError
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,8 +30,14 @@ class AssetContent:
             )
 
 
+class AssetContentSource(Protocol):
+    async def get(self, path: str) -> "AssetContent | None": ...
+
+    async def list_info(self) -> "tuple[AssetContentInfo, ...]": ...
+
+
 def compute_asset_etag(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-__all__ = ["AssetContent", "AssetContentInfo", "compute_asset_etag"]
+__all__ = ["AssetContent", "AssetContentInfo", "AssetContentSource", "compute_asset_etag"]

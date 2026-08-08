@@ -5,7 +5,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent import AgentDeps
-from ..core.json import canonical_json_bytes
+from ..core import canonical_json_bytes
 
 
 class TemporalRunContext(BaseModel):

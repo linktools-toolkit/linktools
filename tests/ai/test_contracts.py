@@ -9,18 +9,18 @@ import pytest
 
 from linktools.ai.agent import AgentDeps
 from scripts.build.agent_bundle import build_bundle
-from linktools.ai.core.errors import ErrorCode, AIError
+from linktools.ai.core import ErrorCode, AIError
 from linktools.ai.model import ModelRegistry, ModelRoute
-from linktools.ai.observe.scope import RunContext
-from linktools.ai.observe.middleware import MiddlewarePipeline
-from linktools.ai.observe.snapshot import RunSnapshot, snapshot_digest
-from linktools.ai.observe.trace import InMemoryTraceRecorder, TraceItem
+from linktools.ai.observe import RunContext
+from linktools.ai.observe import MiddlewarePipeline
+from linktools.ai.observe import RunSnapshot, snapshot_digest
+from linktools.ai.observe import InMemoryTraceRecorder, TraceItem
 from linktools.ai.workspace import trusted_workspace_principal
-from linktools.ai.runtime.services import ExecutionRequest
+from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
 from linktools.ai.task import TaskGraph, TaskNode
 from linktools.ai.temporal import WorkerActivities, WorkerRegistration, production_registration
-from linktools.ai.temporal.gateway import WorkflowGateway
+from linktools.ai.temporal import WorkflowGateway
 from linktools.ai.temporal import ActivityType, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, WorkflowType
 from linktools.ai.temporal.workflow import EvaluationWorkflowInput, EvaluationWorkflowResult, ExecutionWorkflowInput, ExecutionWorkflowResult, SessionWorkflowInput, SessionWorkflowResult, TaskWorkflowInput, TaskWorkflowResult
 

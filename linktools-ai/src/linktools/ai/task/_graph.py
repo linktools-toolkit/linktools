@@ -5,9 +5,9 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..core.errors import ErrorCode, AIError
-from ..core.validation import validate_idempotency_key
-from ..core.value import Principal, TaskStatus
+from ..core import ErrorCode, AIError
+from ..core import validate_idempotency_key
+from ..core import Principal, TaskStatus
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,9 +5,9 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core.errors import ErrorCode, AIError
-from ..core.principal import ResourceRef
-from ..core.value import Principal
+from ..core import ErrorCode, AIError
+from ..core import ResourceRef
+from ..core import Principal
 
 
 @dataclass(frozen=True, slots=True)

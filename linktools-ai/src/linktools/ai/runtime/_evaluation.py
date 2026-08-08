@@ -10,13 +10,13 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Principal
-from ..core.errors import ErrorCode, AIError
-from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core.ids import canonical_sha256, idempotency_key_hash
-from ..core.value import EvaluationStatus, IdempotencyStatus, ResourceKind
-from ..observe.snapshot import RunSnapshot
-from .persistence import EvaluationRecord, IdempotencyRecord, RuntimePersistence
-from .services import (
+from ..core import ErrorCode, AIError
+from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
+from ..core import canonical_sha256, idempotency_key_hash
+from ..core import EvaluationStatus, IdempotencyStatus, ResourceKind
+from ..observe import RunSnapshot
+from ._persistence import EvaluationRecord, IdempotencyRecord, RuntimePersistence
+from ._services import (
     CompareEvaluationRequest,
     EvaluationComparison,
     EvaluationHandle,
@@ -26,7 +26,7 @@ from .services import (
     ExecutionHandle,
     ExecutionRequest,
 )
-from .services import ExecutionService
+from ._services import ExecutionService
 
 _logger = environ.get_logger("ai.runtime.evaluation")
 

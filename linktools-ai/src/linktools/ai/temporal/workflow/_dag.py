@@ -16,7 +16,7 @@ except ModuleNotFoundError as error:
     _TemporalRetryPolicy = None
 
 from ._run import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
-from ...core.errors import ErrorCode, AIError
+from ...core import ErrorCode, AIError
 from ...task import SwarmLimits
 
 

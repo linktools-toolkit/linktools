@@ -11,10 +11,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from linktools.ai.asset import AssetCodecRegistry, AssetInfo, AssetKey, AssetRequest, AssetRevision, AssetRoot, AssetStore, AssetStoreRevision, FileAssetBackend, MemoryAssetBackend
-from linktools.ai.core.paging import HmacCursorSigner
-from linktools.ai.storage.composition import StorageAdapter, StorageComposition
-from linktools.ai.storage.layer import StorageWriteVisibility
+from linktools.ai.asset import AssetCodecRegistry, AssetInfo, AssetKey, AssetRequest, AssetRevision, AssetRoot, AssetStore, AssetStoreRevision, FilesystemAssetBackend, InMemoryAssetBackend
+from linktools.ai.core import HmacCursorSigner
+from linktools.ai.storage import StorageAdapter, StorageComposition
+from linktools.ai.storage import StorageWriteVisibility
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +59,7 @@ class IdentityAdapter(StorageAdapter[AssetKey, bytes, AssetKey, bytes, AssetInfo
             raise ValueError("asset size mismatch")
 
 
-def make_store(backend: MemoryAssetBackend | FileAssetBackend) -> tuple[AssetStore, StorageComposition[AssetKey, bytes, AssetKey, bytes, AssetInfo, AssetRevision, AssetStoreRevision]]:
+def make_store(backend: InMemoryAssetBackend | FilesystemAssetBackend) -> tuple[AssetStore, StorageComposition[AssetKey, bytes, AssetKey, bytes, AssetInfo, AssetRevision, AssetStoreRevision]]:
     codecs = AssetCodecRegistry()
     codecs.register(SampleCodec())
     codecs.freeze()
@@ -72,9 +72,9 @@ def make_store(backend: MemoryAssetBackend | FileAssetBackend) -> tuple[AssetSto
     return AssetStore(storage=storage, codecs=codecs, cursor_signer=HmacCursorSigner("test", b"cursor-key")), storage
 
 
-def test_memory_asset_store_cas_tombstone_and_history() -> None:
+def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
     async def run() -> None:
-        backend = MemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
+        backend = InMemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
         store, storage = make_store(backend)
         await storage.initialize()
         key = AssetKey("sample", "one")
@@ -93,7 +93,7 @@ def test_memory_asset_store_cas_tombstone_and_history() -> None:
 
 def test_asset_get_many_preserves_request_order() -> None:
     async def run() -> None:
-        backend = MemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
+        backend = InMemoryAssetBackend(AssetRoot("memory:test", "memory", "test", "digest"))
         store, storage = make_store(backend)
         await storage.initialize()
         await store.put(AssetKey("sample", "one"), SampleAsset("sample", "one", "one"))
@@ -114,16 +114,16 @@ def test_asset_get_many_preserves_request_order() -> None:
     asyncio.run(run())
 
 
-def test_file_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
+def test_filesystem_asset_store_recovers_history_after_restart(tmp_path: Path) -> None:
     async def run() -> None:
         root = AssetRoot("file:test", "file", str(tmp_path), "digest")
-        backend = FileAssetBackend(root)
+        backend = FilesystemAssetBackend(root)
         store, storage = make_store(backend)
         await storage.initialize()
         key = AssetKey("sample", "one")
         first = await store.put(key, SampleAsset("sample", "one", "first"))
         await store.put(key, SampleAsset("sample", "one", "second"), expected_entry_revision=first.entry_revision)
-        restarted = FileAssetBackend(root)
+        restarted = FilesystemAssetBackend(root)
         restarted_store, restarted_storage = make_store(restarted)
         await restarted_storage.initialize()
         assert await restarted_store.get(key, expected=SampleAsset) == SampleAsset("sample", "one", "second")

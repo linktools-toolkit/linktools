@@ -8,7 +8,7 @@ from collections.abc import Collection, Mapping
 from decimal import Decimal, InvalidOperation
 
 from ..core import JsonValue
-from ..core.errors import AssetError, ErrorCode
+from ..core import AssetError, ErrorCode
 
 
 class StrictConfigReader:

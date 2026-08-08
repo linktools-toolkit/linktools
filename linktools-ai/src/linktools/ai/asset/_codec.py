@@ -5,9 +5,9 @@
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
 
-from ..core.errors import ErrorCode, AIError
-from ..core.ids import canonical_sha256
-from .domain import AssetKey, AssetValue
+from ..core import ErrorCode, AIError
+from ..core import canonical_sha256
+from ._domain import AssetKey, AssetValue
 
 TAsset = TypeVar("TAsset", bound=AssetValue)
 

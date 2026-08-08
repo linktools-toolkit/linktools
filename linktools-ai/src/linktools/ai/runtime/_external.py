@@ -4,11 +4,11 @@
 
 from datetime import datetime, timezone
 
-from ..core.errors import ErrorCode, AIError
-from ..core.principal import AuthorizationAction, AuthorizationPolicy
-from ..core.value import ExternalCallStatus
-from .persistence import RuntimePersistence
-from .services import ExternalResultRequest, ExternalResultResult, WorkflowGateway
+from ..core import ErrorCode, AIError
+from ..core import AuthorizationAction, AuthorizationPolicy
+from ..core import ExternalCallStatus
+from ._persistence import RuntimePersistence
+from ._services import ExternalResultRequest, ExternalResultResult, WorkflowGateway
 
 
 class DefaultExternalService:

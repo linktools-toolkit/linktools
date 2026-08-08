@@ -8,9 +8,9 @@ import asyncio
 import pytest
 
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
-from linktools.ai.adapter import build_memory_runtime
-from linktools.ai.runtime.execution import DefaultExecutionService
-from linktools.ai.runtime.services import ExecutionRequest
+from linktools.ai.adapter import build_in_memory_runtime
+from linktools.ai.runtime import DefaultExecutionService
+from linktools.ai.runtime import ExecutionRequest
 
 
 class _History:
@@ -35,7 +35,7 @@ class _Launcher:
 
 @pytest.mark.asyncio
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    runtime = build_memory_runtime(namespace="service-start")
+    runtime = build_in_memory_runtime(namespace="service-start")
     await runtime.initialize()
     launcher = _Launcher()
     service = DefaultExecutionService(

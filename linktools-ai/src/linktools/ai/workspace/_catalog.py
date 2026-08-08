@@ -9,7 +9,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, AIError
+from ..core import ErrorCode, AIError
 from ._root import WorkspacePolicy
 
 

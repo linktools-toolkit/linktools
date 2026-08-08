@@ -4,7 +4,7 @@
 
 from pathlib import Path
 
-from linktools.ai.core.ids import canonical_sha256
+from linktools.ai.core import canonical_sha256
 
 
 def file_manifest(root: Path) -> 'dict[str, str]':

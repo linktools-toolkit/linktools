@@ -5,7 +5,7 @@
 
 import ast
 from pathlib import Path
-from linktools.ai.core.json import JsonValue
+from linktools.ai.core import JsonValue
 
 
 def build_inventory(source_root: "str | Path") -> "dict[str, JsonValue]":

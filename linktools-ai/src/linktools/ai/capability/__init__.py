@@ -10,7 +10,7 @@ from ._retrieval import RetrievalProvider
 from ._sandbox import Sandbox
 from ._skill import SkillProvider, SkillSpec
 from ._subagent import RunLauncher, SubagentProvider, SubagentRunRequest, SubagentRunResult
-from .tool import ToolOperationRecord, ToolPolicy, ToolStateStore
+from ._tool import ToolOperationRecord, ToolPolicy, ToolStateStore
 
 __all__ = [
     "CapabilityCodec", "CapabilityManifest", "CapabilityRef",

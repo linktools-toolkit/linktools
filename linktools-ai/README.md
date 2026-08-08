@@ -7,7 +7,7 @@ runtime does not expose an execution profile or deployment category.
 
 Its public storage abstraction is `AssetStore`; specification DTOs and codecs
 live in `linktools.ai.spec`, while the concrete SQL asset backend is available
-from `linktools.ai.asset.sql`.
+as `linktools.ai.asset.SqlAssetBackend`.
 
 Storage builders are lazy. Callers explicitly initialize the SQL schema and
 then construct the storage composition and asset store. The `ai run` command
@@ -31,22 +31,22 @@ keep the namespace stable for the deployment:
 ```python
 import os
 
-from linktools.ai import RuntimeStoreConfig, open_runtime_store
+from linktools.ai import RuntimePersistenceConfig, open_runtime_resources
 
-config = RuntimeStoreConfig.postgresql(
+config = RuntimePersistenceConfig.postgresql(
     os.environ["LINKTOOLS_DATABASE_URL"],
     namespace="tenant-id",
     deployment_id="runtime-prod",
 )
 
-async with open_runtime_store(config) as stores:
-    # Pass stores.domain into the application service composition.
-    await stores.domain.sessions.list(tenant_id="tenant-id")
+async with open_runtime_resources(config) as resources:
+    # Pass resources.domain into the application service composition.
+    await resources.domain.sessions.list(tenant_id="tenant-id")
 ```
 
-Use `RuntimeStoreConfig.sqlite(path, namespace=..., deployment_id=...)` for a
+Use `RuntimePersistenceConfig.sqlite(path, namespace=..., deployment_id=...)` for a
 single-node database. MySQL uses
-`RuntimeStoreConfig.mysql("mysql+asyncmy://...", namespace=..., deployment_id=...)`.
+`RuntimePersistenceConfig.mysql("mysql+asyncmy://...", namespace=..., deployment_id=...)`.
 SQL drivers are loaded only when the corresponding backend is opened.
 
 The checked-in architecture and release contract is maintained under

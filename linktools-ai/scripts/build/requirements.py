@@ -6,7 +6,7 @@
 from pathlib import Path
 from typing import cast
 
-from linktools.ai.core.json import JsonValue
+from linktools.ai.core import JsonValue
 
 try:
     import yaml as _yaml

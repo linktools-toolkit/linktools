@@ -14,17 +14,16 @@
     "process-and-shared-filesystem-coordination"
   ],
   "public_modules": [
-    "cache",
-    "composition",
-    "database",
-    "dialects",
-    "files",
-    "initialize",
-    "layer",
-    "lock",
-    "model",
-    "names",
-    "revision"
+    "_cache",
+    "_composition",
+    "_database",
+    "_dialects",
+    "_files",
+    "_initialize",
+    "_layer",
+    "_lock",
+    "_names",
+    "_revision"
   ],
   "verification": {
     "tests": ["tests/ai/test_storage.py", "tests/ai/test_asset_and_commands.py", "tests/ai/test_storage_asset_restoration.py"],

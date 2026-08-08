@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Single-word filename policy."""
+"""Single-word filename and package-boundary policy."""
 
 import re
 from pathlib import Path
@@ -11,8 +11,15 @@ def _semantic_stem(path: Path) -> str:
     return path.stem.removeprefix("_")
 
 
+def _namespace_root(root: Path) -> Path:
+    current = root
+    while (current.parent / "__init__.py").is_file():
+        current = current.parent
+    return current
+
+
 def check_names(source_root: "str | Path") -> "tuple[str, ...]":
-    root = Path(source_root)
+    root = _namespace_root(Path(source_root))
     errors: list[str] = []
     modules = [path for path in root.rglob("*.py") if "__pycache__" not in path.parts and path.stem != "__init__"]
     for path in modules:
@@ -20,25 +27,39 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
             continue
         if not re.fullmatch(r"_?[a-z][a-z0-9]*", path.stem):
             errors.append(str(path))
-    by_stem: dict[str, list[Path]] = {}
-    for path in modules:
-        by_stem.setdefault(_semantic_stem(path), []).append(path)
-    for stem, paths in sorted(by_stem.items()):
-        if len(paths) > 1:
-            errors.append(f"duplicate module basename: {stem}: {', '.join(str(path) for path in sorted(paths))}")
-    package_paths = {
-        f"{path.relative_to(root).as_posix()}/"
+    package_paths = tuple(
+        path.relative_to(root).parts
         for path in root.rglob("*")
         if path.is_dir() and path.name != "__pycache__" and (path / "__init__.py").is_file()
-    }
+    )
     for path in modules:
-        collisions = tuple(
-            package_path
+        module_parts = path.relative_to(root).with_suffix("").parts
+        parent_parts = module_parts[:-1]
+        stem = _semantic_stem(path)
+        if any(
+            package_path[-1] == stem
+            and (
+                package_path == (*parent_parts, stem)
+                or parent_parts[: len(package_path)] == package_path
+            )
             for package_path in package_paths
-            if package_path.rstrip("/").rsplit("/", 1)[-1] == _semantic_stem(path)
-        )
-        if collisions:
+        ):
             errors.append(f"module/package stem collision: {path}")
+    for path in modules:
+        module_parts = path.relative_to(root).with_suffix("").parts
+        parent_parts = module_parts[:-1]
+        stem = _semantic_stem(path)
+        conflicts = tuple(
+            other
+            for other in modules
+            if other != path
+            and _semantic_stem(other) == stem
+            and len(other.relative_to(root).parts) < len(module_parts)
+            and parent_parts[: len(other.relative_to(root).parts) - 1] == other.relative_to(root).with_suffix("").parts[:-1]
+        )
+        if conflicts:
+            names = ", ".join(str(item) for item in sorted(conflicts))
+            errors.append(f"nested module basename collision: {path}: {names}")
     for path in root.rglob("*"):
         if not path.is_dir() or path.name == "__pycache__":
             continue

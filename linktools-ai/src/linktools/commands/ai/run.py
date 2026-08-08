@@ -15,8 +15,8 @@ from linktools.cli import BaseCommand, CommandError
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.agent import WorkspaceAgentRunner
-from ...ai.app.workbench import open_workspace_runtime
-from ...ai.core.json import JsonValue
+from ...ai.app import open_workspace_runtime
+from ...ai.core import JsonValue
 from ...ai.workspace import Workspace, build_workspace_capabilities
 
 if TYPE_CHECKING:

@@ -12,9 +12,9 @@ from pathlib import Path
 from pydantic_ai.models.test import TestModel
 
 from linktools.ai.agent import WorkspaceAgentRunner
-from linktools.ai.app.assembly import RuntimeStoreConfig
-from linktools.ai.app.workbench import open_workspace_runtime
-from linktools.ai.core.errors import ErrorCode, AIError
+from linktools.ai.app import RuntimePersistenceConfig
+from linktools.ai.app import open_workspace_runtime
+from linktools.ai.core import ErrorCode, AIError
 from linktools.ai.workspace import Workspace
 from linktools.commands.ai.run import command as run_command
 
@@ -31,7 +31,7 @@ def test_workspace_runtime_uses_database_storage(tmp_path: Path) -> None:
     async def run() -> str:
         workspace = Workspace.load(tmp_path)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
-        config = RuntimeStoreConfig.sqlite(str(tmp_path / "runtime.db"), namespace=workspace.workspace_id, deployment_id="workspace")
+        config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace=workspace.workspace_id, deployment_id="workspace")
         async with open_workspace_runtime(workspace, config=config, runner=runner) as runtime:
             result = await runtime.run("main", "hello", idempotency_key="database-key")
             return result.output
@@ -43,7 +43,7 @@ def test_workspace_runtime_rejects_reused_key_after_head_changes(tmp_path: Path)
     async def run() -> None:
         workspace = Workspace.load(tmp_path)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
-        async with open_workspace_runtime(workspace, config=RuntimeStoreConfig.memory(namespace=workspace.workspace_id), runner=runner) as runtime:
+        async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
             await runtime.run("main", "one", idempotency_key="same")
             try:
                 await runtime.run("main", "two", idempotency_key="same")

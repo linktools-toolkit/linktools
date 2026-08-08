@@ -8,18 +8,11 @@ import json
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Protocol
 
 from ..core import JsonValue
-from ..core.errors import AssetNotFoundError, AssetParseError
-from ._content import AssetContent, AssetContentInfo
-from .domain import AssetSource
-
-
-class TextAssetStore(Protocol):
-    async def get(self, path: str) -> "AssetContent | None": ...
-
-    async def list_info(self) -> "tuple[AssetContentInfo, ...]": ...
+from ..core import AssetNotFoundError, AssetParseError
+from ._content import AssetContentSource
+from ._domain import AssetSource
 
 
 class AssetLoader:
@@ -67,7 +60,7 @@ class AssetLoader:
         return cls(read=read, list_ids=list_ids)
 
     @classmethod
-    def from_store(cls, store: TextAssetStore, *, prefix: str) -> "AssetLoader":
+    def from_source(cls, source: AssetContentSource, *, prefix: str) -> "AssetLoader":
         base = prefix.strip("/")
 
         def full(path: str) -> str:
@@ -77,7 +70,7 @@ class AssetLoader:
             return joined
 
         async def read(path: str) -> str:
-            content = await store.get(full(path))
+            content = await source.get(full(path))
             if content is None:
                 raise AssetNotFoundError(f"asset content not found: {path}")
             return content.content.decode("utf-8")
@@ -87,7 +80,7 @@ class AssetLoader:
             return tuple(
                 sorted(
                     info.path.rsplit("/", 1)[-1][: -len(suffix)]
-                    for info in await store.list_info()
+                    for info in await source.list_info()
                     if info.path.startswith(prefix_value) and info.path.endswith(suffix)
                 )
             )
@@ -182,7 +175,6 @@ def _resolve_env_refs(value: JsonValue) -> JsonValue:
 __all__ = [
     "AssetLoader",
     "AssetLoaderSource",
-    "TextAssetStore",
     "load_markdown_text",
     "load_yaml_text",
     "parse_json_text",

@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Protocol
 
-from ..core.errors import ErrorCode, AIError
-from ..core.json import JsonValue, canonical_json_bytes
-from ..core.principal import ResourceRef
-from ..core.value import Principal
+from ..core import ErrorCode, AIError
+from ..core import JsonValue, canonical_json_bytes
+from ..core import ResourceRef
+from ..core import Principal
 
 
 @dataclass(frozen=True, slots=True)

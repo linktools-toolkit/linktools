@@ -4,7 +4,7 @@
 
 from typing import Protocol
 
-from ..core.value import Principal
+from ..core import Principal
 from ._graph import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
 
 class TaskQueryApi(Protocol):

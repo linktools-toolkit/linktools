@@ -10,13 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core.errors import ErrorCode, AIError
-from linktools.ai import RuntimeStoreConfig, open_runtime_store
-from linktools.ai.capability.tool import ToolOperationRecord
-from linktools.ai.core.value import ToolOperationStatus
-from linktools.ai.storage.cache import FilesystemContentCache, MemoryContentCache
-from linktools.ai.storage.composition import StorageAdapter, StorageComposition
-from linktools.ai.storage.layer import StorageLayer
+from linktools.ai.core import ErrorCode, AIError
+from linktools.ai import RuntimePersistenceConfig, open_runtime_resources
+from linktools.ai.capability import ToolOperationRecord
+from linktools.ai.core import ToolOperationStatus
+from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
+from linktools.ai.storage import StorageAdapter, StorageComposition
+from linktools.ai.storage import StorageLayer
 from linktools.ai.storage import MetadataChange, MetadataLoad, MetadataLoadMode, StorageOwnedInfo
 
 
@@ -85,7 +85,7 @@ class CacheAdapter:
 
 @pytest.mark.asyncio
 async def test_cache_contains_does_not_touch_lru_and_files_are_hashed(tmp_path: Path) -> None:
-    cache = MemoryContentCache(max_bytes=2)
+    cache = InMemoryContentCache(max_bytes=2)
     await cache.put("a", b"a")
     await cache.put("b", b"b")
     assert await cache.contains_many(("a",)) == frozenset({"a"})
@@ -146,7 +146,7 @@ async def test_read_only_write_is_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
     timestamp = datetime.now(timezone.utc)
-    async with open_runtime_store(RuntimeStoreConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime", deployment_id="test")) as runtime:
+    async with open_runtime_resources(RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime", deployment_id="test")) as runtime:
         record = ToolOperationRecord(
             "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
             ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,

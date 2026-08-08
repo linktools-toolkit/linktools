@@ -1,7 +1,7 @@
 {
   "types": {
     "AgentFeatureRef": {
-      "module": "linktools.ai.spec.contract",
+      "module": "linktools.ai.spec._contract",
       "fields": [
         {"name": "kind", "type": "Literal[tool,skill,mcp,subagent,sandbox,middleware]"},
         {"name": "id", "type": "str"},
@@ -11,7 +11,7 @@
       ]
     },
     "AgentSpec": {
-      "module": "linktools.ai.spec.contract",
+      "module": "linktools.ai.spec._contract",
       "fields": [
         {"name": "id", "type": "str"},
         {"name": "revision", "type": "int"},
@@ -23,7 +23,7 @@
       ]
     },
     "PromptSpec": {
-      "module": "linktools.ai.spec.contract",
+      "module": "linktools.ai.spec._contract",
       "fields": [
         {"name": "id", "type": "str"},
         {"name": "revision", "type": "int"},

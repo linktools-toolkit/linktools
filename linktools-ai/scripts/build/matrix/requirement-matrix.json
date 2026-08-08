@@ -5,10 +5,10 @@
       "id": "R-01",
       "owner": "runtime/adapter/workbench",
       "implementation": [
-        "runtime/persistence.py",
-        "runtime/execution.py",
-        "app/workbench.py",
-        "adapter/_memory.py",
+        "runtime/_persistence.py",
+        "runtime/_execution.py",
+        "app/_workbench.py",
+        "adapter/_persistence.py",
         "adapter/_repository.py"
       ],
       "tests": [
@@ -22,13 +22,13 @@
     },
     {
       "id": "R-02",
-      "owner": "app/facade",
+      "owner": "app/_facade",
       "implementation": [
-        "app/facade.py",
-        "runtime/execution.py",
+        "app/_facade.py",
+        "runtime/_execution.py",
         "runtime/_session.py",
-        "task/service.py",
-        "runtime/approval.py"
+        "task/_service.py",
+        "runtime/_approval.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
@@ -39,10 +39,10 @@
     },
     {
       "id": "R-03",
-      "owner": "app/workbench",
+      "owner": "app/_workbench",
       "implementation": [
-        "app/workbench.py",
-        "runtime/services.py"
+        "app/_workbench.py",
+        "runtime/_services.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_workspace_session_listing_reads_past_the_first_page",
@@ -58,7 +58,7 @@
       "owner": "adapter/history",
       "implementation": [
         "adapter/_history.py",
-        "app/assembly.py"
+        "app/_assembly.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency",
@@ -89,7 +89,7 @@
       "owner": "adapter/history",
       "implementation": [
         "adapter/_history.py",
-        "core/errors.py"
+        "core/_errors.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_history_trace_and_transcript_use_the_stable_cursor_error"
@@ -106,9 +106,10 @@
       ],
       "tests": [
         "tests/ai/test_architecture.py::test_names_and_module_imports_are_clean",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_package_collision",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename"
       ],
-      "requirement": "Naming gate enforces exact module/package collisions with only the frozen v5 grandfather set.",
+      "requirement": "Naming gate allows parallel-package basename reuse and rejects same-parent module/package collisions plus nested module shadowing.",
       "constraints": "Preserve the v5 public and ownership boundary.",
       "status": "PASS"
     },
@@ -131,18 +132,18 @@
       "id": "R-09",
       "owner": "runtime/app/capability",
       "implementation": [
-        "core/value.py",
-        "runtime/persistence.py",
-        "runtime/services.py",
-        "runtime/execution.py",
+        "core/_value.py",
+        "runtime/_persistence.py",
+        "runtime/_services.py",
+        "runtime/_execution.py",
         "runtime/_session.py",
-        "runtime/evaluation.py",
-        "app/assembly.py",
-        "app/workbench.py",
-        "workspace/root.py",
-        "workspace/tools.py",
-        "capability/tool.py",
-        "temporal/gateway.py"
+        "runtime/_evaluation.py",
+        "app/_assembly.py",
+        "app/_workbench.py",
+        "workspace/_root.py",
+        "workspace/_tools.py",
+        "capability/_tool.py",
+        "temporal/_gateway.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers",
@@ -156,24 +157,24 @@
       "id": "R-10",
       "owner": "adapter",
       "implementation": [
-        "adapter/_memory.py",
+        "adapter/_persistence.py",
         "adapter/_repository.py",
         "adapter/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite",
-        "tests/ai/persistence/test_runtime_store_bundle.py::test_file_runtime_fault_does_not_publish_a_partial_mutation"
+        "tests/ai/persistence/test_runtime_resources.py::test_file_runtime_fault_does_not_publish_a_partial_mutation"
       ],
-      "requirement": "Memory/FILE/SQL persistence preserves atomic CAS and rollback boundaries.",
+      "requirement": "InMemory/Filesystem/SQL persistence preserves atomic CAS and rollback boundaries.",
       "constraints": "Preserve the v5 public and ownership boundary.",
       "status": "PASS"
     },
     {
       "id": "R-11",
-      "owner": "app/workbench",
+      "owner": "app/_workbench",
       "implementation": [
-        "app/workbench.py",
-        "storage/lock.py"
+        "app/_workbench.py",
+        "storage/_lock.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_shutdown_cleans_active_execution_on_the_second_session_page",
@@ -265,7 +266,7 @@
       "id": "T-07",
       "owner": "tests",
       "implementation": [
-        "app/workbench.py",
+        "app/_workbench.py",
         "tests/ai/test_v5_conformance.py"
       ],
       "tests": [
@@ -310,9 +311,10 @@
         "scripts/build/names.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_rejects_non_frozen_duplicate_and_package_collision"
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_package_collision",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename"
       ],
-      "requirement": "Non-grandfathered names fail the naming gate.",
+      "requirement": "Invalid module/package and nested-shadowing names fail the naming gate while parallel-package names remain valid.",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "status": "PASS"
     },
@@ -348,9 +350,9 @@
       "id": "T-13",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/core/value.py",
-        "linktools-ai/src/linktools/ai/runtime/persistence.py",
-        "linktools-ai/src/linktools/ai/app/assembly.py"
+        "linktools-ai/src/linktools/ai/core/_value.py",
+        "linktools-ai/src/linktools/ai/runtime/_persistence.py",
+        "linktools-ai/src/linktools/ai/app/_assembly.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_public_runtime_contract_has_no_profile_or_replacement_category"
@@ -363,8 +365,8 @@
       "id": "T-14",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/app/assembly.py",
-        "linktools-ai/src/linktools/ai/app/workbench.py"
+        "linktools-ai/src/linktools/ai/app/_assembly.py",
+        "linktools-ai/src/linktools/ai/app/_workbench.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_composition_is_driven_by_injected_dependencies"
@@ -377,7 +379,7 @@
       "id": "T-15",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/adapter/_memory.py",
+        "linktools-ai/src/linktools/ai/adapter/_persistence.py",
         "linktools-ai/src/linktools/ai/adapter/_repository.py",
         "linktools-ai/src/linktools/ai/adapter/_schema.py"
       ],
@@ -385,7 +387,7 @@
         "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
         "tests/ai/test_v5_conformance.py::test_sql_legacy_profile_tombstone_is_not_domain_semantic"
       ],
-      "requirement": "FILE legacy payload and SQL profile tombstone are both executable and profile-free.",
+      "requirement": "Filesystem legacy payload and SQL profile tombstone are both executable and profile-free.",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "status": "PASS"
     },
@@ -393,7 +395,7 @@
       "id": "T-16",
       "owner": "adapter",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/runtime/_execution.py",
         "linktools-ai/src/linktools/ai/runtime/_session.py",
         "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
@@ -421,10 +423,10 @@
     },
     {
       "id": "T-18",
-      "owner": "app/workbench",
+      "owner": "app/_workbench",
       "implementation": [
-        "linktools-ai/src/linktools/ai/app/workbench.py",
-        "linktools-ai/src/linktools/ai/storage/lock.py"
+        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/storage/_lock.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_workbench_owns_sqlite_lock_and_generic_services_do_not"
@@ -435,12 +437,12 @@
     },
     {
       "id": "T-19",
-      "owner": "tests/architecture/runtime",
+      "owner": "runtime",
       "requirement": "cancel natural terminal race resolves by actual terminal",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py",
-        "linktools-ai/src/linktools/ai/app/workbench.py"
+        "linktools-ai/src/linktools/ai/runtime/_execution.py",
+        "linktools-ai/src/linktools/ai/app/_workbench.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
@@ -450,12 +452,12 @@
     },
     {
       "id": "T-20",
-      "owner": "tests/architecture/runtime",
+      "owner": "runtime",
       "requirement": "confirmed cancellation and concurrent cancel request IDs converge",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py",
-        "linktools-ai/src/linktools/ai/app/workbench.py"
+        "linktools-ai/src/linktools/ai/runtime/_execution.py",
+        "linktools-ai/src/linktools/ai/app/_workbench.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_confirmed_cancel_requires_task_cancelled_and_closes_operation",
@@ -465,11 +467,11 @@
     },
     {
       "id": "T-21",
-      "owner": "tests/architecture/runtime",
+      "owner": "runtime",
       "requirement": "Memory and SQLite request_cancel operation preconditions are equivalent",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/runtime/_execution.py",
         "linktools-ai/src/linktools/ai/adapter/_repository.py"
       ],
       "tests": [
@@ -479,7 +481,7 @@
     },
     {
       "id": "T-22",
-      "owner": "tests/architecture/runtime",
+      "owner": "runtime",
       "requirement": "Naming grandfather fixtures are exact and reject generic exceptions",
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
@@ -487,8 +489,9 @@
         "tests/ai/test_architecture.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename",
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"
       ],
       "status": "PASS"
     },
@@ -536,11 +539,11 @@
     },
     {
       "id": "T-26",
-      "owner": "runtime/execution",
+      "owner": "runtime/_execution",
       "requirement": "同一 cancel_request_id 的 UNKNOWN caller 与后续 CONFIRMED caller 最终收敛 execution=CANCELLED、operation=SUCCEEDED，UNKNOWN caller 允许先返回 false。",
       "constraints": "不因固定 expected=PENDING 或 EFFECT_UNKNOWN 卡死 CANCELLING。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py"
+        "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges"
@@ -550,11 +553,11 @@
     },
     {
       "id": "T-27",
-      "owner": "runtime/execution",
+      "owner": "runtime/_execution",
       "requirement": "EFFECT_UNKNOWN 在 actual SUCCEEDED/CANCELLED terminal 后收敛 operation=SUCCEEDED，FAILED operation 不被覆盖。",
       "constraints": "resolver 重读 ledger，CAS conflict 后不直接宣告 resolved。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py"
+        "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal"
@@ -568,7 +571,7 @@
       "requirement": "五个 legacy profile digest scope replay 前后 execution/session ID、session head/revision、source execution、launcher side effect 和 legacy ledger 完全不变。",
       "constraints": "不创建第二 record，不执行 launcher，不改变 durable state。",
       "implementation": [
-        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/runtime/_execution.py",
         "linktools-ai/src/linktools/ai/runtime/_session.py",
         "linktools-ai/src/linktools/ai/runtime/_planner.py"
       ],
@@ -616,10 +619,10 @@
     {
       "id": "T-32",
       "owner": "architecture/naming",
-      "requirement": "semantic duplicate、module/package collision 和 private directory 均被严格拒绝，`_` 不绕过命名 gate。",
+      "requirement": "parallel package basename reuse is allowed; module/package collision、nested module shadowing 和 private directory 均被严格拒绝，`_` 不绕过命名 gate。",
       "constraints": "不保留 grandfather。",
       "implementation": ["linktools-ai/scripts/build/names.py"],
-      "tests": ["tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only", "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"],
+      "tests": ["tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision", "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename", "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only", "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"],
       "finding_mapping": "F-15/T-32",
       "status": "PASS"
     },
@@ -636,7 +639,7 @@
     {
       "id": "T-34",
       "owner": "architecture/import",
-      "requirement": "package public surface 完整，asset.sql 保持 dotted path，adapter/asset/app/temporal 基础 import 不 eager-load sqlalchemy/temporalio/acp。",
+      "requirement": "package public surface 完整，SQL asset backend 通过 asset package surface 提供，adapter/asset/app/temporal 基础 import 不 eager-load sqlalchemy/temporalio/acp。",
       "constraints": "optional dependency blocker 必须在独立 subprocess 中执行。",
       "implementation": ["linktools-ai/src/linktools/ai/adapter/__init__.py", "linktools-ai/src/linktools/ai/asset/__init__.py", "linktools-ai/src/linktools/ai/app/__init__.py", "linktools-ai/src/linktools/ai/temporal/__init__.py"],
       "tests": ["tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation"],
@@ -658,8 +661,8 @@
       "owner": "asset/storage",
       "requirement": "Asset backend、path validation、journal/recovery、local/source parsing、SQL backend 与 storage contract behavior 在 organization merge 后保持。",
       "constraints": "不改变 durable data format、schema owner literal 或 backend behavior。",
-      "implementation": ["linktools-ai/src/linktools/ai/asset/_backend.py", "linktools-ai/src/linktools/ai/asset/_parsing.py", "linktools-ai/src/linktools/ai/storage/contracts.py"],
-      "tests": ["tests/ai/test_asset_and_commands.py::test_memory_asset_store_cas_tombstone_and_history", "tests/ai/test_asset_and_commands.py::test_file_asset_store_recovers_history_after_restart", "tests/ai/test_storage_asset_restoration.py::test_local_content_backend_restores_atomic_path_mapping_and_batch_io", "tests/ai/test_storage_asset_restoration.py::test_sql_asset_backend_keeps_lightweight_asset_surface", "tests/ai/test_storage_asset_restoration.py::test_asset_loader_index_and_config_are_available"],
+      "implementation": ["linktools-ai/src/linktools/ai/asset/_backend.py", "linktools-ai/src/linktools/ai/asset/_parsing.py", "linktools-ai/src/linktools/ai/storage/_contracts.py"],
+      "tests": ["tests/ai/test_asset_and_commands.py::test_in_memory_asset_store_cas_tombstone_and_history", "tests/ai/test_asset_and_commands.py::test_filesystem_asset_store_recovers_history_after_restart", "tests/ai/test_storage_asset_restoration.py::test_filesystem_asset_content_store_restores_atomic_path_mapping_and_batch_io", "tests/ai/test_storage_asset_restoration.py::test_sql_asset_backend_keeps_lightweight_asset_surface", "tests/ai/test_storage_asset_restoration.py::test_asset_loader_index_and_config_are_available"],
       "finding_mapping": "F-15/T-36",
       "status": "PASS"
     },
@@ -668,7 +671,7 @@
       "owner": "runtime/regression",
       "requirement": "前几轮 Runtime/Task correctness、cancellation、effect ownership、profile-free contract、history 与 Workbench regression 全部保持。",
       "constraints": "本轮不得重设计 state machine 或 cancellation semantics。",
-      "implementation": ["linktools-ai/src/linktools/ai/runtime", "linktools-ai/src/linktools/ai/app/workbench.py"],
+      "implementation": ["linktools-ai/src/linktools/ai/runtime", "linktools-ai/src/linktools/ai/app/_workbench.py"],
       "tests": ["tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner", "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges", "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"],
       "finding_mapping": "F-15/T-37",
       "status": "PASS"
@@ -676,8 +679,8 @@
     {
       "id": "T-38",
       "owner": "release/provenance",
-      "requirement": "S 可解析且 exact validation 后，E direct parent=S 且相对 S 仅 evidence/status metadata；source DOD-023/024 在 S 中保持 pending。",
-      "constraints": "source SHA 不可解析、非 direct parent 或 source/test/checker diff 均必须失败。",
+      "requirement": "S 可解析且完成 exact validation 后，E 可作为 evidence-only metadata revision；squash 后不把 parent topology 作为 correctness 条件。",
+      "constraints": "source SHA 不可解析或 evidence 无法追溯到 logical/source revision 时必须失败。",
       "implementation": ["linktools-ai/scripts/build/matrix"],
       "tests": ["tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"],
       "finding_mapping": "F-15/T-38",
@@ -690,11 +693,11 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+    "validated_source_commit": "71576909",
     "tests_ai": "passed: 91 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "architecture": "passed: exact S compileall, Ruff, import-all, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
-  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
+  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
 }

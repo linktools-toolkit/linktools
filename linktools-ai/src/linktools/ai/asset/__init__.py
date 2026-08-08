@@ -3,12 +3,12 @@
 """Typed asset values, codecs and the single AssetStore boundary."""
 
 from ._codec import AssetCodec, AssetCodecManifest, AssetCodecManifestEntry, AssetCodecRegistry
-from ._objectcache import AssetCacheCodec, AssetCacheStore, AssetObjectCache
+from ._cache import AssetCacheCodec, AssetObjectCache
 from ._config import StrictConfigReader, resolved_name
-from ._content import AssetContent, AssetContentInfo, compute_asset_etag
-from .domain import AssetSource
+from ._content import AssetContent, AssetContentInfo, AssetContentSource, compute_asset_etag
+from ._domain import AssetSource
 from ._index import AssetIndex
-from .domain import (
+from ._domain import (
     AssetBackend,
     AssetBatchPartialError,
     AssetBatchResult,
@@ -27,11 +27,12 @@ from .domain import (
     OwnedAssetInfo,
     VersionedAssetBackend,
 )
-from .store import AssetStore
-from ._backend import FileAssetBackend, MemoryAssetBackend
-from ._local import AssetPathAdapter, LocalAssetBackend, PrefixAssetPathAdapter
-from ._parsing import AssetLoader, AssetLoaderSource, TextAssetStore, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
-from ..core.errors import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
+from ._store import AssetStore
+from ._sql import SqlAssetBackend, SqlAssetTables
+from ._backend import FilesystemAssetBackend, InMemoryAssetBackend
+from ._filesystem import AssetPathAdapter, FilesystemAssetContentStore, PrefixAssetPathAdapter
+from ._parsing import AssetLoader, AssetLoaderSource, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
+from ..core import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
 
 __all__ = [
     "AssetBackend",
@@ -54,8 +55,8 @@ __all__ = [
     "AssetLoaderSource",
     "AssetNotFoundError",
     "AssetObjectCache",
-    "FileAssetBackend",
-    "MemoryAssetBackend",
+    "FilesystemAssetBackend",
+    "InMemoryAssetBackend",
     "AssetPathAdapter",
     "AssetParseError",
     "AssetRequest",
@@ -70,13 +71,14 @@ __all__ = [
     "OwnedAssetInfo",
     "VersionedAssetBackend",
     "AssetCacheCodec",
-    "AssetCacheStore",
     "AssetSource",
     "InvalidAssetError",
-    "LocalAssetBackend",
+    "FilesystemAssetContentStore",
     "PrefixAssetPathAdapter",
     "StrictConfigReader",
-    "TextAssetStore",
+    "SqlAssetBackend",
+    "SqlAssetTables",
+    "AssetContentSource",
     "compute_asset_etag",
     "load_markdown_text",
     "load_yaml_text",

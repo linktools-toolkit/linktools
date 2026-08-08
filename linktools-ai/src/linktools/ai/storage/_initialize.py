@@ -4,8 +4,8 @@
 
 from typing import TYPE_CHECKING, Protocol
 
-from ..core.errors import ErrorCode, AIError
-from .database import StorageDatabase, sql_constraint_signature
+from ..core import ErrorCode, AIError
+from ._database import StorageDatabase, sql_constraint_signature
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection

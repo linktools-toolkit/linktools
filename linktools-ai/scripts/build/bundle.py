@@ -5,8 +5,8 @@
 
 from dataclasses import dataclass
 
-from linktools.ai.core.ids import canonical_sha256
-from linktools.ai.spec.contract import AgentSpec, PromptSpec
+from linktools.ai.core import canonical_sha256
+from linktools.ai.spec import AgentSpec, PromptSpec
 from .agent_bundle import AgentBundle, build_bundle
 
 

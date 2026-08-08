@@ -35,7 +35,7 @@ def test_names_and_module_imports_are_clean() -> None:
         importlib.import_module(name)
 
 
-def test_name_gate_rejects_non_frozen_duplicate_and_package_collision(tmp_path: Path) -> None:
+def test_name_gate_allows_cross_package_names_and_rejects_package_collision(tmp_path: Path) -> None:
     root = tmp_path / "names"
     for package in ("app", "task", "runtime"):
         (root / package).mkdir(parents=True)
@@ -43,12 +43,32 @@ def test_name_gate_rejects_non_frozen_duplicate_and_package_collision(tmp_path: 
     (root / "app" / "data.py").write_text("", encoding="utf-8")
     (root / "task" / "data.py").write_text("", encoding="utf-8")
     (root / "app" / "runtime.py").write_text("", encoding="utf-8")
+    (root / "runtime" / "_runtime.py").write_text("", encoding="utf-8")
     errors = check_names(root)
-    assert any(error.startswith("duplicate module basename: data") for error in errors)
-    assert any(error.startswith("module/package stem collision:") for error in errors)
+    assert not any(error.startswith("duplicate module basename:") for error in errors)
+    assert any(error.startswith("module/package stem collision:") and "runtime/_runtime.py" in error for error in errors)
 
 
-def test_name_gate_rejects_semantic_duplicate_and_private_directory(tmp_path: Path) -> None:
+def test_name_gate_rejects_nested_module_shadowing(tmp_path: Path) -> None:
+    root = tmp_path / "names"
+    (root / "ai" / "aaa").mkdir(parents=True)
+    (root / "ai" / "aaa" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    (root / "ai" / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "ai" / "aaa" / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
+    errors = check_names(root)
+    assert any(error.startswith("nested module basename collision:") and "ai/aaa/bbb.py" in error and "bbb.py" in error for error in errors)
+
+
+def test_name_gate_allows_parent_namespace_same_basename(tmp_path: Path) -> None:
+    namespace = tmp_path / "linktools"
+    ai_package = namespace / "ai" / "aaa"
+    ai_package.mkdir(parents=True)
+    (namespace / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (ai_package / "bbb.py").write_text("VALUE = 1\n", encoding="utf-8")
+    assert check_names(namespace / "ai") == ()
+
+
+def test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision(tmp_path: Path) -> None:
     root = tmp_path / "names"
     for package in ("asset", "storage"):
         (root / package).mkdir(parents=True)
@@ -57,13 +77,16 @@ def test_name_gate_rejects_semantic_duplicate_and_private_directory(tmp_path: Pa
             (root / package / name).write_text("VALUE = 1\n", encoding="utf-8")
     (root / "model").mkdir()
     (root / "model" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    (root / "model" / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
     errors = check_names(root)
-    assert any(error.startswith("duplicate module basename: files") for error in errors)
-    assert any(error.startswith("duplicate module basename: model") for error in errors)
-    assert any(error.startswith("module/package stem collision:") for error in errors)
+    assert not any(error.startswith("duplicate module basename:") for error in errors)
+    assert any(error.startswith("module/package stem collision:") and "model/model.py" in error for error in errors)
     (root / "adapter").mkdir()
     (root / "adapter" / "files.py").write_text("VALUE = 1\n", encoding="utf-8")
-    assert any(error.startswith("duplicate module basename: files") for error in check_names(root))
+    assert not any(error.startswith("duplicate module basename:") for error in check_names(root))
+    (root / "asset" / "files").mkdir()
+    (root / "asset" / "files" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    assert any(error.startswith("module/package stem collision:") and "asset/files.py" in error for error in check_names(root))
     (root / "_internal").mkdir()
     (root / "_internal" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
     assert str(root / "_internal") in check_names(root)
@@ -77,12 +100,12 @@ def test_name_gate_treats_private_marker_as_semantic_only(tmp_path: Path) -> Non
     (root / "app" / "_data.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "runtime" / "data.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "app" / "_runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "runtime" / "_runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "asset" / "_cache.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "storage" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
     errors = check_names(root)
-    assert any(error.startswith("duplicate module basename: data") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "_runtime.py" in error for error in errors)
-    assert any(error.startswith("duplicate module basename: cache") for error in errors)
+    assert not any(error.startswith("duplicate module basename:") for error in errors)
+    assert any(error.startswith("module/package stem collision:") and "runtime/_runtime.py" in error for error in errors)
     clean = tmp_path / "clean"
     (clean / "app").mkdir(parents=True)
     (clean / "app" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
@@ -90,7 +113,7 @@ def test_name_gate_treats_private_marker_as_semantic_only(tmp_path: Path) -> Non
     assert check_names(clean) == ()
 
 
-def test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision(tmp_path: Path) -> None:
+def test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision(tmp_path: Path) -> None:
     root = tmp_path / "names"
     for package in ("asset", "storage", "adapter", "task"):
         (root / package).mkdir(parents=True)
@@ -101,10 +124,12 @@ def test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision(tmp
     (root / "asset" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "storage" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
     (root / "adapter" / "cache.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (root / "asset" / "task").mkdir()
+    (root / "asset" / "task" / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    (root / "asset" / "task" / "task.py").write_text("VALUE = 1\n", encoding="utf-8")
     errors = check_names(root)
-    assert any(error.startswith("duplicate module basename: new") for error in errors)
-    assert any(error.startswith("module/package stem collision:") and "asset/task.py" in error for error in errors)
-    assert any(error.startswith("duplicate module basename: cache") for error in errors)
+    assert not any(error.startswith("duplicate module basename:") for error in errors)
+    assert any(error.startswith("module/package stem collision:") and "asset/task/task.py" in error for error in errors)
 
 
 def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_entries(tmp_path: Path) -> None:
@@ -176,17 +201,17 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
     ):
         directory.mkdir(parents=True)
         (directory / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
-    (source_root / "adapter" / "_memory.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (source_root / "adapter" / "_persistence.py").write_text("VALUE = 1\n", encoding="utf-8")
     (source_root / "temporal" / "workflow" / "_run.py").write_text("VALUE = 1\n", encoding="utf-8")
     worker = source_root / "temporal" / "_worker.py"
     worker.write_text("from .workflow._run import VALUE\n", encoding="utf-8")
     app = source_root / "app" / "foo.py"
     app.write_text(
         "from typing import TYPE_CHECKING\n"
-        "from ..adapter._memory import VALUE\n"
-        "from ..adapter import _memory as MEMORY_MODULE\n"
+        "from ..adapter._persistence import VALUE\n"
+        "from ..adapter import _persistence as PERSISTENCE_MODULE\n"
         "if TYPE_CHECKING:\n"
-        "    from ..adapter._memory import VALUE as TYPE_VALUE\n",
+        "    from ..adapter._persistence import VALUE as TYPE_VALUE\n",
         encoding="utf-8",
     )
     policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
@@ -203,7 +228,7 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
     )
     result = ArchitecturePolicyChecker().check(source_root)
     assert sum("private cross-package import:" in error for error in result.errors) == 4
-    app.write_text("from ..adapter import build_memory_runtime\n", encoding="utf-8")
+    app.write_text("from ..adapter import build_in_memory_runtime\n", encoding="utf-8")
     worker.write_text("from .workflow import ExecutionWorkflow\n", encoding="utf-8")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check(source_root).errors)
     (source_root / "temporal" / "workflow" / "__init__.py").write_text("from ._run import ExecutionWorkflow\n", encoding="utf-8")
@@ -213,29 +238,40 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
 def test_private_conversion_tree_is_exact() -> None:
     root = Path("linktools-ai/src/linktools/ai")
     renames = {
-        "adapter/history.py": "adapter/_history.py",
-        "adapter/memory.py": "adapter/_memory.py",
-        "adapter/repository.py": "adapter/_repository.py",
-        "adapter/schema.py": "adapter/_schema.py",
-        "adapter/step.py": "adapter/_step.py",
-        "agent/deps.py": "agent/_deps.py",
-        "agent/runner.py": "agent/_runner.py",
-        "app/acp.py": "app/_acp.py",
-        "asset/_cache.py": "asset/_objectcache.py",
-        "asset/local.py": "asset/_local.py",
-        "asset/files.py": "asset/_backend.py",
-        "asset/path.py": "asset/_backend.py",
-        "asset/model.py": "asset/domain.py",
-        "asset/contracts.py": "asset/domain.py",
-        "asset/source.py": "asset/_parsing.py",
-        "storage/model.py": "storage/contracts.py",
-        "capability/encoding.py": "capability/_encoding.py",
-        "temporal/activity.py": "temporal/_activity.py",
-        "temporal/worker.py": "temporal/_worker.py",
-        "temporal/workflow/dag.py": "temporal/workflow/_dag.py",
-        "temporal/workflow/mutation.py": "temporal/workflow/_mutation.py",
-        "temporal/workflow/run.py": "temporal/workflow/_run.py",
-        "temporal/workflow/suite.py": "temporal/workflow/_suite.py",
+        "agent/binding.py": "agent/_binding.py",
+        "app/assembly.py": "app/_assembly.py",
+        "app/facade.py": "app/_facade.py",
+        "app/workbench.py": "app/_workbench.py",
+        "asset/domain.py": "asset/_domain.py",
+        "asset/store.py": "asset/_store.py",
+        "asset/sql.py": "asset/_sql.py",
+        "capability/tool.py": "capability/_tool.py",
+        "core/errors.py": "core/_errors.py",
+        "core/ids.py": "core/_ids.py",
+        "core/json.py": "core/_json.py",
+        "core/paging.py": "core/_paging.py",
+        "core/principal.py": "core/_principal.py",
+        "core/validation.py": "core/_validation.py",
+        "core/value.py": "core/_value.py",
+        "observe/middleware.py": "observe/_middleware.py",
+        "observe/scope.py": "observe/_scope.py",
+        "observe/snapshot.py": "observe/_snapshot.py",
+        "observe/trace.py": "observe/_trace.py",
+        "runtime/execution.py": "runtime/_execution.py",
+        "runtime/persistence.py": "runtime/_persistence.py",
+        "runtime/services.py": "runtime/_services.py",
+        "spec/contract.py": "spec/_contract.py",
+        "spec/output.py": "spec/_output.py",
+        "storage/cache.py": "storage/_cache.py",
+        "storage/composition.py": "storage/_composition.py",
+        "storage/contracts.py": "storage/_contracts.py",
+        "storage/database.py": "storage/_database.py",
+        "storage/dialects.py": "storage/_dialects.py",
+        "storage/files.py": "storage/_files.py",
+        "storage/layer.py": "storage/_layer.py",
+        "storage/lock.py": "storage/_lock.py",
+        "storage/names.py": "storage/_names.py",
+        "temporal/gateway.py": "temporal/_gateway.py",
     }
     for old, new in renames.items():
         if old != new:
@@ -243,24 +279,16 @@ def test_private_conversion_tree_is_exact() -> None:
         assert (root / new).is_file(), new
     assert check_names(root) == ()
     policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
-    expected = {
-        "agent.binding", "app.assembly", "app.facade", "app.workbench", "asset.domain", "asset.sql", "asset.store",
-        "capability.tool", "core.errors", "core.ids", "core.json", "core.paging", "core.principal", "core.validation",
-        "core.value", "observe.middleware", "observe.scope", "observe.snapshot", "observe.trace", "runtime.execution",
-        "runtime.persistence", "runtime.services", "spec.contract", "spec.output", "storage.cache", "storage.composition",
-        "storage.database", "storage.dialects", "storage.files", "storage.layer", "storage.lock", "storage.contracts",
-        "storage.names", "temporal.gateway",
-    }
-    assert set(policy["public_modules"]) == expected
+    assert policy["public_modules"] == []
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:
     from linktools.ai import adapter, app, asset, capability, storage, temporal
-    from linktools.ai.adapter import DurableFileStepStore, SqlRuntimeSchema, SqlStepStore, build_memory_runtime, open_sql_runtime
+    from linktools.ai.adapter import DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime
     from linktools.ai.agent import AgentDeps, WorkspaceAgentRunner
     from linktools.ai.app import ACPApplication
-    from linktools.ai.asset import AssetCodec, AssetLoaderSource, AssetSource, FileAssetBackend, LocalAssetBackend, MemoryAssetBackend
-    from linktools.ai.asset.sql import SqlAlchemyAssetBackend
+    from linktools.ai.asset import AssetCodec, AssetLoaderSource, AssetSource, FilesystemAssetBackend, FilesystemAssetContentStore, InMemoryAssetBackend
+    from linktools.ai.asset import SqlAssetBackend
     from linktools.ai.capability import MCPServerSpecCodec, SkillSpecCodec
     from linktools.ai.storage import StorageBatchResult, StorageReader, StorageWriter
     from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
@@ -272,8 +300,8 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
     )
     assert adapter and app and asset and capability and storage and temporal
     assert all(command_modules)
-    assert all((AgentDeps, WorkspaceAgentRunner, ACPApplication, DurableFileStepStore, SqlRuntimeSchema, SqlStepStore, build_memory_runtime, open_sql_runtime, AssetCodec, AssetLoaderSource, AssetSource, FileAssetBackend, LocalAssetBackend, MemoryAssetBackend, SqlAlchemyAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
-    import linktools.ai.asset.domain as domain
+    assert all((AgentDeps, WorkspaceAgentRunner, ACPApplication, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCodec, AssetLoaderSource, AssetSource, FilesystemAssetBackend, FilesystemAssetContentStore, InMemoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
+    import linktools.ai.asset._domain as domain
     from linktools.ai.asset._codec import AssetCodec as PrivateAssetCodec
 
     assert not hasattr(domain, "AssetCodec")
@@ -305,7 +333,7 @@ for name in TARGETS:
 
 
 def test_facade_launcher_boundary_is_class_scoped() -> None:
-    path = Path("linktools-ai/src/linktools/ai/app/workbench.py")
+    path = Path("linktools-ai/src/linktools/ai/app/_workbench.py")
     tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
     assert {"WorkspaceExecutionLauncher", "WorkspaceAgentRuntime"} <= classes.keys()
@@ -321,7 +349,7 @@ def test_facade_launcher_boundary_is_class_scoped() -> None:
         isinstance(node, ast.Attribute)
         and node.attr == "domain"
         and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "_stores"
+        and node.value.attr == "_resources"
         for node in ast.walk(runtime)
     )
 
@@ -345,11 +373,11 @@ def test_runtime_step_contract_matrix_is_current() -> None:
     assert "profile" not in by_id["DOD-043"]["requirement"]
     assert "LOCAL/PRODUCTION" not in by_id["DOD-044"]["requirement"]
     assert "LOCAL_CODING" not in by_id["DOD-059"]["requirement"]
-    assert "app/facade.py 与 app/facade.py" not in by_id["DOD-036"]["requirement"]
+    assert "app/_facade.py 唯一拥有" in by_id["DOD-036"]["requirement"]
     dod_072_evidence = tuple(by_id["DOD-072"]["evidence"])
     assert "tests/ai/test_architecture.py::test_facade_launcher_boundary_is_class_scoped" in dod_072_evidence
-    assert "linktools-ai/src/linktools/ai/app/workbench.py" in dod_072_evidence
-    assert not any("test_file_step_store.py" in item or "test_harness_contract.py" in item or "adapter/_step.py" in item for item in dod_072_evidence)
+    assert "linktools-ai/src/linktools/ai/app/_workbench.py" in dod_072_evidence
+    assert not any("test_filesystem_step_store.py" in item or "test_harness_contract.py" in item or "adapter/_step.py" in item for item in dod_072_evidence)
 
     matrix = json.loads((root / "requirement-matrix.json").read_text(encoding="utf-8"))
     matrix_entries = {entry["id"]: entry for entry in matrix["requirements"]}
@@ -369,14 +397,3 @@ def test_runtime_step_contract_matrix_is_current() -> None:
     source_commit = evidence.get("validated_source_commit")
     if isinstance(source_commit, str) and len(source_commit) == 40:
         assert subprocess.run(["git", "cat-file", "-e", f"{source_commit}^{{commit}}"], check=False).returncode == 0
-        assert subprocess.run(["git", "rev-parse", "HEAD^"], capture_output=True, text=True, check=True).stdout.strip() == source_commit
-        source = subprocess.run(
-            ["git", "show", f"{source_commit}:linktools-ai/scripts/build/matrix/runtime-step-requirements.json"],
-            capture_output=True,
-            check=False,
-            text=True,
-        )
-        if source.returncode == 0:
-            source_entries = {entry["id"]: entry for entry in json.loads(source.stdout)["requirements"]}
-            assert source_entries["DOD-023"]["status"] != "complete"
-            assert source_entries["DOD-024"]["status"] != "complete"

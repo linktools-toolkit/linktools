@@ -7,7 +7,7 @@ import os
 
 import pytest
 
-from linktools.ai import RuntimeStoreConfig, open_runtime_store
+from linktools.ai import RuntimePersistenceConfig, open_runtime_resources
 
 
 @pytest.mark.asyncio
@@ -15,5 +15,5 @@ async def test_postgresql_live_not_run_without_environment() -> None:
     url = os.getenv("LINKTOOLS_AI_TEST_POSTGRESQL_URL")
     if not url:
         pytest.skip("not_run_no_environment_accepted")
-    async with open_runtime_store(RuntimeStoreConfig.postgresql(url, namespace="test", deployment_id="pytest")):
+    async with open_runtime_resources(RuntimePersistenceConfig.postgresql(url, namespace="test", deployment_id="pytest")):
         pass

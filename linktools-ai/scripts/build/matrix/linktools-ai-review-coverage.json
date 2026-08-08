@@ -1,5 +1,5 @@
 {
-  "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+  "validated_source_commit": "71576909",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
@@ -11,7 +11,7 @@
     "memory_file_sqlite": "passed: exact S 91 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
-    "source_commit": "passed: 0f08ae29d5f74a6956d82a29c0839025fae7d82e exact source validation; E direct parent",
+    "source_commit": "passed: 71576909 exact source validation; squash-compatible logical/source revision",
     "full_spec_review": {
       "Critical": 0,
       "Important": 0,
@@ -20,7 +20,7 @@
       "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 0\nVerdict: CLEAN"
     }
   },
-  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
-  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
-  "review_mode": "cold-start self-review from the full specification, current repository, 148a05a..0f08ae29 source diff, and fresh exact-S verification; no reviewer subagent was available"
+  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "review_mode": "cold-start self-review from the full specification, current repository, and fresh exact-S verification; no reviewer subagent was available"
 }

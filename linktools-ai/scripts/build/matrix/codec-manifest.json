@@ -1,27 +1,27 @@
 {
-  "digest": "14e0891f7d4a4308f825782e48dbc7412bce3a6f1ae8fd11406ffcab1da26272",
+  "digest": "78c5b8d171401d384dd8591df9cee7568266bf7b2c2b3627da484ef6a1355a1f",
   "entries": [
     {
       "kind": "agent",
-      "value_type": "linktools.ai.spec.contract.AgentSpec",
+      "value_type": "linktools.ai.spec._contract.AgentSpec",
       "fingerprint": "agent-spec",
       "codec_version": 1
     },
     {
       "kind": "mcp",
-      "value_type": "linktools.ai.capability.mcp.MCPServerSpec",
+      "value_type": "linktools.ai.capability._mcp.MCPServerSpec",
       "fingerprint": "mcp-server-spec",
       "codec_version": 1
     },
     {
       "kind": "prompt",
-      "value_type": "linktools.ai.spec.contract.PromptSpec",
+      "value_type": "linktools.ai.spec._contract.PromptSpec",
       "fingerprint": "prompt-spec",
       "codec_version": 1
     },
     {
       "kind": "skill",
-      "value_type": "linktools.ai.capability.skill.SkillSpec",
+      "value_type": "linktools.ai.capability._skill.SkillSpec",
       "fingerprint": "skill-spec",
       "codec_version": 1
     }

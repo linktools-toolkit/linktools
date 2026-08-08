@@ -5,9 +5,9 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..storage.database import SqlSchemaRegistry
-from ..storage.names import storage_name
-from ..core.errors import ErrorCode, AIError
+from ..storage import SqlSchemaRegistry
+from ..storage import storage_name
+from ..core import ErrorCode, AIError
 
 runtime_metadata: object | None = None
 step_metadata: object | None = None

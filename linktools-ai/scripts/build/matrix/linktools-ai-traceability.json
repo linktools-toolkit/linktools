@@ -1,29 +1,29 @@
 {
   "status": "COMPLETE",
-  "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+  "validated_source_commit": "71576909",
   "open_findings": [],
   "entries": [
     {
       "owner": "runtime",
       "requirements": "R-01,R-02,R-09",
       "implementation": [
-        "runtime/persistence.py",
-        "runtime/execution.py",
+        "runtime/_persistence.py",
+        "runtime/_execution.py",
         "runtime/_session.py",
-        "runtime/services.py",
-        "app/facade.py"
+        "runtime/_services.py",
+        "app/_facade.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py",
-        "tests/ai/persistence/test_runtime_store_bundle.py"
+        "tests/ai/persistence/test_runtime_resources.py"
       ]
     },
     {
       "owner": "workbench",
       "requirements": "R-01,R-03,R-11,T-01,T-03,T-05,T-06,T-07,T-18,T-19,T-20",
       "implementation": [
-        "app/workbench.py",
-        "storage/lock.py"
+        "app/_workbench.py",
+        "storage/_lock.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py"
@@ -34,13 +34,13 @@
       "requirements": "R-01,R-04,R-06,R-10,T-15,T-21",
       "implementation": [
         "adapter/_history.py",
-        "adapter/_memory.py",
+        "adapter/_persistence.py",
         "adapter/_repository.py",
         "adapter/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py",
-        "tests/ai/persistence/test_runtime_store_bundle.py",
+        "tests/ai/persistence/test_runtime_resources.py",
         "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
       ]
     },
@@ -48,8 +48,8 @@
       "owner": "composition",
       "requirements": "R-02,R-09",
       "implementation": [
-        "app/assembly.py",
-        "app/facade.py"
+        "app/_assembly.py",
+        "app/_facade.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
@@ -83,11 +83,11 @@
       "owner": "profile-removal",
       "requirements": "R-09,R-10,T-13,T-14,T-15,T-16,T-17",
       "implementation": [
-        "core/value.py",
-        "core/errors.py",
+        "core/_value.py",
+        "core/_errors.py",
         "runtime",
         "adapter",
-        "app/assembly.py",
+        "app/_assembly.py",
         "workspace"
       ],
       "tests": [
@@ -118,8 +118,8 @@
       "owner": "cancellation",
       "requirements": "R-01,T-19,T-20,T-21",
       "implementation": [
-        "runtime/execution.py",
-        "app/workbench.py",
+        "runtime/_execution.py",
+        "app/_workbench.py",
         "adapter/_repository.py"
       ],
       "tests": [
@@ -137,9 +137,10 @@
         "scripts/build/names.py"
       ],
       "tests": [
-        "tests/ai/test_architecture.py::test_name_gate_rejects_semantic_duplicate_and_private_directory",
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_nested_package_collision",
+        "tests/ai/test_architecture.py::test_name_gate_rejects_nested_module_shadowing", "tests/ai/test_architecture.py::test_name_gate_allows_parent_namespace_same_basename",
         "tests/ai/test_architecture.py::test_name_gate_treats_private_marker_as_semantic_only",
-        "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
+        "tests/ai/test_architecture.py::test_name_gate_allows_cross_package_names_and_rejects_ancestor_collision"
       ]
     },
     {
@@ -158,7 +159,7 @@
       "owner": "execution-cancellation-convergence",
       "requirements": "F-13,R-04,T-26,T-27,DOD-083",
       "implementation": [
-        "runtime/execution.py"
+        "runtime/_execution.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges",
@@ -169,7 +170,7 @@
       "owner": "profile-removal-completeness",
       "requirements": "F-12,T-28",
       "implementation": [
-        "runtime/execution.py",
+        "runtime/_execution.py",
         "runtime/_session.py",
         "runtime/_planner.py"
       ],
@@ -192,6 +193,6 @@
   "scope_exclusions": [
     "Downstream migration and compatibility work are explicitly excluded by the user."
   ],
-  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
-  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
+  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
 }

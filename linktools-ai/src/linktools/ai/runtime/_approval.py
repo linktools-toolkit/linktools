@@ -8,11 +8,11 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Principal
-from ..core.errors import ErrorCode, AIError
-from ..core.principal import AuthorizationAction, AuthorizationPolicy
-from ..core.value import ApprovalStatus
-from .persistence import RuntimePersistence
-from .services import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, WorkflowGateway
+from ..core import ErrorCode, AIError
+from ..core import AuthorizationAction, AuthorizationPolicy
+from ..core import ApprovalStatus
+from ._persistence import RuntimePersistence
+from ._services import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, WorkflowGateway
 
 _logger = environ.get_logger("ai.runtime.approval")
 
@@ -71,7 +71,7 @@ class DefaultApprovalService:
 
 
 def _decision_digest(request: ApprovalDecisionRequest) -> str:
-    from ..core.ids import canonical_sha256
+    from ..core import canonical_sha256
     return canonical_sha256({"approval_id": request.approval_id, "decision_id": request.decision_id, "decision": request.decision.value, "principal_id": request.principal.principal_id})
 
 

@@ -6,7 +6,7 @@ from typing import Generic, TypeVar
 
 from ._codec import AssetCodec
 from ._parsing import AssetLoader, AssetLoaderSource
-from .domain import AssetSource
+from ._domain import AssetSource
 
 TAsset = TypeVar("TAsset")
 

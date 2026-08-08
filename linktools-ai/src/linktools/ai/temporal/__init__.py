@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Temporal durable production boundary."""
 
-from .gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
+from ._gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
 from ._context import RunContext, TemporalRunContext
 from ._activity import (
     ActivityOptions,

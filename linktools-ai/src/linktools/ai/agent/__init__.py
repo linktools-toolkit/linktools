@@ -3,7 +3,7 @@
 
 """Static Agent runtime support API."""
 
-from .binding import AgentBinding
+from ._binding import AgentBinding
 from ._deps import AgentDeps
 from ._runner import AgentRunner, WorkspaceAgentResult, WorkspaceAgentRunner
 

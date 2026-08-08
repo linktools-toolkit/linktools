@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Static exports for the domain-independent storage kernel."""
 
-from .cache import ContentCache, FilesystemContentCache, MemoryContentCache, TieredContentCache
-from .composition import CacheAdapter, StorageAdapter, StorageComposition, StorageLayer
-from .database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage, dialect_for_url
-from .dialects import (
+from ._cache import ContentCache, FilesystemContentCache, InMemoryContentCache, TieredContentCache
+from ._composition import CacheAdapter, StorageAdapter, StorageComposition, StorageLayer
+from ._database import CoordinationScope, SqlSchemaManifest, SqlSchemaRegistry, SqlTableManifest, StorageDatabase, build_sqlite_storage, build_storage, close_storage, dialect_for_url
+from ._dialects import (
     IntegrityViolationKind,
     InsertResult,
     MySQLDialect,
@@ -18,23 +18,23 @@ from .dialects import (
     primary_key_column,
     resolve_dialect,
 )
-from .files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child
+from ._files import Sha256Digest, StorageId, StoragePath, atomic_write_bytes, atomic_write_json, read_bytes, read_json, safe_child, write_bytes_atomic, write_json_atomic
 from ._initialize import initialize_storage
-from .layer import LayerRefreshPolicy, StorageWriteVisibility
-from .contracts import (
+from ._layer import LayerRefreshPolicy, StorageWriteVisibility
+from ._contracts import (
     BatchStorageReader,
     BatchStorageWriter,
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
     PreloadResult,
-    ReadableMetadataBackend,
+    ReadableStorageBackend,
     StorageBatchFailure,
     StorageBatchPartialError,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
-    StorageMetadataBackend,
+    StorageMetadataReader,
     StorageOperation,
     StorageOwnedInfo,
     StoragePutResult,
@@ -44,19 +44,19 @@ from .contracts import (
     VersionSummary,
     VersionedStorage,
 )
-from .names import TABLE_PREFIX, storage_name
-from ._revision import BackendRevisionSource, LayerMetadataView, RevisionSource
-from .lock import FileLeaseCoordinator, FileWriterLock, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
+from ._names import TABLE_PREFIX, storage_name
+from ._revision import StorageRevisionSource, LayerMetadataView, RevisionSource
+from ._lock import FilesystemLeaseCoordinator, FilesystemWriterLock, KeyedAsyncLock, Lease, ProcessLeaseCoordinator
 
 __all__ = [
-    "BackendRevisionSource",
+    "StorageRevisionSource",
     "BatchStorageReader",
     "BatchStorageWriter",
     "CacheAdapter",
     "ContentCache",
     "CoordinationScope",
-    "FileLeaseCoordinator",
-    "FileWriterLock",
+    "FilesystemLeaseCoordinator",
+    "FilesystemWriterLock",
     "FilesystemContentCache",
     "IntegrityViolationKind",
     "InsertResult",
@@ -64,7 +64,7 @@ __all__ = [
     "LayerMetadataView",
     "LayerRefreshPolicy",
     "Lease",
-    "MemoryContentCache",
+    "InMemoryContentCache",
     "MySQLDialect",
     "MetadataChange",
     "MetadataLoad",
@@ -72,7 +72,7 @@ __all__ = [
     "PreloadResult",
     "PostgreSQLDialect",
     "ProcessLeaseCoordinator",
-    "ReadableMetadataBackend",
+    "ReadableStorageBackend",
     "RevisionSource",
     "SqlSchemaRegistry",
     "SqlSchemaManifest",
@@ -88,7 +88,7 @@ __all__ = [
     "StorageDeleteResult",
     "StorageLayer",
     "StoragePath",
-    "StorageMetadataBackend",
+    "StorageMetadataReader",
     "StorageOperation",
     "StorageOwnedInfo",
     "StoragePutResult",
@@ -119,4 +119,6 @@ __all__ = [
     "safe_child",
     "primary_key_column",
     "storage_name",
+    "write_bytes_atomic",
+    "write_json_atomic",
 ]

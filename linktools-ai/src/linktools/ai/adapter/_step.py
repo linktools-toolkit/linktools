@@ -16,27 +16,27 @@ from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai_harness.media import MediaContext, media_uri_for, parse_media_uri
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
 
-from ..core.errors import ErrorCode, AIError
-from ..core.json import canonical_json_bytes
-from ..storage.database import StorageDatabase
-from ..storage.files import read_json, write_json_atomic
-from ..storage.lock import FileWriterLock
-from ..storage.names import storage_name
+from ..core import ErrorCode, AIError
+from ..core import canonical_json_bytes
+from ..storage import StorageDatabase
+from ..storage import read_json, write_json_atomic
+from ..storage import FilesystemWriterLock
+from ..storage import storage_name
 from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
 
-class DurableFileStepStore:
+class DurableFilesystemStepStore:
     """Immutable-file StepStore with crash recovery checks and fsync barriers."""
 
-    def __init__(self, root: str | Path, namespace: str, *, writer_lock: FileWriterLock | None = None) -> None:
+    def __init__(self, root: str | Path, namespace: str, *, writer_lock: FilesystemWriterLock | None = None) -> None:
         if not namespace.strip():
             raise ValueError("StepStore namespace is required")
         self._root = Path(root).expanduser().resolve() / "steps" / _file_digest(namespace)
         self._lock = asyncio.Lock()
-        self._writer_lock = writer_lock or FileWriterLock(self._root.parent.parent / ".linktools" / "runtime" / _file_digest(namespace) / "step.lock")
+        self._writer_lock = writer_lock or FilesystemWriterLock(self._root.parent.parent / ".linktools" / "runtime" / _file_digest(namespace) / "step.lock")
         self._owns_writer_lock = writer_lock is None
         self._closed = True
 
@@ -499,4 +499,4 @@ def _schema_digest(metadata: "MetaData") -> str:
     return hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
 
 
-__all__ = ["DurableFileStepStore", "SqlMediaStore", "SqlStepStore"]
+__all__ = ["DurableFilesystemStepStore", "SqlMediaStore", "SqlStepStore"]

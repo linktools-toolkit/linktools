@@ -1,6 +1,6 @@
 {
-  "baseline_commit": "148a05a0b3a360061a2bdc837e521a8282933de7",
-  "validated_source_commit": "0f08ae29d5f74a6956d82a29c0839025fae7d82e",
+  "baseline_commit": "71576909",
+  "validated_source_commit": "71576909",
   "status": "COMPLETE",
   "open_findings": [],
   "environment": {
@@ -29,6 +29,6 @@
     "schema": "passed: exact S separate runtime/step metadata registries and SQL profile tombstone checks",
     "provenance": "passed: exact S validated; E is evidence-only and directly based on S"
   },
-  "spec_revision": "linktools-ai-148a05a-private-module-fix-spec-v2-final",
-  "review_scope": "linktools-ai-148a05a-private-module-fix-spec-v2-final"
+  "spec_revision": "linktools-ai-7157690-private-boundary-fix-spec-final",
+  "review_scope": "linktools-ai-7157690-private-boundary-fix-spec-final"
 }

@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from ..workspace import trusted_workspace_principal
-from ..runtime.services import ExecutionHandle, ExecutionRequest
-from .assembly import AppServices
+from ..runtime import ExecutionHandle, ExecutionRequest
+from ._assembly import AppServices
 
 
 @dataclass(frozen=True, slots=True)

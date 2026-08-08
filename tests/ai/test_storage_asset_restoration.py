@@ -16,26 +16,26 @@ from linktools.ai.asset import (
     AssetIndex,
     AssetLoader,
     AssetLoaderSource,
-    LocalAssetBackend,
+    FilesystemAssetContentStore,
     AssetObjectCache,
     PrefixAssetPathAdapter,
     StrictConfigReader,
     compute_asset_etag,
     parse_json_text,
 )
-from linktools.ai.asset.sql import SqlAlchemyAssetBackend
-from linktools.ai.storage.dialects import (
+from linktools.ai.asset import SqlAssetBackend
+from linktools.ai.storage import (
     MySQLDialect,
     PostgreSQLDialect,
     SQLiteDialect,
     resolve_dialect,
 )
-from linktools.ai.storage.database import SqlSchemaRegistry
-from linktools.ai.storage.names import TABLE_PREFIX, storage_name
+from linktools.ai.storage import SqlSchemaRegistry
+from linktools.ai.storage import TABLE_PREFIX, storage_name
 
 
 @dataclass(frozen=True, slots=True)
-class _TextContentStore:
+class _TextContentSource:
     content: AssetContent
 
     async def get(self, path: str) -> "AssetContent | None":
@@ -66,10 +66,10 @@ def test_asset_loader_index_and_config_are_available() -> None:
         source = AssetLoaderSource(loader)
         assert await source.list_ids(".json") == ()
 
-        store = _TextContentStore(
+        source = _TextContentSource(
             AssetContent(AssetContentInfo("sample/one.json", "sample", 1, "etag"), b'{"value":"one"}')
         )
-        loader = AssetLoader.from_store(store, prefix="sample")
+        loader = AssetLoader.from_source(source, prefix="sample")
         index = AssetIndex(loader_source := AssetIndex.source_from_loader(loader), _TextCodec(), suffix=".json")
         assert loader_source is not None
         assert await index.list_ids() == ("one",)
@@ -82,10 +82,10 @@ def test_asset_loader_index_and_config_are_available() -> None:
 
 @pytest.mark.asyncio
 async def test_decoded_asset_cache_shares_inflight_work() -> None:
-    store = _TextContentStore(
+    source = _TextContentSource(
         AssetContent(AssetContentInfo("sample/one.json", "sample", 1, "etag"), b'{"value":"one"}')
     )
-    cache = AssetObjectCache(store, _TextCodec(), prefix="sample", suffix=".json")
+    cache = AssetObjectCache(source, _TextCodec(), prefix="sample", suffix=".json")
     values = await asyncio.gather(cache.get("one"), cache.get("one"))
     assert tuple(values) == ({"id": "one", "value": "one"},) * 2
     assert await cache.list_ids() == ("one",)
@@ -123,13 +123,13 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
 
 
 def test_sql_asset_backend_does_not_use_pessimistic_row_locks() -> None:
-    source = Path("linktools-ai/src/linktools/ai/asset/sql.py").read_text(encoding="utf-8")
+    source = Path("linktools-ai/src/linktools/ai/asset/_sql.py").read_text(encoding="utf-8")
     assert "with_for_update" not in source
 
 
 def test_sql_asset_backend_keeps_lightweight_asset_surface() -> None:
-    backend = SqlAlchemyAssetBackend(lambda: None)
-    tables = SqlAlchemyAssetBackend.register_schema(SqlSchemaRegistry())
+    backend = SqlAssetBackend(lambda: None)
+    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
     assert backend.root.scheme == "sql"
     assert tuple(table.name for table in (tables.root, tables.entry, tables.version, tables.blob)) == (
         storage_name("asset_revision"),
@@ -141,8 +141,8 @@ def test_sql_asset_backend_keeps_lightweight_asset_surface() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_content_backend_restores_atomic_path_mapping_and_batch_io(tmp_path: Path) -> None:
-    backend = LocalAssetBackend(tmp_path, path_adapter=PrefixAssetPathAdapter({"mcp": "mapped"}))
+async def test_filesystem_asset_content_store_restores_atomic_path_mapping_and_batch_io(tmp_path: Path) -> None:
+    backend = FilesystemAssetContentStore(tmp_path, path_adapter=PrefixAssetPathAdapter({"mcp": "mapped"}))
     await backend.initialize_storage()
     first = AssetContent(
         AssetContentInfo("mcp/one.json", "mcp", 1, compute_asset_etag(b"one")),
