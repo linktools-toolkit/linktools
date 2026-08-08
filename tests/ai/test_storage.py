@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
+from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai import RuntimeStoreConfig, open_runtime_store
 from linktools.ai.capability.tool import ToolOperationRecord
 from linktools.ai.core.value import ToolOperationStatus
@@ -138,7 +138,7 @@ async def test_refresh_single_flight_and_cancelled_waiter() -> None:
 @pytest.mark.asyncio
 async def test_read_only_write_is_fail_closed() -> None:
     storage = StorageComposition(Backend(()), adapter=Adapter())
-    with pytest.raises(LinktoolsAIError) as error:
+    with pytest.raises(AIError) as error:
         await storage.put("key", Value("key", 1, b"value"))
     assert error.value.code == ErrorCode.STORAGE_READ_ONLY
 
@@ -153,7 +153,7 @@ async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> No
         )
         await runtime.domain.tools.reserve(record)
         assert await runtime.domain.tools.get_operation("operation", tenant_id="tenant") == record
-        with pytest.raises(LinktoolsAIError) as error:
+        with pytest.raises(AIError) as error:
             await runtime.domain.tools.reserve(
                 ToolOperationRecord(
                     "operation", "tenant", "run", "other-call", "a" * 64, "tool", "arguments", "binding", True,

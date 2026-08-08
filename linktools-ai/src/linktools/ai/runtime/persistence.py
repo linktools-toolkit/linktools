@@ -12,8 +12,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..capability.tool import ToolOperationRecord, ToolStateStore
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.json import JsonValue
 from ..core.paging import Page
 from ..core.principal import ResourceRef
@@ -58,9 +57,9 @@ def validate_runtime_profile(
     """Reject profile and durable-engine combinations that cannot be safe."""
     if profile is ExecutionProfile.PRODUCTION_SERVICE:
         if backend not in {RuntimeBackend.SQLITE, RuntimeBackend.MYSQL, RuntimeBackend.POSTGRESQL} or not temporal_enabled or local_trusted:
-            raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
     elif profile is ExecutionProfile.LOCAL_CODING and backend not in {RuntimeBackend.MEMORY, RuntimeBackend.FILE, RuntimeBackend.SQLITE}:
-        raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+        raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,26 +97,26 @@ class ExecutionRecord:
     binding_digest: str
     parent_execution_id: "str | None"
     root_execution_id: str
+    source_execution_id: "str | None"
+    base_execution_id: "str | None"
+    lineage_kind: ExecutionLineageKind
     status: ExecutionStatus
-    snapshot_revision: int
+    revision: int
     event_sequence: int
+    agent_run_sequence: int
     result_ref: "str | None"
     result_digest: "str | None"
     error_code: "str | None"
     safe_error_details: Mapping[str, JsonValue]
     created_at: datetime
     updated_at: datetime
-    source_execution_id: "str | None" = None
-    base_execution_id: "str | None" = None
-    lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN
-    agent_run_sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class ExecutionStartClaim:
     execution_id: str
     tenant_id: str
-    expected_execution_revision: int
+    expected_revision: int
     expected_event_sequence: int
     scope: str
     key_hash: str
@@ -129,10 +128,22 @@ class ExecutionStartClaim:
 class ExecutionStartUnknownCommit:
     execution_id: str
     tenant_id: str
-    expected_execution_revision: int
+    expected_revision: int
+    expected_event_sequence: int
     scope: str
     key_hash: str
-    started_at: datetime
+    request_digest: str
+    occurred_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionCancelRequestCommit:
+    execution_id: str
+    tenant_id: str
+    expected_revision: int
+    expected_event_sequence: int
+    operation_id: str
+    requested_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,9 +275,9 @@ class ArtifactRecord:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionTerminalCommit:
-    expected_execution_revision: int
+    expected_revision: int
     expected_event_sequence: int
-    terminal_execution: ExecutionRecord
+    execution: ExecutionRecord
     result: ResultRecord
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
@@ -379,8 +390,13 @@ class RuntimeRepository(Protocol):
     async def close(self) -> None: ...
 
 
-class ManagedToolStateRepository(ToolStateStore, RuntimeRepository, Protocol):
-    pass
+class ManagedToolStateRepository(RuntimeRepository, Protocol):
+    async def reserve(self, record: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]: ...
+    async def get_operation(self, operation_id: str, *, tenant_id: str) -> "Mapping[str, JsonValue] | None": ...
+    async def claim(self, operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> Mapping[str, JsonValue]: ...
+    async def renew(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int) -> Mapping[str, JsonValue]: ...
+    async def complete(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, result_ref: "str | None", result_digest: str) -> Mapping[str, JsonValue]: ...
+    async def fail(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str) -> Mapping[str, JsonValue]: ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -395,13 +411,14 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def create(self, record: ExecutionRecord) -> ExecutionRecord: ...
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None: ...
-    async def compare_and_swap(self, execution_id: str, *, tenant_id: str, expected_snapshot_revision: int, next_record: ExecutionRecord) -> ExecutionRecord: ...
+    async def compare_and_swap(self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord) -> ExecutionRecord: ...
     async def list_by_session(self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None) -> tuple[ExecutionRecord, ...]: ...
     async def list_children(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionRecord, ...]: ...
     async def claim_start(self, claim: ExecutionStartClaim) -> ExecutionRecord: ...
     async def reserve_start(self, reservation: ExecutionStartReservation) -> ExecutionStartReservationResult: ...
     async def claim_next_agent_run(self, execution_id: str, *, tenant_id: str, expected_revision: int, expected_agent_run_sequence: int) -> ExecutionRecord: ...
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord: ...
+    async def request_cancel(self, commit: ExecutionCancelRequestCommit) -> ExecutionRecord: ...
     async def advance_sequence(self, execution_id: str, *, tenant_id: str, kind: str, expected_sequence: int) -> ExecutionRecord: ...
     async def commit_terminal(self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord) -> ExecutionRecord: ...
 
@@ -543,9 +560,9 @@ class RuntimePersistence:
 __all__ = [
     "ApprovalRecord", "ApprovalRepository", "ArtifactRecord", "ArtifactRepository", "BlobRef", "BlobStatus",
     "BlobStore", "EvaluationRecord", "EvaluationRepository", "ExecutionEventRecord", "ExecutionRecord",
-    "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate", "SessionHeadAdvance",
+    "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate", "SessionHeadAdvance",
     "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository",
     "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeBackend", "RuntimePersistence",
     "RuntimePersistenceMode", "RuntimeRepository", "ManagedToolStateRepository", "SessionRecord", "SessionRepository", "backend_mode",
-    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationRecord", "ToolOperationStatus", "validate_runtime_profile",
+    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus", "validate_runtime_profile",
 ]

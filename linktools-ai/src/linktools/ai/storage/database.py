@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, unquote
 from typing import TYPE_CHECKING, Protocol
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.json import canonical_json_bytes
 
 if TYPE_CHECKING:
@@ -128,7 +128,7 @@ def dialect_for_url(url: str) -> str:
         return "mysql"
     if scheme == "postgresql+asyncpg":
         return "postgresql"
-    raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID, "unsupported SQL storage dialect")
+    raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "unsupported SQL storage dialect")
 
 
 def scope_for_url(url: str) -> CoordinationScope:
@@ -161,7 +161,7 @@ def build_storage(
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     except ModuleNotFoundError as error:
         if error.name == "sqlalchemy":
-            raise LinktoolsAIError(
+            raise AIError(
                 ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
                 "SQLAlchemy is required for SQL storage",
             ) from error
@@ -170,7 +170,7 @@ def build_storage(
         engine = create_async_engine(async_url)
     except ModuleNotFoundError as error:
         if error.name in {"aiosqlite", "asyncmy", "asyncpg"}:
-            raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, f"SQL driver is required for {dialect} storage") from error
+            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, f"SQL driver is required for {dialect} storage") from error
         raise
     if dialect == "sqlite":
         from sqlalchemy import event
@@ -181,7 +181,7 @@ def build_storage(
             try:
                 cursor.execute("PRAGMA journal_mode=WAL")
                 if str(cursor.fetchone()[0]).lower() != "wal":
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
                 cursor.execute("PRAGMA foreign_keys=ON")
                 cursor.execute("PRAGMA busy_timeout=5000")
             finally:
@@ -220,7 +220,7 @@ def _new_metadata() -> "MetaData":
         from sqlalchemy import MetaData
     except ModuleNotFoundError as error:
         if error.name == "sqlalchemy":
-            raise LinktoolsAIError(
+            raise AIError(
                 ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
                 "SQLAlchemy is required for SQL schema registration",
             ) from error

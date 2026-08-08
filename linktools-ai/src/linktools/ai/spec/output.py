@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 
 
@@ -32,15 +32,15 @@ class OutputTypeRegistry:
 
     def register(self, schema_id: str, revision: int, output_type: 'type[BaseModel]') -> None:
         if self._manifest is not None:
-            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_DRIFT, "output registry is frozen")
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_DRIFT, "output registry is frozen")
         if not schema_id.strip() or revision < 1:
-            raise LinktoolsAIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
         key = (schema_id, revision)
         fingerprint = canonical_sha256(output_type.model_json_schema())
         previous = self._fingerprints.get(key)
         previous_type = self._types.get(key)
         if previous is not None and (previous != fingerprint or previous_type is not output_type):
-            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_DRIFT)
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_DRIFT)
         self._types[key] = output_type
         self._fingerprints[key] = fingerprint
 
@@ -66,13 +66,13 @@ class OutputTypeRegistry:
         try:
             return self._types[(schema_id, revision)]
         except KeyError as exc:
-            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_UNKNOWN) from exc
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_UNKNOWN) from exc
 
     def fingerprint(self, schema_id: str, revision: int) -> str:
         try:
             return self._fingerprints[(schema_id, revision)]
         except KeyError as exc:
-            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_UNKNOWN) from exc
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_UNKNOWN) from exc
 
     def manifest(self) -> OutputSchemaManifest:
         if self._manifest is None:

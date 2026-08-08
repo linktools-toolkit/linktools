@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 __description__ = f"{environ.name} plugin"
 
 
-class LinktoolsPlugin(Plugin, FridaScriptHandler):
+class ObjectionPlugin(Plugin, FridaScriptHandler):
 
     def __init__(self, ns):
         self.script_path = __cap_mobile__.get_asset_path("frida.js")
@@ -94,4 +94,4 @@ class LinktoolsPlugin(Plugin, FridaScriptHandler):
 
 
 namespace = 'lt'
-plugin = LinktoolsPlugin
+plugin = ObjectionPlugin

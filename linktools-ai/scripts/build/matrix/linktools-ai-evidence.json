@@ -1,7 +1,8 @@
 {
-  "spec": ".docs/linktools-ai-runtime-step-persistence-spec-v11-final.md",
-  "baseline_commit": "6c1d4a25f2312c3c8827503b290f730d489e5a4f",
-  "status": "CLEAN",
+  "spec": ".docs/linktools-ai-architecture-runtime-convergence-spec-v23-final.md",
+  "baseline_commit": "6dd48064f74ca109b97527c1bd1056eed5ec6923",
+  "final_commit": "d4f17677",
+  "status": "COMPLETE",
   "open_findings": [],
   "environment": {
     "python": "3.13",
@@ -15,16 +16,16 @@
     "memory": "passed",
     "file": "passed",
     "sqlite": "passed",
-    "mysql": "implemented_not_run_no_environment_accepted",
-    "postgresql": "implemented_not_run_no_environment_accepted"
+    "mysql": "not_run_no_environment_accepted",
+    "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 54 tests, 2 optional live tests skipped without environment",
+    "conformance": "passed: 50 tests, 2 optional live tests skipped without environment",
     "concurrency": "passed: service claim_start winner, memory and durable store checks",
     "fault_injection": "passed: FILE runtime mutation rollback/reload boundary",
     "security": "passed: hashed FILE paths and SQL URL repr redaction",
     "public_api": "passed: baseline import does not load SQL optional modules",
     "architecture": "passed: compileall, ruff, architecture gate",
-    "schema": "implemented: separate runtime/step metadata registries; fresh digest manifest"
+    "schema": "passed: separate runtime/step metadata registries; fresh digest manifest"
   }
 }

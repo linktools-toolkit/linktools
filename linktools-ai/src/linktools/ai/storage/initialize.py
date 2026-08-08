@@ -4,7 +4,7 @@
 
 from typing import TYPE_CHECKING, Protocol
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from .database import StorageDatabase, sql_constraint_signature
 
 if TYPE_CHECKING:
@@ -16,7 +16,7 @@ class _SqlTypeValue(Protocol):
 
 async def initialize_storage(database: StorageDatabase) -> None:
     if not database.schema_manifest_digest:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     async with database.engine.begin() as connection:
         await connection.run_sync(database.metadata.create_all)
         await connection.run_sync(_validate_schema, database)
@@ -27,13 +27,13 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
         from sqlalchemy import inspect
     except ModuleNotFoundError as error:
         if error.name == "sqlalchemy":
-            raise LinktoolsAIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL storage") from error
+            raise AIError(ErrorCode.OPTIONAL_DEPENDENCY_MISSING, "SQLAlchemy is required for SQL storage") from error
         raise
     inspector = inspect(connection)
     actual_tables = set(inspector.get_table_names())
     expected_tables = set(database.metadata.tables)
     if actual_tables != expected_tables:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     for table_name, table in database.metadata.tables.items():
         primary_key = set(inspector.get_pk_constraint(table_name).get("constrained_columns", ()))
         actual_columns = {
@@ -45,7 +45,7 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
             for column in table.columns
         }
         if actual_columns != expected_columns:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         expected_constraints = {
             sql_constraint_signature(constraint)
             for constraint in table.constraints
@@ -66,7 +66,7 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
             for item in inspector.get_foreign_keys(table_name)
         )
         if actual_constraints != expected_constraints:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         actual_indexes = {
             f"{item.get('name') or ''}:{','.join(item.get('column_names', ())) }"
             for item in inspector.get_indexes(table_name)
@@ -78,7 +78,7 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
             if index.name is not None
         }
         if actual_indexes != expected_indexes:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _type_name(value: _SqlTypeValue, column_name: "str | None" = None) -> str:

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from .errors import ErrorCode, LinktoolsAIError
+from .errors import ErrorCode, AIError
 from .value import Principal, PrincipalKind, ResourceKind
 
 
@@ -66,9 +66,9 @@ class TenantAuthorizationPolicy:
         resource: ResourceRef,
     ) -> None:
         if principal.tenant_id != resource.tenant_id:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if resource.owner_principal_id is not None and resource.owner_principal_id != principal.principal_id:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if principal.kind == PrincipalKind.LOCAL_TRUSTED.value and action not in {
             AuthorizationAction.EXECUTION_RUN,
             AuthorizationAction.EXECUTION_READ,
@@ -79,7 +79,7 @@ class TenantAuthorizationPolicy:
             AuthorizationAction.SESSION_CLOSE,
             AuthorizationAction.TOOL_EXECUTE,
         }:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
 @runtime_checkable

@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from typing import Literal
 
 from ..core.json import JsonValue
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..asset.model import AssetValue
 
@@ -48,7 +48,7 @@ class AgentSpec(AssetValue):
             previous = unique.get(key)
             if previous is not None:
                 if _feature_digest(previous) != _feature_digest(feature):
-                    raise LinktoolsAIError(ErrorCode.FEATURE_CONFLICT)
+                    raise AIError(ErrorCode.FEATURE_CONFLICT)
                 continue
             unique[key] = feature
         object.__setattr__(self, "features", tuple(unique.values()))

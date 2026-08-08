@@ -15,7 +15,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_json_bytes, canonical_sha256
 from ..core.paging import CursorPayload, CursorSigner
 from ..core.principal import AuthorizationAction, AuthorizationPolicy
@@ -46,7 +46,7 @@ class DefaultArtifactService:
     async def list(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[ArtifactView]:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
         await self._authorization.authorize(principal, AuthorizationAction.ARTIFACT_READ, header)
         raw_cursor = _decode_cursor(cursor, principal.tenant_id, execution_id, self._cursor_signer)
@@ -58,11 +58,11 @@ class DefaultArtifactService:
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload:
         header = await self._persistence.artifacts.get_header(artifact_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.ARTIFACT_READ, header)
         record = await self._persistence.artifacts.get_metadata(artifact_id, tenant_id=principal.tenant_id)
         if record is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         expires_at = int(time.time()) + 300
         nonce = secrets.token_hex(16)
         request_digest = canonical_sha256({"action": "artifact.download", "tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest})
@@ -90,7 +90,7 @@ class DefaultArtifactService:
                 raise ValueError("artifact grant target mismatch")
             return record.blob_ref
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED) from error
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
 
 
 def _encode_grant(payload: dict[str, str | int]) -> str:
@@ -121,6 +121,6 @@ def _decode_cursor(cursor: str | None, tenant_id: str, execution_id: str, signer
             raise ValueError("artifact cursor identity mismatch")
         return payload.sort_key
     except (binascii.Error, KeyError, TypeError, ValueError, UnicodeError, json.JSONDecodeError) as error:
-        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error
-    except LinktoolsAIError as error:
-        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error

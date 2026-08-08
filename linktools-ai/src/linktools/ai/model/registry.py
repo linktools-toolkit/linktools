@@ -9,7 +9,7 @@ from threading import Lock
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 
 _logger = environ.get_logger("ai.model.registry")
@@ -43,13 +43,13 @@ class ModelRegistry:
             if self._snapshot.revision != 0:
                 if dict(routes) == dict(self._snapshot.routes):
                     return self._snapshot
-                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+                raise AIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
             return self._commit(routes)
 
     def register(self, route: ModelRoute, *, expected_revision: int) -> ModelRegistrySnapshot:
         with self._lock:
             if expected_revision != self._snapshot.revision:
-                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+                raise AIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
             routes = dict(self._snapshot.routes)
             routes[route.route_id] = route
             return self._commit(routes)
@@ -57,7 +57,7 @@ class ModelRegistry:
     def remove(self, route_id: str, *, expected_revision: int) -> ModelRegistrySnapshot:
         with self._lock:
             if expected_revision != self._snapshot.revision:
-                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+                raise AIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
             routes = dict(self._snapshot.routes)
             routes.pop(route_id, None)
             return self._commit(routes)
@@ -65,7 +65,7 @@ class ModelRegistry:
     def apply(self, routes: 'Mapping[str, ModelRoute]', *, expected_revision: int) -> ModelRegistrySnapshot:
         with self._lock:
             if expected_revision != self._snapshot.revision:
-                raise LinktoolsAIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
+                raise AIError(ErrorCode.MODEL_REGISTRY_CONFLICT)
             return self._commit(routes)
 
     def snapshot(self) -> ModelRegistrySnapshot:

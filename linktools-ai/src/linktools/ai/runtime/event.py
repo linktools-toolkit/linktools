@@ -9,7 +9,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.principal import AuthorizationAction, AuthorizationPolicy
 from ..core.value import ExecutionEventType, ExecutionStatus
 from .persistence import RuntimePersistence
@@ -33,7 +33,7 @@ class DefaultEventService:
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.EVENT_READ, header)
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
         page = await self._persistence.events.list(execution_id, tenant_id=principal.tenant_id, after_sequence=after_sequence, limit=limit)

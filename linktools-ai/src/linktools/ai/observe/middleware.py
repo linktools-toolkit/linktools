@@ -8,7 +8,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from .context import RunContext
 
 
@@ -68,7 +68,7 @@ class MiddlewarePipeline:
                 await self._dispatch(middleware, stage, context)
             except Exception as exc:
                 if middleware.mutating:
-                    raise LinktoolsAIError(ErrorCode.MIDDLEWARE_FAILED, f"middleware {stage} failed") from exc
+                    raise AIError(ErrorCode.MIDDLEWARE_FAILED, f"middleware {stage} failed") from exc
                 self._logger.warning(
                     "observational middleware failed: stage=%s",
                     stage,
@@ -88,7 +88,7 @@ class MiddlewarePipeline:
         failure: BaseException,
     ) -> None:
         if middleware.mutating:
-            raise LinktoolsAIError(ErrorCode.MIDDLEWARE_FAILED, f"middleware {stage} failed") from failure
+            raise AIError(ErrorCode.MIDDLEWARE_FAILED, f"middleware {stage} failed") from failure
         self._logger.warning(
             "observational middleware failed: stage=%s",
             stage,

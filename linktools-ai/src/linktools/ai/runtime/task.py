@@ -8,8 +8,7 @@ from datetime import datetime, timezone
 
 from linktools.core import environ
 
-from ..agent.context import AgentBinding
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.value import OperationKind, OperationStatus, Principal, ResourceKind, TaskStatus
@@ -28,14 +27,14 @@ class DefaultTaskService:
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
-    async def run_graph(self, binding: AgentBinding, request: TaskGraphRequest) -> TaskGraphResult:
+    async def run_graph(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphResult:
         await self._authorization.authorize(request.principal, AuthorizationAction.TASK_RUN, ResourceRef(ResourceKind.TASK_GRAPH, request.graph.graph_id, request.principal.tenant_id))
-        digest = canonical_sha256({"graph_id": request.graph.graph_id, "nodes": [node.task_id for node in request.graph.nodes], "binding": binding.digest, "limits": {"max_nodes": request.limits.max_nodes, "max_depth": request.limits.max_depth, "max_budget": request.limits.max_budget, "max_concurrency": request.limits.max_concurrency}})
+        digest = canonical_sha256({"graph_id": request.graph.graph_id, "nodes": [node.task_id for node in request.graph.nodes], "binding": binding_digest, "limits": {"max_nodes": request.limits.max_nodes, "max_depth": request.limits.max_depth, "max_budget": request.limits.max_budget, "max_concurrency": request.limits.max_concurrency}})
         operation_id = idempotency_key_hash(request.idempotency_key)
         existing = await self._persistence.operations.get(operation_id, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             view = await self._persistence.tasks.get_plan(request.graph.graph_id, tenant_id=request.principal.tenant_id)
             return TaskGraphResult(request.graph.graph_id, view.status if view else TaskStatus.PENDING, ())
         now = datetime.now(timezone.utc)
@@ -66,17 +65,17 @@ class DefaultTaskService:
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         header = await self._persistence.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
         view = await self._persistence.tasks.get_plan(graph_id, tenant_id=principal.tenant_id)
         if view is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return view
 
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
         header = await self._persistence.tasks.get_header(graph_id, tenant_id=request.principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.TASK_CANCEL, header)
         operation_digest = canonical_sha256(
             {
@@ -94,11 +93,11 @@ class DefaultTaskService:
         )
         if operation is not None:
             if operation.request_digest != operation_digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if operation.status in {OperationStatus.SUCCEEDED, OperationStatus.CANCELLED}:
                 view = await self._persistence.tasks.get_plan(graph_id, tenant_id=request.principal.tenant_id)
                 if view is None:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 return view
         else:
             now = datetime.now(timezone.utc)

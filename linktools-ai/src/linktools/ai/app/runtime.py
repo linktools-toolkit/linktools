@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Pure Runtime composition from preflighted dependencies."""
+"""Runtime containers with explicit query/mutation separation."""
 
 from dataclasses import dataclass
 from collections.abc import AsyncIterator
 
 from linktools.core import environ
 
-from ..agent.context import AgentBinding
+from ..agent.binding import AgentBinding
 from ..capability import MCPToolProvider, SkillProvider, SubagentProvider, ToolPolicy, ToolStateStore, Sandbox
 from ..core import Page, Principal, PrincipalProvider
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..model import ModelResolver
 from ..observe.middleware import MiddlewarePipeline
 from ..observe.snapshot import RunSnapshot
 from ..spec import AgentSpec, OutputTypeRegistry, PromptSpec
 from ..task.model import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
-from .container import Runtime, RuntimeAccess
-from .evaluation import EvaluationApi, EvaluationQueryApi, validate_compare_request
-from .execution import ExecutionApi, ExecutionQueryApi
-from .services import (
+from ..task.service import TaskApi
+from ..runtime.approval import ApprovalApi
+from ..runtime.artifact import ArtifactApi
+from ..runtime.event import EventApi
+from ..runtime.evaluation import EvaluationApi, EvaluationQueryApi, validate_compare_request
+from ..runtime.execution import ExecutionApi, ExecutionQueryApi
+from ..runtime.services import (
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
     ApprovalService,
@@ -53,6 +56,7 @@ from .services import (
     ResumeSessionRequest,
     RetryExecutionRequest,
     RunEvaluationRequest,
+    RuntimeServiceIdentity,
     RuntimeServices,
     SessionService,
     SessionView,
@@ -61,7 +65,32 @@ from .services import (
     TranscriptItem,
     UpdateSessionRequest,
 )
-from .session import SessionApi, SessionQueryApi
+from ..runtime.session import SessionApi, SessionQueryApi
+
+
+@dataclass(frozen=True, slots=True)
+class Runtime:
+    service_identity: RuntimeServiceIdentity
+    binding: AgentBinding
+    execution: ExecutionApi
+    session: SessionApi
+    task: TaskApi
+    evaluation: EvaluationApi
+    approval: ApprovalApi
+    event: EventApi
+    artifact: ArtifactApi
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeAccess:
+    service_identity: RuntimeServiceIdentity
+    execution: ExecutionQueryApi
+    session: SessionApi
+    task: TaskApi
+    evaluation: EvaluationQueryApi
+    approval: ApprovalApi
+    event: EventApi
+    artifact: ArtifactApi
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,9 +130,9 @@ def build_runtime(
             dependencies.services,
         )
     ):
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not spec.id or not prompt.id or spec.revision < 1 or prompt.revision < 1:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "invalid Agent or Prompt revision")
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "invalid Agent or Prompt revision")
     route = dependencies.model_resolver.resolve(spec.model)
     model_revision = dependencies.model_resolver.snapshot().revision
     spec_fingerprint = canonical_sha256(
@@ -137,7 +166,7 @@ def build_runtime(
         dependencies.sandbox.fingerprint,
         dependencies.middleware.fingerprint,
     )
-    logger = environ.get_logger("ai.runtime.factory")
+    logger = environ.get_logger("ai.app.runtime")
     logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, route.route_id)
     return Runtime(
         dependencies.services.identity,
@@ -154,7 +183,7 @@ def build_runtime(
 
 def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
     if services is None:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     return RuntimeAccess(
         services.identity,
         _ExecutionAccess(services.execution),
@@ -191,10 +220,10 @@ def _capability_digest(spec: AgentSpec, dependencies: RuntimeDependencies) -> st
                 resolved_revision = feature.revision or 1
                 fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id})
             else:
-                raise LinktoolsAIError(ErrorCode.FEATURE_REQUIRED_MISSING if feature.required else ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        except LinktoolsAIError as error:
+                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING if feature.required else ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        except AIError as error:
             if feature.required:
-                raise LinktoolsAIError(ErrorCode.FEATURE_REQUIRED_MISSING) from error
+                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING) from error
             resolved_revision = 0
             fingerprint = "UNRESOLVED"
             provider_digest = "UNRESOLVED"
@@ -299,7 +328,7 @@ class _TaskApi:
         self._binding = binding
 
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
-        return await self._service.run_graph(self._binding, request)
+        return await self._service.run_graph(self._binding.digest, request)
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         return await self._service.inspect_graph(graph_id, principal=principal)
@@ -322,7 +351,7 @@ class _EvaluationApi(EvaluationApi):
         self._binding = binding
 
     async def run(self, request: RunEvaluationRequest) -> EvaluationHandle:
-        return await self._service.run(self._binding, request)
+        return await self._service.run(self._binding.digest, self._binding.output_schema_fingerprint, request)
 
     async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView:
         return await self._service.inspect(evaluation_id, principal=principal)
@@ -335,7 +364,7 @@ class _EvaluationApi(EvaluationApi):
         return await self._service.snapshot(evaluation_id, principal=principal)
 
     async def replay(self, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle:
-        return await self._service.replay(self._binding, snapshot_id, request)
+        return await self._service.replay(self._binding.digest, snapshot_id, request)
 
 
 class _EvaluationAccess(EvaluationQueryApi):

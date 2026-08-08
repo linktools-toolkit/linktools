@@ -16,7 +16,7 @@ except ModuleNotFoundError as error:
     _TemporalRetryPolicy = None
 
 from .execution import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
-from ...core.errors import ErrorCode, LinktoolsAIError
+from ...core.errors import ErrorCode, AIError
 from ...task.model import SwarmLimits
 
 
@@ -32,7 +32,7 @@ class TaskWorkflowNode:
 
     def __post_init__(self) -> None:
         if not self.task_id.strip() or not self.binding_digest.strip() or len(self.dependencies) > 256 or len(set(self.dependencies)) != len(self.dependencies) or any(not dependency.strip() for dependency in self.dependencies) or self.budget_cost < 1 or self.fence < 0 or (self.fence and not self.owner.strip()) or (self.operation_id and not self.owner.strip()):
-            raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID)
+            raise AIError(ErrorCode.TASK_DAG_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +124,7 @@ async def _run_task_children(
         ready = tuple(sorted((node for node in pending.values() if all(dependency in completed for dependency in node.dependencies)), key=lambda node: node.task_id))
         if not ready:
             if pending:
-                raise LinktoolsAIError(ErrorCode.TASK_GRAPH_DEADLOCK)
+                raise AIError(ErrorCode.TASK_GRAPH_DEADLOCK)
             break
         limits = request.limits
         for offset in range(0, len(ready), limits.max_concurrency):
@@ -172,16 +172,16 @@ async def _run_task_children(
 
 def _validate_graph(nodes: tuple[TaskWorkflowNode, ...], limits: SwarmLimits) -> None:
     if len(nodes) > limits.max_nodes or sum(node.budget_cost for node in nodes) > limits.max_budget:
-        raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID)
+        raise AIError(ErrorCode.TASK_DAG_INVALID)
     identifiers = {node.task_id for node in nodes}
     if len(identifiers) != len(nodes) or any(dependency not in identifiers for node in nodes for dependency in node.dependencies):
-        raise LinktoolsAIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
+        raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
     remaining = {node.task_id: set(node.dependencies) for node in nodes}
     depth: dict[str, int] = {}
     while remaining:
         ready = tuple(sorted(task_id for task_id, dependencies in remaining.items() if not dependencies))
         if not ready:
-            raise LinktoolsAIError(ErrorCode.TASK_GRAPH_CYCLE)
+            raise AIError(ErrorCode.TASK_GRAPH_CYCLE)
         for task_id in ready:
             node = next(node for node in nodes if node.task_id == task_id)
             depth[task_id] = 1 + max((depth[item] for item in node.dependencies), default=0)
@@ -189,7 +189,7 @@ def _validate_graph(nodes: tuple[TaskWorkflowNode, ...], limits: SwarmLimits) ->
         for dependencies in remaining.values():
             dependencies.difference_update(ready)
     if max(depth.values(), default=0) > limits.max_depth:
-        raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID)
+        raise AIError(ErrorCode.TASK_DAG_INVALID)
 
 
 def _validate_child_results(

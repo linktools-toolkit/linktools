@@ -6,7 +6,7 @@ import json
 
 from ..asset.codec import AssetCodec
 from ..asset.model import AssetKey
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from .model import AgentFeatureRef, AgentSpec, PromptSpec
 
 
@@ -29,7 +29,7 @@ class AgentSpecCodec(AssetCodec[AgentSpec]):
     def decode(self, data: bytes) -> AgentSpec:
         raw = json.loads(data.decode("utf-8"))
         if "output_schema_revision" not in raw:
-            raise LinktoolsAIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
         return AgentSpec(raw["id"], raw["revision"], raw["model"], tuple(AgentFeatureRef(item["kind"], item["id"], item.get("revision"), item.get("required", True), item.get("config", {})) for item in raw["features"]), raw["output_schema"], int(raw["output_schema_revision"]), tuple(raw.get("instructions", ())))
 
     def validate_key(self, key: "AssetKey", value: AgentSpec) -> None:

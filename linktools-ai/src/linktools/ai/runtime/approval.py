@@ -8,7 +8,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.principal import AuthorizationAction, AuthorizationPolicy
 from ..core.value import ApprovalStatus
 from .persistence import RuntimePersistence
@@ -42,7 +42,7 @@ class DefaultApprovalService:
         await self._authorize_execution(execution_id, request.principal, AuthorizationAction.APPROVAL_DECIDE)
         record = await self._persistence.approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
         if record is None or record.execution_id != execution_id:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         decision_digest = _decision_digest(request)
         updated = await self._persistence.approvals.decide(
             request.approval_id,
@@ -66,7 +66,7 @@ class DefaultApprovalService:
     async def _authorize_execution(self, execution_id: str, principal: Principal, action: AuthorizationAction) -> None:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
 
 

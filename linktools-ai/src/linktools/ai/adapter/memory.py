@@ -18,7 +18,7 @@ from enum import Enum
 from pathlib import Path
 
 from ..capability.tool import ToolOperationRecord, ToolStateStore
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
 from ..core.paging import Page
@@ -32,7 +32,7 @@ from ..core.value import (
 )
 from ..runtime.persistence import (
     ApprovalRecord, ArtifactRecord, BlobRef, BlobStore, EvaluationRecord, ExecutionEventRecord,
-    ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExternalResultRecord, IdempotencyTerminalUpdate, OperationTerminalUpdate,
+    ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionCancelRequestCommit, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExternalResultRecord, IdempotencyTerminalUpdate, OperationTerminalUpdate,
     IdempotencyRecord, MemoryRecord, OperationLedgerInput, OperationLedgerRecord, ResultRecord, RuntimePersistence,
     RuntimeBackend, RuntimePersistenceMode, RuntimeRepository, SessionRecord, TaskLease, TaskNodeView,
 )
@@ -43,7 +43,7 @@ from linktools.core import environ
 
 _MAX_BLOB_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_INLINE_BLOB_BYTES = 4 * 1024 * 1024
-_logger = environ.get_logger("ai.local.persistence")
+_logger = environ.get_logger("ai.adapter.memory")
 
 
 class _SharedTransactionLock:
@@ -112,13 +112,13 @@ class _Base:
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CLOSED)
+            raise AIError(ErrorCode.STORAGE_CLOSED)
         if self._refresh_source is not None:
             self._refresh_source()
 
     def _check_tenant(self, tenant_id: str) -> None:
         if self._local_tenant_id is not None and tenant_id != self._local_tenant_id:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
 
 
 class _SessionRepository(_Base):
@@ -132,7 +132,7 @@ class _SessionRepository(_Base):
         async with self._lock:
             key = (record.tenant_id, record.session_id)
             if key in self._records:
-                raise LinktoolsAIError(ErrorCode.SESSION_CONFLICT)
+                raise AIError(ErrorCode.SESSION_CONFLICT)
             self._records[key] = record
             self._mark_changed()
             return record
@@ -161,9 +161,9 @@ class _SessionRepository(_Base):
             key = (tenant_id, session_id)
             current = self._records.get(key)
             if current is None or current.revision != expected_revision:
-                raise LinktoolsAIError(ErrorCode.SESSION_REVISION_CONFLICT)
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             if next_record.revision != expected_revision + 1 or next_record.tenant_id != tenant_id:
-                raise LinktoolsAIError(ErrorCode.SESSION_REVISION_CONFLICT)
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             self._records[key] = next_record
             self._mark_changed()
             return next_record
@@ -174,10 +174,12 @@ class _ExecutionRepository(_Base):
         self._records: dict[tuple[str, str], ExecutionRecord] = {}
         self._idempotency: _IdempotencyRepository | None = None
         self._events: _EventRepository | None = None
+        self._operations: _OperationRepository | None = None
 
-    def bind_start_repositories(self, idempotency: "_IdempotencyRepository", events: "_EventRepository") -> None:
+    def bind_start_repositories(self, idempotency: "_IdempotencyRepository", events: "_EventRepository", operations: "_OperationRepository") -> None:
         self._idempotency = idempotency
         self._events = events
+        self._operations = operations
 
     async def create(self, record: ExecutionRecord) -> ExecutionRecord:
         self._ensure_open()
@@ -185,7 +187,7 @@ class _ExecutionRepository(_Base):
         async with self._lock:
             key = (record.tenant_id, record.execution_id)
             if key in self._records:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[key] = record
             self._mark_changed()
             return record
@@ -201,16 +203,16 @@ class _ExecutionRepository(_Base):
         self._check_tenant(tenant_id)
         return self._records.get((tenant_id, execution_id))
 
-    async def compare_and_swap(self, execution_id: str, *, tenant_id: str, expected_snapshot_revision: int, next_record: ExecutionRecord) -> ExecutionRecord:
+    async def compare_and_swap(self, execution_id: str, *, tenant_id: str, expected_revision: int, next_record: ExecutionRecord) -> ExecutionRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         async with self._lock:
             key = (tenant_id, execution_id)
             current = self._records.get(key)
-            if current is None or current.snapshot_revision != expected_snapshot_revision:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
-            if next_record.snapshot_revision != expected_snapshot_revision + 1:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            if current is None or current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if next_record.revision != expected_revision + 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[key] = next_record
             self._mark_changed()
             return next_record
@@ -233,19 +235,19 @@ class _ExecutionRepository(_Base):
         self._ensure_open()
         self._check_tenant(claim.tenant_id)
         if self._idempotency is None or self._events is None:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         async with self._lock:
             key = (claim.tenant_id, claim.execution_id)
             current = self._records.get(key)
             identity = await self._idempotency.get(claim.scope, claim.key_hash, tenant_id=claim.tenant_id)
             if current is None or identity is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
-            if current.status is not ExecutionStatus.PENDING_START or current.snapshot_revision != claim.expected_execution_revision or current.event_sequence != claim.expected_event_sequence or current.agent_run_sequence != 0:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if current.status is not ExecutionStatus.PENDING_START or current.revision != claim.expected_revision or current.event_sequence != claim.expected_event_sequence or current.agent_run_sequence != 0:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if identity.status is not IdempotencyStatus.RESERVED or identity.execution_id != claim.execution_id or identity.request_digest != claim.request_digest:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = claim.started_at
-            started = replace(current, status=ExecutionStatus.STARTED, snapshot_revision=current.snapshot_revision + 1, event_sequence=current.event_sequence + 1, updated_at=now, agent_run_sequence=1)
+            started = replace(current, status=ExecutionStatus.STARTED, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=now, agent_run_sequence=1)
             started_identity = replace(identity, status=IdempotencyStatus.STARTED, updated_at=now)
             event = ExecutionEventRecord(claim.execution_id, claim.tenant_id, claim.expected_event_sequence + 1, ExecutionEventType.EXECUTION_STARTED, {})
             self._records[key] = started
@@ -258,21 +260,21 @@ class _ExecutionRepository(_Base):
         self._ensure_open()
         self._check_tenant(reservation.execution.tenant_id)
         if self._idempotency is None:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if reservation.execution.tenant_id != reservation.idempotency.tenant_id or reservation.execution.execution_id != reservation.idempotency.execution_id:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         async with self._lock:
             idempotency_key = (reservation.idempotency.tenant_id, reservation.idempotency.scope, reservation.idempotency.key_hash)
             existing_idempotency = self._idempotency._records.get(idempotency_key)
             if existing_idempotency is not None:
                 if existing_idempotency.request_digest != reservation.idempotency.request_digest:
-                    raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 existing_execution = self._records.get((existing_idempotency.tenant_id, existing_idempotency.execution_id))
                 if existing_execution is None:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return ExecutionStartReservationResult(existing_execution, existing_idempotency, False)
             if (reservation.execution.tenant_id, reservation.execution.execution_id) in self._records:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[(reservation.execution.tenant_id, reservation.execution.execution_id)] = reservation.execution
             self._idempotency._records[idempotency_key] = reservation.idempotency
             self._mark_changed()
@@ -284,9 +286,9 @@ class _ExecutionRepository(_Base):
         async with self._lock:
             key = (tenant_id, execution_id)
             current = self._records.get(key)
-            if current is None or current.status is not ExecutionStatus.STARTED or current.snapshot_revision != expected_revision or current.agent_run_sequence != expected_agent_run_sequence:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
-            updated = replace(current, snapshot_revision=current.snapshot_revision + 1, agent_run_sequence=current.agent_run_sequence + 1, updated_at=datetime.now(timezone.utc))
+            if current is None or current.status is not ExecutionStatus.STARTED or current.revision != expected_revision or current.agent_run_sequence != expected_agent_run_sequence:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            updated = replace(current, revision=current.revision + 1, agent_run_sequence=current.agent_run_sequence + 1, updated_at=datetime.now(timezone.utc))
             self._records[key] = updated
             self._mark_changed()
             return updated
@@ -295,19 +297,41 @@ class _ExecutionRepository(_Base):
         self._ensure_open()
         self._check_tenant(commit.tenant_id)
         if self._idempotency is None or self._events is None:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         async with self._lock:
             key = (commit.tenant_id, commit.execution_id)
             current = self._records.get(key)
             identity = await self._idempotency.get(commit.scope, commit.key_hash, tenant_id=commit.tenant_id)
-            if current is None or identity is None or current.status is not ExecutionStatus.STARTED or current.snapshot_revision != commit.expected_execution_revision or identity.status is not IdempotencyStatus.STARTED:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
-            unknown = replace(current, status=ExecutionStatus.START_UNKNOWN, snapshot_revision=current.snapshot_revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.started_at)
+            if current is None or identity is None or current.status is not ExecutionStatus.STARTED or current.revision != commit.expected_revision or identity.status is not IdempotencyStatus.STARTED:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            unknown = replace(current, status=ExecutionStatus.START_UNKNOWN, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.occurred_at)
             self._records[key] = unknown
-            self._idempotency._records[(commit.tenant_id, commit.scope, commit.key_hash)] = replace(identity, status=IdempotencyStatus.START_UNKNOWN, updated_at=commit.started_at)
+            self._idempotency._records[(commit.tenant_id, commit.scope, commit.key_hash)] = replace(identity, status=IdempotencyStatus.START_UNKNOWN, updated_at=commit.occurred_at)
             self._events._items.setdefault((commit.tenant_id, commit.execution_id), []).append(ExecutionEventRecord(commit.execution_id, commit.tenant_id, current.event_sequence + 1, ExecutionEventType.EXECUTION_START_UNKNOWN, {}))
             self._mark_changed()
             return unknown
+
+    async def request_cancel(self, commit: ExecutionCancelRequestCommit) -> ExecutionRecord:
+        self._ensure_open()
+        self._check_tenant(commit.tenant_id)
+        if self._events is None or self._operations is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        async with self._lock:
+            key = (commit.tenant_id, commit.execution_id)
+            current = self._records.get(key)
+            operation = await self._operations.get(commit.operation_id, tenant_id=commit.tenant_id)
+            events = self._events._items.get(key, ())
+            if current is None or operation is None or operation.status is not OperationStatus.PENDING or operation.execution_id != commit.execution_id:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if current.status is ExecutionStatus.CANCELLING and any(item.event_type is ExecutionEventType.CANCEL_REQUESTED for item in events):
+                return current
+            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            updated = replace(current, status=ExecutionStatus.CANCELLING, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.requested_at)
+            self._records[key] = updated
+            self._events._items.setdefault(key, []).append(ExecutionEventRecord(commit.execution_id, commit.tenant_id, commit.expected_event_sequence + 1, ExecutionEventType.CANCEL_REQUESTED, {}))
+            self._mark_changed()
+            return updated
 
     async def advance_sequence(self, execution_id: str, *, tenant_id: str, kind: str, expected_sequence: int) -> ExecutionRecord:
         self._ensure_open()
@@ -316,16 +340,16 @@ class _ExecutionRepository(_Base):
             key = (tenant_id, execution_id)
             current = self._records.get(key)
             if current is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if kind != "event":
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             sequence = current.event_sequence
             if sequence != expected_sequence:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             updated = replace(
                 current,
                 event_sequence=sequence + 1,
-                snapshot_revision=current.snapshot_revision + 1,
+                revision=current.revision + 1,
                 updated_at=datetime.now(timezone.utc),
             )
             self._records[key] = updated
@@ -338,12 +362,12 @@ class _ExecutionRepository(_Base):
         async with self._lock:
             key = (tenant_id, execution_id)
             current = self._records.get(key)
-            if current is None or current.snapshot_revision != expected_revision:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
-            if next_record.tenant_id != tenant_id or next_record.execution_id != execution_id or next_record.snapshot_revision != expected_revision + 1:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            if current is None or current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if next_record.tenant_id != tenant_id or next_record.execution_id != execution_id or next_record.revision != expected_revision + 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if next_record.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[key] = next_record
             self._mark_changed()
             return next_record
@@ -358,7 +382,7 @@ class _IdempotencyRepository(_Base):
         self._ensure_open()
         self._check_tenant(record.tenant_id)
         if re.fullmatch(r"[0-9a-f]{64}", record.key_hash) is None:
-            raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         async with self._lock:
             key = (record.tenant_id, record.scope, record.key_hash)
             current = self._records.get(key)
@@ -367,7 +391,7 @@ class _IdempotencyRepository(_Base):
                 self._mark_changed()
                 return record
             if current.request_digest != record.request_digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return current
 
     async def get(self, scope: str, key_hash: str, *, tenant_id: str) -> IdempotencyRecord | None:
@@ -387,9 +411,9 @@ class _IdempotencyRepository(_Base):
             store_key = (tenant_id, scope, key_hash)
             current = self._records.get(store_key)
             if current is None or current.status is not expected_status:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if next_record.tenant_id != tenant_id or next_record.key_hash != key_hash:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[store_key] = next_record
             self._mark_changed()
             return next_record
@@ -409,7 +433,7 @@ class _EventRepository(_Base):
             items = self._items.setdefault((tenant_id, execution_id), [])
             sequence = items[-1].sequence if items else 0
             if sequence != expected_sequence:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             item = ExecutionEventRecord(execution_id, tenant_id, sequence + 1, event_type, payload)
             await self._executions.advance_sequence(execution_id, tenant_id=tenant_id, kind="event", expected_sequence=expected_sequence)
             items.append(item)
@@ -420,7 +444,7 @@ class _EventRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         if not 1 <= limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         values = tuple(item for item in self._items.get((tenant_id, execution_id), ()) if item.sequence > after_sequence)
         return Page(values[:limit], str(values[limit - 1].sequence) if len(values) > limit else None)
 
@@ -443,7 +467,7 @@ class _ResultRepository(_Base):
 
     async def commit_terminal(self, commit: ExecutionTerminalCommit) -> ExecutionTerminalCommitResult:
         self._ensure_open()
-        execution = commit.terminal_execution
+        execution = commit.execution
         self._check_tenant(execution.tenant_id)
         result = commit.result
         if (
@@ -452,18 +476,18 @@ class _ResultRepository(_Base):
             or execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
             or result.status is not execution.status
         ):
-            raise LinktoolsAIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         if commit.expected_event_sequence < 0 or execution.event_sequence != commit.expected_event_sequence + 1:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         if commit.terminal_event_type not in {ExecutionEventType.EXECUTION_SUCCEEDED, ExecutionEventType.EXECUTION_FAILED, ExecutionEventType.EXECUTION_CANCELLED}:
-            raise LinktoolsAIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         if not isinstance(commit.terminal_event_payload, dict):
-            raise LinktoolsAIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         validate_observation_payload(commit.terminal_event_payload)
         if commit.session_head is not None and (execution.status is not ExecutionStatus.SUCCEEDED or execution.lineage_kind not in {ExecutionLineageKind.SESSION_RESUME, ExecutionLineageKind.RETRY}):
-            raise LinktoolsAIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         if self._sessions is None or self._idempotency is None or self._events is None or self._operations is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = (execution.tenant_id, execution.execution_id)
         async with self._lock:
             current_result = self._results.get(key)
@@ -473,13 +497,15 @@ class _ResultRepository(_Base):
                 identity = self._find_idempotency(commit, execution)
                 if (current is not None and current.status is execution.status and current.result_digest == execution.result_digest and current_result == result and len(event) > commit.expected_event_sequence and event[commit.expected_event_sequence].event_type is commit.terminal_event_type and event[commit.expected_event_sequence].payload == commit.terminal_event_payload and self._idempotency_matches(identity, commit.idempotency)):
                     return ExecutionTerminalCommitResult(current, current_result)
-                raise LinktoolsAIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
+                raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
             current = self._executions._records.get(key)
-            if current is None or current.snapshot_revision != commit.expected_execution_revision or current.event_sequence != commit.expected_event_sequence or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            if current is None or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             identity = self._find_idempotency(commit, execution)
             self._validate_idempotency(identity, commit.idempotency, execution)
             self._validate_operation(commit.operation, execution)
+            if execution.revision != commit.expected_revision + 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._executions._records[key] = execution
             self._results[key] = result
             self._events._items.setdefault(key, []).append(ExecutionEventRecord(execution.execution_id, execution.tenant_id, commit.expected_event_sequence + 1, commit.terminal_event_type, commit.terminal_event_payload))
@@ -499,16 +525,16 @@ class _ResultRepository(_Base):
     def _find_idempotency(self, commit: ExecutionTerminalCommit, execution: ExecutionRecord) -> IdempotencyRecord | None:
         records = tuple(record for record in self._idempotency._records.values() if record.tenant_id == execution.tenant_id and record.execution_id == execution.execution_id)
         if len(records) > 1:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return records[0] if records else None
 
     def _validate_idempotency(self, current: IdempotencyRecord | None, update: IdempotencyTerminalUpdate | None, execution: ExecutionRecord) -> None:
         if update is None:
             if current is not None and current.status in {IdempotencyStatus.RESERVED, IdempotencyStatus.STARTED}:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
         if current is None or current.tenant_id != execution.tenant_id or current.execution_id != execution.execution_id or current.scope != update.scope or current.key_hash != update.key_hash or current.request_digest != update.request_digest or current.status is not update.expected_status:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _idempotency_matches(self, current: IdempotencyRecord | None, update: IdempotencyTerminalUpdate | None) -> bool:
         return update is None or (current is not None and current.status is update.next_status and current.result_digest == update.result_digest and current.error_code == update.error_code)
@@ -518,7 +544,7 @@ class _ResultRepository(_Base):
             return
         current = self._operations._records.get((execution.tenant_id, update.operation_id))
         if current is None or current.execution_id != execution.execution_id or current.status is not update.expected_status:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def get(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
         self._ensure_open()
@@ -544,9 +570,9 @@ class _MemoryRepository(_Base):
             key = (record.tenant_id, record.memory_id)
             current = self._records.get(key)
             if current is None and expected_revision not in (None, 0):
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             if current is not None and current.revision != expected_revision:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             next_record = replace(record, revision=0 if current is None else current.revision + 1)
             self._records[key] = next_record
             self._mark_changed()
@@ -561,7 +587,7 @@ class _MemoryRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         if not 1 <= limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         values = tuple(sorted((item for item in self._records.values() if item.tenant_id == tenant_id and item.owner_id == owner_id), key=lambda item: item.memory_id))
         start = 0 if cursor is None else next((index + 1 for index, item in enumerate(values) if item.memory_id == cursor), len(values))
         page = values[start:start + limit]
@@ -578,7 +604,7 @@ class _ArtifactRepository(_Base):
         self._check_tenant(record.tenant_id)
         current = self._records.get((record.tenant_id, record.artifact_id))
         if current is not None and current != record:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._records[(record.tenant_id, record.artifact_id)] = record
         self._mark_changed()
         return record
@@ -598,7 +624,7 @@ class _ArtifactRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         if not 1 <= limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         values = tuple(sorted((item for item in self._records.values() if item.tenant_id == tenant_id and item.execution_id == execution_id), key=lambda item: item.artifact_id))
         start = 0 if cursor is None else next((index + 1 for index, item in enumerate(values) if item.artifact_id == cursor), len(values))
         page = values[start:start + limit]
@@ -623,7 +649,7 @@ class _ApprovalRepository(_Base):
         if current is not None:
             if current == record:
                 return current
-            raise LinktoolsAIError(ErrorCode.APPROVAL_CONFLICT)
+            raise AIError(ErrorCode.APPROVAL_CONFLICT)
         self._records[(record.tenant_id, record.approval_id)] = record
         self._mark_changed()
         return record
@@ -641,7 +667,7 @@ class _ApprovalRepository(_Base):
             if current is None or current.status is not expected_status:
                 if current is not None and current.decision_id == decision_id and current.decision is decision and current.decision_digest == decision_digest:
                     return current
-                raise LinktoolsAIError(ErrorCode.APPROVAL_CONFLICT)
+                raise AIError(ErrorCode.APPROVAL_CONFLICT)
             updated = replace(current, status=ApprovalStatus.APPROVED if decision is ApprovalDecision.APPROVE else ApprovalStatus.DENIED, decision_id=decision_id, decision=decision, decided_by=principal_id, decision_digest=decision_digest, decided_at=decided_at)
             self._records[(tenant_id, approval_id)] = updated
             self._mark_changed()
@@ -671,7 +697,7 @@ class _ExternalRepository(_Base):
         if current is not None:
             if current == record:
                 return current
-            raise LinktoolsAIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
         self._records[(record.tenant_id, record.call_id)] = record
         self._mark_changed()
         return record
@@ -688,7 +714,7 @@ class _ExternalRepository(_Base):
         if current is None or current.status is not expected_status:
             if current is not None and current.result_id == result_id and current.payload_ref == payload_ref and current.payload_digest == payload_digest:
                 return current
-            raise LinktoolsAIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
+            raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
         updated = replace(current, status=ExternalCallStatus.SUPPLIED, result_id=result_id, payload_ref=payload_ref, payload_digest=payload_digest, supplied_at=supplied_at)
         self._records[(tenant_id, call_id)] = updated
         self._mark_changed()
@@ -713,7 +739,7 @@ class _OperationRepository(_Base):
             current = self._records.get(key)
             if current is not None:
                 if _operation_immutable(current) != _operation_input_immutable(record):
-                    raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return current
             sequence = max(
                 (item.sequence for item in self._records.values() if item.tenant_id == record.tenant_id and item.resource_kind is record.resource_kind and item.resource_id == record.resource_id),
@@ -748,7 +774,7 @@ class _OperationRepository(_Base):
                 or next_record.resource_id != current.resource_id
                 or next_record.sequence != current.sequence
             ):
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[(tenant_id, operation_id)] = next_record
             self._mark_changed()
             return next_record
@@ -757,7 +783,7 @@ class _OperationRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         if limit < 1 or limit > 1000:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         values = tuple(item for item in self._records.values() if item.tenant_id == tenant_id and item.resource_kind is resource_kind and item.resource_id == resource_id and item.status in {OperationStatus.PENDING, OperationStatus.RUNNING})
         return tuple(sorted(values, key=lambda item: item.sequence))[:limit]
 
@@ -790,7 +816,7 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         key = (tenant_id, graph.graph_id)
         if key in self._plans:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         view = TaskGraphView(graph.graph_id, TaskStatus.PENDING, graph.nodes)
         self._plans[key] = view
         for node in graph.nodes:
@@ -808,7 +834,7 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         current = self._plans.get((tenant_id, graph_id))
         if current is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
             return current
         updated = replace(current, status=TaskStatus.CANCELLED)
@@ -829,21 +855,21 @@ class _TaskRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         if not owner.strip() or not 1 <= lease_seconds <= 3600:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (tenant_id, graph_id, task_id)
         async with self._lock:
             current = self._nodes.get(key)
             if current is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             now = datetime.now(timezone.utc)
             reclaimable = current.status is TaskStatus.RUNNING and current.lease_expires_at is not None and current.lease_expires_at <= now
             if current.status not in {TaskStatus.PENDING, TaskStatus.READY} and not reclaimable:
-                raise LinktoolsAIError(ErrorCode.TASK_NOT_READY)
+                raise AIError(ErrorCode.TASK_NOT_READY)
             dependencies = tuple(self._nodes.get((tenant_id, graph_id, dependency)) for dependency in current.dependencies)
             if any(dependency is None for dependency in dependencies):
-                raise LinktoolsAIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
+                raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
             if any(dependency.status is not TaskStatus.SUCCEEDED for dependency in dependencies if dependency is not None):
-                raise LinktoolsAIError(ErrorCode.TASK_NOT_READY)
+                raise AIError(ErrorCode.TASK_NOT_READY)
             fence = current.fence + 1
             expiry = now + timedelta(seconds=lease_seconds)
             self._nodes[key] = replace(current, status=TaskStatus.RUNNING, owner=owner, fence=fence, lease_expires_at=expiry)
@@ -855,7 +881,7 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
         if current is None or current.owner != lease.owner or current.fence != lease.fence or current.lease_expires_at is None or current.lease_expires_at <= datetime.now(timezone.utc):
-            raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
         self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, lease_expires_at=expiry)
         self._mark_changed()
@@ -866,11 +892,11 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
         if current is None or current.owner != lease.owner or current.fence != lease.fence:
-            raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
             if current.status is TaskStatus.SUCCEEDED and current.result_digest == result_digest:
                 return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, result_digest, None, None)
-            raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
+            raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
         self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.SUCCEEDED, result_digest=result_digest, lease_expires_at=None)
         self._mark_changed()
         return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None)
@@ -880,11 +906,11 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
         if current is None or current.owner != lease.owner or current.fence != lease.fence:
-            raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
             if current.status is TaskStatus.FAILED and current.error_code == error_code and current.error_digest == error_digest:
                 return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, None, error_code, error_digest)
-            raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
+            raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
         self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.FAILED, error_code=error_code, error_digest=error_digest, lease_expires_at=None)
         self._mark_changed()
         return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
@@ -913,7 +939,7 @@ class _EvaluationRepository(_Base):
             if current is not None:
                 if current == record:
                     return current
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[(record.tenant_id, record.evaluation_id)] = record
             self._mark_changed()
             return record
@@ -935,7 +961,7 @@ class _EvaluationRepository(_Base):
                 or next_record.tenant_id != tenant_id
                 or next_record.revision != expected_revision + 1
             ):
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[(tenant_id, evaluation_id)] = next_record
             self._mark_changed()
             return next_record
@@ -955,7 +981,7 @@ class _ToolRepository(_Base, ToolStateStore):
         self._ensure_open()
         self._check_tenant(record.tenant_id)
         if re.fullmatch(r"[0-9a-f]{64}", record.idempotency_key_hash) is None:
-            raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         key = (record.tenant_id, record.operation_id)
         current = self._records.get(key)
         if current is not None:
@@ -968,7 +994,7 @@ class _ToolRepository(_Base, ToolStateStore):
                 or current.binding_fingerprint != record.binding_fingerprint
                 or current.replay_safe != record.replay_safe
             ):
-                raise LinktoolsAIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             return current
         self._records[key] = record
         self._mark_changed()
@@ -984,16 +1010,16 @@ class _ToolRepository(_Base, ToolStateStore):
         self._check_tenant(tenant_id)
         current = self._records.get((tenant_id, operation_id))
         if current is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if current.status in {ToolOperationStatus.COMPLETED, ToolOperationStatus.FAILED, ToolOperationStatus.EFFECT_UNKNOWN, ToolOperationStatus.CANCELLED}:
-            raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
+            raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
         if current.status is ToolOperationStatus.CLAIMED and current.lease_expires_at is not None and current.lease_expires_at <= datetime.now(timezone.utc) and not current.replay_safe:
             unknown = replace(current, status=ToolOperationStatus.EFFECT_UNKNOWN, lease_expires_at=None)
             self._records[(tenant_id, operation_id)] = unknown
             self._mark_changed()
-            raise LinktoolsAIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
         if current.owner is not None and current.lease_expires_at is not None and current.lease_expires_at > datetime.now(timezone.utc):
-            raise LinktoolsAIError(ErrorCode.TASK_OWNER_CONFLICT)
+            raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
         updated = replace(current, status=ToolOperationStatus.CLAIMED, owner=owner, fence=current.fence + 1, lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=lease_seconds))
         self._records[(tenant_id, operation_id)] = updated
         self._mark_changed()
@@ -1015,7 +1041,7 @@ class _ToolRepository(_Base, ToolStateStore):
         if current.status is ToolOperationStatus.COMPLETED:
             if current.result_digest == result_digest:
                 return current
-            raise LinktoolsAIError(ErrorCode.TOOL_RESULT_CONFLICT)
+            raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
         updated = replace(current, status=ToolOperationStatus.COMPLETED, result_ref=result_ref, result_digest=result_digest, lease_expires_at=None)
         self._records[(tenant_id, operation_id)] = updated
         self._mark_changed()
@@ -1033,7 +1059,7 @@ class _ToolRepository(_Base, ToolStateStore):
     async def _require_claim(self, operation_id: str, tenant_id: str, owner: str, fence: int) -> ToolOperationRecord:
         current = self._records.get((tenant_id, operation_id))
         if current is None or current.owner != owner or current.fence != fence or current.lease_expires_at is None or current.lease_expires_at <= datetime.now(timezone.utc):
-            raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         return current
 
 
@@ -1049,7 +1075,7 @@ class MemoryBlobStore(_Base, BlobStore):
             raise ValueError("put_stream is required for blobs larger than 4 MiB")
         digest = hashlib.sha256(data).hexdigest()
         if expected_digest is not None and expected_digest != digest:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._blobs[(tenant_id, digest)] = data
         self._mark_changed()
         return BlobRef(tenant_id, digest, len(data), f"memory:{self.namespace}:{tenant_id}:{digest}")
@@ -1057,7 +1083,7 @@ class MemoryBlobStore(_Base, BlobStore):
     async def put_stream(self, *, tenant_id: str, chunks: AsyncIterator[bytes], expected_size: int, expected_digest: str) -> BlobRef:
         self._ensure_open()
         if expected_size < 0 or expected_size > _MAX_BLOB_BYTES:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         self._check_tenant(tenant_id)
         data = bytearray()
         async for chunk in chunks:
@@ -1065,7 +1091,7 @@ class MemoryBlobStore(_Base, BlobStore):
                 raise ValueError("invalid blob chunk")
             data.extend(chunk)
         if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_digest:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._blobs[(tenant_id, expected_digest)] = bytes(data)
         self._mark_changed()
         return BlobRef(tenant_id, expected_digest, len(data), f"memory:{self.namespace}:{tenant_id}:{expected_digest}")
@@ -1081,7 +1107,7 @@ class MemoryBlobStore(_Base, BlobStore):
         self._check_tenant(tenant_id)
         data = self._blobs.get((tenant_id, ref.digest))
         if data is None or ref.tenant_id != tenant_id:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for offset in range(0, len(data), 64 * 1024):
             yield data[offset:offset + 64 * 1024]
 
@@ -1109,14 +1135,14 @@ class FileBlobStore(_Base, BlobStore):
             raise ValueError("put_stream is required for blobs larger than 4 MiB")
         digest = hashlib.sha256(data).hexdigest()
         if expected_digest is not None and expected_digest != digest:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._publish(tenant_id, digest, data)
 
     async def put_stream(self, *, tenant_id: str, chunks: AsyncIterator[bytes], expected_size: int, expected_digest: str) -> BlobRef:
         self._ensure_open()
         self._check_tenant(tenant_id)
         if expected_size < 0 or expected_size > _MAX_BLOB_BYTES:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         _validate_blob_digest(expected_digest)
         target = self._body_path(tenant_id, expected_digest)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1151,7 +1177,7 @@ class FileBlobStore(_Base, BlobStore):
                 await asyncio.to_thread(handle.flush)
                 await asyncio.to_thread(os.fsync, handle.fileno())
             if size != expected_size or digest.hexdigest() != expected_digest:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             lease = await self._leases.acquire(f"blob:{tenant_id}:{expected_digest}")
             try:
                 await asyncio.to_thread(self._commit_upload, journal, journal_payload, lease.fence)
@@ -1172,15 +1198,15 @@ class FileBlobStore(_Base, BlobStore):
         body = self._body_path(tenant_id, ref.digest)
         if metadata is None:
             if body.exists():
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return None
         if metadata.get("tenant_id") != tenant_id or metadata.get("digest") != ref.digest or metadata.get("status") != "COMPLETED" or not body.is_file():
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             if body.stat().st_size != int(metadata["size"]):
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         except (OSError, TypeError, ValueError) as error:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return BlobRef(tenant_id, ref.digest, int(metadata["size"]), ref.locator or f"file:{self.namespace}:{tenant_id}:{ref.digest}")
 
     def open(self, ref: BlobRef, *, tenant_id: str) -> AsyncIterator[bytes]:
@@ -1189,7 +1215,7 @@ class FileBlobStore(_Base, BlobStore):
     async def _open(self, ref: BlobRef, tenant_id: str) -> AsyncIterator[bytes]:
         blob = await self.stat(ref, tenant_id=tenant_id)
         if blob is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         path = self._body_path(tenant_id, blob.digest)
         digest = hashlib.sha256()
         size = 0
@@ -1202,7 +1228,7 @@ class FileBlobStore(_Base, BlobStore):
                 size += len(chunk)
                 yield chunk
         if size != blob.size or digest.hexdigest() != blob.digest:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _publish(self, tenant_id: str, digest: str, data: bytes) -> BlobRef:
         async def chunks() -> AsyncIterator[bytes]:
@@ -1220,7 +1246,7 @@ class FileBlobStore(_Base, BlobStore):
         tenant_id = str(payload["tenant_id"])
         digest = str(payload["digest"])
         if not temporary.is_file():
-            raise LinktoolsAIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, target)
         _fsync_directory(target.parent)
@@ -1237,7 +1263,7 @@ class FileBlobStore(_Base, BlobStore):
             try:
                 payload = read_json(journal)
                 if payload.get("namespace") != self.namespace or payload.get("record_type") != "blob-upload":
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 temporary = Path(str(payload["temporary"]))
                 target = Path(str(payload["body"]))
                 metadata = Path(str(payload["metadata"]))
@@ -1246,9 +1272,9 @@ class FileBlobStore(_Base, BlobStore):
                 if target.is_file() and metadata.is_file():
                     journal.unlink(missing_ok=True)
                 elif target.is_file() and not metadata.is_file() and not temporary.is_file():
-                    raise LinktoolsAIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 elif metadata.is_file() and not target.is_file() and not temporary.is_file():
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 elif temporary.is_file():
                     target.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(temporary, target)
@@ -1258,10 +1284,10 @@ class FileBlobStore(_Base, BlobStore):
                     target.unlink(missing_ok=True)
                     metadata.unlink(missing_ok=True)
                     journal.unlink(missing_ok=True)
-            except LinktoolsAIError:
+            except AIError:
                 raise
             except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
-                raise LinktoolsAIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
 
     def _body_path(self, tenant_id: str, digest: str) -> Path:
         _validate_blob_digest(digest)
@@ -1278,13 +1304,13 @@ class FileBlobStore(_Base, BlobStore):
         try:
             value = read_json(path)
             if value.get("schema_version") != 1 or value.get("record_type") != "blob-meta" or value.get("namespace") != self.namespace:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             payload = value.get("payload")
             if not isinstance(payload, dict) or value.get("payload_sha256") != canonical_sha256(payload):
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return payload
         except (OSError, TypeError, ValueError):
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _write_metadata(self, tenant_id: str, digest: str, size: int) -> None:
         payload: dict[str, JsonValue] = {"tenant_id": tenant_id, "digest": digest, "size": size, "status": "COMPLETED"}
@@ -1395,10 +1421,10 @@ class _DurableRuntime(MemoryRuntime):
     def _commit(self) -> None:
         with self._commit_lock:
             if self._closed:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CLOSED)
+                raise AIError(ErrorCode.STORAGE_CLOSED)
             try:
                 self._flush()
-            except LinktoolsAIError as error:
+            except AIError as error:
                 if error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
                     self._closed = True
                     raise
@@ -1406,7 +1432,7 @@ class _DurableRuntime(MemoryRuntime):
                 raise
             except BaseException as error:
                 self._load()
-                raise LinktoolsAIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     def _load_payload(self, value: dict[str, JsonValue]) -> None:
         sessions = self.components[0]
@@ -1423,7 +1449,7 @@ class _DurableRuntime(MemoryRuntime):
         operations = self.components[11]
         tools = self.components[12]
         if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository):
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._clear_payload()
         for raw in value.get("sessions", []):
             sessions._records[(str(raw["tenant_id"]), str(raw["session_id"]))] = _session_from_json(raw)
@@ -1544,7 +1570,7 @@ class _DurableRuntime(MemoryRuntime):
         operations = self.components[11]
         tools = self.components[12]
         if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository):
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return {
             "sessions": [_record_json(item) for item in sorted(sessions._records.values(), key=lambda value: (value.tenant_id, value.session_id))],
             "executions": [_record_json(item) for item in sorted(executions._records.values(), key=lambda value: (value.tenant_id, value.execution_id))],
@@ -1571,7 +1597,7 @@ class FileRuntime(_DurableRuntime):
         if not state_path.is_file():
             legacy = state_path.parent / "runtime-file-manifest.json"
             if legacy.exists() or (state_path.parent / "session-state").exists():
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             payload: dict[str, JsonValue] = {"sessions": [], "executions": [], "results": [], "idempotency": [], "events": [], "tasks": [], "evaluations": [], "memories": [], "artifacts": [], "approvals": [], "externals": [], "operations": [], "tools": []}
             self._load_payload(payload)
             return
@@ -1595,7 +1621,7 @@ class FileRuntime(_DurableRuntime):
             self._load_payload(payload)
             self._validate_payload()
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     async def initialize(self) -> None:
         if self._initialized:
             return
@@ -1613,18 +1639,18 @@ class FileRuntime(_DurableRuntime):
             for key, result in results._results.items():
                 execution = executions._records.get(key)
                 if execution is None or execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or execution.status is not result.status:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             for key, execution in executions._records.items():
                 if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and key not in results._results:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for component in self.components:
             if isinstance(component, _EventRepository):
                 for key, records in component._items.items():
                     if [item.sequence for item in records] != list(range(1, len(records) + 1)):
-                        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     execution = executions._records.get(key) if isinstance(executions, _ExecutionRepository) else None
                     if execution is None or execution.event_sequence != len(records):
-                        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
@@ -1696,13 +1722,13 @@ def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
-    return ExecutionRecord(str(value["execution_id"]), str(value["tenant_id"]), None if value.get("session_id") is None else str(value["session_id"]), ExecutionProfile(str(value["profile"])), str(value["binding_digest"]), None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), str(value["root_execution_id"]), ExecutionStatus(str(value["status"])), int(value["snapshot_revision"]), int(value["event_sequence"]), None if value.get("result_ref") is None else str(value["result_ref"]), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), value.get("safe_error_details", {}), _time(value["created_at"]), _time(value["updated_at"]), None if value.get("source_execution_id") is None else str(value["source_execution_id"]), None if value.get("base_execution_id") is None else str(value["base_execution_id"]), ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), int(value.get("agent_run_sequence", 0)))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), profile=ExecutionProfile(str(value["profile"])), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]))
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
     key_hash = str(value["key_hash"])
     if re.fullmatch(r"[0-9a-f]{64}", key_hash) is None:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return IdempotencyRecord(str(value["tenant_id"]), str(value["scope"]), key_hash, str(value["request_digest"]), str(value["execution_id"]), IdempotencyStatus(str(value["status"])), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), _time(value["created_at"]), _time(value["updated_at"]))
 
 
@@ -1775,7 +1801,7 @@ def _fsync_directory(path: Path) -> None:
 
 def _validate_blob_digest(value: str) -> None:
     if re.fullmatch(r"[0-9a-f]{64}", value) is None:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _operation_immutable(record: OperationLedgerRecord) -> tuple[object, ...]:
@@ -1816,7 +1842,7 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str |
         _ToolRepository(*args),
         FileBlobStore(Path(state_path).parent, *args) if backend is RuntimeBackend.FILE and state_path is not None else MemoryBlobStore(*args),
     )
-    executions.bind_start_repositories(components[3], components[4])
+    executions.bind_start_repositories(components[3], components[4], components[11])
     components[2].bind_terminal_repositories(components[0], components[3], components[4], components[11])
     transaction_lock = _SharedTransactionLock()
     for component in components:
@@ -1857,14 +1883,14 @@ def build_memory_runtime(*, namespace: str | None = None) -> MemoryRuntime:
     return _build_runtime(RuntimeBackend.MEMORY, namespace=namespace or f"memory-{uuid.uuid4().hex}")
 
 
-def build_file_runtime(root: str, *, project_id: str, local_tenant_id: str, writer_lock: FileWriterLock | None = None) -> FileRuntime:
-    if not local_tenant_id.strip() or not project_id.strip():
+def build_file_runtime(root: str, *, workspace_id: str, writer_lock: FileWriterLock | None = None) -> FileRuntime:
+    if not workspace_id.strip():
         raise ValueError("FILE runtime identity is incomplete")
     root_path = Path(root).expanduser().resolve()
-    namespace_digest = hashlib.sha256(project_id.encode("utf-8")).hexdigest()
+    namespace_digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
     state_path = root_path / ".linktools" / "runtime" / namespace_digest / "state.json"
-    domain = hashlib.sha256(f"file{root_path}{project_id}2".encode("utf-8")).hexdigest()
-    return _build_runtime(RuntimeBackend.FILE, namespace=project_id, state_path=str(state_path), atomic_domain_id=domain, local_tenant_id=local_tenant_id, writer_lock=writer_lock)
+    domain = hashlib.sha256(f"file{root_path}{workspace_id}2".encode("utf-8")).hexdigest()
+    return _build_runtime(RuntimeBackend.FILE, namespace=workspace_id, state_path=str(state_path), atomic_domain_id=domain, local_tenant_id=workspace_id, writer_lock=writer_lock)
 
 
 __all__ = ["FileBlobStore", "FileRuntime", "MemoryBlobStore", "MemoryRuntime", "build_file_runtime", "build_memory_runtime"]

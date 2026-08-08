@@ -3,7 +3,7 @@
 import pytest
 
 from linktools import utils
-from linktools.errors import LinktoolsError
+from linktools.errors import Error
 
 
 # ----------------------------------------------------------------------
@@ -31,7 +31,7 @@ def test_safe_remove_outside_root_rejected(tmp_path):
     outside = tmp_path.parent / "sibling-target"
     outside.mkdir(exist_ok=True)
     try:
-        with pytest.raises(LinktoolsError):
+        with pytest.raises(Error):
             utils.safe_remove(outside, root=tmp_path)
         assert outside.exists()  # untouched
     finally:

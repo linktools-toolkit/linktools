@@ -1,5 +1,5 @@
 {
-  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "local", "adapter", "temporal", "entry"],
+  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal", "app"],
   "dependencies": {
     "core": [],
     "storage": ["core"],
@@ -10,11 +10,11 @@
     "capability": ["core", "asset", "spec", "observe"],
     "task": ["core", "observe"],
     "agent": ["core", "spec", "model", "observe", "capability"],
-    "runtime": ["core", "spec", "model", "observe", "capability", "task", "agent"],
-    "local": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "runtime": ["core", "observe", "task"],
+    "workspace": ["core", "storage", "asset", "spec", "model", "observe", "capability"],
     "adapter": ["core", "storage", "spec", "model", "observe", "capability", "task", "runtime"],
     "temporal": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
-    "entry": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "local", "adapter", "temporal"]
+    "app": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal"]
   },
   "module_dependencies": {
     "adapter.sql": ["core", "storage", "runtime", "capability", "task"],
@@ -23,9 +23,11 @@
     "adapter.provider": ["core", "model"],
     "adapter.principal": ["core"],
     "adapter.schema": ["core", "storage"],
-    "runtime.factory": ["core", "spec", "model", "observe", "capability", "task", "agent"],
-    "runtime.services": ["core", "observe", "task", "agent"],
-    "agent.context": ["core", "spec", "model"]
+    "app.runtime": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "app.services": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
+    "app.workspace": ["core", "storage", "agent", "runtime", "workspace"],
+    "agent.binding": ["core", "spec", "model"],
+    "temporal.context": ["core", "agent"]
   },
   "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
   "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],

@@ -8,7 +8,7 @@ from linktools.cli.exitcodes import (
 )
 from linktools.cli.command import CommandError
 from linktools.errors import (
-    LinktoolsError, ConfigError, DownloadError, GitError, SSHError, ToolError,
+    Error, ConfigError, DownloadError, GitError, SSHError, ToolError,
     CacheError, EnvironmentError,
 )
 
@@ -34,7 +34,7 @@ def test_other_linktools_error_is_internal():
     # Cache / Environment are not user-input/config/network/tool -> internal.
     assert exit_code_for(CacheError("x")) == EXIT_INTERNAL
     assert exit_code_for(EnvironmentError("x")) == EXIT_INTERNAL
-    assert exit_code_for(LinktoolsError("x")) == EXIT_INTERNAL
+    assert exit_code_for(Error("x")) == EXIT_INTERNAL
 
 
 def test_plain_exception_is_internal():

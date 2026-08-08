@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, TypeAlias
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..storage.database import SqlSchemaRegistry
 from ..storage.dialects import SqlAlchemyDialect, resolve_dialect
 from ..storage.names import storage_name
@@ -49,7 +49,7 @@ try:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 except ModuleNotFoundError as error:
     if error.name == "sqlalchemy":
-        raise LinktoolsAIError(
+        raise AIError(
             ErrorCode.OPTIONAL_DEPENDENCY_MISSING,
             "SQLAlchemy is required for linktools.ai.asset.sql",
         ) from error
@@ -300,7 +300,7 @@ class SqlAlchemyAssetBackend:
             async with session.begin():
                 current = await self._current_revision(session)
                 if expected_store_revision is not None and _revision_number(expected_store_revision) != current:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
                 previous = {change.key: await self._entry(session, change.key) for change in changes}
                 mutates = any(_change_mutates(change, previous[change.key]) for change in changes)
                 revision = current + 1 if mutates else current
@@ -459,7 +459,7 @@ class SqlAlchemyAssetBackend:
             .values(revision=expected + 1, updated_at=now)
         )
         if result.rowcount != 1:
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         return expected + 1
 
     async def _write_entry(self, session: AsyncSession, info: AssetInfo, value: bytes, now: datetime) -> None:
@@ -511,7 +511,7 @@ class SqlAlchemyAssetBackend:
             return None
         content = row[0]
         if not isinstance(content, bytes) or _etag(content) != digest:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return content
 
     async def _info_for_change(self, session: AsyncSession, row: Mapping[str, SqlValue], store_revision: int) -> AssetInfo:
@@ -520,7 +520,7 @@ class SqlAlchemyAssetBackend:
             return _info_from_change(row, self._root, AssetStoreRevision(str(row["revision"])))
         entry = await self._entry(session, key)
         if entry is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _info_from_entry(entry, self._root, AssetStoreRevision(str(row["revision"])))
 
     async def _version_summary(self, session: AsyncSession, row: Mapping[str, SqlValue]) -> VersionSummary[AssetRevision]:
@@ -529,7 +529,7 @@ class SqlAlchemyAssetBackend:
         if not bool(row["deleted"]):
             content = await self._read_blob(session, str(row["object_id"]))
             if content is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             size = len(content)
         return VersionSummary(AssetRevision(int(row["version"] or 0)), digest, size, _as_utc(row["created_at"]), bool(row["deleted"]))
 
@@ -542,13 +542,13 @@ class SqlAlchemyAssetBackend:
         seen: set[AssetKey] = set()
         for change in changes:
             if change.key in seen:
-                raise LinktoolsAIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
+                raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
             seen.add(change.key)
 
 
 def _check_entry_revision(previous: "AssetInfo | None", expected: "AssetRevision | None") -> None:
     if expected is not None and (previous is None or previous.entry_revision != expected):
-        raise LinktoolsAIError(ErrorCode.ASSET_REVISION_CONFLICT)
+        raise AIError(ErrorCode.ASSET_REVISION_CONFLICT)
 
 
 def _change_mutates(change: StorageChange[AssetKey, bytes, AssetRevision], previous: "Mapping[str, SqlValue] | None") -> bool:
@@ -564,7 +564,7 @@ def _path_for_key(key: AssetKey) -> str:
 def _key_from_path(path: str) -> AssetKey:
     kind, separator, asset_id = path.partition("/")
     if not separator or not kind or not asset_id:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return AssetKey(kind, asset_id)
 
 
@@ -573,14 +573,14 @@ def _info_from_entry(row: Mapping[str, SqlValue], root: AssetRoot, store_revisio
     etag = _TOMBSTONE_ETAG if deleted else str(row["etag"])
     content = row["content"]
     if not isinstance(content, bytes):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if deleted:
         if content:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         size = 0
     else:
         if _etag(content) != etag:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         size = len(content)
     return AssetInfo(
         _key_from_path(str(row["path"])),
@@ -598,7 +598,7 @@ def _info_from_entry(row: Mapping[str, SqlValue], root: AssetRoot, store_revisio
 def _entry_content(row: Mapping[str, SqlValue]) -> bytes:
     content = row["content"]
     if not isinstance(content, bytes) or _etag(content) != str(row["etag"]):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return content
 
 
@@ -619,7 +619,7 @@ def _info_from_change(row: Mapping[str, SqlValue], root: AssetRoot, store_revisi
 
 def _as_utc(value: SqlValue) -> datetime:
     if not isinstance(value, datetime):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
@@ -631,9 +631,9 @@ def _revision_number(revision: AssetStoreRevision) -> int:
     try:
         value = int(revision.value)
     except ValueError as error:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if value < 0:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return value
 
 

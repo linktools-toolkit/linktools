@@ -9,8 +9,8 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
-from .project import LocalPolicy
+from ..core.errors import ErrorCode, AIError
+from .root import WorkspacePolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,15 +44,15 @@ def parse_skill(path: "str | Path", *, revision: int = 1) -> Skill:
             agents.append(PrivateAgent(agent_path.stem, agent_path, agent_content, hashlib.sha256(agent_content.encode("utf-8")).hexdigest(), skill_id))
     return Skill(skill_id, skill_path, content, hashlib.sha256(content.encode("utf-8")).hexdigest(), revision, tuple(agents))
 
-logger = environ.get_logger("ai.local.index")
+logger = environ.get_logger("ai.workspace.index")
 
 
 class SkillIndex:
     """Refresh only changed SKILL.md files under an explicit project root."""
 
-    def __init__(self, root: "str | Path", policy: "LocalPolicy | None" = None) -> None:
+    def __init__(self, root: "str | Path", policy: "WorkspacePolicy | None" = None) -> None:
         self.root = Path(root).resolve()
-        self.policy = policy or LocalPolicy()
+        self.policy = policy or WorkspacePolicy()
         self.policy.validate()
         self._fingerprints: "dict[Path, tuple[int, int, str]]" = {}
         self._skill_ids: "dict[Path, str]" = {}
@@ -73,7 +73,7 @@ class SkillIndex:
             nearest_depth = len(ordered[0].parent.relative_to(self.root).parts)
             nearest = tuple(item for item in ordered if len(item.parent.relative_to(self.root).parts) == nearest_depth)
             if len(nearest) > 1:
-                raise LinktoolsAIError(ErrorCode.LOCAL_SKILL_CONFLICT, f"duplicate skill id: {skill_id}")
+                raise AIError(ErrorCode.LOCAL_SKILL_CONFLICT, f"duplicate skill id: {skill_id}")
             selected.append(nearest[0])
         current = set(selected)
         for path in tuple(self._fingerprints):

@@ -4,7 +4,7 @@
 
 from datetime import datetime, timezone
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.principal import AuthorizationAction, AuthorizationPolicy
 from ..core.value import ExternalCallStatus
 from .persistence import RuntimePersistence
@@ -20,11 +20,11 @@ class DefaultExternalService:
     async def supply(self, execution_id: str, request: ExternalResultRequest) -> ExternalResultResult:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=request.principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXTERNAL_SUPPLY, header)
         call = await self._persistence.externals.get(request.call_id, tenant_id=request.principal.tenant_id)
         if call is None or call.execution_id != execution_id:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         updated = await self._persistence.externals.supply(
             request.call_id,
             tenant_id=request.principal.tenant_id,

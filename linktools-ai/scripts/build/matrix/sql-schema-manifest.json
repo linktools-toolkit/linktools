@@ -1,5 +1,5 @@
 {
-  "spec": ".docs/linktools-ai-runtime-step-persistence-spec-v11-final.md",
+  "spec": ".docs/linktools-ai-architecture-runtime-convergence-spec-v23-final.md",
   "runtime_owner": "adapter.sql",
   "step_owner": "adapter.step",
   "runtime_digest": "e4b926efa6940529736e410ac768e5585308eb22bbc5bdc60d55cf332f02f634",

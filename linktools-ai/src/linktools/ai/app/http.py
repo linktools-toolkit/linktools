@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..core import Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
-from .services import EntryServices
+from ..core.errors import ErrorCode, AIError
+from .services import AppServices
 
 REQUIRED_ROUTE_NAMES = frozenset({
     "execution",
@@ -38,7 +38,7 @@ class HttpRoute:
 
 
 class HttpApplication:
-    def __init__(self, services: EntryServices, routes: 'tuple[HttpRoute, ...]') -> None:
+    def __init__(self, services: AppServices, routes: 'tuple[HttpRoute, ...]') -> None:
         route_names = {route.name for route in routes}
         if route_names != REQUIRED_ROUTE_NAMES:
             missing = sorted(REQUIRED_ROUTE_NAMES - route_names)
@@ -50,7 +50,7 @@ class HttpApplication:
         if len(route_keys) != len(routes):
             raise ValueError("HTTP method and path pairs must be unique")
         if services.principal_provider is None:
-            raise LinktoolsAIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider is not ready")
+            raise AIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider is not ready")
         self._access = services.access
         self._principal_provider = services.principal_provider
         self._routes = routes
@@ -60,15 +60,15 @@ class HttpApplication:
         key = (method.upper(), path)
         handler = self._index.get(key)
         if handler is None:
-            raise LinktoolsAIError(
+            raise AIError(
                 ErrorCode.HTTP_ROUTE_NOT_FOUND,
                 safe_details={"method": key[0], "path": path},
             )
         if self._principal_provider is None:
-            raise LinktoolsAIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider is not ready")
+            raise AIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider is not ready")
         principal = await self._principal_provider.current()
         if not isinstance(principal, Principal):
-            raise LinktoolsAIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider returned an invalid principal")
+            raise AIError(ErrorCode.SERVICE_NOT_READY, "HTTP authentication provider returned an invalid principal")
         authenticated = dict(request)
         authenticated["principal_id"] = principal.principal_id
         authenticated["tenant_id"] = principal.tenant_id

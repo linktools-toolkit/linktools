@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar
 
-from .errors import ErrorCode, LinktoolsAIError
+from .errors import ErrorCode, AIError
 from .json import JsonValue, canonical_json_bytes
 
 ItemT = TypeVar("ItemT")
@@ -97,7 +97,7 @@ class HmacCursorSigner:
                 raise ValueError("expired")
             return payload
         except (KeyError, TypeError, ValueError, UnicodeError, OverflowError, binascii.Error, json.JSONDecodeError) as error:
-            raise LinktoolsAIError(ErrorCode.ASSET_CURSOR_INVALID) from error
+            raise AIError(ErrorCode.ASSET_CURSOR_INVALID) from error
 
 
 def _b64(value: bytes) -> str:

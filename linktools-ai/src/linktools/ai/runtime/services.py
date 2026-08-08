@@ -10,7 +10,7 @@ import secrets
 import time
 
 from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionProfile, ExecutionStatus, Page, Principal, SessionStatus
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.validation import validate_idempotency_key, validate_prompt, validate_resource_id
 from ..core.ids import canonical_sha256
 from ..core.json import JsonValue
@@ -22,7 +22,6 @@ from ..task.model import (
     TaskGraphResult,
     TaskGraphView,
 )
-from ..agent.context import AgentBinding
 from .persistence import BlobRef, BlobStore, RuntimeBackend, validate_runtime_profile
 
 
@@ -71,10 +70,9 @@ class ExecutionRequest:
 
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
-        if self.requested_profile is ExecutionProfile.PRODUCTION_SERVICE and self.idempotency_key is None:
-            raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        if self.idempotency_key is not None:
-            validate_idempotency_key(self.idempotency_key)
+        if self.idempotency_key is None:
+            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,7 +229,7 @@ class CloseSessionRequest:
     def __post_init__(self) -> None:
         validate_idempotency_key(self.close_request_id)
         if not 1 <= self.wait_timeout_seconds <= 300:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,7 +364,7 @@ class ExternalResultRequest:
         validate_resource_id(self.call_id)
         validate_idempotency_key(self.result_id)
         if not self.payload_ref.strip() or len(self.payload_digest) != 64:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,17 +490,17 @@ class SessionService(Protocol):
 
 
 class TaskService(Protocol):
-    async def run_graph(self, binding: AgentBinding, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def run_graph(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphResult: ...
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
 
 class EvaluationService(Protocol):
-    async def run(self, binding: AgentBinding, request: RunEvaluationRequest) -> EvaluationHandle: ...
+    async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle: ...
     async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView: ...
     async def compare(self, request: CompareEvaluationRequest) -> EvaluationComparison: ...
     async def snapshot(self, evaluation_id: str, *, principal: Principal) -> RunSnapshot: ...
-    async def replay(self, binding: AgentBinding, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
+    async def replay(self, binding_digest: str, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle: ...
 
 
 class ApprovalService(Protocol):
@@ -568,7 +566,7 @@ class BlobPayloadService:
     async def load(self, ref: PayloadRef) -> bytes:
         blob = await self._blobs.stat(BlobRef(self._tenant_id, ref.value, 0, ""), tenant_id=self._tenant_id)
         if blob is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         chunks = bytearray()
         async for chunk in self._blobs.open(blob, tenant_id=self._tenant_id):
             chunks.extend(chunk)

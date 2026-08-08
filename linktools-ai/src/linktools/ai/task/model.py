@@ -5,7 +5,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.validation import validate_idempotency_key
 from ..core.value import ExecutionProfile, Principal, TaskStatus
 
@@ -67,20 +67,20 @@ class TaskGraph:
 
     def validate_limits(self, limits: SwarmLimits) -> None:
         if len(self.nodes) > limits.max_nodes:
-            raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
+            raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
         depths: dict[str, int] = {}
         for task_id in self._topological_order():
             node = next(node for node in self.nodes if node.task_id == task_id)
             depths[task_id] = 1 + max((depths[item] for item in node.dependencies), default=0)
         if max(depths.values(), default=0) > limits.max_depth:
-            raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds depth limit")
+            raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds depth limit")
         if sum(node.budget_cost for node in self.nodes) > limits.max_budget:
-            raise LinktoolsAIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds budget limit")
+            raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds budget limit")
 
 
-class TaskGraphValidationError(LinktoolsAIError, ValueError):
+class TaskGraphValidationError(AIError, ValueError):
     def __init__(self, code: ErrorCode, message: str) -> None:
-        LinktoolsAIError.__init__(self, code, message)
+        AIError.__init__(self, code, message)
         ValueError.__init__(self, message)
 
 
@@ -126,25 +126,25 @@ class TaskCompletionLedger:
     def _apply(self, candidate: TaskTerminalRecord) -> TaskTerminalRecord:
         if candidate.fence < 1 or not candidate.task_id or not candidate.owner:
             if candidate.fence < 1 and candidate.task_id and candidate.owner and candidate.task_id in self._records:
-                raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+                raise AIError(ErrorCode.TASK_FENCE_STALE)
             raise ValueError("task terminal identity is invalid")
         previous = self._records.get(candidate.task_id)
         if previous is None:
             self._records[candidate.task_id] = candidate
             return candidate
         if candidate.fence < previous.fence:
-            raise LinktoolsAIError(ErrorCode.TASK_FENCE_STALE)
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         if candidate.fence == previous.fence:
             if candidate.owner != previous.owner:
-                raise LinktoolsAIError(ErrorCode.TASK_OWNER_CONFLICT)
+                raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
             if _same_terminal_result(candidate, previous):
                 return previous
             if candidate.status is not previous.status:
-                raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
+                raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
             if candidate.status is TaskStatus.SUCCEEDED:
-                raise LinktoolsAIError(ErrorCode.TASK_RESULT_CONFLICT)
-            raise LinktoolsAIError(ErrorCode.TASK_RESULT_CONFLICT)
-        raise LinktoolsAIError(ErrorCode.TASK_TERMINAL_CONFLICT)
+                raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+            raise AIError(ErrorCode.TASK_RESULT_CONFLICT)
+        raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
 
 
 def _same_terminal_result(left: TaskTerminalRecord, right: TaskTerminalRecord) -> bool:

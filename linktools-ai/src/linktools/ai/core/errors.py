@@ -80,6 +80,7 @@ class ErrorCode(StrEnum):
     STORAGE_RECOVERY_REQUIRED = "STORAGE_RECOVERY_REQUIRED"
     SESSION_REVISION_CONFLICT = "SESSION_REVISION_CONFLICT"
     EXECUTION_RESULT_CONFLICT = "EXECUTION_RESULT_CONFLICT"
+    EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
     EXECUTION_START_UNKNOWN = "EXECUTION_START_UNKNOWN"
     EXECUTION_START_PERSISTENCE_FAILED = "EXECUTION_START_PERSISTENCE_FAILED"
@@ -116,7 +117,7 @@ class SafeError:
     cause_digest: str
 
 
-class LinktoolsAIError(Exception):
+class AIError(Exception):
     """An error with a stable machine-readable code."""
 
     def __init__(
@@ -157,7 +158,7 @@ class LinktoolsAIError(Exception):
         )
 
 
-class StorageError(LinktoolsAIError):
+class StorageError(AIError):
     def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
         super().__init__(code, message)
 
@@ -177,7 +178,7 @@ class InvalidStoragePathError(StorageError):
         super().__init__(message, ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-class AssetError(LinktoolsAIError):
+class AssetError(AIError):
     def __init__(self, message: str, code: ErrorCode = ErrorCode.STORAGE_UNAVAILABLE) -> None:
         super().__init__(code, message)
 
@@ -210,7 +211,7 @@ __all__ = [
     "ErrorCode",
     "InvalidAssetError",
     "InvalidStoragePathError",
-    "LinktoolsAIError",
+    "AIError",
     "StorageConflictError",
     "StorageCorruptionError",
     "StorageError",

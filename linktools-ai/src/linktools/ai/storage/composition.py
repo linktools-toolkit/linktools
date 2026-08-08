@@ -9,7 +9,7 @@ from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from .cache import ContentCache, contains_many, read_cache, write_cache
 from .layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility
@@ -244,13 +244,13 @@ class StorageComposition(
         if isinstance(backend, StorageStatBackend):
             origin = await backend.stat(self._to_storage_key(key))
             if origin is None:
-                raise LinktoolsAIError(
+                raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata points to a missing origin",
                     safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
                 )
             if origin != info:
-                raise LinktoolsAIError(
+                raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata and origin disagree",
                     safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
@@ -296,7 +296,7 @@ class StorageComposition(
                     key,
                     extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                 )
-                raise LinktoolsAIError(
+                raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata points to a missing origin",
                     safe_details={"key_digest": canonical_sha256(str(key))},
@@ -314,7 +314,7 @@ class StorageComposition(
                     key,
                     extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                 )
-                raise LinktoolsAIError(
+                raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata and origin disagree",
                     safe_details={"key_digest": canonical_sha256(str(key))},
@@ -385,7 +385,7 @@ class StorageComposition(
                         key,
                         extra={"error_code": ErrorCode.STORAGE_OWNER_MISMATCH.value},
                     )
-                    raise LinktoolsAIError(
+                    raise AIError(
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         "storage metadata and origin disagree",
                         safe_details={"key_digest": canonical_sha256(str(key))},
@@ -572,7 +572,7 @@ class StorageComposition(
 
     def _require_writer(self) -> 'StorageWriter[StorageKeyT, StorageValueT, InfoT, EntryRevisionT, StoreRevisionT]':
         if self.writer is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_READ_ONLY)
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
         return self.writer
 
     async def put(
@@ -660,7 +660,7 @@ class StorageComposition(
         if expected_store_revision is not None:
             current = await self.current_revision()
             if current != expected_store_revision:
-                raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         results: list[StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT] | StorageDeleteResult[DomainKeyT, EntryRevisionT, StoreRevisionT]] = []
         revision = expected_store_revision
         for index, change in enumerate(changes):
@@ -681,7 +681,7 @@ class StorageComposition(
                 failure_revision = revision if revision is not None else await self.current_revision()
                 error_code = (
                     exc.code.value
-                    if isinstance(exc, LinktoolsAIError)
+                    if isinstance(exc, AIError)
                     else ErrorCode.STORAGE_BATCH_PARTIAL_FAILURE.value
                 )
                 failure = StorageBatchFailure(
@@ -704,14 +704,14 @@ class StorageComposition(
         result: 'StorageBatchResult[InfoT, StorageKeyT, EntryRevisionT, StoreRevisionT]',
     ) -> None:
         if len(domain_changes) != len(changes) or len(result.results) != len(changes):
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch result count mismatch")
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch result count mismatch")
         for domain_change, change, item in zip(domain_changes, changes, result.results):
             if change.operation is StorageOperation.PUT:
                 if not isinstance(item, StoragePutResult):
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch put result mismatch")
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch put result mismatch")
                 self._validate_value(domain_change.key, cast(DomainValueT, domain_change.value), item.info)
             elif not isinstance(item, StorageDeleteResult) or item.key != change.key:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch delete result mismatch")
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch delete result mismatch")
 
     def _validate_batch(self, changes: 'Sequence[StorageChange[DomainKeyT, DomainValueT, EntryRevisionT]]') -> None:
         seen: set[DomainKeyT] = set()
@@ -719,7 +719,7 @@ class StorageComposition(
             if change.operation not in {StorageOperation.PUT, StorageOperation.DELETE}:
                 raise ValueError(f"unsupported storage operation: {change.operation}")
             if change.key in seen:
-                raise LinktoolsAIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
+                raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
             seen.add(change.key)
             if change.operation is StorageOperation.PUT and change.value is None:
                 raise ValueError("PUT changes require a value")
@@ -774,8 +774,8 @@ class StorageComposition(
         if collected:
             return tuple(sorted(collected.values(), key=lambda version: str(version.entry_revision), reverse=True))
         if key not in state.owners:
-            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
-        raise LinktoolsAIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
+        raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_revision(self, key: DomainKeyT, entry_revision: EntryRevisionT) -> 'DomainValueT | None':
         state = await self._state()
@@ -788,7 +788,7 @@ class StorageComposition(
             if any(version.entry_revision == entry_revision for version in versions):
                 value = await backend.get_at_revision(self._to_storage_key(key), entry_revision)
                 return None if value is None else self._from_storage_value(value)
-        raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
     async def get_at_version(self, key: DomainKeyT, version: int) -> 'DomainValueT | None':
         state = await self._state()
@@ -801,7 +801,7 @@ class StorageComposition(
             if any(str(item.entry_revision.value) == str(version) for item in versions):
                 value = await backend.get_at_version(self._to_storage_key(key), version)
                 return None if value is None else self._from_storage_value(value)
-        raise LinktoolsAIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 __all__ = [

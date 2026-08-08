@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Generic, Literal, Protocol, TypeVar, runtime_checkable
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..storage.model import (
     BatchStorageReader,
     BatchStorageWriter,
@@ -124,7 +124,7 @@ class AssetBatchResult:
     results: "tuple[AssetInfo | AssetDeleteResult, ...]"
 
 
-class AssetBatchPartialError(LinktoolsAIError):
+class AssetBatchPartialError(AIError):
     def __init__(
         self,
         failure: 'StorageBatchFailure[AssetInfo, AssetKey, AssetRevision, AssetStoreRevision]',

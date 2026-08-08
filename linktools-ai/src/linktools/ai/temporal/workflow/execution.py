@@ -17,7 +17,7 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...core.errors import ErrorCode, LinktoolsAIError
+from ...core.errors import ErrorCode, AIError
 from ...core.json import JsonValue
 from ...core.value import ApprovalDecision, ExecutionStatus
 
@@ -383,7 +383,7 @@ def _validate_stage_transition(
     if current.approval_decisions[: len(previous.approval_decisions)] != previous.approval_decisions:
         raise ValueError(f"activity {stage} removed an approval decision")
     if len(current.external_result_refs) > 1000 or len(current.approval_decisions) > 1000:
-        raise LinktoolsAIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
+        raise AIError(ErrorCode.TOO_MANY_PENDING_OPERATIONS)
 
 
 async def _execute_activity(name: str, state: ExecutionWorkflowState) -> ExecutionWorkflowState:

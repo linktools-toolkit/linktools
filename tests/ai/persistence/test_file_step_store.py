@@ -11,8 +11,8 @@ import pytest
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
 
-from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
-from linktools.ai.local.step import DurableFileStepStore
+from linktools.ai.core.errors import ErrorCode, AIError
+from linktools.ai.adapter.step import DurableFileStepStore
 
 
 def _run(run_id: str) -> RunRecord:
@@ -28,7 +28,7 @@ async def test_file_step_store_round_trip_and_restart(tmp_path: Path) -> None:
     await first.append_event(StepEvent(run_id=run.run_id, kind="model_request_started", step_index=1, timestamp=datetime.now(timezone.utc), conversation_id=run.conversation_id, parent_run_id=None, agent_name="agent", tool_call_id=None, tool_name=None, error=None, metadata={}))
     await first.save_snapshot(ContinuableSnapshot(run_id=run.run_id, step_index=1, messages=[ModelRequest(parts=[UserPromptPart(content="hello")], conversation_id=run.conversation_id)], conversation_id=run.conversation_id, parent_run_id=None, agent_name="agent", timestamp=datetime.now(timezone.utc)))
     await first.record_tool_effect(ToolEffectRecord(tool_call_id="call", tool_name="tool", run_id=run.run_id, status="started", started_at=datetime.now(timezone.utc), ended_at=None, idempotency_key="key", effect_summary=None))
-    with pytest.raises(LinktoolsAIError) as error:
+    with pytest.raises(AIError) as error:
         await first.register_run(run)
     assert error.value.code is ErrorCode.STORAGE_CONFLICT
     await first.close()
@@ -47,7 +47,7 @@ async def test_file_step_store_round_trip_and_restart(tmp_path: Path) -> None:
 async def test_file_step_store_rejects_path_identifiers(tmp_path: Path) -> None:
     store = DurableFileStepStore(tmp_path, "namespace")
     await store.initialize()
-    with pytest.raises(LinktoolsAIError) as error:
+    with pytest.raises(AIError) as error:
         await store.get_run(run_id="../escape")
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     await store.close()

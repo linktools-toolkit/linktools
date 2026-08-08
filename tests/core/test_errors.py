@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for the linktools exception hierarchy.
 
-The hierarchy has a single root ``LinktoolsError`` with one direct child per
-domain. ``Error`` is retained as an alias of ``LinktoolsError`` for the
+The hierarchy has a single root ``Error`` with one direct child per
+domain. ``Error`` is retained as an alias of ``Error`` for the
 migration cycle, so every historical name keeps working while ``isinstance``
 checks against the new root succeed.
 """
@@ -27,19 +27,19 @@ LEGACY_NAMES = [
 
 
 def test_error_is_alias_of_linktools_root():
-    assert errs.Error is errs.LinktoolsError
+    assert errs.Error is errs.Error
 
 
 def test_every_domain_root_is_a_linktools_error():
     for name in DOMAIN_ROOTS:
         cls = getattr(errs, name)
-        assert issubclass(cls, errs.LinktoolsError), name
+        assert issubclass(cls, errs.Error), name
 
 
 def test_all_legacy_names_still_importable():
     for name in LEGACY_NAMES:
         assert hasattr(errs, name), "lost legacy error name: %s" % name
-        assert issubclass(getattr(errs, name), errs.LinktoolsError), name
+        assert issubclass(getattr(errs, name), errs.Error), name
 
 
 def test_specifics_are_grouped_under_their_domain():
@@ -56,7 +56,7 @@ def test_root_catches_everything_domain_isolates_specifics():
     # Catching the root catches every domain.
     for cls in [errs.GitDivergedError, errs.ToolExecError, errs.ConfigError,
                 errs.NoFreePortFoundError, errs.ModuleError]:
-        assert isinstance(cls("x"), errs.LinktoolsError)
+        assert isinstance(cls("x"), errs.Error)
 
     # But a domain root only catches its own specifics.
     assert not isinstance(errs.GitError("x"), errs.ToolError)
@@ -79,10 +79,10 @@ def test_download_http_error_carries_code():
 def test_all_public_names_listed_in___all__():
     # __all__ guards `from linktools.errors import *` so the builtin-shadowing
     # domain roots (SystemError, EnvironmentError) are opt-in only.
-    assert set(errs.__all__) >= set(LEGACY_NAMES) | set(DOMAIN_ROOTS) | {"LinktoolsError"}
+    assert set(errs.__all__) >= set(LEGACY_NAMES) | set(DOMAIN_ROOTS) | {"Error"}
 
 
-@pytest.mark.parametrize("name", DOMAIN_ROOTS + ["LinktoolsError"])
+@pytest.mark.parametrize("name", DOMAIN_ROOTS + ["Error"])
 def test_str_does_not_crash(name):
     cls = getattr(errs, name)
     assert str(cls("boom"))

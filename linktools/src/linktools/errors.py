@@ -3,12 +3,12 @@
 
 """linktools exception hierarchy (spec §18).
 
-``LinktoolsError`` is the single root. Each direct child is a *domain root*
+``Error`` is the single root. Each direct child is a *domain root*
 matching one subsystem. Specific exceptions live under their domain root so
 callers can catch a whole subsystem without enumerating every case, while the
 root catches everything::
 
-    LinktoolsError
+    Error
     +-- EnvironmentError      # environment / paths / composition root
     +-- LoggingError          # logging manager / handlers
     +-- CacheError            # local persistence (sqlite store)
@@ -24,11 +24,8 @@ root catches everything::
     +-- ReactorError          # scheduler
     +-- CliError              # command framework
 
-``Error`` is retained as an alias of ``LinktoolsError`` for the in-repo
-migration cycle (spec §3.3): existing subclasses such as ``ContainerError(Error)``
-and legacy ``except Error`` sites keep working unchanged. New code should catch
-``LinktoolsError`` or a domain root; ``Error`` will be retired once every
-consumer has migrated.
+All domain roots inherit from ``Error``. Catch ``Error`` for the broadest
+framework-level exception handling.
 
 Note: ``EnvironmentError`` and ``SystemError`` intentionally reuse names that
 are also legacy Python builtins (aliases of ``OSError`` and the interpreter
@@ -38,7 +35,7 @@ code catches the builtin forms (verified at refactor time). See ADR-013.
 """
 
 __all__ = [
-    "LinktoolsError", "Error",
+    "Error",
     # Domain roots.
     "EnvironmentError", "LoggingError", "CacheError", "ConfigError",
     "DownloadError", "ToolError", "CapabilityError", "GitError", "SSHError",
@@ -68,34 +65,28 @@ __all__ = [
 ]
 
 
-class LinktoolsError(Exception):
-    """Root of every linktools-specific exception.
+class Error(Exception):
+    """Root of every framework-specific exception.
 
-    All linktools errors inherit from here, so ``except LinktoolsError`` is the
+    All framework errors inherit from here, so ``except Error`` is the
     broadest safe catch in business code. ``str(error)`` must never contain a
     secret; subclasses carry structured fields where useful.
     """
-
-
-# Retained alias for the migration cycle (spec  Same class object, two
-# names, so ``isinstance(x, Error)`` and ``isinstance(x, LinktoolsError)``
-# agree and ``class X(Error)`` continues to work.
-Error = LinktoolsError
 
 
 # ---------------------------------------------------------------------------
 # Domain roots (spec 
 # ---------------------------------------------------------------------------
 
-class EnvironmentError(LinktoolsError):
+class EnvironmentError(Error):
     """Environment, path resolution or composition-root failures."""
 
 
-class LoggingError(LinktoolsError):
+class LoggingError(Error):
     """Logging manager, handler or formatter failures."""
 
 
-class CacheError(LinktoolsError):
+class CacheError(Error):
     """Local persistence (cache store) failures."""
 
 
@@ -131,7 +122,7 @@ class CacheRestoreError(CacheError):
     """A cache restore operation failed."""
 
 
-class ConfigError(LinktoolsError):
+class ConfigError(Error):
     """Configuration data is invalid or unavailable."""
 
 
@@ -175,23 +166,23 @@ class ConfigPromptError(ConfigError):
     """A config prompt could not be answered (non-interactive / cancelled)."""
 
 
-class DownloadError(LinktoolsError):
+class DownloadError(Error):
     """A download failed."""
 
 
-class ToolError(LinktoolsError):
+class ToolError(Error):
     """Managed external-tool discovery or execution failed."""
 
 
-class CapabilityError(LinktoolsError):
+class CapabilityError(Error):
     """An installed-package capability is missing or unusable."""
 
 
-class GitError(LinktoolsError):
+class GitError(Error):
     """A git repository operation failed."""
 
 
-class SSHError(LinktoolsError):
+class SSHError(Error):
     """An SSH operation failed."""
 
 
@@ -227,23 +218,23 @@ class SSHTimeoutError(SSHError):
     """An SSH operation exceeded its timeout."""
 
 
-class SystemError(LinktoolsError):
+class SystemError(Error):
     """Platform, port or network helper failures."""
 
 
-class ProcessError(LinktoolsError):
+class ProcessError(Error):
     """A subprocess operation failed."""
 
 
-class EventError(LinktoolsError):
+class EventError(Error):
     """An event-bus operation failed."""
 
 
-class ReactorError(LinktoolsError):
+class ReactorError(Error):
     """A scheduler operation failed."""
 
 
-class CliError(LinktoolsError):
+class CliError(Error):
     """A CLI-framework operation failed."""
 
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..storage.files import read_bytes, read_json, write_bytes_atomic, write_json_atomic
 from ..storage.model import (
     MetadataChange,
@@ -183,7 +183,7 @@ class MemoryAssetBackend:
 
     def _require_writable(self) -> None:
         if not self._writable:
-            raise LinktoolsAIError(ErrorCode.STORAGE_READ_ONLY)
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
 
 class FileAssetBackend:
@@ -248,9 +248,9 @@ class FileAssetBackend:
             try:
                 content = read_bytes(asset_path(self._root, key))
             except FileNotFoundError:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
             if _etag(content) != entry[0].etag:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return content
 
     async def get_many(self, keys: 'tuple[AssetKey, ...]') -> 'dict[AssetKey, bytes]':
@@ -263,9 +263,9 @@ class FileAssetBackend:
                 try:
                     content = read_bytes(asset_path(self._root, key))
                 except FileNotFoundError:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
                 if _etag(content) != entry[0].etag:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 values[key] = content
         return values
 
@@ -418,7 +418,7 @@ class FileAssetBackend:
             history = self._journal_path(payload, "history", journal)
             revision = _positive_int(payload.get("revision"), ErrorCode.ASSET_RECOVERY_REQUIRED)
             if not temporary_metadata.exists() and not metadata.exists():
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             if not deleted and temporary_content.exists():
                 content_matches = False
                 if content.exists():
@@ -445,7 +445,7 @@ class FileAssetBackend:
                     history.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(temporary_history, history)
             if not metadata.exists() or not history.exists() or (not deleted and not content.exists()):
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             recovered_info = _info_from_json(read_json(metadata), self._root)
             recovered_version = _info_from_json(read_json(history), self._root)
             if (
@@ -455,27 +455,27 @@ class FileAssetBackend:
                 or recovered_version != recovered_info
                 or recovered_info.store_revision.value != str(revision)
             ):
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             if not _journal_matches_info(payload, recovered_info, deleted):
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             if recovered_info.entry_revision.value:
                 previous_history = self._history_path(
                     recovered_info.key,
                     AssetRevision(recovered_info.entry_revision.value - 1),
                 )
                 if not previous_history.exists():
-                    raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
                 previous_info = _info_from_json(read_json(previous_history), self._root)
                 if (
                     payload.get("old_content_digest") != previous_info.etag
                     or payload.get("old_store_revision") != previous_info.store_revision.value
                 ):
-                    raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             if deleted:
                 if content.exists():
-                    raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             elif _etag(content.read_bytes()) != recovered_info.etag:
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
             marker_revision = 0
             if self._marker.exists():
                 marker_revision = _positive_int(
@@ -504,18 +504,18 @@ class FileAssetBackend:
             info = _info_from_json(raw, self._root)
             expected_metadata = _metadata_path(asset_path(self._root, info.key))
             if metadata.resolve() != expected_metadata.resolve():
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             content_path = asset_path(self._root, info.key)
             try:
                 content = b"" if info.deleted else read_bytes(content_path)
             except FileNotFoundError as exc:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
             if not info.deleted and (_etag(content) != info.etag or len(content) != info.size):
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if info.root_id != self._root.root_id or info.root_digest != self._root.digest:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if info.key in self._entries:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             self._entries[info.key] = (info, content)
             self._revision = max(self._revision, _revision_number(info.store_revision))
         self._load_legacy_entries()
@@ -535,7 +535,7 @@ class FileAssetBackend:
             try:
                 key = AssetKey(relative.parts[0], "/".join(relative.parts[1:]))
                 asset_path(self._root, key)
-            except (ValueError, LinktoolsAIError):
+            except (ValueError, AIError):
                 continue
             if key in self._entries:
                 continue
@@ -564,21 +564,21 @@ class FileAssetBackend:
             info = _info_from_json(raw, self._root)
             expected = self._history_path(info.key, info.entry_revision)
             if history.resolve() != expected.resolve():
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             encoded = raw.get("content")
             if not isinstance(encoded, str):
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
                 content = base64.b64decode(encoded, validate=True)
             except (ValueError, binascii.Error) as exc:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
             if info.deleted:
                 content = b""
             elif _etag(content) != info.etag or len(content) != info.size:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             versions = self._versions.setdefault(info.key, [])
             if any(existing.entry_revision == info.entry_revision for existing, _ in versions):
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             versions.append((info, content))
         for versions in self._versions.values():
             versions.sort(key=lambda item: item[0].entry_revision.value)
@@ -590,20 +590,20 @@ class FileAssetBackend:
     def _journal_path(self, payload: 'dict[str, str | int | bool | None]', name: str, journal: Path) -> Path:
         value = payload.get(name)
         if not isinstance(value, str) or not value:
-            raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
         candidate = Path(value).resolve()
         root = self._directory.resolve()
         try:
             candidate.relative_to(root)
         except ValueError as exc:
-            raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED) from exc
+            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED) from exc
         if name.startswith("temporary_"):
             if candidate.parent == self._transaction_directory.resolve() or not candidate.name.startswith(".") or not candidate.name.endswith(".tmp"):
-                raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
         elif name in {"content", "metadata"} and candidate.parent == self._transaction_directory.resolve():
-            raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
         if journal.resolve().parent != self._transaction_directory.resolve():
-            raise LinktoolsAIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
+            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
         return candidate
 
     def _transaction_directory_fdatasync(self) -> None:
@@ -615,12 +615,12 @@ class FileAssetBackend:
 
     def _require_writable(self) -> None:
         if not self._writable:
-            raise LinktoolsAIError(ErrorCode.STORAGE_READ_ONLY)
+            raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
 
 def _check_entry_revision(previous: 'tuple[AssetInfo, bytes] | None', expected: 'AssetRevision | None') -> None:
     if expected is not None and (previous is None or previous[0].entry_revision != expected):
-        raise LinktoolsAIError(ErrorCode.ASSET_REVISION_CONFLICT)
+        raise AIError(ErrorCode.ASSET_REVISION_CONFLICT)
 
 
 def _etag(value: bytes) -> str:
@@ -631,7 +631,7 @@ def _revision_number(revision: AssetStoreRevision) -> int:
     try:
         return int(revision.value)
     except ValueError as exc:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
 
 
 def _info_json(info: AssetInfo) -> 'dict[str, str | int | bool | None]':
@@ -652,21 +652,21 @@ def _info_json(info: AssetInfo) -> 'dict[str, str | int | bool | None]':
 def _info_from_json(value: 'dict[str, str | int | bool | None]', root: AssetRoot) -> AssetInfo:
     required = ("kind", "id", "entry_revision", "store_revision", "etag", "size", "deleted", "root_id", "root_digest", "modified_at")
     if any(key not in value for key in required):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     key = AssetKey(str(value["kind"]), str(value["id"]))
     asset_path(root, key)
     entry_revision = _positive_int(value["entry_revision"], ErrorCode.STORAGE_INTEGRITY_ERROR)
     store_revision = _positive_int(value["store_revision"], ErrorCode.STORAGE_INTEGRITY_ERROR)
     etag = str(value["etag"])
     if len(etag) != 64 or any(character not in "0123456789abcdef" for character in etag):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not isinstance(value["deleted"], bool):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if value["deleted"] and (etag != _EMPTY_ETAG or int(str(value["size"])) != 0):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     modified_at = datetime.fromisoformat(str(value["modified_at"]))
     if modified_at.tzinfo is None:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return AssetInfo(
         key,
         AssetRevision(entry_revision),
@@ -718,13 +718,13 @@ def _journal_matches_info(
 
 def _positive_int(value: 'str | int | bool | None', code: ErrorCode) -> int:
     if isinstance(value, bool):
-        raise LinktoolsAIError(code)
+        raise AIError(code)
     try:
         result = int(str(value))
     except (TypeError, ValueError) as exc:
-        raise LinktoolsAIError(code) from exc
+        raise AIError(code) from exc
     if result < 0:
-        raise LinktoolsAIError(code)
+        raise AIError(code)
     return result
 
 

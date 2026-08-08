@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from .model import AssetKey, AssetValue
 
@@ -34,7 +34,7 @@ class AssetCodec(Protocol[TAsset]):
 
     def validate_key(self, key: AssetKey, value: TAsset) -> None:
         if value.asset_kind != key.kind or value.asset_id != key.id:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,14 +58,14 @@ class AssetCodecRegistry:
 
     def register(self, codec: 'AssetCodec[TAsset]') -> None:
         if self._manifest is not None:
-            raise LinktoolsAIError(ErrorCode.ASSET_CODEC_CONFLICT, "codec registry is frozen")
+            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "codec registry is frozen")
         if not codec.kind.strip() or not codec.fingerprint.strip():
-            raise LinktoolsAIError(ErrorCode.ASSET_CODEC_CONFLICT)
+            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
         existing = self._codecs.get(codec.kind)
         if existing is not None:
             if existing.value_type is codec.value_type and existing.fingerprint == codec.fingerprint:
                 return
-            raise LinktoolsAIError(ErrorCode.ASSET_CODEC_CONFLICT)
+            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
         self._codecs[codec.kind] = codec
 
     def freeze(self) -> AssetCodecManifest:
@@ -97,9 +97,9 @@ class AssetCodecRegistry:
     def resolve(self, kind: str, expected: 'type[TAsset]') -> 'AssetCodec[TAsset]':
         codec = self._codecs.get(kind)
         if codec is None:
-            raise LinktoolsAIError(ErrorCode.ASSET_CODEC_UNKNOWN)
+            raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN)
         if codec.value_type is not expected:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
         return codec
 
     def manifest(self) -> AssetCodecManifest:

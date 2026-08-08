@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.principal import ResourceRef
 from ..core.value import Principal
 
@@ -24,7 +24,7 @@ class SubagentRunRequest:
 
     def __post_init__(self) -> None:
         if self.parent.id != self.parent_execution_id or self.parent.kind.value != "EXECUTION" or self.parent.tenant_id != self.principal.tenant_id or not self.operation_id.strip() or not 0 <= self.depth <= self.max_depth or not 1 <= self.timeout_seconds <= 900:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)

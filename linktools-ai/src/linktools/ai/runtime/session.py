@@ -13,7 +13,7 @@ from typing import Protocol
 from linktools.core import environ
 
 from ..core import Page, Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.paging import CursorPayload, CursorSigner
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
@@ -74,12 +74,12 @@ class DefaultSessionService:
         record = SessionRecord(request.session_id, request.principal.tenant_id, request.principal.principal_id, binding_digest, SessionStatus.OPEN, 0, 0, request.cwd, {}, now, now, None, self._service_profile, None)
         try:
             await self._persistence.sessions.create(record)
-        except LinktoolsAIError as error:
+        except AIError as error:
             if error.code is not ErrorCode.SESSION_CONFLICT:
                 raise
             current = await self._persistence.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
             if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding_digest or current.profile is not self._service_profile:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             record = current
         await self._complete_operation(operation, request.principal.tenant_id, record.session_id, canonical_sha256({"session_id": record.session_id, "revision": record.revision}))
         _logger.info("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
@@ -93,7 +93,7 @@ class DefaultSessionService:
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, "list", request.principal.tenant_id))
         records = await self._persistence.sessions.list(tenant_id=request.principal.tenant_id, owner_principal_id=request.principal.principal_id)
         if not 1 <= request.limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         snapshot = _session_snapshot(records)
         start = _cursor_start(request.cursor, snapshot, request.principal.tenant_id, request.principal.principal_id, records, self._cursor_signer)
         values = records[start:start + request.limit]
@@ -113,9 +113,9 @@ class DefaultSessionService:
         record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id))
         if record.status is not SessionStatus.OPEN:
-            raise LinktoolsAIError(ErrorCode.SESSION_CONFLICT)
+            raise AIError(ErrorCode.SESSION_CONFLICT)
         if record.binding_digest != binding_digest or record.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         return await self._execution.run_for_session(binding_digest, session_id, ExecutionRequest(request.prompt, request.principal, record.profile, request.idempotency_key))
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
@@ -128,12 +128,12 @@ class DefaultSessionService:
             if current is not None:
                 return await self._view(current, request.principal)
         if source.binding_digest != binding_digest or source.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         now = datetime.now(timezone.utc)
-        target = SessionRecord(request.new_session_id, source.tenant_id, source.owner_principal_id, source.binding_digest, SessionStatus.OPEN, 0, 0, source.cwd if request.cwd is None else request.cwd, source.metadata, now, now, None, source.profile, source.head_execution_id)
+        target = SessionRecord(request.new_session_id, source.tenant_id, source.owner_principal_id, source.binding_digest, SessionStatus.OPEN, 0, 0, source.cwd if request.cwd is None else request.cwd, {}, now, now, None, source.profile, source.head_execution_id)
         try:
             await self._persistence.sessions.create(target)
-        except LinktoolsAIError as error:
+        except AIError as error:
             if error.code is not ErrorCode.SESSION_CONFLICT:
                 raise
             existing_target = await self._persistence.sessions.get(request.new_session_id, tenant_id=request.principal.tenant_id)
@@ -146,7 +146,7 @@ class DefaultSessionService:
                 or existing_target.revision != 0
                 or existing_target.resource_generation != 0
             ):
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
             target = existing_target
         await self._complete_operation(operation, request.principal.tenant_id, target.session_id, canonical_sha256({"session_id": target.session_id, "revision": target.revision}))
         _logger.info("session forked: source=%s target=%s", session_id, target.session_id)
@@ -155,7 +155,7 @@ class DefaultSessionService:
     async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
         if current.binding_digest != binding_digest or current.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
         digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
         operation = await self._begin_operation(request.mutation_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
         if operation.result_ref:
@@ -175,9 +175,9 @@ class DefaultSessionService:
             _logger.info("session update reconciled: session=%s revision=%s", session_id, current.revision)
             return await self._view(current, request.principal)
         if current.status is SessionStatus.CLEANUP_REQUIRED:
-            raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+            raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
         if current.revision != request.expected_revision or current.status is not SessionStatus.OPEN:
-            raise LinktoolsAIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
         now = datetime.now(timezone.utc)
         next_record = replace(current, revision=current.revision + 1, resource_generation=current.resource_generation + 1, cwd=requested_cwd, metadata=request.metadata, updated_at=now)
         updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
@@ -196,12 +196,12 @@ class DefaultSessionService:
         executions = await self._active_executions(session_id, request.principal.tenant_id)
         active = executions
         if active and not request.force:
-            raise LinktoolsAIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+            raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
         if current.status is SessionStatus.CLOSED:
             await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
             return await self._view(current, request.principal)
         if current.status is SessionStatus.CLEANUP_REQUIRED and not request.force:
-            raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+            raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
         if current.status is SessionStatus.OPEN:
             now = datetime.now(timezone.utc)
             current = await self._persistence.sessions.compare_and_swap(
@@ -234,7 +234,7 @@ class DefaultSessionService:
                     expected_revision=current.revision,
                     next_record=cleanup,
                 )
-                raise LinktoolsAIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
+                raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
         now = datetime.now(timezone.utc)
         closing = replace(current, status=SessionStatus.CLOSED, revision=current.revision + 1, updated_at=now, closed_at=now)
         updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
@@ -257,13 +257,13 @@ class DefaultSessionService:
     async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
         header = await self._persistence.sessions.get_header(session_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
         record = await self._persistence.sessions.get(session_id, tenant_id=principal.tenant_id)
         if record is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if record.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         return record
 
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
@@ -277,23 +277,23 @@ class DefaultSessionService:
             existing = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
             if existing is not None:
                 if existing.request_digest != request_digest:
-                    raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return existing
             now = datetime.now(timezone.utc)
             record = OperationLedgerInput(operation_id, tenant_id, resource_kind, resource_id, None, kind, OperationStatus.PENDING, request_digest, None, None, None, True, now, now)
             try:
                 return await self._persistence.operations.append(record)
-            except LinktoolsAIError as error:
+            except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-        raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def _complete_operation(self, operation: OperationLedgerRecord, tenant_id: str, result_ref: str, result_digest: str) -> None:
         now = datetime.now(timezone.utc)
         completed = OperationLedgerRecord(operation.operation_id, tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, result_ref, result_digest, None, operation.compactable, operation.sequence, operation.created_at, now)
         try:
             await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=completed)
-        except LinktoolsAIError as error:
+        except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
             current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
@@ -325,6 +325,6 @@ def _cursor_start(cursor: str | None, snapshot: int, tenant_id: str, owner_id: s
             raise ValueError("session cursor sort key is empty")
         return next((index + 1 for index, item in enumerate(records) if item.session_id == payload.sort_key), len(records))
     except (Base64Error, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error
-    except LinktoolsAIError as error:
-        raise LinktoolsAIError(ErrorCode.CURSOR_INVALID) from error
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error

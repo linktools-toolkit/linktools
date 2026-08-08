@@ -12,7 +12,7 @@ from typing import TypeVar
 from linktools.core import environ
 
 from ..core import CursorPayload, CursorSigner, Page
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256
 from ..storage.composition import CacheAdapter, StorageAdapter, StorageComposition
 from ..storage.layer import StorageWriteVisibility
@@ -53,7 +53,7 @@ class _AssetStorageAdapter(StorageAdapter[AssetKey, bytes, AssetKey, bytes, Asse
 
     def validate_value(self, key: AssetKey, value: bytes, info: AssetInfo) -> None:
         if info.key != key or len(value) != info.size or hashlib.sha256(value).hexdigest() != info.etag:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
 
 
 class _AssetCacheAdapter(CacheAdapter[AssetKey, bytes, AssetInfo]):
@@ -101,10 +101,10 @@ class AssetStore:
         try:
             value = codec.decode(encoded)
             codec.validate_key(key, value)
-        except LinktoolsAIError:
+        except AIError:
             raise
         except Exception as error:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
         return value
 
     async def get_many(self, requests: 'Sequence[AssetRequest[AssetValue]]') -> 'tuple[AssetValue | None, ...]':
@@ -127,10 +127,10 @@ class AssetStore:
             try:
                 value = codec.decode(content)
                 codec.validate_key(request.key, value)
-            except LinktoolsAIError:
+            except AIError:
                 raise
             except Exception as error:
-                raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
             values.append(value)
         return tuple(values)
 
@@ -211,7 +211,7 @@ class AssetStore:
         limit: int = 100,
     ) -> 'Page[OwnedAssetInfo]':
         if limit < 1 or limit > 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         owned = [item for item in await self._storage.list_info_with_owners() if not item.info.deleted]
         owned = [item for item in owned if (kind is None or item.info.key.kind == kind) and (prefix is None or item.info.key.id.startswith(prefix))]
         ordered = sorted(owned, key=lambda item: (item.info.key.kind, item.info.key.id))
@@ -242,19 +242,19 @@ class AssetStore:
         versions = await self._storage.list_versions(key)
         version = next((item for item in versions if item.entry_revision == entry_revision), None)
         if version is None:
-            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         if version.deleted:
             return None
         content = await self._storage.get_at_revision(key, entry_revision)
         if content is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             value = codec.decode(content)
             codec.validate_key(key, value)
-        except LinktoolsAIError:
+        except AIError:
             raise
         except Exception as error:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
         return value
 
     async def get_at_version(self, key: AssetKey, version: int, *, expected: 'type[AssetT]') -> 'AssetT | None':
@@ -262,19 +262,19 @@ class AssetStore:
         versions = await self._storage.list_versions(key)
         summary = next((item for item in versions if item.entry_revision.value == version), None)
         if summary is None:
-            raise LinktoolsAIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
         if summary.deleted:
             return None
         content = await self._storage.get_at_version(key, version)
         if content is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             value = codec.decode(content)
             codec.validate_key(key, value)
-        except LinktoolsAIError:
+        except AIError:
             raise
         except Exception as error:
-            raise LinktoolsAIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
         return value
 
 
@@ -288,7 +288,7 @@ def _page_infos(
     signer: CursorSigner,
 ) -> 'Page[AssetInfo]':
     if limit < 1 or limit > 200:
-        raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+        raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
     ordered = sorted(infos, key=lambda info: (info.key.kind, info.key.id))
     start = _cursor_start(cursor, revision, kind, prefix, ordered, signer)
     page = ordered[start : start + limit]
@@ -313,7 +313,7 @@ def _cursor_start(cursor: 'str | None', revision: AssetStoreRevision, kind: 'str
         if not isinstance(raw_last, list) or len(raw_last) != 2 or not all(isinstance(item, str) for item in raw_last):
             raise ValueError
     except (ValueError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError, binascii.Error):
-        raise LinktoolsAIError(ErrorCode.ASSET_CURSOR_INVALID) from None
+        raise AIError(ErrorCode.ASSET_CURSOR_INVALID) from None
     for index, value in enumerate(values):
         info = value.info if isinstance(value, OwnedAssetInfo) else value
         if (info.key.kind, info.key.id) > tuple(raw_last):

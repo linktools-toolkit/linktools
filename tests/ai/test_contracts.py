@@ -9,13 +9,13 @@ import pytest
 
 from linktools.ai.agent import AgentDeps
 from scripts.build.agent_bundle import build_bundle
-from linktools.ai.core.errors import ErrorCode, LinktoolsAIError
+from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.model import ModelRegistry, ModelRoute
 from linktools.ai.observe.context import RunContext
 from linktools.ai.observe.middleware import MiddlewarePipeline
 from linktools.ai.observe.snapshot import RunSnapshot, snapshot_digest
 from linktools.ai.observe.trace import InMemoryTraceRecorder, TraceItem
-from linktools.ai.local.principal import trusted_local_principal
+from linktools.ai.workspace import trusted_workspace_principal
 from linktools.ai.runtime.services import ExecutionRequest
 from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
 from linktools.ai.task import TaskGraph, TaskNode
@@ -60,16 +60,16 @@ def test_task_completion_checks_owner_fence_result_and_terminal_state() -> None:
     ledger = TaskCompletionLedger()
     first = ledger.complete("task", "owner", 1, "digest")
     assert ledger.complete("task", "owner", 1, "digest") == first
-    with pytest.raises(LinktoolsAIError) as result_error:
+    with pytest.raises(AIError) as result_error:
         ledger.complete("task", "owner", 1, "other")
     assert result_error.value.code == ErrorCode.TASK_RESULT_CONFLICT
-    with pytest.raises(LinktoolsAIError) as owner_error:
+    with pytest.raises(AIError) as owner_error:
         ledger.complete("task", "other", 1, "digest")
     assert owner_error.value.code == ErrorCode.TASK_OWNER_CONFLICT
-    with pytest.raises(LinktoolsAIError) as fence_error:
+    with pytest.raises(AIError) as fence_error:
         ledger.complete("task", "owner", 0, "digest")
     assert fence_error.value.code == ErrorCode.TASK_FENCE_STALE
-    with pytest.raises(LinktoolsAIError) as terminal_error:
+    with pytest.raises(AIError) as terminal_error:
         ledger.fail("task", "owner", 1, "FAILED", "error")
     assert terminal_error.value.code == ErrorCode.TASK_TERMINAL_CONFLICT
 
@@ -117,7 +117,7 @@ async def test_middleware_order_and_failure_classification() -> None:
     class FailingMutation(FailingObserver):
         mutating = True
 
-    with pytest.raises(LinktoolsAIError) as middleware_error:
+    with pytest.raises(AIError) as middleware_error:
         await MiddlewarePipeline((FailingMutation(),)).before_model(context)
     assert middleware_error.value.code == ErrorCode.MIDDLEWARE_FAILED
 
@@ -209,8 +209,8 @@ async def test_production_gateway_rejects_local_and_unknown_operations() -> None
             return None
 
     gateway = WorkflowGateway(Client())
-    local = ExecutionRequest("prompt", trusted_local_principal("local"))
-    with pytest.raises(LinktoolsAIError) as profile_error:
+    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key")
+    with pytest.raises(AIError) as profile_error:
         await gateway.start_execution("execution", local)
     assert profile_error.value.code == ErrorCode.PROFILE_NOT_ALLOWED
     with pytest.raises(ValueError):

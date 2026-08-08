@@ -8,7 +8,7 @@ from enum import StrEnum
 from collections.abc import Mapping, Sequence
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 
 KeyT = TypeVar("KeyT")
 ValueT = TypeVar("ValueT")
@@ -67,7 +67,7 @@ class StorageBatchFailure(Generic[InfoT, KeyT, EntryRevisionT, StoreRevisionT]):
 
 
 class StorageBatchPartialError(
-    LinktoolsAIError,
+    AIError,
     Generic[InfoT, KeyT, EntryRevisionT, StoreRevisionT],
 ):
     def __init__(

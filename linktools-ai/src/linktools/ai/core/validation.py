@@ -5,7 +5,7 @@
 import re
 from enum import Enum
 
-from .errors import ErrorCode, LinktoolsAIError
+from .errors import ErrorCode, AIError
 from .json import JsonValue, canonical_json_bytes
 
 
@@ -27,43 +27,43 @@ def validate_idempotency_key(value: str) -> str:
 
 def validate_agent_id(value: str) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", value):
-        raise LinktoolsAIError(ErrorCode.AGENT_ID_INVALID)
+        raise AIError(ErrorCode.AGENT_ID_INVALID)
     return value
 
 
 def validate_prompt(value: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > 1024 * 1024:
-        raise LinktoolsAIError(ErrorCode.PROMPT_TOO_LARGE)
+        raise AIError(ErrorCode.PROMPT_TOO_LARGE)
     return value
 
 
 def validate_external_payload(value: JsonValue) -> JsonValue:
     if len(canonical_json_bytes(value)) > 4 * 1024 * 1024:
-        raise LinktoolsAIError(ErrorCode.EXTERNAL_RESULT_TOO_LARGE)
+        raise AIError(ErrorCode.EXTERNAL_RESULT_TOO_LARGE)
     return value
 
 
 def validate_tool_arguments(value: JsonValue) -> JsonValue:
     if len(canonical_json_bytes(value)) > 1024 * 1024:
-        raise LinktoolsAIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
+        raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
     return value
 
 
 def validate_observation_payload(value: JsonValue) -> JsonValue:
     if len(canonical_json_bytes(value)) > 1024 * 1024:
-        raise LinktoolsAIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
+        raise AIError(ErrorCode.OBSERVATION_PAYLOAD_TOO_LARGE)
     return value
 
 
 def validate_page_limit(value: int) -> int:
     if value < 1 or value > 200:
-        raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+        raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
     return value
 
 
 def validate_shell_timeout(value: int) -> int:
     if value < 1 or value > 900:
-        raise LinktoolsAIError(ErrorCode.TOOL_TIMEOUT_INVALID)
+        raise AIError(ErrorCode.TOOL_TIMEOUT_INVALID)
     return value
 
 
@@ -71,13 +71,13 @@ def validate_enum(value: str, enum_type: type[Enum]) -> str:
     try:
         enum_type(value)
     except ValueError as error:
-        raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
     return value
 
 
 def _text(value: str, maximum: int, code: ErrorCode) -> str:
     if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > maximum:
-        raise LinktoolsAIError(code)
+        raise AIError(code)
     return value
 
 

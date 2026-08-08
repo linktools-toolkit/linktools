@@ -9,7 +9,7 @@ from linktools.core import environ
 
 from ..core.json import JsonValue
 from ..core import ExecutionProfile, require_profile_available
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..runtime.services import (
     CancelExecutionResult,
     ExecutionHandle,
@@ -63,7 +63,7 @@ class WorkflowGateway:
             raise ValueError("workflow id is required")
         require_profile_available(request.requested_profile)
         if request.requested_profile is not ExecutionProfile.PRODUCTION_SERVICE or request.principal.kind == "LOCAL_TRUSTED":
-            raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
         _logger.info("starting durable execution workflow: workflow_id=%s", workflow_id)
         return await self._client.start_workflow("execution", request, workflow_id=workflow_id)
 
@@ -78,11 +78,11 @@ class WorkflowGateway:
         if operation == "supply_external_result":
             required = {"call_id", "result_id", "payload_ref", "payload_digest", "principal_id"}
             if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if operation == "approve":
             required = {"approval_id", "decision_id", "decision", "principal_id", "decision_digest"}
             if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
 
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult:
@@ -100,7 +100,7 @@ class WorkflowGateway:
             raise ValueError("workflow id is required")
         require_profile_available(request.requested_profile)
         if request.requested_profile is not ExecutionProfile.PRODUCTION_SERVICE or request.principal.kind == "LOCAL_TRUSTED":
-            raise LinktoolsAIError(ErrorCode.PROFILE_NOT_ALLOWED)
+            raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
         _logger.info("starting durable task workflow: workflow_id=%s", workflow_id)
         return await self._client.start_task_graph(request, workflow_id=workflow_id)
 

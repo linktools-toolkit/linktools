@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from uuid import uuid4
 
 from linktools.core import environ
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 
 
 _logger = environ.get_logger("ai.storage.lock")
@@ -215,7 +215,7 @@ class FileWriterLock:
             await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
             os.close(descriptor)
-            raise LinktoolsAIError(ErrorCode.STORAGE_CONFLICT) from error
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         except BaseException:
             os.close(descriptor)
             raise

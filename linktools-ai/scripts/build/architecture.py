@@ -172,7 +172,11 @@ def _source_packages(root: Path) -> 'tuple[str, ...]':
 def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[str]':
     errors: list[str] = []
     actual = _source_packages(root)
-    packages = actual
+    packages = expected_packages
+    missing = sorted(set(expected_packages) - set(actual))
+    unexpected = sorted(set(actual) - set(expected_packages))
+    errors.extend(f"missing target package: {package}" for package in missing)
+    errors.extend(f"unexpected target package: {package}" for package in unexpected)
     for path in root.rglob("*.py"):
         if "__pycache__" in path.parts:
             continue
@@ -182,7 +186,7 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]') -> 'list[st
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
         elif relative[0] == "temporal":
-            if len(relative) == 2 and relative[1] in {"gateway.py", "worker.py"}:
+            if len(relative) == 2 and relative[1] in {"context.py", "gateway.py", "worker.py"}:
                 continue
             if len(relative) != 3 or relative[1] not in {"workflow", "activity"}:
                 errors.append(f"invalid temporal depth: {path}")

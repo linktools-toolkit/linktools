@@ -9,7 +9,7 @@ import pytest
 
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.core.value import ExecutionProfile
-from linktools.ai.local.persistence import build_memory_runtime
+from linktools.ai.adapter.memory import build_memory_runtime
 from linktools.ai.runtime.execution import DefaultExecutionService
 from linktools.ai.runtime.services import ExecutionRequest
 

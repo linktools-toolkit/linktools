@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from .paging import Page
-from .errors import ErrorCode, LinktoolsAIError
+from .errors import ErrorCode, AIError
 
 
 class ExecutionProfile(StrEnum):
@@ -192,7 +192,7 @@ def profile_available(profile: ExecutionProfile) -> bool:
 
 def require_profile_available(profile: ExecutionProfile) -> None:
     if not profile_available(profile):
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "production-sandboxed is blocked by the Harness release")
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "production-sandboxed is blocked by the Harness release")
 
 
 __all__ = [

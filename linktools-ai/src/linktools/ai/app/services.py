@@ -26,12 +26,10 @@ from ..runtime import (
     DefaultExecutionService,
     DefaultSessionService,
     DefaultTaskService,
-    Runtime,
-    RuntimeAccess,
     RuntimeServices,
-    build_runtime_access,
 )
-from ..runtime.execution import ExecutionLauncher
+from .runtime import Runtime, RuntimeAccess, build_runtime_access
+from ..runtime.execution import CancelEffectOutcome, ExecutionLauncher
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextContent, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore, RunRecord, StepEvent, StepStore
 
@@ -41,13 +39,13 @@ from ..runtime.persistence import ExecutionRecord
 from ..runtime.services import ExecutionHistoryReader, ExecutionRequest, TraceItem, TranscriptItem, WorkflowGateway, new_runtime_service_identity
 from ..core import AuthorizationPolicy, ExecutionProfile, HmacCursorSigner, Page, PrincipalProvider
 from ..core.ids import step_conversation_id, step_run_id
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..storage.lock import FileWriterLock
 from ..spec import AgentSpecCodec, PromptSpecCodec
 from ..capability.codec import MCPServerSpecCodec, SkillSpecCodec
 from ..spec.output import OutputTypeRegistry
 
-_logger = environ.get_logger("ai.entry.services")
+_logger = environ.get_logger("ai.app.services")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,16 +58,16 @@ class RuntimeStoreConfig:
 
     def __post_init__(self) -> None:
         if not self.namespace.strip() or not self.deployment_id.strip() or _has_control(self.namespace) or _has_control(self.deployment_id):
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self.backend is RuntimeBackend.MEMORY:
             if self.location or self.local_tenant_id is not None:
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.FILE:
             if self.location is None or not Path(self.location).is_absolute() or not self.local_tenant_id or not self.local_tenant_id.strip() or _has_control(self.local_tenant_id):
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.SQLITE:
             if self.location is None or self.location == ":memory:" or not Path(self.location).is_absolute():
-                raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.MYSQL:
             _validate_url(self.location or "", "mysql+asyncmy")
         elif self.backend is RuntimeBackend.POSTGRESQL:
@@ -80,15 +78,15 @@ class RuntimeStoreConfig:
         return cls(backend=RuntimeBackend.MEMORY, namespace=namespace, deployment_id=deployment_id)
 
     @classmethod
-    def file(cls, root: str, *, project_id: str, local_tenant_id: str) -> "RuntimeStoreConfig":
-        if not root.strip() or not project_id.strip() or not local_tenant_id.strip():
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return cls(backend=RuntimeBackend.FILE, namespace=project_id, deployment_id="local", location=str(Path(root).expanduser().resolve()), local_tenant_id=local_tenant_id)
+    def file(cls, root: str, *, workspace_id: str) -> "RuntimeStoreConfig":
+        if not root.strip() or not workspace_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return cls(backend=RuntimeBackend.FILE, namespace=workspace_id, deployment_id="workspace", location=str(Path(root).expanduser().resolve()), local_tenant_id=workspace_id)
 
     @classmethod
     def sqlite(cls, path: str, *, namespace: str, deployment_id: str) -> "RuntimeStoreConfig":
         if not path.strip():
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return cls(backend=RuntimeBackend.SQLITE, namespace=namespace, deployment_id=deployment_id, location=str(Path(path).expanduser().resolve()))
 
     @classmethod
@@ -105,7 +103,7 @@ class RuntimeStoreConfig:
 def _validate_url(url: str, scheme: str) -> None:
     parsed = urlsplit(url)
     if parsed.scheme != scheme or not parsed.hostname:
-        raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def _has_control(value: str) -> bool:
@@ -125,15 +123,7 @@ class RuntimeStores:
     steps: StepStore
 
 
-class _EmptyExecutionHistoryReader:
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TraceItem]:
-        return Page((), None)
-
-    async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TranscriptItem]:
-        return Page((), None)
-
-
-class _StepExecutionHistoryReader:
+class StepExecutionHistoryReader:
     def __init__(self, namespace: str, persistence: RuntimePersistence, store: StepStore) -> None:
         self._namespace = namespace
         self._persistence = persistence
@@ -142,9 +132,9 @@ class _StepExecutionHistoryReader:
     async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TraceItem]:
         record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if not 1 <= limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         entries = await self._history_tree(record, tenant_id)
         projected: list[tuple[tuple[object, ...], TraceItem]] = []
         for item, depth in entries:
@@ -162,10 +152,10 @@ class _StepExecutionHistoryReader:
 
     async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TranscriptItem]:
         if not 1 <= limit <= 200:
-            raise LinktoolsAIError(ErrorCode.PAGE_LIMIT_INVALID)
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if record.agent_run_sequence == 0:
             return Page((), None)
         await self._history_tree(record, tenant_id)
@@ -173,14 +163,14 @@ class _StepExecutionHistoryReader:
         snapshot = await self._store.latest_snapshot(run_id=final_run_id)
         if snapshot is None:
             if record.status.value == "SUCCEEDED":
-                raise LinktoolsAIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id)
         values: list[str] = []
         for message in snapshot.messages:
             if isinstance(message, (ModelRequest, ModelResponse)):
                 if message.conversation_id is None:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if message.conversation_id != conversation_id:
                     continue
             if isinstance(message, ModelRequest):
@@ -200,15 +190,15 @@ class _StepExecutionHistoryReader:
 
         async def visit(record: ExecutionRecord, depth: int) -> None:
             if record.execution_id in visited or depth > 8:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if record.tenant_id != tenant_id:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if depth == 0:
                 if record.parent_execution_id is not None or record.lineage_kind.value not in {"RUN", "RETRY", "FORK", "SESSION_RESUME"}:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             else:
                 if record.lineage_kind != "SUBAGENT" or record.root_execution_id != root.root_execution_id:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             visited.add(record.execution_id)
             result.append((record, depth))
             children = await self._persistence.executions.list_children(record.execution_id, tenant_id=tenant_id)
@@ -220,7 +210,7 @@ class _StepExecutionHistoryReader:
 
     async def _segment_events(self, record: ExecutionRecord, tenant_id: str) -> list[tuple[int, list[StepEvent]]]:
         if record.agent_run_sequence < 0:
-            raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=record.execution_id)
         terminal = record.status.value in {"SUCCEEDED", "FAILED", "CANCELLED"}
         result: list[tuple[int, list[StepEvent]]] = []
@@ -230,12 +220,12 @@ class _StepExecutionHistoryReader:
             if run is None:
                 if not terminal and sequence == record.agent_run_sequence:
                     continue
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             _validate_run(run, deterministic_id, conversation_id, sequence)
             events = await self._store.list_events(run_id=deterministic_id)
             for event in events:
                 if event.run_id != deterministic_id or event.conversation_id not in {None, conversation_id}:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((sequence, events))
         return result
 
@@ -267,10 +257,10 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
 
 def _validate_run(run: RunRecord, expected_id: str, conversation_id: str, sequence: int) -> None:
     if run.run_id != expected_id or run.conversation_id != conversation_id or run.metadata.get("segment_sequence") != str(sequence):
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     agent_name = run.metadata.get("agent_name")
     if agent_name is None or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", agent_name) is None:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _event_timestamp(event: StepEvent) -> datetime:
@@ -283,9 +273,9 @@ def _cursor_offset(cursor: str | None, size: int) -> int:
     try:
         offset = int(cursor)
     except ValueError as error:
-        raise LinktoolsAIError(ErrorCode.PAGE_CURSOR_INVALID) from error
+        raise AIError(ErrorCode.PAGE_CURSOR_INVALID) from error
     if offset < 0 or offset > size:
-        raise LinktoolsAIError(ErrorCode.PAGE_CURSOR_INVALID)
+        raise AIError(ErrorCode.PAGE_CURSOR_INVALID)
     return offset
 
 
@@ -314,7 +304,7 @@ def _validate_store_config(config: RuntimeStoreConfig) -> None:
 async def open_runtime_store(config: RuntimeStoreConfig) -> AsyncIterator[RuntimeStores]:
     _validate_store_config(config)
     if config.backend is RuntimeBackend.MEMORY:
-        from ..local.persistence import build_memory_runtime
+        from ..adapter.memory import build_memory_runtime
         runtime = build_memory_runtime(namespace=config.namespace)
         steps = InMemoryStepStore()
         await runtime.initialize()
@@ -324,9 +314,9 @@ async def open_runtime_store(config: RuntimeStoreConfig) -> AsyncIterator[Runtim
             await runtime.close()
         return
     if config.backend is RuntimeBackend.FILE:
-        from ..local.persistence import build_file_runtime
-        from ..local.step import DurableFileStepStore
-        runtime = build_file_runtime(str(config.location), project_id=config.namespace, local_tenant_id=str(config.local_tenant_id))
+        from ..adapter.memory import build_file_runtime
+        from ..adapter.step import DurableFileStepStore
+        runtime = build_file_runtime(str(config.location), workspace_id=config.namespace)
         steps = DurableFileStepStore(str(config.location), config.namespace, writer_lock=runtime.writer_lock)
         await runtime.initialize()
         await steps.initialize()
@@ -370,6 +360,7 @@ async def open_runtime_services(
     temporal_enabled: bool,
     grant_key: bytes,
     workflow_gateway: "WorkflowGateway | None" = None,
+    execution_launcher: "ExecutionLauncher | None" = None,
 ) -> AsyncIterator[RuntimeServices]:
     validate_runtime_profile(config.backend, profile, temporal_enabled=temporal_enabled)
     local_lock = None
@@ -379,21 +370,21 @@ async def open_runtime_services(
         await local_lock.acquire()
     try:
         async with open_runtime_store(config) as stores:
-            history_reader = _StepExecutionHistoryReader(config.namespace, stores.domain, stores.steps)
-            yield build_default_runtime_services(stores.domain, authorization, profile=profile, temporal_enabled=temporal_enabled, grant_key=grant_key, workflow_gateway=workflow_gateway, history_reader=history_reader)
+            history_reader = StepExecutionHistoryReader(config.namespace, stores.domain, stores.steps)
+            yield build_runtime_services(stores.domain, authorization, profile=profile, temporal_enabled=temporal_enabled, grant_key=grant_key, workflow_gateway=workflow_gateway, execution_launcher=execution_launcher, history_reader=history_reader, schema_digest=stores.domain.atomic_domain_id)
     finally:
         if local_lock is not None:
             await local_lock.release()
 
 @dataclass(frozen=True, slots=True)
-class EntryServices:
+class AppServices:
     runtime_services: RuntimeServices
     access: RuntimeAccess
-    runtime_factory: "EntryRuntimeFactory"
+    runtime_factory: "RuntimeFactory"
     principal_provider: "PrincipalProvider | None" = None
 
 
-class EntryRuntimeFactory(Protocol):
+class RuntimeFactory(Protocol):
     async def build_for_request(self, request: ExecutionRequest) -> Runtime: ...
 
 
@@ -404,26 +395,9 @@ class _WorkflowExecutionLauncher:
     async def start(self, request: ExecutionRequest, execution: "ExecutionRecord") -> None:
         await self._gateway.start_execution(execution.execution_id, request)
 
-    async def cancel(self, execution: "ExecutionRecord") -> None:
-        await self._gateway.cancel_execution(execution.execution_id)
-
-
-@dataclass(frozen=True, slots=True)
-class AgentServices:
-    asset_store: AssetStore
-    model_registry: ModelRegistry
-    model_resolver: ModelResolver
-    skill_provider: SkillProvider
-    mcp_provider: MCPToolProvider
-    subagent_provider: SubagentProvider
-    middleware: MiddlewarePipeline
-    sandbox: Sandbox
-    tool_policy: ToolPolicy
-    output_types: OutputTypeRegistry
-    tool_state: ToolStateStore
-    principal_provider: PrincipalProvider
-    runtime_services: RuntimeServices
-    runtime_access: RuntimeAccess
+    async def cancel(self, execution: "ExecutionRecord") -> "CancelEffectOutcome":
+        result = await self._gateway.cancel_execution(execution.execution_id)
+        return CancelEffectOutcome.CONFIRMED if result.cancelled else CancelEffectOutcome.UNKNOWN
 
 
 def build_asset_codecs() -> AssetCodecRegistry:
@@ -437,7 +411,7 @@ def build_asset_codecs() -> AssetCodecRegistry:
     return registry
 
 
-def build_agent_services(
+def build_app_services(
     asset_store: AssetStore,
     model_registry: ModelRegistry,
     model_resolver: ModelResolver,
@@ -451,7 +425,7 @@ def build_agent_services(
     tool_state: ToolStateStore,
     principal_provider: PrincipalProvider,
     runtime_services: RuntimeServices,
-) -> AgentServices:
+) -> AppServices:
     if any(
         value is None
         for value in (
@@ -470,61 +444,41 @@ def build_agent_services(
             runtime_services,
         )
     ):
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     registry_snapshot = model_registry.snapshot()
     resolver_snapshot = model_resolver.snapshot()
     if (
         resolver_snapshot.revision != registry_snapshot.revision
         or resolver_snapshot.digest != registry_snapshot.digest
     ):
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not output_types.frozen:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not asset_store.codec_manifest.entries or not asset_store.codec_manifest.digest:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not skill_provider.manifest() or not mcp_provider.manifest() or not subagent_provider.manifest():
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    services = AgentServices(
-        asset_store,
-        model_registry,
-        model_resolver,
-        skill_provider,
-        mcp_provider,
-        subagent_provider,
-        middleware,
-        sandbox,
-        tool_policy,
-        output_types,
-        tool_state,
-        principal_provider,
-        runtime_services,
-        build_runtime_access(runtime_services),
-    )
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    services = AppServices(runtime_services, build_runtime_access(runtime_services), _MissingRuntimeFactory(), principal_provider)
     _logger.info("agent services composed: model_revision=%s", model_registry.snapshot().revision)
     return services
 
 
-def build_services(
-    services: RuntimeServices,
-    runtime_factory: EntryRuntimeFactory,
-    principal_provider: "PrincipalProvider | None" = None,
-) -> EntryServices:
-    if runtime_factory is None:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    return EntryServices(services, build_runtime_access(services), runtime_factory, principal_provider)
+class _MissingRuntimeFactory:
+    async def build_for_request(self, request: ExecutionRequest) -> Runtime:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def build_default_runtime_services(
+def build_runtime_services(
     persistence: RuntimePersistence,
     authorization: "AuthorizationPolicy",
     *,
     profile: "ExecutionProfile",
     temporal_enabled: bool,
     grant_key: bytes,
-    schema_digest: str = "runtime",
+    history_reader: ExecutionHistoryReader,
+    schema_digest: str,
     workflow_gateway: "WorkflowGateway | None" = None,
     execution_launcher: "ExecutionLauncher | None" = None,
-    history_reader: ExecutionHistoryReader,
 ) -> RuntimeServices:
     """Compose all default services from one persistence and authorization root."""
     identity = new_runtime_service_identity(
@@ -535,11 +489,20 @@ def build_default_runtime_services(
         profile=profile,
         temporal_enabled=temporal_enabled,
     )
-    if profile is ExecutionProfile.PRODUCTION_SERVICE and workflow_gateway is None:
-        raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if profile is ExecutionProfile.PRODUCTION_SANDBOXED:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if workflow_gateway is not None and execution_launcher is not None:
-        raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
-    launcher = _WorkflowExecutionLauncher(workflow_gateway) if workflow_gateway is not None else execution_launcher
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if profile is ExecutionProfile.LOCAL_CODING:
+        if workflow_gateway is not None or execution_launcher is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        launcher = execution_launcher
+    elif profile is ExecutionProfile.PRODUCTION_SERVICE:
+        if workflow_gateway is None or execution_launcher is not None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        launcher = _WorkflowExecutionLauncher(workflow_gateway)
+    else:
+        raise AIError(ErrorCode.PROFILE_NOT_ALLOWED)
     execution = DefaultExecutionService(persistence, authorization, launcher=launcher, service_profile=profile, history_reader=history_reader)
     services = RuntimeServices(
         identity,
@@ -555,4 +518,4 @@ def build_default_runtime_services(
     return services
 
 
-__all__ = ["AgentServices", "EntryRuntimeFactory", "EntryServices", "RuntimeStoreConfig", "RuntimeStores", "build_agent_services", "build_asset_codecs", "build_default_runtime_services", "build_services", "namespace_scoped_step_db_path", "open_runtime_services", "open_runtime_store"]
+__all__ = ["AppServices", "RuntimeFactory", "RuntimeStoreConfig", "RuntimeStores", "StepExecutionHistoryReader", "build_app_services", "build_asset_codecs", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_services", "open_runtime_store"]

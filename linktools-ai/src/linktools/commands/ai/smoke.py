@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 
-from ...ai.entry.acp import ACPApplication
-from ...ai.local import LocalProject
+from ...ai.app.acp import ACPApplication
+from ...ai.workspace import Workspace
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -26,17 +26,17 @@ class Command(BaseCommand):
         parser.add_argument("--json", action="store_true", help="emit JSON")
 
     def run(self, args: Namespace) -> int:
-        project = LocalProject.discover(Path.cwd(), root=args.project, storage_root=args.storage)
-        application = ACPApplication.for_project(project)
+        workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+        application = ACPApplication.for_workspace(workspace)
         report = {
-            "ok": application.agent().__class__.__name__ == "LocalACPAgent",
+            "ok": application.__class__.__name__ == "ACPApplication",
             "boundary": ACPApplication.__name__,
-            "project_root": project.root.as_posix(),
+            "workspace_root": workspace.root.as_posix(),
         }
         if args.json:
             print(json.dumps(report, sort_keys=True))
         else:
-            self.logger.info("ACP application ready: project=%s", project.root)
+            self.logger.info("ACP application ready: workspace=%s", workspace.root)
         return 0
 
 

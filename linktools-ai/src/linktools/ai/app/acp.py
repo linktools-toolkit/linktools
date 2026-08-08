@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ACP composition and stdio transport for the local Agent runtime."""
+"""ACP transport for the Workspace application runtime."""
 
 import asyncio
 from dataclasses import dataclass
@@ -18,11 +18,10 @@ except ModuleNotFoundError:
     _acp_schema = None
 
 from ..core import JsonValue
-from ..agent.runner import LocalAgentRunner
-from ..local import LocalAgentRuntime, LocalProject
-from ..local.tool import build_local_capabilities
+from ..workspace import Workspace
+from .workspace import WorkspaceAgentRuntime, open_workspace_runtime
 
-_logger = environ.get_logger("ai.entry.acp")
+_logger = environ.get_logger("ai.app.acp")
 
 
 class ACPConnection(Protocol):
@@ -33,8 +32,8 @@ class ACPTextContent(Protocol):
     text: str
 
 
-class LocalACPAgent:
-    def __init__(self, runtime: LocalAgentRuntime) -> None:
+class ACPAgent:
+    def __init__(self, runtime: WorkspaceAgentRuntime) -> None:
         self._runtime = runtime
         self._connection: ACPConnection | None = None
         self._initialized = False
@@ -138,33 +137,30 @@ class LocalACPAgent:
 
 @dataclass(frozen=True, slots=True)
 class ACPApplication:
-    runtime: LocalAgentRuntime
+    workspace: Workspace
+    runtime: WorkspaceAgentRuntime | None = None
 
     @classmethod
-    def for_project(cls, project: LocalProject) -> "ACPApplication":
-        return cls(
-            LocalAgentRuntime(
-                project,
-                runner=LocalAgentRunner(project.root, project.config, capabilities=build_local_capabilities(project.root)),
-            )
-        )
+    def for_workspace(cls, workspace: Workspace) -> "ACPApplication":
+        return cls(workspace)
 
-    def agent(self) -> LocalACPAgent:
-        return LocalACPAgent(self.runtime)
+    def agent(self) -> ACPAgent:
+        if self.runtime is None:
+            raise RuntimeError("ACP runtime is not open")
+        return ACPAgent(self.runtime)
 
     async def serve(self) -> None:
-        try:
+        async with open_workspace_runtime(self.workspace) as runtime:
+            self.runtime = runtime
             await serve_stdio(self.agent())
-        finally:
-            await self.runtime.shutdown()
 
 
-async def serve_stdio(agent: LocalACPAgent) -> None:
+async def serve_stdio(agent: ACPAgent) -> None:
     acp, _ = _require_acp()
     await acp.run_agent(agent, use_unstable_protocol=True)
 
 
-def run_stdio(agent: LocalACPAgent) -> None:
+def run_stdio(agent: ACPAgent) -> None:
     asyncio.run(serve_stdio(agent))
 
 
@@ -208,4 +204,4 @@ def _acp_update(schema, event: 'dict[str, JsonValue]') -> 'JsonValue | None':
     )
 
 
-__all__ = ["ACPApplication", "ACPConnection", "LocalACPAgent", "run_stdio", "serve_stdio"]
+__all__ = ["ACPAgent", "ACPApplication", "ACPConnection", "run_stdio", "serve_stdio"]

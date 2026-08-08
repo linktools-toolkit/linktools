@@ -16,7 +16,7 @@ contract::
 """
 
 from ..errors import (
-    LinktoolsError, CliError, ConfigError, DownloadError, GitError, SSHError,
+    Error, CliError, ConfigError, DownloadError, GitError, SSHError,
     ToolError,
 )
 
@@ -47,6 +47,6 @@ def exit_code_for(error: BaseException) -> int:
         return EXIT_NETWORK
     if isinstance(error, ToolError):
         return EXIT_TOOL
-    if isinstance(error, LinktoolsError):
+    if isinstance(error, Error):
         return EXIT_INTERNAL
     return EXIT_INTERNAL

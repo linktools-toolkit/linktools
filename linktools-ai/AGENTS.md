@@ -15,12 +15,12 @@ The package is deliberately small and has one owner per concern:
 | `capability` | MCP, Skill, Subagent, Tool, Sandbox, Retrieval and Extension contracts |
 | `task` | Task, Job, Swarm and DAG contracts |
 | `agent` | Pydantic AI boundary, dependencies, context and runner |
-| `runtime` | Runtime container, services and the seven runtime APIs |
-| `local` | Local coding profile and its project, index, sandbox and tools |
+| `runtime` | Runtime persistence contracts, services and the seven runtime APIs |
+| `workspace` | Workspace identity, discovery, index and local coding tools |
 | `adapter` | Non-Asset external adapters and runtime/task ports |
 | `temporal` | Durable workflows, activities, gateway, worker and launcher |
 | `scripts/build` | Bundle compilation, architecture, import, dependency and data gates |
-| `entry` | HTTP, CLI, ACP and the only composition root |
+| `app` | Runtime/workspace composition, HTTP, CLI, ACP and the only composition root |
 
 Normal library modules are directly under `linktools/ai/<package>/`. Build-time
 gates live under `scripts/build/`. Only Temporal

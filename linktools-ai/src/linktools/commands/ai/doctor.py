@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand
 
-from ...ai.local import LocalProject, SkillIndex
+from ...ai.workspace import SkillIndex, Workspace
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -24,21 +24,21 @@ class Command(BaseCommand):
         parser.add_argument("--json", action="store_true", help="emit JSON")
 
     def run(self, args: Namespace) -> int:
-        project = LocalProject.load(args.project)
-        index = SkillIndex(project.root)
+        workspace = Workspace.load(args.project)
+        index = SkillIndex(workspace.root)
         revision = index.refresh()
         report = {
-            "root": str(project.root),
-            "project_id": project.project_id,
-            "config": str(project.config_path) if project.config_path else None,
+            "root": str(workspace.root),
+            "workspace_id": workspace.workspace_id,
+            "config": str(workspace.config_path) if workspace.config_path else None,
             "skill_revision": revision,
             "skills": [skill.skill_id for skill in index.list()],
         }
         if args.json:
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))
         else:
-            self.logger.info("project root=%s", report["root"])
-            self.logger.info("project id=%s", report["project_id"])
+            self.logger.info("workspace root=%s", report["root"])
+            self.logger.info("workspace id=%s", report["workspace_id"])
             self.logger.info("skills=%s", ", ".join(report["skills"]) or "none")
         return 0
 

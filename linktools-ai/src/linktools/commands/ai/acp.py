@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from ...ai.entry.acp import ACPApplication
-from ...ai.local import LocalProject
+from ...ai.app.acp import ACPApplication
+from ...ai.workspace import Workspace
 
 if TYPE_CHECKING:
     from linktools.cli import CommandParser
@@ -26,8 +26,8 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         try:
-            project = LocalProject.discover(Path.cwd(), root=args.project, storage_root=args.storage)
-            asyncio.run(ACPApplication.for_project(project).serve())
+            workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+            asyncio.run(ACPApplication.for_workspace(workspace).serve())
         except ModuleNotFoundError as error:
             raise CommandError("ai acp requires pydantic-ai-harness and agent-client-protocol dependencies") from error
         except ValueError as error:

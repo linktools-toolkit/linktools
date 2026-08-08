@@ -9,18 +9,18 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..core.errors import ErrorCode, InvalidStoragePathError, LinktoolsAIError
+from ..core.errors import ErrorCode, InvalidStoragePathError, AIError
 from ..core.json import JsonValue
 
 
 def validate_root_path(root: Path, relative: str) -> Path:
     if not relative or "\x00" in relative or "\\" in relative:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     candidate = (root / relative).resolve()
     try:
         candidate.relative_to(root.resolve())
     except ValueError as exc:
-        raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
     return candidate
 
 
@@ -49,7 +49,7 @@ def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None
     except BaseException as error:
         Path(temporary).unlink(missing_ok=True)
         if replaced:
-            raise LinktoolsAIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
         raise
 
 

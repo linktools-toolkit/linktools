@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from collections.abc import Mapping
 from typing import Protocol
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.json import JsonValue, canonical_json_bytes
 from ..core.principal import ResourceRef
 from ..core.value import Principal
@@ -44,14 +44,14 @@ class MCPCallRequest:
 
     def __post_init__(self) -> None:
         if self.principal.tenant_id != self.execution.tenant_id or not self.operation_id.strip() or not self.server_id.strip() or not self.tool_name.strip() or not 1 <= self.timeout_seconds <= 900:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if len(canonical_json_bytes(dict(self.arguments))) > 4 * 1024 * 1024:
-            raise LinktoolsAIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
+            raise AIError(ErrorCode.TOOL_ARGUMENTS_TOO_LARGE)
 
 
 def validate_mcp_response(value: JsonValue) -> JsonValue:
     if len(canonical_json_bytes(value)) > 4 * 1024 * 1024:
-        raise LinktoolsAIError(ErrorCode.MCP_RESPONSE_TOO_LARGE)
+        raise AIError(ErrorCode.MCP_RESPONSE_TOO_LARGE)
     return value
 
 

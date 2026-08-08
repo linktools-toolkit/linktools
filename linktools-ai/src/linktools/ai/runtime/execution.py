@@ -7,10 +7,11 @@ import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from enum import StrEnum
 from typing import Protocol
 
 from ..core import Page, Principal
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.ids import canonical_sha256, idempotency_key_hash
 from ..core.principal import AuthorizationAction, AuthorizationPolicy, ResourceRef
 from ..core.value import ExecutionEventType, ExecutionLineageKind, ExecutionProfile, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, StopReason
@@ -20,6 +21,7 @@ from .persistence import (
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
+    ExecutionCancelRequestCommit,
     ExecutionTerminalCommit, IdempotencyTerminalUpdate, OperationTerminalUpdate,
     IdempotencyRecord,
     OperationLedgerInput,
@@ -60,7 +62,12 @@ class ExecutionApi(ExecutionQueryApi, Protocol):
 
 class ExecutionLauncher(Protocol):
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
-    async def cancel(self, execution: ExecutionRecord) -> None: ...
+    async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
+
+
+class CancelEffectOutcome(StrEnum):
+    CONFIRMED = "CONFIRMED"
+    UNKNOWN = "UNKNOWN"
 
 
 class DefaultExecutionService:
@@ -88,37 +95,44 @@ class DefaultExecutionService:
 
     async def run_for_session(self, binding_digest: str, session_id: str, request: ExecutionRequest) -> ExecutionHandle:
         if not session_id.strip():
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
 
     async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
-            raise LinktoolsAIError(ErrorCode.REQUEST_FIELD_INVALID)
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if request.requested_profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         if self._launcher is None:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if request.idempotency_key is None:
+            raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        if session_id is not None and source_execution_id is None:
+            session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            if session is None:
+                raise AIError(ErrorCode.SESSION_NOT_FOUND)
+            base_execution_id = session.head_execution_id
+            lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
         resource = ResourceRef(ResourceKind.EXECUTION, execution_id, request.principal.tenant_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, resource)
-        key = request.idempotency_key or execution_id
-        key_hash = idempotency_key_hash(key)
-        request_digest = _request_digest(request, binding_digest)
+        key_hash = idempotency_key_hash(request.idempotency_key)
+        request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind)
         existing = await self._persistence.idempotency.get(scope, key_hash, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.START_UNKNOWN:
-                raise LinktoolsAIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
                 pending = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     return ExecutionHandle(existing.execution_id, request.requested_profile)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
-                    raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
-                    await self._persistence.executions.claim_start(ExecutionStartClaim(existing.execution_id, request.principal.tenant_id, pending.snapshot_revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
-                except LinktoolsAIError as error:
+                    await self._persistence.executions.claim_start(ExecutionStartClaim(existing.execution_id, request.principal.tenant_id, pending.revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
+                except AIError as error:
                     current = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
@@ -131,13 +145,6 @@ class DefaultExecutionService:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_CANCELLED)
             return ExecutionHandle(existing.execution_id, request.requested_profile)
         now = datetime.now(timezone.utc)
-        if session_id is not None and source_execution_id is None:
-            session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
-            if session is None:
-                raise LinktoolsAIError(ErrorCode.SESSION_NOT_FOUND)
-            source_execution_id = session.head_execution_id
-            base_execution_id = source_execution_id
-            lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution = ExecutionRecord(
             execution_id=execution_id,
             tenant_id=request.principal.tenant_id,
@@ -147,7 +154,7 @@ class DefaultExecutionService:
             parent_execution_id=parent_execution_id,
             root_execution_id=root_execution_id or execution_id,
             status=ExecutionStatus.PENDING_START,
-            snapshot_revision=0,
+            revision=0,
             event_sequence=0,
             result_ref=None,
             result_digest=None,
@@ -168,11 +175,11 @@ class DefaultExecutionService:
         )
         if not reservation.created:
             if reservation.idempotency.request_digest != request_digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
                 try:
-                    await self._persistence.executions.claim_start(ExecutionStartClaim(reservation.execution.execution_id, reservation.execution.tenant_id, reservation.execution.snapshot_revision, reservation.execution.event_sequence, scope, key_hash, request_digest, now))
-                except LinktoolsAIError as error:
+                    await self._persistence.executions.claim_start(ExecutionStartClaim(reservation.execution.execution_id, reservation.execution.tenant_id, reservation.execution.revision, reservation.execution.event_sequence, scope, key_hash, request_digest, now))
+                except AIError as error:
                     current = await self._persistence.executions.get(reservation.execution.execution_id, tenant_id=reservation.execution.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
@@ -181,9 +188,9 @@ class DefaultExecutionService:
             elif reservation.execution.status is ExecutionStatus.STARTED and reservation.idempotency.status is IdempotencyStatus.STARTED:
                 return ExecutionHandle(reservation.execution.execution_id, request.requested_profile)
             elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
-                raise LinktoolsAIError(ErrorCode.EXECUTION_START_UNKNOWN)
+                raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             else:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(reservation.execution.execution_id, request.requested_profile)
         execution_id = reservation.execution.execution_id
         try:
@@ -193,27 +200,30 @@ class DefaultExecutionService:
         except BaseException as error:
             if isinstance(error, asyncio.CancelledError):
                 raise
-            raise LinktoolsAIError(ErrorCode.EXECUTION_START_PERSISTENCE_FAILED) from error
+            raise AIError(ErrorCode.EXECUTION_START_PERSISTENCE_FAILED) from error
         await self._launch_claim(request, execution_id, request.principal.tenant_id, scope, key_hash)
         _logger.info("execution started: execution=%s scope=%s profile=%s", execution_id, scope, request.requested_profile)
         return ExecutionHandle(execution_id, request.requested_profile)
 
     async def _launch_claim(self, request: ExecutionRequest, execution_id: str, tenant_id: str, scope: str, key_hash: str) -> None:
         if self._launcher is None:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
             launch_record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
             if launch_record is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._launcher.start(request, launch_record)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
             current = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
             if current is not None and current.status is ExecutionStatus.STARTED:
-                await self._persistence.executions.mark_start_unknown(ExecutionStartUnknownCommit(execution_id, tenant_id, current.snapshot_revision, scope, key_hash, datetime.now(timezone.utc)))
+                identity = await self._persistence.idempotency.get(scope, key_hash, tenant_id=tenant_id)
+                if identity is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await self._persistence.executions.mark_start_unknown(ExecutionStartUnknownCommit(execution_id, tenant_id, current.revision, current.event_sequence, scope, key_hash, identity.request_digest, datetime.now(timezone.utc)))
             _logger.error("execution start outcome unknown: execution=%s", execution_id)
-            raise LinktoolsAIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
@@ -223,32 +233,32 @@ class DefaultExecutionService:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         result = await self._persistence.results.get(execution_id, tenant_id=principal.tenant_id)
         if result is None:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         return ExecutionResult(execution.execution_id, result.status, result.payload_ref or "")
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest or previous.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
             request.prompt,
             request.principal,
             previous.profile,
             request.idempotency_key,
         )
-        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id or previous.execution_id)
+        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
         if previous.binding_digest != binding_digest or previous.profile is not self._service_profile:
-            raise LinktoolsAIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
+            raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
             request.prompt,
             request.principal,
             previous.profile,
             request.idempotency_key,
         )
-        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.base_execution_id or previous.execution_id)
+        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         execution = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL)
@@ -268,9 +278,11 @@ class DefaultExecutionService:
         )
         if operation is not None:
             if operation.request_digest != operation_digest:
-                raise LinktoolsAIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if operation.status in {OperationStatus.SUCCEEDED, OperationStatus.CANCELLED}:
                 return CancelExecutionResult(execution_id, execution.status is ExecutionStatus.CANCELLED)
+            if operation.status is OperationStatus.EFFECT_UNKNOWN:
+                return CancelExecutionResult(execution_id, False)
         else:
             now = datetime.now(timezone.utc)
             operation = OperationLedgerInput(
@@ -298,40 +310,55 @@ class DefaultExecutionService:
                 next_record=_operation_result(operation, execution.execution_id, execution.result_digest),
             )
             return CancelExecutionResult(execution_id, execution.status is ExecutionStatus.CANCELLED)
-        now = datetime.now(timezone.utc)
-        cancelling = _next_execution(execution, ExecutionStatus.CANCELLING, now)
         try:
-            await self._persistence.executions.compare_and_swap(
-                execution_id,
-                tenant_id=request.principal.tenant_id,
-                expected_snapshot_revision=execution.snapshot_revision,
-                next_record=cancelling,
+            cancelling = await self._persistence.executions.request_cancel(
+                ExecutionCancelRequestCommit(
+                    execution_id=execution_id,
+                    tenant_id=request.principal.tenant_id,
+                    expected_revision=execution.revision,
+                    expected_event_sequence=execution.event_sequence,
+                    operation_id=operation.operation_id,
+                    requested_at=datetime.now(timezone.utc),
+                )
             )
-            await self._persistence.events.append(
-                execution_id,
-                tenant_id=request.principal.tenant_id,
-                expected_sequence=cancelling.event_sequence,
-                event_type=ExecutionEventType.CANCEL_REQUESTED,
-                payload={},
-            )
-            if self._launcher is not None:
-                await self._launcher.cancel(cancelling)
-            cancelling_current = await self._persistence.executions.get(
-                execution_id,
-                tenant_id=request.principal.tenant_id,
-            )
+            if self._launcher is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            outcome = await self._launcher.cancel(cancelling)
+            if outcome is CancelEffectOutcome.UNKNOWN:
+                current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
+                if current is not None and current.status is OperationStatus.PENDING:
+                    await self._persistence.operations.compare_and_swap(
+                        operation.operation_id,
+                        tenant_id=request.principal.tenant_id,
+                        expected_status=OperationStatus.PENDING,
+                        next_record=_operation_status(current, OperationStatus.EFFECT_UNKNOWN),
+                    )
+                _logger.warning("execution cancellation effect unknown: execution=%s operation=%s", execution_id, operation.operation_id)
+                return CancelExecutionResult(execution_id, False)
+            cancelling_current = await self._persistence.executions.get(execution_id, tenant_id=request.principal.tenant_id)
             if cancelling_current is None:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = datetime.now(timezone.utc)
             terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
             result = ResultRecord(execution_id, request.principal.tenant_id, ExecutionStatus.CANCELLED, "none", 1, "none", None, None, StopReason.CANCELLED, 0, 0, 0, now)
             idempotency_records = await self._persistence.idempotency.list_by_execution(execution_id, tenant_id=request.principal.tenant_id)
             if len(idempotency_records) > 1:
-                raise LinktoolsAIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             identity = idempotency_records[0] if idempotency_records else None
             idempotency = None if identity is None else IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, IdempotencyStatus.CANCELLED, identity.request_digest, None, None)
-            operation_update = OperationTerminalUpdate(operation.operation_id, operation.status, OperationStatus.SUCCEEDED, None, None, None)
-            await self._persistence.results.commit_terminal(ExecutionTerminalCommit(cancelling_current.snapshot_revision, cancelling_current.event_sequence, terminal, result, ExecutionEventType.EXECUTION_CANCELLED, {}, idempotency=idempotency, operation=operation_update))
+            operation_update = OperationTerminalUpdate(operation.operation_id, OperationStatus.PENDING, OperationStatus.SUCCEEDED, None, None, None)
+            await self._persistence.results.commit_terminal(
+                ExecutionTerminalCommit(
+                    expected_revision=cancelling_current.revision,
+                    expected_event_sequence=cancelling_current.event_sequence,
+                    execution=terminal,
+                    result=result,
+                    terminal_event_type=ExecutionEventType.EXECUTION_CANCELLED,
+                    terminal_event_payload={},
+                    idempotency=idempotency,
+                    operation=operation_update,
+                )
+            )
             _logger.info("execution cancelled: execution=%s operation=%s", execution_id, operation.operation_id)
         except asyncio.CancelledError:
             raise
@@ -350,6 +377,7 @@ class DefaultExecutionService:
             raise
         return CancelExecutionResult(execution_id, True)
 
+
     async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[TraceItem]:
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.trace(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
@@ -361,16 +389,41 @@ class DefaultExecutionService:
     async def _load_authorized(self, execution_id: str, principal: Principal, action: AuthorizationAction) -> ExecutionRecord:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
         record = await self._persistence.executions.get(execution_id, tenant_id=principal.tenant_id)
         if record is None:
-            raise LinktoolsAIError(ErrorCode.AUTHORIZATION_DENIED)
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
 
 
-def _request_digest(request: ExecutionRequest, binding_digest: str) -> str:
-    return canonical_sha256({"prompt": request.prompt, "profile": request.requested_profile.value, "binding": binding_digest})
+def _request_digest(
+    request: ExecutionRequest,
+    binding_digest: str,
+    *,
+    session_id: str | None,
+    source_execution_id: str | None,
+    base_execution_id: str | None,
+    parent_execution_id: str | None,
+    root_execution_id: str | None,
+    lineage_kind: ExecutionLineageKind,
+) -> str:
+    return canonical_sha256(
+        {
+            "prompt": request.prompt,
+            "profile": request.requested_profile.value,
+            "binding_digest": binding_digest,
+            "scope": session_id or "execution",
+            "principal_id": request.principal.principal_id,
+            "tenant_id": request.principal.tenant_id,
+            "session_id": session_id,
+            "source_execution_id": source_execution_id,
+            "base_execution_id": base_execution_id,
+            "parent_execution_id": parent_execution_id,
+            "root_identity": root_execution_id or "$self",
+            "lineage_kind": lineage_kind.value,
+        }
+    )
 
 
 def _operation_result(
@@ -417,15 +470,56 @@ def _operation_failure(operation: OperationLedgerRecord, error_code: str) -> Ope
     )
 
 
+def _operation_status(operation: OperationLedgerRecord, status: OperationStatus) -> OperationLedgerRecord:
+    return OperationLedgerRecord(
+        operation.operation_id,
+        operation.tenant_id,
+        operation.resource_kind,
+        operation.resource_id,
+        operation.execution_id,
+        operation.kind,
+        status,
+        operation.request_digest,
+        operation.result_ref,
+        operation.result_digest,
+        operation.error_code,
+        operation.compactable,
+        operation.sequence,
+        operation.created_at,
+        datetime.now(timezone.utc),
+    )
+
+
 def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datetime, *, error_code: "str | None" = None, agent_run_sequence: int | None = None, terminal_event: bool = False) -> ExecutionRecord:
-    return ExecutionRecord(record.execution_id, record.tenant_id, record.session_id, record.profile, record.binding_digest, record.parent_execution_id, record.root_execution_id, status, record.snapshot_revision + 1, record.event_sequence + (1 if terminal_event else 0), record.result_ref, record.result_digest, error_code, record.safe_error_details, record.created_at, now, record.source_execution_id, record.base_execution_id, record.lineage_kind, record.agent_run_sequence if agent_run_sequence is None else agent_run_sequence)
+    return ExecutionRecord(
+        execution_id=record.execution_id,
+        tenant_id=record.tenant_id,
+        session_id=record.session_id,
+        profile=record.profile,
+        binding_digest=record.binding_digest,
+        parent_execution_id=record.parent_execution_id,
+        root_execution_id=record.root_execution_id,
+        source_execution_id=record.source_execution_id,
+        base_execution_id=record.base_execution_id,
+        lineage_kind=record.lineage_kind,
+        status=status,
+        revision=record.revision + 1,
+        event_sequence=record.event_sequence + (1 if terminal_event else 0),
+        agent_run_sequence=record.agent_run_sequence if agent_run_sequence is None else agent_run_sequence,
+        result_ref=record.result_ref,
+        result_digest=record.result_digest,
+        error_code=error_code,
+        safe_error_details=record.safe_error_details,
+        created_at=record.created_at,
+        updated_at=now,
+    )
 
 
-def _stable_idempotency_error(error_code: str | None, fallback: ErrorCode) -> LinktoolsAIError:
+def _stable_idempotency_error(error_code: str | None, fallback: ErrorCode) -> AIError:
     try:
-        return LinktoolsAIError(fallback if error_code is None else ErrorCode(error_code))
+        return AIError(fallback if error_code is None else ErrorCode(error_code))
     except ValueError:
-        return LinktoolsAIError(fallback)
+        return AIError(fallback)
 
 
-__all__ = ["DefaultExecutionService", "ExecutionApi", "ExecutionLauncher", "ExecutionQueryApi"]
+__all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionApi", "ExecutionLauncher", "ExecutionQueryApi"]

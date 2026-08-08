@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from .errors import ErrorCode, LinktoolsAIError, SafeError
+from .errors import ErrorCode, AIError, SafeError
 from .ids import canonical_sha256
 from .json import JsonValue
 
@@ -41,13 +41,13 @@ class StructuredRedactor:
             if classification is RedactionClass.SENSITIVE:
                 return RedactedValue(_redact_nested(value, set()), True, canonical_sha256(value))
             return RedactedValue(value, False, None)
-        except LinktoolsAIError:
+        except AIError:
             raise
         except Exception as error:
-            raise LinktoolsAIError(ErrorCode.REDACTION_FAILED) from error
+            raise AIError(ErrorCode.REDACTION_FAILED) from error
 
     def safe_error(self, error: BaseException, *, operation_id: str) -> SafeError:
-        if isinstance(error, LinktoolsAIError):
+        if isinstance(error, AIError):
             return error.to_safe_error(operation_id=operation_id)
         return SafeError(
             ErrorCode.STORAGE_UNAVAILABLE.value,
@@ -63,7 +63,7 @@ def _redact_nested(value: JsonValue, seen: set[int]) -> JsonValue:
     if isinstance(value, dict):
         marker = id(value)
         if marker in seen:
-            raise LinktoolsAIError(ErrorCode.REDACTION_FAILED)
+            raise AIError(ErrorCode.REDACTION_FAILED)
         seen.add(marker)
         result = {str(key): _redact_nested(item, seen) for key, item in value.items()}
         seen.remove(marker)
@@ -71,7 +71,7 @@ def _redact_nested(value: JsonValue, seen: set[int]) -> JsonValue:
     if isinstance(value, list):
         marker = id(value)
         if marker in seen:
-            raise LinktoolsAIError(ErrorCode.REDACTION_FAILED)
+            raise AIError(ErrorCode.REDACTION_FAILED)
         seen.add(marker)
         result = [_redact_nested(item, seen) for item in value]
         seen.remove(marker)

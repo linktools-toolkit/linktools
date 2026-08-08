@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Local-coding tools and durable tool state."""
+"""Workspace-local tools and capability boundaries."""
 
 import asyncio
 import os
@@ -12,7 +12,7 @@ from linktools.core import environ
 
 from ..core.json import JsonValue
 from ..core.ids import canonical_sha256
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from ..core.value import ExecutionProfile
 from ..storage.files import write_bytes_atomic
 
@@ -20,21 +20,21 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pydantic_ai.capabilities import AgentCapability
 
-_logger = environ.get_logger("ai.local.tool")
+_logger = environ.get_logger("ai.workspace.tool")
 
 
-class LocalTool(Protocol):
+class WorkspaceTool(Protocol):
     async def __call__(self, **kwargs: JsonValue) -> 'dict[str, JsonValue]': ...
 
 
-LocalToolResultValue = str | int | bool | None | list[dict[str, str]]
+WorkspaceToolResultValue = str | int | bool | None | list[dict[str, str]]
 
 
-def build_local_tools(root: 'str | Path') -> 'tuple[LocalTool, ...]':
+def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     project_root = Path(root).expanduser().resolve()
     shell_slots = asyncio.Semaphore(4)
 
-    async def list_dir(path: str = ".", recursive: bool = False) -> 'dict[str, LocalToolResultValue]':
+    async def list_dir(path: str = ".", recursive: bool = False) -> 'dict[str, WorkspaceToolResultValue]':
         try:
             target = _resolve_path(project_root, path)
         except ValueError:
@@ -50,7 +50,7 @@ def build_local_tools(root: 'str | Path') -> 'tuple[LocalTool, ...]':
         _logger.info("local tool completed name=list_dir path=%s count=%s", path, len(entries))
         return {"path": target.relative_to(project_root).as_posix(), "entries": entries}
 
-    async def read_file(path: str, max_chars: int = 6000) -> 'dict[str, LocalToolResultValue]':
+    async def read_file(path: str, max_chars: int = 6000) -> 'dict[str, WorkspaceToolResultValue]':
         try:
             target = _resolve_path(project_root, path)
         except ValueError:
@@ -62,7 +62,7 @@ def build_local_tools(root: 'str | Path') -> 'tuple[LocalTool, ...]':
         _logger.info("local tool completed name=read_file path=%s", path)
         return {"path": target.relative_to(project_root).as_posix(), "content": content[:limit], "truncated": len(content) > limit}
 
-    async def write_file(path: str, content: str) -> 'dict[str, LocalToolResultValue]':
+    async def write_file(path: str, content: str) -> 'dict[str, WorkspaceToolResultValue]':
         try:
             target = _resolve_path(project_root, path)
         except ValueError:
@@ -76,7 +76,7 @@ def build_local_tools(root: 'str | Path') -> 'tuple[LocalTool, ...]':
         _logger.info("local tool completed name=write_file path=%s bytes=%s", path, size)
         return {"path": target.relative_to(project_root).as_posix(), "bytes": size}
 
-    async def bash(command: str, timeout_ms: 'int | None' = None) -> 'dict[str, LocalToolResultValue]':
+    async def bash(command: str, timeout_ms: 'int | None' = None) -> 'dict[str, WorkspaceToolResultValue]':
         async with shell_slots:
             if os.name != "posix":
                 return {"error": ErrorCode.LOCAL_SHELL_PLATFORM_UNSUPPORTED.value}
@@ -129,12 +129,12 @@ def build_local_tools(root: 'str | Path') -> 'tuple[LocalTool, ...]':
                 "truncated": stdout_truncated or stderr_truncated,
             }
 
-    return cast(tuple[LocalTool, ...], (list_dir, read_file, write_file, bash))
+    return cast(tuple[WorkspaceTool, ...], (list_dir, read_file, write_file, bash))
 
 
-def build_local_capabilities(root: 'str | Path', *, profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING) -> 'tuple[AgentCapability[None], ...]':
+def build_workspace_capabilities(root: 'str | Path', *, profile: ExecutionProfile = ExecutionProfile.LOCAL_CODING) -> 'tuple[AgentCapability[None], ...]':
     if profile is not ExecutionProfile.LOCAL_CODING:
-        raise LinktoolsAIError(ErrorCode.CAPABILITY_DISABLED_FOR_PROFILE)
+        raise AIError(ErrorCode.CAPABILITY_DISABLED_FOR_PROFILE)
     from pydantic_ai_harness.filesystem import FileSystem
     from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
@@ -146,8 +146,8 @@ def build_local_capabilities(root: 'str | Path', *, profile: ExecutionProfile = 
     )
 
 
-def build_local_tool_map(root: 'str | Path') -> 'Mapping[str, LocalTool]':
-    tools = build_local_tools(root)
+def build_workspace_tool_map(root: 'str | Path') -> 'Mapping[str, WorkspaceTool]':
+    tools = build_workspace_tools(root)
     return {
         "list_dir": tools[0],
         "read_file": tools[1],
@@ -209,4 +209,4 @@ def _kill_process_group(pid: int) -> None:
         return
 
 
-__all__ = ["LocalTool", "build_local_capabilities", "build_local_tool_map", "build_local_tools"]
+__all__ = ["WorkspaceTool", "build_workspace_capabilities", "build_workspace_tool_map", "build_workspace_tools"]

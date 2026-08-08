@@ -4,7 +4,7 @@
 
 from typing import Protocol
 
-from ..core.errors import ErrorCode, LinktoolsAIError
+from ..core.errors import ErrorCode, AIError
 from .registry import ModelRegistrySnapshot, ModelRoute
 
 
@@ -21,7 +21,7 @@ class SnapshotModelResolver:
         try:
             return self._snapshot.routes[route_id]
         except KeyError as exc:
-            raise LinktoolsAIError(ErrorCode.STORAGE_NOT_FOUND) from exc
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND) from exc
 
     def snapshot(self) -> ModelRegistrySnapshot:
         return self._snapshot

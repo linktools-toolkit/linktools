@@ -3,6 +3,7 @@
 """Temporal durable production boundary."""
 
 from .gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
+from .context import RunContext, TemporalRunContext
 from .worker import (
     ActivityType,
     AssetPayloadCodec,
@@ -27,7 +28,7 @@ __all__ = [
     "ActivityType", "AssetPayloadCodec", "AssetWorkerInterceptor", "QUERY_NAMES", "TemporalClient", "TemporalSdkClient",
     "TemporalSdkClientConfig", "TemporalSdkDataConverter",
     "TemporalSdkInterceptor", "TemporalSdkPayloadCodec", "TemporalSdkWorker", "TemporalWorker", "UPDATE_NAMES",
-    "WorkerActivities", "WorkerRegistration", "WorkflowGateway", "WorkflowType", "build_production_worker", "build_temporal_components",
+    "RunContext", "TemporalRunContext", "WorkerActivities", "WorkerRegistration", "WorkflowGateway", "WorkflowType", "build_production_worker", "build_temporal_components",
     "build_temporal_worker",
     "production_registration",
 ]
