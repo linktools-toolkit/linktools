@@ -1,6 +1,6 @@
 {
   "status": "COMPLETE",
-  "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
+  "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
   "open_findings": [],
   "entries": [
     {
@@ -140,11 +140,57 @@
         "tests/ai/test_architecture.py::test_name_gate_allows_only_the_existing_asset_storage_duplicate_group",
         "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
       ]
+    },
+    {
+      "owner": "task-concurrency",
+      "requirements": "F-13,R-01,R-02,R-03,T-23,T-24,T-25,DOD-082",
+      "implementation": [
+        "runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner",
+        "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error",
+        "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner"
+      ]
+    },
+    {
+      "owner": "execution-cancellation-convergence",
+      "requirements": "F-13,R-04,T-26,T-27,DOD-083",
+      "implementation": [
+        "runtime/execution.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges",
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal"
+      ]
+    },
+    {
+      "owner": "profile-removal-completeness",
+      "requirements": "F-12,T-28",
+      "implementation": [
+        "runtime/execution.py",
+        "runtime/session.py",
+        "runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
+      ]
+    },
+    {
+      "owner": "contract-provenance",
+      "requirements": "F-05,T-29,DOD-023,DOD-024",
+      "implementation": [
+        "scripts/build/matrix/runtime-step-requirements.json",
+        "scripts/build/matrix/requirement-matrix.json"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"
+      ]
     }
   ],
   "scope_exclusions": [
     "Downstream migration and compatibility work are explicitly excluded by the user."
   ],
-  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
-  "review_scope": "linktools-ai-d218889-fix-spec-final"
+  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
+  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
 }

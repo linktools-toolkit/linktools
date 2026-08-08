@@ -491,6 +491,107 @@
         "tests/ai/test_architecture.py::test_name_gate_rejects_non_grandfathered_duplicate_and_package_collision"
       ],
       "status": "PASS"
+    },
+    {
+      "id": "T-23",
+      "owner": "runtime/planner",
+      "requirement": "Task run 相同 operation key 只有一个 side-effect owner，loser 不重复 create/gateway effect，完成后同-key replay 成功。",
+      "constraints": "通过 OperationLedger PENDING→RUNNING CAS，不使用进程级锁或自动重试。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner"
+      ],
+      "finding_mapping": "F-13/R-01",
+      "status": "PASS"
+    },
+    {
+      "id": "T-24",
+      "owner": "runtime/planner",
+      "requirement": "Task FAILED operation 保存真实稳定 ErrorCode，重复请求 replay 同一错误且不返回 TaskGraphResult。",
+      "constraints": "AIError 保留原 code，普通异常只映射 STORAGE_UNAVAILABLE，不覆盖真实 FAILED。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error"
+      ],
+      "finding_mapping": "F-13/R-02",
+      "status": "PASS"
+    },
+    {
+      "id": "T-25",
+      "owner": "runtime/planner",
+      "requirement": "Task cancel 相同 cancel_request_id 只有一个 side-effect owner，完成后 replay 不重复 cancel effect。",
+      "constraints": "使用同一 OperationLedger CAS ownership，不新增 status 或 lock。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner"
+      ],
+      "finding_mapping": "F-13/R-03",
+      "status": "PASS"
+    },
+    {
+      "id": "T-26",
+      "owner": "runtime/execution",
+      "requirement": "同一 cancel_request_id 的 UNKNOWN caller 与后续 CONFIRMED caller 最终收敛 execution=CANCELLED、operation=SUCCEEDED，UNKNOWN caller 允许先返回 false。",
+      "constraints": "不因固定 expected=PENDING 或 EFFECT_UNKNOWN 卡死 CANCELLING。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges"
+      ],
+      "finding_mapping": "F-13/R-04",
+      "status": "PASS"
+    },
+    {
+      "id": "T-27",
+      "owner": "runtime/execution",
+      "requirement": "EFFECT_UNKNOWN 在 actual SUCCEEDED/CANCELLED terminal 后收敛 operation=SUCCEEDED，FAILED operation 不被覆盖。",
+      "constraints": "resolver 重读 ledger，CAS conflict 后不直接宣告 resolved。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal"
+      ],
+      "finding_mapping": "F-13/R-04",
+      "status": "PASS"
+    },
+    {
+      "id": "T-28",
+      "owner": "profile-removal",
+      "requirement": "五个 legacy profile digest scope replay 前后 execution/session ID、session head/revision、source execution、launcher side effect 和 legacy ledger 完全不变。",
+      "constraints": "不创建第二 record，不执行 launcher，不改变 durable state。",
+      "implementation": [
+        "linktools-ai/src/linktools/ai/runtime/execution.py",
+        "linktools-ai/src/linktools/ai/runtime/session.py",
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ],
+      "tests": [
+        "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"
+      ],
+      "finding_mapping": "F-12",
+      "status": "PASS"
+    },
+    {
+      "id": "T-29",
+      "owner": "architecture/evidence",
+      "requirement": "DOD-001～DOD-083 current contract 连续、evidence path/test node 存在、stale profile/category wording 清除、DOD-072 boundary evidence 正确。",
+      "constraints": "Source S 阶段 DOD-023/DOD-024 不得 complete，E 阶段由 provenance test 验证。",
+      "implementation": [
+        "linktools-ai/scripts/build/matrix/runtime-step-requirements.json",
+        "linktools-ai/scripts/build/matrix/requirement-matrix.json"
+      ],
+      "tests": [
+        "tests/ai/test_architecture.py::test_runtime_step_contract_matrix_is_current"
+      ],
+      "finding_mapping": "F-05/provenance",
+      "status": "PASS"
     }
   ],
   "scope_exclusions": [
@@ -499,11 +600,11 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
-    "tests_ai": "passed: 62 passed, 2 skipped (MySQL/PostgreSQL live not available)",
-    "architecture": "passed",
+    "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
+    "tests_ai": "passed: 86 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "architecture": "passed: compileall, Ruff, import-all, SCC, dynamic import, dependency, naming and cohesion gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
-  "review_scope": "linktools-ai-d218889-fix-spec-final"
+  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
+  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
 }

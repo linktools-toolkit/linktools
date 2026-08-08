@@ -3,8 +3,10 @@
 
 """Cold-start architecture and import checks. MT-51 MT-52."""
 
+import ast
 import importlib
 import json
+import subprocess
 from pathlib import Path
 
 from scripts.build.architecture import ArchitecturePolicyChecker, build_report
@@ -107,3 +109,79 @@ def test_architecture_gate_normalizes_relative_module_policy_and_rejects_stale_e
     result = checker.check(source_root)
     assert not result.passed
     assert any(error.startswith("stale module dependency policy:") for error in result.errors)
+
+
+def test_facade_launcher_boundary_is_class_scoped() -> None:
+    path = Path("linktools-ai/src/linktools/ai/app/workbench.py")
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    assert {"WorkspaceExecutionLauncher", "WorkspaceAgentRuntime"} <= classes.keys()
+    terminal_owners = {
+        class_name
+        for class_name, node in classes.items()
+        if any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "commit_terminal" for call in ast.walk(node))
+    }
+    assert terminal_owners == {"WorkspaceExecutionLauncher"}
+    runtime = classes["WorkspaceAgentRuntime"]
+    assert not any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "commit_terminal" for call in ast.walk(runtime))
+    assert not any(
+        isinstance(node, ast.Attribute)
+        and node.attr == "domain"
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "_stores"
+        for node in ast.walk(runtime)
+    )
+
+
+def test_runtime_step_contract_matrix_is_current() -> None:
+    root = Path("linktools-ai/scripts/build/matrix")
+    requirements_path = root / "runtime-step-requirements.json"
+    requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
+    entries = requirements["requirements"]
+    assert [entry["id"] for entry in entries] == [f"DOD-{index:03d}" for index in range(1, 84)]
+    for entry in entries:
+        for evidence in entry.get("evidence", []):
+            path_text, separator, test_name = evidence.partition("::")
+            path = Path(path_text)
+            assert path.is_file(), evidence
+            if separator:
+                tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+                assert any(node.name == test_name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), evidence
+    by_id = {entry["id"]: entry for entry in entries}
+    assert "LOCAL_CODING" not in by_id["DOD-026"]["requirement"]
+    assert "profile" not in by_id["DOD-043"]["requirement"]
+    assert "LOCAL/PRODUCTION" not in by_id["DOD-044"]["requirement"]
+    assert "LOCAL_CODING" not in by_id["DOD-059"]["requirement"]
+    assert "app/facade.py 与 app/facade.py" not in by_id["DOD-036"]["requirement"]
+    dod_072_evidence = tuple(by_id["DOD-072"]["evidence"])
+    assert "tests/ai/test_architecture.py::test_facade_launcher_boundary_is_class_scoped" in dod_072_evidence
+    assert "linktools-ai/src/linktools/ai/app/workbench.py" in dod_072_evidence
+    assert not any("test_file_step_store.py" in item or "test_harness_contract.py" in item or "adapter/step.py" in item for item in dod_072_evidence)
+
+    matrix = json.loads((root / "requirement-matrix.json").read_text(encoding="utf-8"))
+    matrix_entries = {entry["id"]: entry for entry in matrix["requirements"]}
+    for index in range(23, 30):
+        entry = matrix_entries[f"T-{index}"]
+        assert entry["status"] in {"PENDING", "PASS"}
+        assert entry["finding_mapping"]
+        for test in entry["tests"]:
+            path_text, separator, test_name = test.partition("::")
+            assert separator
+            path = Path(path_text)
+            assert path.is_file(), test
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            assert any(node.name == test_name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), test
+
+    evidence = json.loads((root / "linktools-ai-evidence.json").read_text(encoding="utf-8"))
+    source_commit = evidence.get("validated_source_commit")
+    if isinstance(source_commit, str) and len(source_commit) == 40:
+        source = subprocess.run(
+            ["git", "show", f"{source_commit}:linktools-ai/scripts/build/matrix/runtime-step-requirements.json"],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if source.returncode == 0:
+            source_entries = {entry["id"]: entry for entry in json.loads(source.stdout)["requirements"]}
+            assert source_entries["DOD-023"]["status"] != "complete"
+            assert source_entries["DOD-024"]["status"] != "complete"

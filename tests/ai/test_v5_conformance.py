@@ -22,11 +22,11 @@ from linktools.ai.app.workbench import open_workspace_runtime
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.core.errors import ErrorCode, AIError
 from linktools.ai.core.ids import canonical_sha256, idempotency_key_hash
-from linktools.ai.core.value import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason
+from linktools.ai.core.value import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason, TaskStatus
 from linktools.ai.runtime.persistence import ApprovalRecord, ExecutionCancelRequestCommit, ExecutionRecord, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, OperationLedgerInput, ResultRecord, RuntimePersistence, SessionHeadAdvance, SessionRecord
 from linktools.ai.runtime.services import ApprovalDecisionRequest, CancelExecutionRequest, CreateSessionRequest, ExecutionHandle, ExecutionRequest, ExecutionView, ForkExecutionRequest, RetryExecutionRequest, RuntimeServiceIdentity, TaskGraphHandle, WorkflowQueryResult, WorkflowUpdateResult
 from linktools.ai.runtime.execution import CancelEffectOutcome
-from linktools.ai.task import TaskGraph, TaskGraphRequest, TaskNode
+from linktools.ai.task import CancelGraphRequest, TaskGraph, TaskGraphRequest, TaskNode
 from linktools.ai.agent.runner import WorkspaceAgentResult, WorkspaceAgentRunner
 from linktools.ai.workspace import Workspace, trusted_workspace_principal
 
@@ -77,6 +77,56 @@ class _Gateway:
 
     async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> object:
         return None
+
+
+class _TaskGateway:
+    def __init__(self, *, start_error: "Exception | None" = None, cancel_error: "Exception | None" = None) -> None:
+        self.start_error = start_error
+        self.cancel_error = cancel_error
+        self.task_starts: list[str] = []
+        self.task_cancels: list[str] = []
+        self.start_entered = asyncio.Event()
+        self.start_release = asyncio.Event()
+        self.cancel_entered = asyncio.Event()
+        self.cancel_release = asyncio.Event()
+        self.block_start = False
+        self.block_cancel = False
+
+    async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle:
+        self.task_starts.append(workflow_id)
+        self.start_entered.set()
+        if self.block_start:
+            await self.start_release.wait()
+        if self.start_error is not None:
+            raise self.start_error
+        return TaskGraphHandle(workflow_id, workflow_id)
+
+    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> object:
+        self.task_cancels.append(workflow_id)
+        self.cancel_entered.set()
+        if self.block_cancel:
+            await self.cancel_release.wait()
+        if self.cancel_error is not None:
+            raise self.cancel_error
+        return None
+
+
+class _CancelRaceLauncher:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_cancel_entered = asyncio.Event()
+        self.first_cancel_release = asyncio.Event()
+
+    async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
+        return None
+
+    async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_cancel_entered.set()
+            await self.first_cancel_release.wait()
+            return CancelEffectOutcome.UNKNOWN
+        return CancelEffectOutcome.CONFIRMED
 
 
 class _BarrierRunner:
@@ -688,13 +738,14 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
     try:
         principal = Principal("owner", "tenant")
         binding_digest = "b" * 64
+        launcher = _Launcher()
         services = build_runtime_services(
             runtime.persistence,
             TenantAuthorizationPolicy(),
             grant_key=b"profile-boundary-key",
             history_reader=_History(),
             schema_digest=runtime.persistence.atomic_domain_id,
-            execution_launcher=_Launcher(),
+            execution_launcher=launcher,
         )
         now = datetime.now(timezone.utc)
         await runtime.persistence.sessions.create(SessionRecord("resume", "tenant", "owner", binding_digest, SessionStatus.OPEN, 0, 0, None, {}, now, now, None, None))
@@ -729,6 +780,23 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
             now,
         )
         await runtime.persistence.operations.append(old_create)
+        pre_sessions = await runtime.persistence.sessions.list(tenant_id="tenant")
+        pre_executions = await runtime.persistence.executions.list_by_session("resume", tenant_id="tenant")
+        pre_execution_ids = {"source", *(item.execution_id for item in pre_executions)}
+        pre_session_ids = {item.session_id for item in pre_sessions}
+        pre_resume = await runtime.persistence.sessions.get("resume", tenant_id="tenant")
+        pre_source = await runtime.persistence.executions.get("source", tenant_id="tenant")
+        pre_legacy_idempotency = {
+            scope: await runtime.persistence.idempotency.get(scope, idempotency_key_hash(key), tenant_id="tenant")
+            for scope, key in (
+                ("execution.run", "old-run"),
+                ("execution.retry", "old-retry"),
+                ("execution.fork", "old-fork"),
+                ("session.resume", "old-resume"),
+            )
+        }
+        pre_legacy_operation = await runtime.persistence.operations.get(old_create.operation_id, tenant_id="tenant")
+        pre_started = tuple(launcher.started)
         old_calls = (
             services.execution.run(binding_digest, ExecutionRequest("run", principal, "old-run")),
             services.execution.retry(binding_digest, "source", RetryExecutionRequest("retry", principal, "old-retry")),
@@ -740,6 +808,29 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
             with pytest.raises(AIError) as error:
                 await call
             assert error.value.code is ErrorCode.IDEMPOTENCY_CONFLICT
+        post_sessions = await runtime.persistence.sessions.list(tenant_id="tenant")
+        post_executions = await runtime.persistence.executions.list_by_session("resume", tenant_id="tenant")
+        post_execution_ids = {"source", *(item.execution_id for item in post_executions)}
+        post_session_ids = {item.session_id for item in post_sessions}
+        post_resume = await runtime.persistence.sessions.get("resume", tenant_id="tenant")
+        post_source = await runtime.persistence.executions.get("source", tenant_id="tenant")
+        post_legacy_idempotency = {
+            scope: await runtime.persistence.idempotency.get(scope, idempotency_key_hash(key), tenant_id="tenant")
+            for scope, key in (
+                ("execution.run", "old-run"),
+                ("execution.retry", "old-retry"),
+                ("execution.fork", "old-fork"),
+                ("session.resume", "old-resume"),
+            )
+        }
+        post_legacy_operation = await runtime.persistence.operations.get(old_create.operation_id, tenant_id="tenant")
+        assert post_execution_ids == pre_execution_ids
+        assert post_session_ids == pre_session_ids
+        assert post_resume == pre_resume
+        assert post_source == pre_source
+        assert tuple(launcher.started) == pre_started
+        assert post_legacy_idempotency == pre_legacy_idempotency
+        assert post_legacy_operation == pre_legacy_operation
         assert await runtime.persistence.sessions.get("old-session", tenant_id="tenant") is None
         assert await runtime.persistence.executions.get("old-run-execution", tenant_id="tenant") is None
 
@@ -774,6 +865,242 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
         expected_graph_digest = canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
         assert graph_operation.request_digest == expected_graph_digest
         assert graph_operation.request_digest != canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "profile": "local-coding", "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_task_run_same_key_has_single_effect_owner() -> None:
+    runtime = build_memory_runtime(namespace="task-run-owner")
+    await runtime.initialize()
+    try:
+        principal = Principal("owner", "tenant")
+        gateway = _TaskGateway()
+        gateway.block_start = True
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"task-run-owner-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            workflow_gateway=gateway,
+            execution_launcher=_Launcher(),
+        )
+        create_plan = runtime.persistence.tasks.create_plan
+        create_count = 0
+
+        async def counted_create_plan(graph: TaskGraph, *, tenant_id: str) -> object:
+            nonlocal create_count
+            create_count += 1
+            return await create_plan(graph, tenant_id=tenant_id)
+
+        runtime.persistence.tasks.create_plan = counted_create_plan
+        request = TaskGraphRequest(TaskGraph("owner-graph", (TaskNode("node"),)), principal, "owner-key")
+        winner = asyncio.create_task(services.task.run_graph("b" * 64, request))
+        await gateway.start_entered.wait()
+        loser = asyncio.create_task(services.task.run_graph("b" * 64, request))
+        with pytest.raises(AIError) as conflict:
+            await loser
+        assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+        gateway.start_release.set()
+        result = await winner
+        operation = await runtime.persistence.operations.get(idempotency_key_hash("owner-key"), tenant_id="tenant")
+        plan = await runtime.persistence.tasks.get_plan("owner-graph", tenant_id="tenant")
+        assert result.graph_id == "owner-graph"
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+        assert plan is not None
+        assert create_count == 1
+        replay = await services.task.run_graph("b" * 64, request)
+        assert replay == result
+        assert gateway.task_starts == ["owner-graph"]
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_task_failed_operation_replays_stable_error() -> None:
+    runtime = build_memory_runtime(namespace="task-failed-replay")
+    await runtime.initialize()
+    try:
+        principal = Principal("owner", "tenant")
+        gateway = _TaskGateway(start_error=AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY))
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"task-failed-replay-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            workflow_gateway=gateway,
+            execution_launcher=_Launcher(),
+        )
+        request = TaskGraphRequest(TaskGraph("failed-graph", (TaskNode("node"),)), principal, "failed-key")
+        with pytest.raises(AIError) as first_error:
+            await services.task.run_graph("b" * 64, request)
+        with pytest.raises(AIError) as replay_error:
+            await services.task.run_graph("b" * 64, request)
+        operation = await runtime.persistence.operations.get(idempotency_key_hash("failed-key"), tenant_id="tenant")
+        assert first_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert replay_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert operation is not None and operation.status is OperationStatus.FAILED
+        assert operation.error_code == ErrorCode.RUNTIME_DEPENDENCY_NOT_READY.value
+        assert gateway.task_starts == ["failed-graph"]
+
+        gateway.start_error = RuntimeError("gateway unavailable")
+        ordinary = TaskGraphRequest(TaskGraph("ordinary-failed-graph", (TaskNode("node"),)), principal, "ordinary-failed-key")
+        with pytest.raises(RuntimeError):
+            await services.task.run_graph("b" * 64, ordinary)
+        with pytest.raises(AIError) as ordinary_replay:
+            await services.task.run_graph("b" * 64, ordinary)
+        ordinary_operation = await runtime.persistence.operations.get(idempotency_key_hash("ordinary-failed-key"), tenant_id="tenant")
+        assert ordinary_replay.value.code is ErrorCode.STORAGE_UNAVAILABLE
+        assert ordinary_operation is not None and ordinary_operation.error_code == ErrorCode.STORAGE_UNAVAILABLE.value
+        assert gateway.task_starts == ["failed-graph", "ordinary-failed-graph"]
+
+        missing_plan = TaskGraphRequest(TaskGraph("missing-plan", (TaskNode("node"),)), principal, "missing-plan-key")
+        missing_digest = canonical_sha256({"graph_id": "missing-plan", "nodes": ["node"], "binding": "b" * 64, "limits": {"max_nodes": missing_plan.limits.max_nodes, "max_depth": missing_plan.limits.max_depth, "max_budget": missing_plan.limits.max_budget, "max_concurrency": missing_plan.limits.max_concurrency}})
+        now = datetime.now(timezone.utc)
+        await runtime.persistence.operations.append(OperationLedgerInput(idempotency_key_hash("missing-plan-key"), "tenant", ResourceKind.TASK_GRAPH, "missing-plan", None, OperationKind.TASK_NODE, OperationStatus.SUCCEEDED, missing_digest, "missing-plan", "missing-digest", None, True, now, now))
+        with pytest.raises(AIError) as missing_error:
+            await services.task.run_graph("b" * 64, missing_plan)
+        assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+        corrupt_plan = TaskGraphRequest(TaskGraph("corrupt-plan", (TaskNode("node"),)), principal, "corrupt-plan-key")
+        corrupt_digest = canonical_sha256({"graph_id": "corrupt-plan", "nodes": ["node"], "binding": "b" * 64, "limits": {"max_nodes": corrupt_plan.limits.max_nodes, "max_depth": corrupt_plan.limits.max_depth, "max_budget": corrupt_plan.limits.max_budget, "max_concurrency": corrupt_plan.limits.max_concurrency}})
+        await runtime.persistence.operations.append(OperationLedgerInput(idempotency_key_hash("corrupt-plan-key"), "tenant", ResourceKind.TASK_GRAPH, "corrupt-plan", None, OperationKind.TASK_NODE, OperationStatus.FAILED, corrupt_digest, None, None, "UNKNOWN_PERSISTED_ERROR", True, now, now))
+        with pytest.raises(AIError) as corrupt_error:
+            await services.task.run_graph("b" * 64, corrupt_plan)
+        assert corrupt_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_task_cancel_same_key_has_single_effect_owner() -> None:
+    runtime = build_memory_runtime(namespace="task-cancel-owner")
+    await runtime.initialize()
+    try:
+        principal = Principal("owner", "tenant")
+        gateway = _TaskGateway()
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"task-cancel-owner-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            workflow_gateway=gateway,
+            execution_launcher=_Launcher(),
+        )
+        graph_request = TaskGraphRequest(TaskGraph("cancel-owner-graph", (TaskNode("node"),)), principal, "cancel-owner-run")
+        await services.task.run_graph("b" * 64, graph_request)
+        cancel_plan = runtime.persistence.tasks.cancel_plan
+        cancel_count = 0
+
+        async def counted_cancel_plan(graph_id: str, *, tenant_id: str) -> object:
+            nonlocal cancel_count
+            cancel_count += 1
+            return await cancel_plan(graph_id, tenant_id=tenant_id)
+
+        runtime.persistence.tasks.cancel_plan = counted_cancel_plan
+        gateway.block_cancel = True
+        request = CancelGraphRequest(principal, "cancel-owner-key")
+        winner = asyncio.create_task(services.task.cancel_graph("cancel-owner-graph", request))
+        await gateway.cancel_entered.wait()
+        loser = asyncio.create_task(services.task.cancel_graph("cancel-owner-graph", request))
+        with pytest.raises(AIError) as conflict:
+            await loser
+        assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
+        gateway.cancel_release.set()
+        result = await winner
+        replay = await services.task.cancel_graph("cancel-owner-graph", request)
+        operation = await runtime.persistence.operations.get(idempotency_key_hash("cancel-owner-key"), tenant_id="tenant")
+        assert result == replay
+        assert result.status is TaskStatus.CANCELLED
+        assert cancel_count == 1
+        assert gateway.task_cancels == ["cancel-owner-graph"]
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_execution_cancel_same_id_unknown_then_confirmed_converges() -> None:
+    runtime = build_memory_runtime(namespace="cancel-unknown-confirmed")
+    await runtime.initialize()
+    try:
+        tenant_id = "tenant"
+        principal = Principal("owner", tenant_id)
+        now = datetime.now(timezone.utc)
+        execution_id = "cancel-race-execution"
+        await runtime.persistence.executions.create(
+            ExecutionRecord(execution_id, tenant_id, None, "b" * 64, None, execution_id, None, None, ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 1, 0, 1, None, None, None, {}, now, now)
+        )
+        launcher = _CancelRaceLauncher()
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"cancel-race-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            execution_launcher=launcher,
+        )
+        request = _cancel_request(principal, "cancel-race-request")
+        unknown = asyncio.create_task(services.execution.cancel(execution_id, request))
+        await launcher.first_cancel_entered.wait()
+        confirmed = await services.execution.cancel(execution_id, request)
+        launcher.first_cancel_release.set()
+        unknown_result = await unknown
+        operation = await runtime.persistence.operations.get(idempotency_key_hash("cancel-race-request"), tenant_id=tenant_id)
+        execution = await runtime.persistence.executions.get(execution_id, tenant_id=tenant_id)
+        assert confirmed.cancelled
+        assert unknown_result.cancelled
+        assert execution is not None and execution.status is ExecutionStatus.CANCELLED
+        assert operation is not None and operation.status is OperationStatus.SUCCEEDED
+        assert (await services.execution.cancel(execution_id, request)).cancelled
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("execution_status", "expected_cancelled"),
+    ((ExecutionStatus.SUCCEEDED, False), (ExecutionStatus.CANCELLED, True)),
+)
+async def test_execution_cancel_effect_unknown_resolves_actual_terminal(execution_status: ExecutionStatus, expected_cancelled: bool) -> None:
+    runtime = build_memory_runtime(namespace=f"cancel-unknown-{execution_status.value.lower()}")
+    await runtime.initialize()
+    try:
+        tenant_id = "tenant"
+        principal = Principal("owner", tenant_id)
+        now = datetime.now(timezone.utc)
+        execution_id = f"terminal-{execution_status.value.lower()}"
+        execution = ExecutionRecord(execution_id, tenant_id, None, "b" * 64, None, execution_id, None, None, ExecutionLineageKind.RUN, execution_status, 1, 0, 0, None, "terminal-digest", None, {}, now, now)
+        await runtime.persistence.executions.create(execution)
+        operation_id = idempotency_key_hash(f"unknown-{execution_id}")
+        digest = canonical_sha256({"action": "execution.cancel", "tenant_id": tenant_id, "principal_id": principal.principal_id, "execution_id": execution_id, "force": True})
+        await runtime.persistence.operations.append(OperationLedgerInput(operation_id, tenant_id, ResourceKind.EXECUTION, execution_id, execution_id, OperationKind.EXECUTION_CANCEL, OperationStatus.EFFECT_UNKNOWN, digest, None, None, None, True, now, now))
+        launcher = _Launcher()
+        services = build_runtime_services(
+            runtime.persistence,
+            TenantAuthorizationPolicy(),
+            grant_key=b"cancel-unknown-key",
+            history_reader=_History(),
+            schema_digest=runtime.persistence.atomic_domain_id,
+            execution_launcher=launcher,
+        )
+        result = await services.execution.cancel(execution_id, _cancel_request(principal, f"unknown-{execution_id}"))
+        current_operation = await runtime.persistence.operations.get(operation_id, tenant_id=tenant_id)
+        assert result.cancelled is expected_cancelled
+        assert current_operation is not None and current_operation.status is OperationStatus.SUCCEEDED
+        assert launcher.started == []
+
+        failed_operation_id = idempotency_key_hash(f"failed-{execution_id}")
+        failed_digest = canonical_sha256({"action": "execution.cancel", "tenant_id": tenant_id, "principal_id": principal.principal_id, "execution_id": execution_id, "force": True})
+        await runtime.persistence.operations.append(OperationLedgerInput(failed_operation_id, tenant_id, ResourceKind.EXECUTION, execution_id, execution_id, OperationKind.EXECUTION_CANCEL, OperationStatus.FAILED, failed_digest, None, None, ErrorCode.RUNTIME_DEPENDENCY_NOT_READY.value, True, now, now))
+        with pytest.raises(AIError) as failed_error:
+            await services.execution.cancel(execution_id, _cancel_request(principal, f"failed-{execution_id}"))
+        failed_operation = await runtime.persistence.operations.get(failed_operation_id, tenant_id=tenant_id)
+        assert failed_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+        assert failed_operation is not None and failed_operation.status is OperationStatus.FAILED
     finally:
         await runtime.close()
 

@@ -1,6 +1,6 @@
 {
   "baseline_commit": "d21888993ab2dd193405710c1d07c872f2c8cbe4",
-  "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
+  "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
   "status": "COMPLETE",
   "open_findings": [],
   "environment": {
@@ -20,15 +20,15 @@
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 62 tests, 2 optional live tests skipped without MySQL/PostgreSQL environment",
-    "cancellation": "passed: natural terminal race, confirmed cancellation, CAS race, concurrent cancel ledgers, and backend error ledger",
-    "concurrency": "passed: stale CAS, concurrent resume, cancellation and shutdown admission suite",
+    "conformance": "passed: 86 AI tests, 2 optional live tests skipped without MySQL/PostgreSQL environment",
+    "cancellation": "passed: natural terminal, confirmed same-ID convergence, EFFECT_UNKNOWN resolution, concurrent ledgers, and backend failure ledger",
+    "concurrency": "passed: Task run/cancel ownership CAS, stale CAS, concurrent resume, cancellation and shutdown admission suite",
     "fault_injection": "passed: FILE rollback and FILE/SQL legacy payload suite",
     "public_api": "passed: import-all, profile-free contract and query-only access suite",
     "architecture": "passed: compileall, Ruff, architecture, SCC, dynamic import, naming, cohesion and dependency gates",
     "schema": "passed: separate runtime/step metadata registries and SQL profile tombstone checks",
-    "provenance": "passed: source commit 878830d6734158ce430d0f1844b070118ed6bf23 is the exact verification target"
+    "provenance": "passed: exact source commit is validated and this commit is evidence-only"
   },
-  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
-  "review_scope": "linktools-ai-d218889-fix-spec-final"
+  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
+  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
 }

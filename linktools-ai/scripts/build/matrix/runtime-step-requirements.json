@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "6dd48064f74ca109b97527c1bd1056eed5ec6923",
+  "baseline_commit": "d3968fe397362de2a29dcf0c3eefa2c08815c3e2",
   "status": "COMPLETE",
   "requirements": [
     {
@@ -221,7 +221,7 @@
     {
       "id": "DOD-023",
       "status": "complete",
-      "requirement": "最终 evidence 绑定最终 commit，open_findings=[]；",
+      "requirement": "Source commit S 不自证为最终 evidence；仅 evidence-only E 在 exact S 验证和 final review 后绑定完整 SHA。",
       "evidence": [
         "linktools-ai/scripts/build/matrix/linktools-ai-evidence.json",
         "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
@@ -230,7 +230,7 @@
     {
       "id": "DOD-024",
       "status": "complete",
-      "requirement": "最终复审未发现新的 blocker/high correctness finding；",
+      "requirement": "Evidence-only E 的 final review 必须没有 Critical/Important finding，且 open_findings=[]。",
       "evidence": [
         "linktools-ai/scripts/build/matrix/linktools-ai-review-coverage.json"
       ]
@@ -248,7 +248,7 @@
     {
       "id": "DOD-026",
       "status": "complete",
-      "requirement": "LOCAL_CODING 无 launcher 时 fail-fast，合法 ACP/CLI composition 不存在 launcher=None；",
+      "requirement": "Execution composition 缺少 explicit ExecutionLauncher 与 WorkflowGateway 时 fail-fast RUNTIME_DEPENDENCY_NOT_READY；合法 composition 仅由实际注入依赖决定，不使用业务 category。",
       "evidence": [
         "tests/ai/test_local_commands.py",
         "linktools-ai/src/linktools/ai/app/workbench.py",
@@ -347,7 +347,7 @@
     {
       "id": "DOD-036",
       "status": "complete",
-      "requirement": "runtime 不再 import agent/spec/model/capability，原 app/facade.py 与 app/facade.py 已合并到 app/facade.py；",
+      "requirement": "runtime domain 不依赖 app composition；Runtime/RuntimeAccess/build_runtime/build_runtime_access 由 app/facade.py 唯一拥有，runtime/__init__.py 不反向 re-export composition symbol。",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
         "linktools-ai/scripts/build/architecture.py"
@@ -416,7 +416,7 @@
     {
       "id": "DOD-043",
       "status": "complete",
-      "requirement": "Session fork 只继承 head/profile/binding/cwd，首次 resume 使用 Harness public fork_run()，不复制 durable rows；",
+      "requirement": "Session fork 只继承 head/binding/cwd；首次 resume 使用 Harness public fork_run()，不复制 durable rows。",
       "evidence": [
         "tests/ai/test_local_commands.py",
         "linktools-ai/src/linktools/ai/app/workbench.py",
@@ -426,7 +426,7 @@
     {
       "id": "DOD-044",
       "status": "complete",
-      "requirement": "start claim 后 launcher outcome unknown 使用原子 mark_start_unknown()，LOCAL/PRODUCTION recovery 不透明重启同 segment；",
+      "requirement": "start claim 后 launcher outcome unknown 使用原子 mark_start_unknown()；recovery 不按 deployment/profile category 分支，也不透明重启同 segment。",
       "evidence": [
         "tests/ai/test_local_commands.py",
         "linktools-ai/src/linktools/ai/app/workbench.py",
@@ -572,7 +572,7 @@
     {
       "id": "DOD-059",
       "status": "complete",
-      "requirement": "SQLite LOCAL_CODING lifetime <runtime-db>.local.lock ownership 通过并发/重启验证；",
+      "requirement": "Workspace Workbench 使用 SQLite 时，在真实 open_workspace_runtime() 生命周期持有 <runtime-db>.local.lock，并通过 contention/error-cleanup/reopen 验证。",
       "evidence": [
         "tests/ai/test_v5_conformance.py::test_workbench_owns_sqlite_lock_and_generic_services_do_not"
       ]
@@ -698,9 +698,8 @@
       "status": "complete",
       "requirement": "facade 与 launcher 同文件的边界由 AST/class-level gate 验证，既阻止 facade direct persistence，也不误报 launcher 合法 terminal aggregate；",
       "evidence": [
-        "tests/ai/persistence/test_file_step_store.py",
-        "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/step.py"
+        "tests/ai/test_architecture.py::test_facade_launcher_boundary_is_class_scoped",
+        "linktools-ai/src/linktools/ai/app/workbench.py"
       ]
     },
     {
@@ -784,17 +783,38 @@
         "tests/ai/test_v5_conformance.py::test_cancel_terminal_wins_before_request_cancel_cas",
         "tests/ai/test_v5_conformance.py::test_cancel_backend_failure_keeps_stable_error_in_operation_ledger"
       ]
+    },
+    {
+      "id": "DOD-082",
+      "status": "complete",
+      "requirement": "Task run/cancel 相同 operation key 通过 PENDING→RUNNING CAS 获得唯一 side-effect ownership；同-key replay 不重复 repository/gateway effect，FAILED replay 保持稳定错误。",
+      "evidence": [
+        "tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner",
+        "tests/ai/test_v5_conformance.py::test_task_failed_operation_replays_stable_error",
+        "tests/ai/test_v5_conformance.py::test_task_cancel_same_key_has_single_effect_owner",
+        "linktools-ai/src/linktools/ai/runtime/planner.py"
+      ]
+    },
+    {
+      "id": "DOD-083",
+      "status": "complete",
+      "requirement": "Execution cancel 相同 cancel_request_id 的 EFFECT_UNKNOWN 可被后续 confirmed effect/actual terminal 收敛为 SUCCEEDED ledger；不得因固定 expected=PENDING 卡死 CANCELLING。",
+      "evidence": [
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges",
+        "tests/ai/test_v5_conformance.py::test_execution_cancel_effect_unknown_resolves_actual_terminal",
+        "linktools-ai/src/linktools/ai/runtime/execution.py"
+      ]
     }
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "878830d6734158ce430d0f1844b070118ed6bf23",
-    "tests_ai": "passed: 62 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "validated_source_commit": "0420b75d2a0da71c2b99502f50d97af54e1cb8e9",
+    "tests_ai": "passed: 86 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
     "ruff": "passed",
     "architecture": "passed",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-cc2beeb-fix-spec-v5-final",
-  "review_scope": "linktools-ai-d218889-fix-spec-final"
+  "spec_revision": "linktools-ai-d3968fe-fix-spec-final",
+  "review_scope": "linktools-ai-d3968fe-fix-spec-final"
 }
