@@ -2,19 +2,41 @@
 # -*- coding: utf-8 -*-
 """Domain-independent storage DTOs and protocols."""
 
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from collections.abc import Mapping, Sequence
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 
-KeyT = TypeVar("KeyT")
+KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
 InfoT = TypeVar("InfoT")
-EntryRevisionT = TypeVar("EntryRevisionT")
-StoreRevisionT = TypeVar("StoreRevisionT")
+
+
+@dataclass(frozen=True, slots=True)
+class StorageEntryRevision:
+    value: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, int) or isinstance(self.value, bool) or self.value < 1:
+            raise ValueError("storage entry revision must be positive")
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+
+@dataclass(frozen=True, slots=True)
+class StorageRevision:
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str) or not self.value:
+            raise ValueError("storage revision must not be empty")
+
+    def __str__(self) -> str:
+        return self.value
 
 
 class StorageOperation(StrEnum):
@@ -23,11 +45,11 @@ class StorageOperation(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class StorageChange(Generic[KeyT, ValueT, EntryRevisionT]):
+class StorageChange(Generic[KeyT, ValueT]):
     operation: StorageOperation
     key: KeyT
     value: "ValueT | None"
-    expected_entry_revision: "EntryRevisionT | None"
+    expected_entry_revision: "StorageEntryRevision | None"
 
     def __post_init__(self) -> None:
         if self.operation is StorageOperation.PUT and self.value is None:
@@ -37,52 +59,52 @@ class StorageChange(Generic[KeyT, ValueT, EntryRevisionT]):
 
 
 @dataclass(frozen=True, slots=True)
-class StoragePutResult(Generic[InfoT, EntryRevisionT, StoreRevisionT]):
+class StoragePutResult(Generic[InfoT]):
     info: InfoT
-    entry_revision: EntryRevisionT
-    store_revision: StoreRevisionT
+    entry_revision: StorageEntryRevision
+    store_revision: StorageRevision
     changed: bool
 
 
 @dataclass(frozen=True, slots=True)
-class StorageDeleteResult(Generic[KeyT, EntryRevisionT, StoreRevisionT]):
+class StorageDeleteResult(Generic[KeyT]):
     key: KeyT
     deleted: bool
-    entry_revision: "EntryRevisionT | None"
-    store_revision: StoreRevisionT
+    entry_revision: "StorageEntryRevision | None"
+    store_revision: StorageRevision
 
 
 @dataclass(frozen=True, slots=True)
-class StorageResetResult(Generic[StoreRevisionT]):
-    store_revision: StoreRevisionT
+class StorageResetResult:
+    store_revision: StorageRevision
     deleted_count: int
 
 
 @dataclass(frozen=True, slots=True)
-class StorageBatchFailure(Generic[InfoT, KeyT, EntryRevisionT, StoreRevisionT]):
+class StorageBatchFailure(Generic[InfoT, KeyT]):
     failed_index: int
     error_code: str
-    store_revision: StoreRevisionT
-    completed: "tuple[StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT] | StorageDeleteResult[KeyT, EntryRevisionT, StoreRevisionT], ...]"
+    store_revision: StorageRevision
+    completed: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT], ...]"
 
 
 class StorageBatchPartialError(
     AIError,
-    Generic[InfoT, KeyT, EntryRevisionT, StoreRevisionT],
+    Generic[InfoT, KeyT],
 ):
     def __init__(
         self,
-        failure: 'StorageBatchFailure[InfoT, KeyT, EntryRevisionT, StoreRevisionT]',
+        failure: 'StorageBatchFailure[InfoT, KeyT]',
     ) -> None:
         self.failure = failure
         super().__init__(ErrorCode.STORAGE_BATCH_PARTIAL_FAILURE)
 
 
 @dataclass(frozen=True, slots=True)
-class StorageBatchResult(Generic[InfoT, KeyT, EntryRevisionT, StoreRevisionT]):
-    store_revision: StoreRevisionT
+class StorageBatchResult(Generic[InfoT, KeyT]):
+    store_revision: StorageRevision
     atomic: bool
-    results: "tuple[StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT] | StorageDeleteResult[KeyT, EntryRevisionT, StoreRevisionT], ...]"
+    results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT], ...]"
 
 
 class MetadataLoadMode(StrEnum):
@@ -97,15 +119,15 @@ class MetadataChange(Generic[KeyT, InfoT]):
 
 
 @dataclass(frozen=True, slots=True)
-class MetadataLoad(Generic[KeyT, InfoT, StoreRevisionT]):
+class MetadataLoad(Generic[KeyT, InfoT]):
     mode: MetadataLoadMode
-    store_revision: StoreRevisionT
+    store_revision: StorageRevision
     changes: "tuple[MetadataChange[KeyT, InfoT], ...]"
 
 
 @dataclass(frozen=True, slots=True)
-class VersionSummary(Generic[EntryRevisionT]):
-    entry_revision: EntryRevisionT
+class VersionSummary:
+    entry_revision: StorageEntryRevision
     digest: str
     size: int
     created_at: datetime
@@ -120,8 +142,8 @@ class StorageOwnedInfo(Generic[InfoT]):
 
 
 @dataclass(frozen=True, slots=True)
-class PreloadResult(Generic[StoreRevisionT]):
-    store_revision: StoreRevisionT
+class PreloadResult:
+    store_revision: StorageRevision
     requested: int
     loaded: int
     already_cached: int
@@ -139,53 +161,53 @@ class BatchStorageReader(Protocol[KeyT, ValueT]):
 
 
 @runtime_checkable
-class StorageWriter(Protocol[KeyT, ValueT, InfoT, EntryRevisionT, StoreRevisionT]):
+class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
     async def put(
         self,
         key: KeyT,
         value: ValueT,
         *,
-        expected_entry_revision: 'EntryRevisionT | None' = None,
-    ) -> 'StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT]': ...
+        expected_entry_revision: 'StorageEntryRevision | None' = None,
+    ) -> 'StoragePutResult[InfoT]': ...
 
     async def delete(
         self,
         key: KeyT,
         *,
-        expected_entry_revision: 'EntryRevisionT | None' = None,
-    ) -> 'StorageDeleteResult[KeyT, EntryRevisionT, StoreRevisionT]': ...
+        expected_entry_revision: 'StorageEntryRevision | None' = None,
+    ) -> 'StorageDeleteResult[KeyT]': ...
 
-    async def reset(self) -> 'StorageResetResult[StoreRevisionT]': ...
+    async def reset(self) -> StorageResetResult: ...
 
 
 @runtime_checkable
-class BatchStorageWriter(Protocol[KeyT, ValueT, InfoT, EntryRevisionT, StoreRevisionT]):
+class BatchStorageWriter(Protocol[KeyT, ValueT, InfoT]):
     async def apply_batch(
         self,
-        changes: 'Sequence[StorageChange[KeyT, ValueT, EntryRevisionT]]',
+        changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
-        expected_store_revision: 'StoreRevisionT | None' = None,
-    ) -> 'StorageBatchResult[InfoT, KeyT, EntryRevisionT, StoreRevisionT]': ...
+        expected_store_revision: 'StorageRevision | None' = None,
+    ) -> 'StorageBatchResult[InfoT, KeyT]': ...
 
 
 @runtime_checkable
-class StorageMetadataReader(Protocol[KeyT, InfoT, StoreRevisionT]):
-    async def head_revision(self) -> StoreRevisionT: ...
+class StorageMetadataReader(Protocol[KeyT, InfoT]):
+    async def head_revision(self) -> StorageRevision: ...
 
     async def load_metadata(
         self,
-        after_revision: 'StoreRevisionT | None',
-    ) -> 'MetadataLoad[KeyT, InfoT, StoreRevisionT]': ...
+        after_revision: 'StorageRevision | None',
+    ) -> 'MetadataLoad[KeyT, InfoT]': ...
 
 
 @runtime_checkable
-class VersionedStorage(Protocol[KeyT, ValueT, EntryRevisionT]):
-    async def list_versions(self, key: KeyT) -> 'Sequence[VersionSummary[EntryRevisionT]]': ...
+class VersionedStorage(Protocol[KeyT, ValueT]):
+    async def list_versions(self, key: KeyT) -> 'Sequence[VersionSummary]': ...
 
     async def get_at_revision(
         self,
         key: KeyT,
-        entry_revision: EntryRevisionT,
+        entry_revision: StorageEntryRevision,
     ) -> 'ValueT | None': ...
 
     async def get_at_version(
@@ -203,7 +225,7 @@ class InitializableStorage(Protocol):
 @runtime_checkable
 class ReadableStorageBackend(
     StorageReader[KeyT, ValueT],
-    StorageMetadataReader[KeyT, InfoT, StoreRevisionT],
+    StorageMetadataReader[KeyT, InfoT],
     Protocol,
 ):
     pass
@@ -215,11 +237,29 @@ class StorageStatReader(Protocol[KeyT, InfoT]):
 
 
 __all__ = [
-    "BatchStorageReader", "BatchStorageWriter", "InitializableStorage",
-    "MetadataChange", "MetadataLoad", "MetadataLoadMode", "PreloadResult",
-    "StorageBatchFailure", "StorageBatchResult", "StorageChange",
+    "BatchStorageReader",
+    "BatchStorageWriter",
+    "InitializableStorage",
+    "MetadataChange",
+    "MetadataLoad",
+    "MetadataLoadMode",
+    "PreloadResult",
+    "ReadableStorageBackend",
+    "StorageBatchFailure",
     "StorageBatchPartialError",
-    "StorageDeleteResult", "StorageMetadataReader", "StorageOperation",
-    "StorageOwnedInfo", "StoragePutResult", "StorageReader", "StorageResetResult",
-    "StorageWriter", "VersionSummary", "VersionedStorage", "ReadableStorageBackend", "StorageStatReader",
+    "StorageBatchResult",
+    "StorageChange",
+    "StorageDeleteResult",
+    "StorageEntryRevision",
+    "StorageMetadataReader",
+    "StorageOperation",
+    "StorageOwnedInfo",
+    "StoragePutResult",
+    "StorageReader",
+    "StorageResetResult",
+    "StorageRevision",
+    "StorageStatReader",
+    "StorageWriter",
+    "VersionSummary",
+    "VersionedStorage",
 ]

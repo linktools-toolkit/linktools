@@ -3,6 +3,7 @@
 """Project Harness step facts into Runtime trace and transcript views."""
 
 import re
+import time
 from datetime import datetime, timezone
 
 from pydantic_ai.messages import (
@@ -18,21 +19,33 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, StepStore
 
-from ..errors import ErrorCode, AIError
-from ..core import step_conversation_id, step_run_id
-from ..core import Page
-from ..runtime import ExecutionRecord, RuntimePersistence
-from ..runtime import ExecutionHistoryItem, TraceItem, TranscriptItem
-from ..core import JsonValue, canonical_sha256
+from ..core import (
+    CursorPayload,
+    CursorSigner,
+    JsonValue,
+    Page,
+    canonical_sha256,
+    step_conversation_id,
+    step_run_id,
+)
+from ..errors import AIError, ErrorCode
+from ..runtime import (
+    ExecutionHistoryItem,
+    ExecutionRecord,
+    RuntimePersistence,
+    TraceItem,
+    TranscriptItem,
+)
 
 
 class StepExecutionHistoryReader:
     """Own the adapter projection between StepStore facts and Runtime views."""
 
-    def __init__(self, namespace: str, persistence: RuntimePersistence, store: StepStore) -> None:
+    def __init__(self, namespace: str, persistence: RuntimePersistence, store: StepStore, cursor_signer: CursorSigner) -> None:
         self._namespace = namespace
         self._persistence = persistence
         self._store = store
+        self._cursor_signer = cursor_signer
 
     async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TraceItem]:
         record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
@@ -63,25 +76,28 @@ class StepExecutionHistoryReader:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
         values: list[ExecutionHistoryItem] = []
-        seen: set[str] = set()
         for item, _depth in entries:
             for segment_sequence, _events in await self._segment_events(item, tenant_id):
                 run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=item.execution_id, segment_sequence=segment_sequence)
                 snapshot = await self._store.latest_snapshot(run_id=run_id)
                 if snapshot is None:
                     continue
-                for message in snapshot.messages:
-                    for projected in _message_items(item.execution_id, message):
-                        identity = canonical_sha256({"execution_id": projected.execution_id, "kind": projected.kind, "content": projected.content, "tool_name": projected.tool_name, "tool_call_id": projected.tool_call_id})
-                        if identity in seen:
-                            continue
-                        seen.add(identity)
-                        values.append(projected)
-        revision = str(record.revision)
-        start = _history_cursor_offset(cursor, revision, len(values))
+                snapshot_items = [projected for message in snapshot.messages for projected in _message_items(item.execution_id, message)]
+                values = _merge_history_occurrences(values, snapshot_items)
+        source_revision = canonical_sha256(
+            {
+                "execution_id": execution_id,
+                "items": [
+                    {"kind": item.kind, "content": item.content, "tool_name": item.tool_name, "tool_call_id": item.tool_call_id}
+                    for item in values
+                ],
+            }
+        )
+        start = _history_cursor_offset(cursor, tenant_id, execution_id, source_revision, len(values), self._cursor_signer)
         selected = tuple(ExecutionHistoryItem(item.execution_id, start + index + 1, item.kind, item.content, item.tool_name, item.tool_call_id) for index, item in enumerate(values[start:start + limit]))
         next_offset = start + len(selected)
-        return Page(selected, f"{revision}:{next_offset}" if next_offset < len(values) else None)
+        next_cursor = _history_cursor(tenant_id, execution_id, source_revision, next_offset, self._cursor_signer) if next_offset < len(values) else None
+        return Page(selected, next_cursor)
 
     async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TranscriptItem]:
         if not 1 <= limit <= 200:
@@ -204,17 +220,46 @@ def _cursor_offset(cursor: str | None, size: int) -> int:
     return offset
 
 
-def _history_cursor_offset(cursor: str | None, revision: str, size: int) -> int:
+def _history_cursor_offset(cursor: str | None, tenant_id: str, execution_id: str, source_revision: str, size: int, signer: CursorSigner) -> int:
     if cursor is None:
         return 0
     try:
-        cursor_revision, raw_offset = cursor.split(":", 1)
-        offset = int(raw_offset)
-    except (ValueError, AttributeError) as error:
+        payload = signer.decode(cursor)
+    except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
-    if cursor_revision != revision or offset < 0 or offset > size:
+    if (
+        payload.tenant_id != tenant_id
+        or payload.resource_kind != "execution_history"
+        or payload.filter_digest != canonical_sha256({"execution_id": execution_id})
+        or payload.sort_key != source_revision
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    offset = payload.snapshot_or_store_revision
+    if offset < 0 or offset > size:
         raise AIError(ErrorCode.CURSOR_INVALID)
     return offset
+
+
+def _history_cursor(tenant_id: str, execution_id: str, source_revision: str, offset: int, signer: CursorSigner) -> str:
+    return signer.encode(
+        CursorPayload(
+            1,
+            tenant_id,
+            "execution_history",
+            canonical_sha256({"execution_id": execution_id}),
+            source_revision,
+            offset,
+            int(time.time()) + 3600,
+        )
+    )
+
+
+def _merge_history_occurrences(accumulated: list[ExecutionHistoryItem], snapshot: list[ExecutionHistoryItem]) -> list[ExecutionHistoryItem]:
+    maximum = min(len(accumulated), len(snapshot))
+    for overlap in range(maximum, 0, -1):
+        if accumulated[-overlap:] == snapshot[:overlap]:
+            return [*accumulated, *snapshot[overlap:]]
+    return [*accumulated, *snapshot]
 
 
 def _message_items(execution_id: str, message: object) -> tuple[ExecutionHistoryItem, ...]:

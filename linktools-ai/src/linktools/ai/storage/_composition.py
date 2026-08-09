@@ -3,16 +3,15 @@
 """Ordered, revision-aware storage composition."""
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
 
-from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
+from ..errors import AIError, ErrorCode
 from ._cache import ContentCache, contains_many, read_cache, write_cache
-from ._layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility
 from ._contracts import (
     BatchStorageReader,
     BatchStorageWriter,
@@ -24,83 +23,72 @@ from ._contracts import (
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
+    StorageEntryRevision,
     StorageOperation,
-    StoragePutResult,
-    StorageStatReader,
     StorageOwnedInfo,
+    StoragePutResult,
     StorageResetResult,
+    StorageRevision,
+    StorageStatReader,
     StorageWriter,
-    VersionSummary,
     VersionedStorage,
+    VersionSummary,
 )
-from ._revision import StorageRevisionSource, LayerMetadataView, RevisionSource
+from ._layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility
+from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
-DomainKeyT = TypeVar("DomainKeyT")
-DomainValueT = TypeVar("DomainValueT")
-StorageKeyT = TypeVar("StorageKeyT")
-StorageValueT = TypeVar("StorageValueT")
+KeyT = TypeVar("KeyT", bound=Hashable)
+ValueT = TypeVar("ValueT")
 InfoT = TypeVar("InfoT")
-EntryRevisionT = TypeVar("EntryRevisionT")
-StoreRevisionT = TypeVar("StoreRevisionT")
 
 _logger = environ.get_logger("ai.storage.composition")
 
 
-class StorageAdapter(
-    Protocol[DomainKeyT, DomainValueT, StorageKeyT, StorageValueT, InfoT],
-):
-    def to_storage_key(self, key: DomainKeyT) -> StorageKeyT: ...
-    def from_storage_value(self, value: StorageValueT) -> DomainValueT: ...
-    def to_storage_value(self, value: DomainValueT) -> StorageValueT: ...
-    def validate_value(self, key: DomainKeyT, value: DomainValueT, info: InfoT) -> None: ...
+class StorageValueValidator(Protocol[KeyT, ValueT, InfoT]):
+    def validate_value(self, key: KeyT, value: ValueT, info: InfoT) -> None: ...
 
 
-class CacheAdapter(Protocol[DomainKeyT, DomainValueT, InfoT]):
-    def cache_key(self, key: DomainKeyT, info: InfoT) -> str: ...
-    def to_cache(self, value: DomainValueT) -> bytes: ...
-    def from_cache(self, value: bytes) -> DomainValueT: ...
+class CacheAdapter(Protocol[KeyT, ValueT, InfoT]):
+    def cache_key(self, key: KeyT, info: InfoT) -> str: ...
+    def to_cache(self, value: ValueT) -> bytes: ...
+    def from_cache(self, value: bytes) -> ValueT: ...
 
 
 @dataclass(frozen=True, slots=True)
-class EffectiveMetadataState(Generic[DomainKeyT, InfoT, StoreRevisionT]):
-    revision: StoreRevisionT
-    entries: "Mapping[DomainKeyT, InfoT]"
-    owners: "Mapping[DomainKeyT, int]"
+class EffectiveMetadataState(Generic[KeyT, InfoT]):
+    revision: StorageRevision
+    entries: "Mapping[KeyT, InfoT]"
+    owners: "Mapping[KeyT, int]"
 
 
-class StorageComposition(
-    Generic[
-        DomainKeyT,
-        DomainValueT,
-        StorageKeyT,
-        StorageValueT,
-        InfoT,
-        EntryRevisionT,
-        StoreRevisionT,
-    ]
-):
+@dataclass(frozen=True, slots=True)
+class StorageLocation(Generic[KeyT, ValueT, InfoT]):
+    key: KeyT
+    info: InfoT
+    backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]"
+    layer: str
+    writable: bool
+
+
+class StorageComposition(Generic[KeyT, ValueT, InfoT]):
     """Own layer merge, cache, refresh, preload, write and version semantics."""
 
     def __init__(
         self,
-        primary: 'ReadableStorageBackend[StorageKeyT, StorageValueT, InfoT, StoreRevisionT]',
+        primary: 'ReadableStorageBackend[KeyT, ValueT, InfoT]',
         *,
-        writer: 'StorageWriter[StorageKeyT, StorageValueT, InfoT, EntryRevisionT, StoreRevisionT] | None' = None,
+        writer: 'StorageWriter[KeyT, ValueT, InfoT] | None' = None,
         write_visibility: StorageWriteVisibility = StorageWriteVisibility.READABLE,
-        layers: 'Sequence[StorageLayer[StorageKeyT, StorageValueT, InfoT, StoreRevisionT]]' = (),
-        adapter: 'StorageAdapter[DomainKeyT, DomainValueT, StorageKeyT, StorageValueT, InfoT] | None' = None,
-        revision_source: 'RevisionSource[StoreRevisionT] | None' = None,
+        layers: 'Sequence[StorageLayer[KeyT, ValueT, InfoT]]' = (),
+        validator: 'StorageValueValidator[KeyT, ValueT, InfoT] | None' = None,
+        revision_source: 'RevisionSource | None' = None,
         cache: 'ContentCache | None' = None,
-        cache_adapter: 'CacheAdapter[DomainKeyT, DomainValueT, InfoT] | None' = None,
+        cache_adapter: 'CacheAdapter[KeyT, ValueT, InfoT] | None' = None,
         cache_concurrency: int = 16,
         preload_batch_size: int = 100,
         preload_concurrency: int = 8,
     ) -> None:
         layer_values = tuple(layers)
-        if adapter is None and layer_values:
-            raise ValueError("storage adapter is required for layers")
-        if adapter is None and cache is not None:
-            raise ValueError("storage adapter is required for cache")
         if cache is not None and cache_adapter is None:
             raise ValueError("cache_adapter is required when cache is configured")
         if cache_concurrency < 1 or preload_batch_size < 1 or preload_concurrency < 1:
@@ -110,32 +98,30 @@ class StorageComposition(
             raise ValueError("layer ids must be non-empty and unique")
         if any(layer.backend is primary for layer in layer_values):
             raise ValueError("primary backend cannot be repeated as a layer")
-        if write_visibility is StorageWriteVisibility.READABLE and writer is not None:
-            if writer is not primary and all(writer is not layer.backend for layer in layer_values):
-                raise ValueError("readable writer must be one of the read backends")
-        if write_visibility is StorageWriteVisibility.EXTERNAL and writer is not None:
-            if writer is primary or any(writer is layer.backend for layer in layer_values):
-                raise ValueError("external writer must not be readable")
+        if write_visibility is StorageWriteVisibility.READABLE and writer is not None and writer is not primary and all(writer is not layer.backend for layer in layer_values):
+            raise ValueError("readable writer must be one of the read backends")
+        if write_visibility is StorageWriteVisibility.EXTERNAL and writer is not None and (writer is primary or any(writer is layer.backend for layer in layer_values)):
+            raise ValueError("external writer must not be readable")
         if writer is None and write_visibility is not StorageWriteVisibility.READABLE:
             raise ValueError("read-only compositions must use READABLE visibility")
         self.primary = primary
         self.writer = writer
         self.layers = layer_values
-        self.adapter = adapter
+        self.validator = validator
         self.cache = cache
         self.cache_adapter = cache_adapter
         self._write_visibility = write_visibility
         self.cache_concurrency = cache_concurrency
         self.preload_batch_size = preload_batch_size
         self.preload_concurrency = preload_concurrency
-        self._cache_tasks: dict[str, asyncio.Task[DomainValueT | None]] = {}
+        self._cache_tasks: dict[str, asyncio.Task[ValueT | None]] = {}
         self._cache_task_lock = asyncio.Lock()
         source = revision_source or StorageRevisionSource(primary)
         self._views = (
             LayerMetadataView(primary, LayerRefreshPolicy.REVISIONED, revision_source=source),
             *(LayerMetadataView(layer.backend, layer.refresh) for layer in layer_values),
         )
-        self._preloaded: dict[DomainKeyT, str] = {}
+        self._preloaded: dict[KeyT, str] = {}
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
 
@@ -148,7 +134,7 @@ class StorageComposition(
         return self.writer is self.primary
 
     @property
-    def primary_view(self) -> 'LayerMetadataView[StorageKeyT, StorageValueT, InfoT, StoreRevisionT]':
+    def primary_view(self) -> 'LayerMetadataView[KeyT, ValueT, InfoT]':
         return self._views[0]
 
     async def initialize(self) -> None:
@@ -169,80 +155,60 @@ class StorageComposition(
             self._initialized = True
         _logger.info("storage composition initialized: layers=%s", len(self._views))
 
-    async def refresh(self) -> StoreRevisionT:
+    async def refresh(self) -> StorageRevision:
         states = await asyncio.gather(*(view.refresh() for view in self._views))
-        entries: dict[DomainKeyT, InfoT] = {}
-        owners: dict[DomainKeyT, int] = {}
+        entries: dict[KeyT, InfoT] = {}
+        owners: dict[KeyT, int] = {}
         revisions: list[str] = []
         for index, state in enumerate(states):
             revisions.append(str(state.revision))
-            for storage_key, info in state.entries.items():
-                domain_key = self._domain_key(storage_key, info)
-                if domain_key not in entries:
-                    entries[domain_key] = info
-                    owners[domain_key] = index
+            for key, info in state.entries.items():
+                if key not in entries:
+                    entries[key] = info
+                    owners[key] = index
         return EffectiveMetadataState(self._effective_revision(revisions, states[0].revision), entries, owners).revision
 
-    async def _state(self) -> 'EffectiveMetadataState[DomainKeyT, InfoT, StoreRevisionT]':
+    async def _state(self) -> 'EffectiveMetadataState[KeyT, InfoT]':
         states = await asyncio.gather(*(view.refresh() for view in self._views))
-        entries: dict[DomainKeyT, InfoT] = {}
-        owners: dict[DomainKeyT, int] = {}
+        entries: dict[KeyT, InfoT] = {}
+        owners: dict[KeyT, int] = {}
         revisions: list[str] = []
         for index, state in enumerate(states):
             revisions.append(str(state.revision))
-            for storage_key, info in state.entries.items():
-                domain_key = self._domain_key(storage_key, info)
-                if domain_key not in entries:
-                    entries[domain_key] = info
-                    owners[domain_key] = index
+            for key, info in state.entries.items():
+                if key not in entries:
+                    entries[key] = info
+                    owners[key] = index
         revision = self._effective_revision(revisions, states[0].revision)
         return EffectiveMetadataState(revision, entries, owners)
 
-    def _domain_key(self, storage_key: StorageKeyT, info: InfoT) -> DomainKeyT:
-        return cast(DomainKeyT, storage_key)
+    def _validate_value(self, key: KeyT, value: ValueT, info: InfoT) -> None:
+        if self.validator is not None:
+            self.validator.validate_value(key, value, info)
 
-    def _to_storage_key(self, key: DomainKeyT) -> StorageKeyT:
-        if self.adapter is None:
-            return cast(StorageKeyT, key)
-        return self.adapter.to_storage_key(key)
-
-    def _from_storage_value(self, value: StorageValueT) -> DomainValueT:
-        if self.adapter is None:
-            return cast(DomainValueT, value)
-        return self.adapter.from_storage_value(value)
-
-    def _to_storage_value(self, value: DomainValueT) -> StorageValueT:
-        if self.adapter is None:
-            return cast(StorageValueT, value)
-        return self.adapter.to_storage_value(value)
-
-    def _validate_value(self, key: DomainKeyT, value: DomainValueT, info: InfoT) -> None:
-        if self.adapter is not None:
-            self.adapter.validate_value(key, value, info)
-
-    def _effective_revision(self, revisions: 'Sequence[str]', primary: StoreRevisionT) -> StoreRevisionT:
+    def _effective_revision(self, revisions: 'Sequence[str]', primary: StorageRevision) -> StorageRevision:
         if len(revisions) == 1:
             return primary
-        return cast(StoreRevisionT, canonical_sha256(list(revisions)))
+        return StorageRevision(canonical_sha256(list(revisions)))
 
-    async def current_revision(self) -> StoreRevisionT:
+    async def current_revision(self) -> StorageRevision:
         heads = await asyncio.gather(*(view.head_revision() for view in self._views))
         if any(head is None for head in heads):
             return (await self._state()).revision
-        return self._effective_revision([str(head) for head in heads], cast(StoreRevisionT, heads[0]))
+        return self._effective_revision([str(head) for head in heads], cast(StorageRevision, heads[0]))
 
-    async def get(self, key: DomainKeyT) -> 'DomainValueT | None':
+    async def get(self, key: KeyT) -> 'ValueT | None':
         state = await self._state()
         return await self._get_from_state(key, state, retried=False)
 
-    async def stat(self, key: DomainKeyT) -> 'InfoT | None':
+    async def stat(self, key: KeyT) -> 'InfoT | None':
         state = await self._state()
         info = state.entries.get(key)
         if info is None:
             return None
         backend = self._views[state.owners[key]].backend
         if isinstance(backend, StorageStatReader):
-            origin = await backend.stat(self._to_storage_key(key))
+            origin = await backend.stat(key)
             if origin is None:
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
@@ -257,11 +223,27 @@ class StorageComposition(
                 )
         return info
 
-    async def _get(self, key: DomainKeyT, *, retried: bool) -> 'DomainValueT | None':
+    async def locate(self, key: KeyT) -> 'StorageLocation[KeyT, ValueT, InfoT] | None':
+        """Return the effective owner selected by layer precedence for one key."""
+        state = await self._state()
+        info = state.entries.get(key)
+        if info is None:
+            return None
+        owner = state.owners[key]
+        backend = self._views[owner].backend
+        return StorageLocation(key, info, backend, self._owner_id(owner), self.writer is backend)
+
+    def invalidate(self) -> None:
+        """Discard materialized metadata and preload markers after an external mutation."""
+        for view in self._views:
+            view.invalidate()
+        self._preloaded.clear()
+
+    async def _get(self, key: KeyT, *, retried: bool) -> 'ValueT | None':
         state = await self._state()
         return await self._get_from_state(key, state, retried=retried)
 
-    async def get_many(self, keys: 'Sequence[DomainKeyT]') -> 'tuple[DomainValueT | None, ...]':
+    async def get_many(self, keys: 'Sequence[KeyT]') -> 'tuple[ValueT | None, ...]':
         if not keys:
             return ()
         state = await self._state()
@@ -271,11 +253,11 @@ class StorageComposition(
 
     async def _get_from_state(
         self,
-        key: DomainKeyT,
-        state: 'EffectiveMetadataState[DomainKeyT, InfoT, StoreRevisionT]',
+        key: KeyT,
+        state: 'EffectiveMetadataState[KeyT, InfoT]',
         *,
         retried: bool,
-    ) -> 'DomainValueT | None':
+    ) -> 'ValueT | None':
         info = state.entries.get(key)
         if info is None:
             return None
@@ -285,9 +267,8 @@ class StorageComposition(
             cached_value = await self._read_cache_value(key, info, cache_key)
             if cached_value is not None:
                 return cached_value
-        storage_key = self._to_storage_key(key)
         backend = self._views[owner].backend
-        value = await backend.get(storage_key)
+        value = await backend.get(key)
         if value is None:
             self._views[owner].invalidate()
             if retried:
@@ -303,9 +284,8 @@ class StorageComposition(
                 )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
-        domain_value = self._from_storage_value(value)
         try:
-            self._validate_value(key, domain_value, info)
+            self._validate_value(key, value, info)
         except Exception:
             self._views[owner].invalidate()
             if retried:
@@ -322,21 +302,21 @@ class StorageComposition(
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
         if self.cache is not None and cache_key is not None:
-            await write_cache(self.cache, cache_key, self.cache_adapter.to_cache(domain_value))
-        return domain_value
+            await write_cache(self.cache, cache_key, self.cache_adapter.to_cache(value))
+        return value
 
     async def _get_many_from_state(
         self,
-        keys: 'Sequence[DomainKeyT]',
-        state: 'EffectiveMetadataState[DomainKeyT, InfoT, StoreRevisionT]',
+        keys: 'Sequence[KeyT]',
+        state: 'EffectiveMetadataState[KeyT, InfoT]',
         *,
         retried: bool,
-    ) -> 'dict[DomainKeyT, DomainValueT | None]':
-        values: dict[DomainKeyT, DomainValueT | None] = {key: None for key in keys}
-        misses: list[DomainKeyT] = []
+    ) -> 'dict[KeyT, ValueT | None]':
+        values: dict[KeyT, ValueT | None] = {key: None for key in keys}
+        misses: list[KeyT] = []
         semaphore = asyncio.Semaphore(self.cache_concurrency)
 
-        async def _cache_read(key: DomainKeyT) -> None:
+        async def _cache_read(key: KeyT) -> None:
             info = state.entries.get(key)
             if info is None or self.cache is None or self.cache_adapter is None:
                 misses.append(key)
@@ -359,7 +339,7 @@ class StorageComposition(
                 raced.add(state.owners[key])
                 continue
             info = state.entries[key]
-            value = self._from_storage_value(raw)
+            value = raw
             try:
                 self._validate_value(key, value, info)
             except Exception:
@@ -394,10 +374,10 @@ class StorageComposition(
 
     async def _read_cache_value(
         self,
-        key: DomainKeyT,
+        key: KeyT,
         info: InfoT,
         cache_key: str,
-    ) -> 'DomainValueT | None':
+    ) -> 'ValueT | None':
         if self.cache is None or self.cache_adapter is None:
             return None
         async with self._cache_task_lock:
@@ -413,10 +393,10 @@ class StorageComposition(
 
     async def _load_cache_value(
         self,
-        key: DomainKeyT,
+        key: KeyT,
         info: InfoT,
         cache_key: str,
-    ) -> 'DomainValueT | None':
+    ) -> 'ValueT | None':
         cached = await read_cache(self.cache, cache_key)
         if cached is None:
             return None
@@ -437,31 +417,30 @@ class StorageComposition(
 
     async def _load_origins(
         self,
-        keys: 'Sequence[DomainKeyT]',
-        state: 'EffectiveMetadataState[DomainKeyT, InfoT, StoreRevisionT]',
-    ) -> 'dict[DomainKeyT, StorageValueT]':
-        loaded: dict[DomainKeyT, StorageValueT] = {}
-        grouped: dict[int, list[DomainKeyT]] = {}
+        keys: 'Sequence[KeyT]',
+        state: 'EffectiveMetadataState[KeyT, InfoT]',
+    ) -> 'dict[KeyT, ValueT]':
+        loaded: dict[KeyT, ValueT] = {}
+        grouped: dict[int, list[KeyT]] = {}
         for key in keys:
             if key in state.entries:
                 grouped.setdefault(state.owners[key], []).append(key)
         semaphore = asyncio.Semaphore(self.preload_concurrency)
 
-        async def _load_group(owner: int, group: 'Sequence[DomainKeyT]') -> None:
+        async def _load_group(owner: int, group: 'Sequence[KeyT]') -> None:
             backend = self._views[owner].backend
-            storage_keys = tuple(self._to_storage_key(key) for key in group)
             if isinstance(backend, BatchStorageReader):
                 async with semaphore:
-                    raw_values = await backend.get_many(storage_keys)
-                for key, storage_key in zip(group, storage_keys):
-                    raw = raw_values.get(storage_key)
+                    raw_values = await backend.get_many(group)
+                for key in group:
+                    raw = raw_values.get(key)
                     if raw is not None:
                         loaded[key] = raw
                 return
 
-            async def _load_one(key: DomainKeyT) -> None:
+            async def _load_one(key: KeyT) -> None:
                 async with semaphore:
-                    raw = await backend.get(self._to_storage_key(key))
+                    raw = await backend.get(key)
                 if raw is not None:
                     loaded[key] = raw
 
@@ -498,7 +477,7 @@ class StorageComposition(
     def _owner_id(self, index: int) -> str:
         return "primary" if index == 0 else self.layers[index - 1].id
 
-    async def preload(self, keys: 'Sequence[DomainKeyT] | None' = None) -> 'PreloadResult[StoreRevisionT]':
+    async def preload(self, keys: 'Sequence[KeyT] | None' = None) -> PreloadResult:
         state = await self._state()
         selected = tuple(dict.fromkeys(keys)) if keys is not None else tuple(state.entries)
         if self.cache is None or self.cache_adapter is None:
@@ -533,13 +512,13 @@ class StorageComposition(
         for offset in range(0, len(missing), self.preload_batch_size):
             batch = missing[offset : offset + self.preload_batch_size]
             raw_values = await self._load_origins(batch, state)
-            writes: list[DomainKeyT] = []
+            writes: list[KeyT] = []
             for key in batch:
                 raw = raw_values.get(key)
                 if raw is None:
                     failed += 1
                     continue
-                value = self._from_storage_value(raw)
+                value = raw
                 try:
                     self._validate_value(key, value, state.entries[key])
                 except Exception:
@@ -570,42 +549,41 @@ class StorageComposition(
             failed,
         )
 
-    def _require_writer(self) -> 'StorageWriter[StorageKeyT, StorageValueT, InfoT, EntryRevisionT, StoreRevisionT]':
+    def _require_writer(self) -> 'StorageWriter[KeyT, ValueT, InfoT]':
         if self.writer is None:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
         return self.writer
 
     async def put(
         self,
-        key: DomainKeyT,
-        value: DomainValueT,
+        key: KeyT,
+        value: ValueT,
         *,
-        expected_entry_revision: 'EntryRevisionT | None' = None,
-    ) -> 'StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT]':
+        expected_entry_revision: 'StorageEntryRevision | None' = None,
+    ) -> 'StoragePutResult[InfoT]':
         writer = self._require_writer()
-        storage_key = self._to_storage_key(key)
-        result = await writer.put(storage_key, self._to_storage_value(value), expected_entry_revision=expected_entry_revision)
+        result = await writer.put(key, value, expected_entry_revision=expected_entry_revision)
         self._validate_value(key, value, result.info)
-        self._after_put(storage_key, result.info, result.store_revision, key)
+        self._after_put(key, result.info, result.store_revision)
         if result.changed:
             await self._notify_revision(result.store_revision)
         return result
 
     async def delete(
         self,
-        key: DomainKeyT,
+        key: KeyT,
         *,
-        expected_entry_revision: 'EntryRevisionT | None' = None,
-    ) -> 'StorageDeleteResult[DomainKeyT, EntryRevisionT, StoreRevisionT]':
+        expected_entry_revision: 'StorageEntryRevision | None' = None,
+    ) -> 'StorageDeleteResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.delete(self._to_storage_key(key), expected_entry_revision=expected_entry_revision)
+        result = await writer.delete(key, expected_entry_revision=expected_entry_revision)
         self._preloaded.pop(key, None)
         if result.deleted:
             self._invalidate_writer_view()
             await self._notify_revision(result.store_revision)
-        return StorageDeleteResult(key, result.deleted, result.entry_revision, result.store_revision)
+        return result
 
-    async def reset(self) -> 'StorageResetResult[StoreRevisionT]':
+    async def reset(self) -> StorageResetResult:
         writer = self._require_writer()
         result = await writer.reset()
         self._preloaded.clear()
@@ -616,25 +594,21 @@ class StorageComposition(
 
     async def apply_batch(
         self,
-        changes: 'Sequence[StorageChange[DomainKeyT, DomainValueT, EntryRevisionT]]',
+        changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
-        expected_store_revision: 'StoreRevisionT | None' = None,
-    ) -> 'StorageBatchResult[InfoT, DomainKeyT, EntryRevisionT, StoreRevisionT]':
+        expected_store_revision: 'StorageRevision | None' = None,
+    ) -> 'StorageBatchResult[InfoT, KeyT]':
         self._validate_batch(changes)
         writer = self._require_writer()
         if isinstance(writer, BatchStorageWriter):
-            storage_changes = tuple(
-                StorageChange(change.operation, self._to_storage_key(change.key), None if change.value is None else self._to_storage_value(change.value), change.expected_entry_revision)
-                for change in changes
-            )
-            result = await writer.apply_batch(storage_changes, expected_store_revision=expected_store_revision)
-            self._validate_writer_batch_result(changes, storage_changes, result)
+            result = await writer.apply_batch(changes, expected_store_revision=expected_store_revision)
+            self._validate_writer_batch_result(changes, result)
             for change in changes:
                 self._preloaded.pop(change.key, None)
             invalidate = False
-            for change, storage_change, item in zip(changes, storage_changes, result.results):
+            for change, item in zip(changes, result.results):
                 if isinstance(item, StoragePutResult):
-                    self._after_put(storage_change.key, item.info, item.store_revision, change.key)
+                    self._after_put(change.key, item.info, item.store_revision)
                 elif item.deleted:
                     invalidate = True
             if invalidate:
@@ -645,28 +619,17 @@ class StorageComposition(
                 for item in result.results
             ):
                 await self._notify_revision(result.store_revision)
-            mapped_results = tuple(
-                StorageDeleteResult(
-                    changes[index].key,
-                    item.deleted,
-                    item.entry_revision,
-                    item.store_revision,
-                )
-                if isinstance(item, StorageDeleteResult)
-                else item
-                for index, item in enumerate(result.results)
-            )
-            return StorageBatchResult(result.store_revision, result.atomic, mapped_results)
+            return result
         if expected_store_revision is not None:
             current = await self.current_revision()
             if current != expected_store_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        results: list[StoragePutResult[InfoT, EntryRevisionT, StoreRevisionT] | StorageDeleteResult[DomainKeyT, EntryRevisionT, StoreRevisionT]] = []
+        results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT]] = []
         revision = expected_store_revision
         for index, change in enumerate(changes):
             try:
                 if change.operation is StorageOperation.PUT:
-                    value = cast(DomainValueT, change.value)
+                    value = cast(ValueT, change.value)
                     item = await self.put(
                         change.key,
                         value,
@@ -699,22 +662,21 @@ class StorageComposition(
 
     def _validate_writer_batch_result(
         self,
-        domain_changes: 'Sequence[StorageChange[DomainKeyT, DomainValueT, EntryRevisionT]]',
-        changes: 'Sequence[StorageChange[StorageKeyT, StorageValueT, EntryRevisionT]]',
-        result: 'StorageBatchResult[InfoT, StorageKeyT, EntryRevisionT, StoreRevisionT]',
+        changes: 'Sequence[StorageChange[KeyT, ValueT]]',
+        result: 'StorageBatchResult[InfoT, KeyT]',
     ) -> None:
-        if len(domain_changes) != len(changes) or len(result.results) != len(changes):
+        if len(result.results) != len(changes):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch result count mismatch")
-        for domain_change, change, item in zip(domain_changes, changes, result.results):
+        for change, item in zip(changes, result.results):
             if change.operation is StorageOperation.PUT:
                 if not isinstance(item, StoragePutResult):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch put result mismatch")
-                self._validate_value(domain_change.key, cast(DomainValueT, domain_change.value), item.info)
+                self._validate_value(change.key, cast(ValueT, change.value), item.info)
             elif not isinstance(item, StorageDeleteResult) or item.key != change.key:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch delete result mismatch")
 
-    def _validate_batch(self, changes: 'Sequence[StorageChange[DomainKeyT, DomainValueT, EntryRevisionT]]') -> None:
-        seen: set[DomainKeyT] = set()
+    def _validate_batch(self, changes: 'Sequence[StorageChange[KeyT, ValueT]]') -> None:
+        seen: set[KeyT] = set()
         for change in changes:
             if change.operation not in {StorageOperation.PUT, StorageOperation.DELETE}:
                 raise ValueError(f"unsupported storage operation: {change.operation}")
@@ -728,17 +690,16 @@ class StorageComposition(
 
     def _after_put(
         self,
-        storage_key: StorageKeyT,
+        key: KeyT,
         info: InfoT,
-        revision: StoreRevisionT,
-        domain_key: DomainKeyT,
+        revision: StorageRevision,
     ) -> None:
-        self._preloaded.pop(domain_key, None)
+        self._preloaded.pop(key, None)
         if self._write_visibility is not StorageWriteVisibility.READABLE or self.writer is None:
             return
         for view in self._views:
             if view.backend is self.writer:
-                view.apply_write(storage_key, info, revision)
+                view.apply_write(key, info, revision)
 
     def _invalidate_writer_view(self) -> None:
         if self._write_visibility is not StorageWriteVisibility.READABLE or self.writer is None:
@@ -747,7 +708,7 @@ class StorageComposition(
             if view.backend is self.writer:
                 view.invalidate()
 
-    async def _notify_revision(self, revision: StoreRevisionT) -> None:
+    async def _notify_revision(self, revision: StorageRevision) -> None:
         source = self.primary_view.revision_source
         if source is not None:
             try:
@@ -760,54 +721,53 @@ class StorageComposition(
                     exc_info=environ.debug,
                 )
 
-    async def list_versions(self, key: DomainKeyT) -> 'tuple[VersionSummary[EntryRevisionT], ...]':
+    async def list_versions(self, key: KeyT) -> 'tuple[VersionSummary, ...]':
         state = await self._state()
         owners = tuple(range(len(self._views)))
-        collected: dict[tuple[str, str, bool], VersionSummary[EntryRevisionT]] = {}
+        collected: dict[tuple[int, str, bool], VersionSummary] = {}
         for owner in owners:
             backend = self._views[owner].backend
             if not isinstance(backend, VersionedStorage):
                 continue
-            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
+            versions = tuple(await backend.list_versions(key))
             for version in versions:
-                collected[(str(version.entry_revision), version.digest, version.deleted)] = version
+                collected[(version.entry_revision.value, version.digest, version.deleted)] = version
         if collected:
-            return tuple(sorted(collected.values(), key=lambda version: str(version.entry_revision), reverse=True))
+            return tuple(sorted(collected.values(), key=lambda version: version.entry_revision.value, reverse=True))
         if key not in state.owners:
             raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN)
         raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
-    async def get_at_revision(self, key: DomainKeyT, entry_revision: EntryRevisionT) -> 'DomainValueT | None':
+    async def get_at_revision(self, key: KeyT, entry_revision: StorageEntryRevision) -> 'ValueT | None':
         state = await self._state()
         owners = tuple(range(len(self._views)))
         for owner in owners:
             backend = self._views[owner].backend
             if not isinstance(backend, VersionedStorage):
                 continue
-            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
+            versions = tuple(await backend.list_versions(key))
             if any(version.entry_revision == entry_revision for version in versions):
-                value = await backend.get_at_revision(self._to_storage_key(key), entry_revision)
-                return None if value is None else self._from_storage_value(value)
+                return await backend.get_at_revision(key, entry_revision)
         raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
-    async def get_at_version(self, key: DomainKeyT, version: int) -> 'DomainValueT | None':
+    async def get_at_version(self, key: KeyT, version: int) -> 'ValueT | None':
         state = await self._state()
         owners = tuple(range(len(self._views)))
         for owner in owners:
             backend = self._views[owner].backend
             if not isinstance(backend, VersionedStorage):
                 continue
-            versions = tuple(await backend.list_versions(self._to_storage_key(key)))
-            if any(str(item.entry_revision.value) == str(version) for item in versions):
-                value = await backend.get_at_version(self._to_storage_key(key), version)
-                return None if value is None else self._from_storage_value(value)
+            versions = tuple(await backend.list_versions(key))
+            if any(item.entry_revision.value == version for item in versions):
+                return await backend.get_at_version(key, version)
         raise AIError(ErrorCode.ASSET_VERSION_OWNER_UNKNOWN if key not in state.owners else ErrorCode.STORAGE_VERSION_UNSUPPORTED)
 
 
 __all__ = [
     "CacheAdapter",
     "EffectiveMetadataState",
-    "StorageAdapter",
     "StorageComposition",
     "StorageLayer",
+    "StorageLocation",
+    "StorageValueValidator",
 ]

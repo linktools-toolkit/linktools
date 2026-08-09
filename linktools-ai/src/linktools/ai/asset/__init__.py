@@ -16,6 +16,7 @@ from ._codec import (
     AssetCodecManifestEntry,
     AssetCodecRegistry,
 )
+from ._composition import AssetBackend, AssetComposition
 from ._config import StrictConfigReader, resolved_name
 from ._directory import (
     AssetPathAdapter,
@@ -51,13 +52,15 @@ from ._sql import SqlAssetBackend, SqlAssetTables
 from ._store import AssetStore
 
 __all__ = [
+    "AssetBackend",
     "AssetBatchResult",
     "AssetChange",
-    "AssetConflictError",
     "AssetCodec",
     "AssetCodecManifest",
     "AssetCodecManifestEntry",
     "AssetCodecRegistry",
+    "AssetComposition",
+    "AssetConflictError",
     "AssetDeleteResult",
     "AssetEntryBatchResult",
     "AssetEntryChange",
@@ -72,25 +75,25 @@ __all__ = [
     "AssetInfo",
     "AssetKey",
     "AssetNotFoundError",
-    "AssetPathAdapter",
-    "FilesystemAssetBackend",
-    "InMemoryAssetBackend",
     "AssetParseError",
+    "AssetPathAdapter",
     "AssetRequest",
     "AssetRevision",
     "AssetRoot",
+    "AssetSource",
     "AssetStore",
     "AssetStoreRevision",
     "AssetValue",
     "AssetVersion",
-    "AssetSource",
-    "filesystem_root",
+    "FilesystemAssetBackend",
+    "InMemoryAssetBackend",
     "InvalidAssetError",
     "LocalDirectoryAssetBackend",
     "PrefixAssetPathAdapter",
-    "StrictConfigReader",
     "SqlAssetBackend",
     "SqlAssetTables",
+    "StrictConfigReader",
+    "filesystem_root",
     "local_directory_root",
     "resolved_name",
 ]

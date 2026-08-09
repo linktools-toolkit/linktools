@@ -2,32 +2,36 @@
 # -*- coding: utf-8 -*-
 """Runtime containers with explicit query/mutation separation."""
 
-from dataclasses import dataclass
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 
 from linktools.core import environ
 
-from ..agent import AgentBinding, AgentCatalogView, BindingDependencies, BindingExecutionRegistry, build_binding_plan
-from pydantic_ai_harness.step_persistence import StepStore
-from ..capability import MCPToolProvider, SkillProvider, ToolPolicy, ToolStateStore, Sandbox
+from ..agent import (
+    AgentBinding,
+    BindingDependencies,
+    BindingExecutionRegistry,
+    build_binding_plan,
+)
+from ..capability import (
+    MCPToolProvider,
+    Sandbox,
+    SkillProvider,
+    ToolPolicy,
+    ToolStateStore,
+)
 from ..core import Page, Principal, PrincipalProvider
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ..model import ModelResolver
-from ..observe import MiddlewarePipeline
-from ..observe import RunSnapshot
-from ..spec import AgentSpec, OutputTypeRegistry, PromptSpec
-from ..task import CancelGraphRequest, TaskGraphRequest, TaskGraphResult, TaskGraphView
-from ..task import TaskApi, TaskQueryApi
-from ..runtime import ApprovalApi, ApprovalQueryApi
-from ..runtime import ArtifactApi
-from ..runtime import EventApi
-from ..runtime import EvaluationApi, EvaluationQueryApi, validate_compare_request
-from ..runtime import ExecutionApi, ExecutionQueryApi
+from ..observe import MiddlewarePipeline, RunSnapshot
 from ..runtime import (
+    ApprovalApi,
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
+    ApprovalQueryApi,
     ApprovalService,
     ApprovalView,
+    ArtifactApi,
     ArtifactDownload,
     ArtifactService,
     ArtifactView,
@@ -36,14 +40,19 @@ from ..runtime import (
     CloseSessionRequest,
     CompareEvaluationRequest,
     CreateSessionRequest,
+    EvaluationApi,
     EvaluationComparison,
     EvaluationHandle,
+    EvaluationQueryApi,
     EvaluationService,
     EvaluationView,
+    EventApi,
     EventService,
+    ExecutionApi,
     ExecutionEvent,
     ExecutionHandle,
     ExecutionHistoryItem,
+    ExecutionQueryApi,
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
@@ -59,14 +68,25 @@ from ..runtime import (
     RunEvaluationRequest,
     RuntimeServiceIdentity,
     RuntimeServices,
+    SessionApi,
+    SessionQueryApi,
     SessionService,
     SessionView,
     TaskService,
     TraceItem,
     TranscriptItem,
     UpdateSessionRequest,
+    validate_compare_request,
 )
-from ..runtime import SessionApi, SessionQueryApi
+from ..spec import AgentSpec, OutputTypeRegistry, PromptSpec
+from ..task import (
+    CancelGraphRequest,
+    TaskApi,
+    TaskGraphRequest,
+    TaskGraphResult,
+    TaskGraphView,
+    TaskQueryApi,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,37 +185,37 @@ def build_runtime(
 
 
 @dataclass(frozen=True, slots=True)
-class LocalRuntimeDependencies:
-    binding: BindingDependencies
-    binding_registry: BindingExecutionRegistry
-    agent_catalog: AgentCatalogView
-    steps: StepStore
-    tool_state: ToolStateStore
-    principal_provider: PrincipalProvider
+class LocalRuntimeServices:
     services: RuntimeServices
+    binding_registry: BindingExecutionRegistry
+
+    def __post_init__(self) -> None:
+        if self.services is None or self.binding_registry is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
 def build_local_runtime(
     spec: AgentSpec,
     prompt: PromptSpec,
     *,
-    dependencies: LocalRuntimeDependencies,
+    binding: BindingDependencies,
+    local: LocalRuntimeServices,
 ) -> Runtime:
-    plan = build_binding_plan(spec, prompt, dependencies=dependencies.binding)
-    dependencies.binding_registry.register(plan)
+    plan = build_binding_plan(spec, prompt, dependencies=binding)
+    local.binding_registry.register(plan)
     binding = plan.binding
     _logger = environ.get_logger("ai.app.facade")
     _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.digest)
     return Runtime(
-        dependencies.services.identity,
+        local.services.identity,
         binding,
-        _ExecutionApi(dependencies.services.execution, binding),
-        _SessionApi(dependencies.services.session, binding),
-        _TaskApi(dependencies.services.task, binding),
-        _EvaluationApi(dependencies.services.evaluation, binding),
-        _ApprovalApi(dependencies.services.approval),
-        _EventApi(dependencies.services.event),
-        _ArtifactApi(dependencies.services.artifact),
+        _ExecutionApi(local.services.execution, binding),
+        _SessionApi(local.services.session, binding),
+        _TaskApi(local.services.task, binding),
+        _EvaluationApi(local.services.evaluation, binding),
+        _ApprovalApi(local.services.approval),
+        _EventApi(local.services.event),
+        _ArtifactApi(local.services.artifact),
     )
 
 
@@ -430,4 +450,4 @@ class _ArtifactApi:
         return await self._service.get(artifact_id, principal=principal)
 
 
-__all__ = ["LocalRuntimeDependencies", "RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]
+__all__ = ["LocalRuntimeServices", "RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]

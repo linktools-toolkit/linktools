@@ -14,6 +14,7 @@ from linktools.core import environ
 
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..storage import MetadataChange, MetadataLoad, MetadataLoadMode, StorageRevision
 from ._domain import (
     AssetDeleteOrigin,
     AssetDeleteResult,
@@ -78,6 +79,10 @@ class InMemoryAssetBackend:
     def writable(self) -> bool:
         return self._writable
 
+    @property
+    def atomic_batch(self) -> bool:
+        return True
+
     async def initialize(self) -> None:
         return
 
@@ -87,6 +92,30 @@ class InMemoryAssetBackend:
     async def current_revision(self) -> AssetStoreRevision:
         async with self._lock:
             return self._store_token()
+
+    async def head_revision(self) -> StorageRevision:
+        return StorageRevision((await self.current_revision()).value)
+
+    async def load_metadata(
+        self,
+        after_revision: "StorageRevision | None",
+    ) -> "MetadataLoad[AssetKey, AssetInfo]":
+        revision = await self.head_revision()
+        if after_revision == revision:
+            return MetadataLoad(MetadataLoadMode.PATCH, revision, ())
+        changes = tuple(MetadataChange(info.key, info) for info in await self.list_assets())
+        return MetadataLoad(MetadataLoadMode.REPLACE, revision, changes)
+
+    async def get(self, key: AssetKey) -> "dict[str, bytes] | None":
+        info = await self.stat_asset(key)
+        if info is None or info.deleted:
+            return None
+        files = await self.snapshot_files(key, info.revision, False)
+        return {
+            item.key.rel_path: item.content
+            for item in files
+            if item.content is not None
+        }
 
     async def stat_asset(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:
@@ -298,13 +327,7 @@ class InMemoryAssetBackend:
         async with self._lock:
             self._require_writable()
             self._check_asset_cas(key, expected_revision)
-            current = self._assets.get(key)
-            if current is None or current.deleted and current.deleted_by == "OVERRIDE":
-                return False, current
-            desired = self._desired_for_asset(key)
-            desired = {path: _DesiredEntry(b"", True, "TOMBSTONE", None) for path in desired}
-            result = self._commit_locked({key: desired}, {key: "OVERRIDE"})
-            return True, result[key]
+            return self._delete_asset_locked(key)
 
     async def apply_asset_batch(self, changes: "Sequence[tuple[AssetKey, bytes | None, str, Literal['PUT', 'DELETE'], AssetRevision | None]]", *, expected_store_revision: "AssetStoreRevision | None") -> "tuple[AssetInfo | AssetDeleteResult, ...]":
         async with self._lock:
@@ -318,17 +341,18 @@ class InMemoryAssetBackend:
             for asset, value, primary_path, operation, expected_revision in changes:
                 self._check_asset_cas(asset, expected_revision)
                 current = self._assets.get(asset)
-                if current is not None and current.deleted:
+                if operation != "DELETE" and current is not None and current.deleted:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if asset not in desired_by_asset:
-                    desired_by_asset[asset] = self._desired_for_asset(asset)
                 if operation == "PUT":
                     if value is None:
                         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-                    desired_by_asset[asset][primary_path] = _DesiredEntry(value, False, "OVERRIDE", None)
-                else:
                     desired_by_asset[asset] = self._desired_for_asset(asset)
+                    desired_by_asset[asset][primary_path] = _DesiredEntry(value, False, "OVERRIDE", None)
+                elif operation == "DELETE":
+                    desired_by_asset[asset] = self._delete_asset_desired(asset)
                     delete_origins[asset] = "OVERRIDE"
+                else:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             committed = self._commit_locked(desired_by_asset, delete_origins)
             result: list[AssetInfo | AssetDeleteResult] = []
             for asset, value, _primary_path, operation, _expected_revision in changes:
@@ -340,6 +364,20 @@ class InMemoryAssetBackend:
                 else:
                     result.append(info)
             return tuple(result)
+
+    def _delete_asset_desired(self, asset: AssetKey) -> "dict[str, _DesiredEntry]":
+        return self._desired_for_asset(asset)
+
+    def _delete_asset_locked(self, key: AssetKey) -> "tuple[bool, AssetInfo | None]":
+        current = self._assets.get(key)
+        if current is None or current.deleted and current.deleted_by == "OVERRIDE":
+            return False, current
+        result = self._commit_locked({key: self._delete_asset_desired(key)}, {key: "OVERRIDE"})
+        info = result.get(key, current)
+        if info is None:
+            return False, None
+        _logger.info("asset container deleted: asset=%s/%s revision=%s", key.kind, key.id, info.revision.value)
+        return True, info
 
     async def restore_asset(self, key: AssetKey, revision: AssetRevision, *, expected_revision: AssetRevision) -> AssetInfo:
         async with self._lock:
@@ -507,9 +545,23 @@ class InMemoryAssetBackend:
             ],
         }
 
+    def export_state(self) -> "dict[str, object]":
+        return self._dump_state()
+
+    def import_state(self, raw: object) -> None:
+        self._load_state(raw)
+
     def _load_state(self, raw: object) -> None:
         if not isinstance(raw, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._assets.clear()
+        self._asset_history.clear()
+        self._entries.clear()
+        self._contents.clear()
+        self._entry_history.clear()
+        self._source_files.clear()
+        self._overrides.clear()
+        self._tombstones.clear()
         self._store_revision = int(raw.get("store_revision", 0))
         for item in raw.get("assets", []):
             if not isinstance(item, dict):

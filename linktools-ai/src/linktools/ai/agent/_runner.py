@@ -6,7 +6,7 @@ import asyncio
 import os
 import re
 import unicodedata
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -34,6 +34,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
@@ -353,12 +354,14 @@ class BindingAgentRunner:
         memory_namespace: "str | None" = None,
         memory_store: "SearchableMemoryStore | None" = None,
         on_event: "EventHandler | None" = None,
+        toolsets: "Sequence[AbstractToolset[None]]" = (),
     ) -> WorkspaceAgentResult:
         existing = await step_store.get_run(run_id=step_run_id)
         if existing is not None:
             raise _SegmentAlreadyStarted(step_run_id)
         if self._plan.mcp_servers and self._mcp_provider is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        _validate_toolsets(toolsets, required=bool(self._plan.mcp_servers))
         agent = await self._get_agent()
         model = self._model
         if model is None:
@@ -391,6 +394,7 @@ class BindingAgentRunner:
             conversation_id=conversation_id,
             run_id=step_run_id,
             capabilities=composed,
+            toolsets=tuple(toolsets),
         ) as events:
             async for event in events:
                 if isinstance(event, AgentRunResultEvent):
@@ -502,6 +506,16 @@ def _map_event(
         if isinstance(part, RetryPromptPart):
             return cast("dict[str, JsonValue]", {"type": "tool", "phase": "end", "id": part.tool_call_id, "name": part.tool_name or "unknown", "operation_id": part.tool_call_id, "result_digest": canonical_sha256(str(part.content)), "status": "FAILED", "truncated": False, "safe_summary": "tool retry requested"})
     return None
+
+
+def _validate_toolsets(toolsets: Sequence[AbstractToolset[None]], *, required: bool) -> None:
+    if required and not toolsets:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "MCP provider returned no run-scoped toolsets")
+    ids = [toolset.id for toolset in toolsets]
+    if any(not isinstance(toolset_id, str) or not toolset_id.strip() for toolset_id in ids):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "MCP toolset id is required")
+    if len(set(ids)) != len(ids):
+        raise AIError(ErrorCode.STORAGE_CONFLICT, "MCP toolset ids must be unique per run")
 
 
 __all__ = ["AgentRunner", "AgentTool", "BindingAgentRunner", "EventHandler", "ModelMaterializer", "WorkspaceAgentResult", "WorkspaceAgentRunner"]

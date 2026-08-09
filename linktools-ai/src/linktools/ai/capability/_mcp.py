@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """MCP capability provider boundary."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from collections.abc import Mapping
 from typing import Protocol
 
-from ..errors import ErrorCode, AIError
-from ..core import JsonValue, canonical_json_bytes
-from ..core import ResourceRef
-from ..core import Principal
+from pydantic_ai.toolsets import AbstractToolset
+
+from ..core import JsonValue, Principal, ResourceRef, canonical_json_bytes
+from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +63,13 @@ class MCPToolProvider(Protocol):
     def manifest(self) -> str: ...
     def resolve_ref(self, server_id: str, revision: 'int | None' = None) -> MCPServerSpec: ...
     async def connect(self, server_id: str) -> MCPConnectionPool: ...
+    async def toolsets(
+        self,
+        servers: Sequence[MCPServerSpec],
+        *,
+        principal: Principal,
+        execution: ResourceRef,
+    ) -> "tuple[AbstractToolset[None], ...]": ...
 
 
 __all__ = ["MCPCallRequest", "MCPConnectionPool", "MCPServerSpec", "MCPToolProvider", "validate_mcp_response"]

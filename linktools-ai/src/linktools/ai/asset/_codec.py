@@ -75,8 +75,6 @@ class AssetCodecRegistry:
             if existing.value_type is codec.value_type and existing.fingerprint == codec.fingerprint and existing.primary_path == codec.primary_path:
                 return
             raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
-        if any(existing_codec.primary_path == codec.primary_path for existing_codec in self._codecs.values()):
-            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
         self._codecs[codec.kind] = codec
 
     def freeze(self) -> AssetCodecManifest:

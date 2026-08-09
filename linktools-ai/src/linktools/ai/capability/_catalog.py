@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 """Runtime Asset adapters for authorized Agent and Skill catalog views."""
 
-from dataclasses import dataclass
+import hashlib
 import keyword
+from dataclasses import dataclass
 from typing import Protocol
 
 from pydantic_ai.models import Model
 
 from ..asset import AssetInfo, AssetKey, AssetStore
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ..spec import AgentSpec
 from ._skill import SkillCatalogView, SkillDescriptor, SkillSpec
 
@@ -65,14 +66,13 @@ class AssetAgentCatalog(AgentCatalogView):
             items.append(
                 AgentCatalogItem(
                     id=specification.id,
-                    name=specification.id,
+                    name=_workflow_agent_name(specification.id),
                     description=f"Authorized agent {specification.id}",
                     instructions=instructions,
                     model=specification.model,
                 )
             )
         return tuple(sorted(items, key=lambda item: item.id))
-
     async def _list_infos(self) -> "list[AssetInfo]":
         infos: "list[AssetInfo]" = []
         cursor = None
@@ -84,6 +84,12 @@ class AssetAgentCatalog(AgentCatalogView):
             if page.next_cursor == cursor or not page.items:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             cursor = page.next_cursor
+
+
+def _workflow_agent_name(agent_id: str) -> str:
+    if agent_id.isidentifier() and not keyword.iskeyword(agent_id):
+        return agent_id
+    return "agent_" + hashlib.sha256(agent_id.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

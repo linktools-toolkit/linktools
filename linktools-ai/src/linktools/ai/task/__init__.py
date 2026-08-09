@@ -19,11 +19,17 @@ from ._graph import (
     TaskTerminalRecord,
     ready_nodes,
 )
+from ._local import (
+    LocalTaskGraphLauncher,
+    RuntimeTaskExecutionVerifier,
+    TaskExecutionVerifier,
+    TaskNodeRunner,
+    TaskNodeRunResult,
+)
 from ._service import TaskApi, TaskGraphLauncher, TaskQueryApi
-from ._local import LocalTaskGraphLauncher, TaskNodeRunResult, TaskNodeRunner
 
 __all__ = [
     "CancelGraphRequest", "Job", "Swarm", "SwarmLimits", "TaskApi", "TaskCompletionLedger", "TaskGraph", "TaskGraphLauncher",
-    "LocalTaskGraphLauncher", "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode", "TaskNodeResult", "TaskNodeRunResult", "TaskNodeRunner", "TaskQueryApi",
+    "LocalTaskGraphLauncher", "RuntimeTaskExecutionVerifier", "TaskExecutionVerifier", "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode", "TaskNodeResult", "TaskNodeRunResult", "TaskNodeRunner", "TaskQueryApi",
     "TaskStatus", "TaskTerminalRecord", "ready_nodes",
 ]

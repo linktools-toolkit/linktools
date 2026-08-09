@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Generic
 
-from ._contracts import InfoT, KeyT, ReadableStorageBackend, StoreRevisionT, ValueT
+from ._contracts import InfoT, KeyT, ReadableStorageBackend, ValueT
 
 
 class LayerRefreshPolicy(StrEnum):
@@ -21,9 +21,9 @@ class StorageWriteVisibility(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class StorageLayer(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
+class StorageLayer(Generic[KeyT, ValueT, InfoT]):
     id: str
-    backend: "ReadableStorageBackend[KeyT, ValueT, InfoT, StoreRevisionT]"
+    backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]"
     refresh: LayerRefreshPolicy = LayerRefreshPolicy.STATIC
 
     def __post_init__(self) -> None:

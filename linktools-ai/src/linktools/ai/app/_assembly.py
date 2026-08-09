@@ -2,44 +2,73 @@
 # -*- coding: utf-8 -*-
 """唯一 Composition Root for process-local Runtime services."""
 
-from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 import hashlib
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
+from pydantic_ai_harness.step_persistence import (
+    InMemoryStepStore,
+    SqliteStepStore,
+    StepStore,
+)
 
-from ..asset import AssetCodecRegistry, AssetStore
-from ..adapter import DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, StepExecutionHistoryReader, build_filesystem_runtime, build_in_memory_runtime, open_sql_runtime
-from ..capability import MCPToolProvider, Sandbox, SkillProvider, ToolPolicy, ToolStateStore
+from ..adapter import (
+    DurableFilesystemStepStore,
+    SqlRuntimeSchema,
+    SqlStepStore,
+    StepExecutionHistoryReader,
+    build_filesystem_runtime,
+    build_in_memory_runtime,
+    open_sql_runtime,
+)
+from ..agent import AgentCatalogView, BindingExecutionRegistry, ModelMaterializer
+from ..asset import AssetCodecRegistry, AssetComposition, AssetSource, AssetStore
+from ..capability import (
+    MCPServerSpecCodec,
+    MCPToolProvider,
+    Sandbox,
+    SkillProvider,
+    SkillSpecCodec,
+    ToolPolicy,
+    ToolStateStore,
+)
+from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
+from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry, ModelResolver
 from ..observe import MiddlewarePipeline
 from ..runtime import (
+    CancelEffectOutcome,
     DefaultApprovalService,
     DefaultArtifactService,
-    DefaultEventService,
     DefaultEvaluationService,
+    DefaultEventService,
     DefaultExecutionService,
     DefaultSessionService,
     DefaultTaskService,
-    WorkflowTaskGraphLauncher,
+    ExecutionHistoryReader,
+    ExecutionLauncher,
+    ExecutionRecord,
+    ExecutionRequest,
+    RuntimeBackend,
+    RuntimePersistence,
     RuntimeServices,
+    WorkflowGateway,
+    WorkflowTaskGraphLauncher,
+    new_runtime_service_identity,
 )
-from ._facade import RuntimeAccess, build_runtime_access
-from ..runtime import CancelEffectOutcome, ExecutionLauncher
-from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore, StepStore
-
-from ..runtime import RuntimeBackend, RuntimePersistence
-from ..runtime import ExecutionRecord
-from ..runtime import ExecutionHistoryReader, ExecutionRequest, WorkflowGateway, new_runtime_service_identity
-from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
-from ..errors import ErrorCode, AIError
-from ..spec import AgentSpecCodec, PromptSpecCodec
-from ..capability import MCPServerSpecCodec, SkillSpecCodec
-from ..spec import OutputTypeRegistry
-from ..task import TaskGraphLauncher
+from ..spec import AgentSpecCodec, OutputTypeRegistry, PromptSpecCodec
+from ..task import (
+    LocalTaskGraphLauncher,
+    RuntimeTaskExecutionVerifier,
+    TaskGraphLauncher,
+    TaskNodeRunner,
+)
+from ._binding_launcher import BindingExecutionLauncher
+from ._facade import LocalRuntimeServices, RuntimeAccess, build_runtime_access
 
 _logger = environ.get_logger("ai.app.assembly")
 
@@ -158,7 +187,12 @@ async def open_runtime_resources(
             await steps.close()
             await runtime.close()
         return
-    from ..storage import SqlSchemaRegistry, build_sqlite_storage, build_storage, initialize_storage
+    from ..storage import (
+        SqlSchemaRegistry,
+        build_sqlite_storage,
+        build_storage,
+        initialize_storage,
+    )
     if engine is None or session_factory is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires an injected session factory and engine")
     _logger.debug("SQL runtime dependencies injected: backend=%s engine=%s session_factory=%s", config.backend, type(engine).__name__, type(session_factory).__name__)
@@ -197,7 +231,7 @@ async def open_runtime_services(
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[RuntimeServices]:
     async with open_runtime_resources(config, engine=engine, session_factory=session_factory) as resources:
-        history_reader = StepExecutionHistoryReader(config.namespace, resources.domain, resources.steps)
+        history_reader = StepExecutionHistoryReader(config.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", grant_key))
         yield build_runtime_services(
             resources.domain,
             authorization,
@@ -228,15 +262,19 @@ class _WorkflowExecutionLauncher:
         return CancelEffectOutcome.CONFIRMED if result.cancelled else CancelEffectOutcome.UNKNOWN
 
 
-def build_asset_codecs() -> AssetCodecRegistry:
-    registry = AssetCodecRegistry()
-    registry.register(AgentSpecCodec())
-    registry.register(PromptSpecCodec())
-    registry.register(SkillSpecCodec())
-    registry.register(MCPServerSpecCodec())
-    manifest = registry.freeze()
+def build_asset_store(
+    storage: AssetComposition,
+    *,
+    sources: "Sequence[AssetSource]" = (),
+) -> AssetStore:
+    codecs = AssetCodecRegistry()
+    codecs.register(AgentSpecCodec())
+    codecs.register(PromptSpecCodec())
+    codecs.register(SkillSpecCodec())
+    codecs.register(MCPServerSpecCodec())
+    manifest = codecs.freeze()
     _logger.info("asset codecs frozen: entries=%s digest=%s", len(manifest.entries), manifest.digest)
-    return registry
+    return AssetStore(storage, codecs=codecs, sources=sources)
 
 
 def build_app_services(
@@ -333,4 +371,56 @@ def build_runtime_services(
     return services
 
 
-__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_codecs", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_services", "open_runtime_resources"]
+def build_local_runtime_services(
+    resources: RuntimeResources,
+    authorization: "AuthorizationPolicy",
+    *,
+    grant_key: bytes,
+    materializer: ModelMaterializer,
+    mcp_provider: MCPToolProvider,
+    agent_catalog: "AgentCatalogView | None" = None,
+    task_launcher: "TaskGraphLauncher | None" = None,
+    task_runner: "TaskNodeRunner | None" = None,
+    task_owner: str = "local",
+) -> LocalRuntimeServices:
+    """Create local services and their one shared binding registry."""
+    registry = BindingExecutionRegistry()
+    launcher = BindingExecutionLauncher(
+        registry,
+        materializer,
+        resources,
+        agent_catalog=agent_catalog,
+        mcp_provider=mcp_provider,
+    )
+    history_reader = StepExecutionHistoryReader(
+        resources.namespace,
+        resources.domain,
+        resources.steps,
+        HmacCursorSigner("execution-history", grant_key),
+    )
+    if task_launcher is None and task_runner is not None:
+        task_launcher = LocalTaskGraphLauncher(
+            resources.domain.tasks,
+            task_runner,
+            RuntimeTaskExecutionVerifier(resources.domain.executions),
+            owner=task_owner,
+        )
+    services = build_runtime_services(
+        resources.domain,
+        authorization,
+        grant_key=grant_key,
+        history_reader=history_reader,
+        schema_digest=resources.domain.atomic_domain_id,
+        execution_launcher=launcher,
+        task_launcher=task_launcher,
+    )
+    _logger.info(
+        "local runtime composition ready: namespace=%s registry=%s launcher=%s",
+        resources.namespace,
+        id(registry),
+        type(launcher).__name__,
+    )
+    return LocalRuntimeServices(services, registry)
+
+
+__all__ = ["AppServices", "LocalRuntimeServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]

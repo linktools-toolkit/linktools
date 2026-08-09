@@ -33,8 +33,10 @@ class ACPTextContent(Protocol):
 
 
 class ACPAgent:
-    def __init__(self, runtime: WorkspaceAgentRuntime) -> None:
+    def __init__(self, runtime: WorkspaceAgentRuntime, *, memory_namespace: str) -> None:
+        _validate_memory_namespace(memory_namespace)
         self._runtime = runtime
+        self._memory_namespace = memory_namespace
         self._connection: ACPConnection | None = None
         self._initialized = False
 
@@ -114,7 +116,7 @@ class ACPAgent:
             if update is not None:
                 await self._connection.session_update(session_id, update)
 
-        await self._runtime.run(session_id, text, memory_namespace=self._runtime.workspace.workspace_id, on_event=on_event)
+        await self._runtime.run(session_id, text, memory_namespace=self._memory_namespace, on_event=on_event)
         _logger.info("ACP prompt completed: session=%s", session_id)
         return schema.PromptResponse(stopReason="end_turn")
 
@@ -144,15 +146,15 @@ class ACPApplication:
     def for_workspace(cls, workspace: Workspace) -> "ACPApplication":
         return cls(workspace)
 
-    def agent(self) -> ACPAgent:
+    def agent(self, *, memory_namespace: str) -> ACPAgent:
         if self.runtime is None:
             raise RuntimeError("ACP runtime is not open")
-        return ACPAgent(self.runtime)
+        return ACPAgent(self.runtime, memory_namespace=memory_namespace)
 
-    async def serve(self) -> None:
+    async def serve(self, *, memory_namespace: str) -> None:
+        _validate_memory_namespace(memory_namespace)
         async with open_workspace_runtime(self.workspace) as runtime:
-            self.runtime = runtime
-            await serve_stdio(self.agent())
+            await serve_stdio(ACPAgent(runtime, memory_namespace=memory_namespace))
 
 
 async def serve_stdio(agent: ACPAgent) -> None:
@@ -162,6 +164,11 @@ async def serve_stdio(agent: ACPAgent) -> None:
 
 def run_stdio(agent: ACPAgent) -> None:
     asyncio.run(serve_stdio(agent))
+
+
+def _validate_memory_namespace(memory_namespace: str) -> None:
+    if not isinstance(memory_namespace, str) or memory_namespace == "":
+        raise ValueError("memory namespace is required")
 
 
 def _require_acp() -> 'tuple[ModuleType, ModuleType]':
@@ -198,8 +205,8 @@ def _acp_update(schema, event: 'dict[str, JsonValue]') -> 'JsonValue | None':
     return schema.ToolCallProgress(
         toolCallId=str(event.get("id", "")),
         kind=kind,
-        status="completed" if event.get("ok") else "failed",
-        rawOutput=event.get("detail"),
+        status="completed" if event.get("status") == "SUCCEEDED" else "failed",
+        rawOutput=event.get("safe_summary"),
         sessionUpdate="tool_call_update",
     )
 

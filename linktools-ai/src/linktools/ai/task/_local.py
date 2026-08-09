@@ -24,7 +24,6 @@ from ._graph import (
 _logger = environ.get_logger("ai.task.local")
 _LEASE_SECONDS = 60
 
-
 @dataclass(frozen=True, slots=True)
 class TaskNodeRunResult:
     execution_id: str
@@ -44,6 +43,38 @@ class TaskNodeRunner(Protocol):
         principal: Principal,
         dependency_execution_ids: "Mapping[str, str]",
     ) -> TaskNodeRunResult: ...
+
+
+class TaskExecutionVerifier(Protocol):
+    async def verify(self, execution_id: str, *, tenant_id: str, result_digest: str) -> None: ...
+
+
+class _ExecutionStatus(Protocol):
+    value: str
+
+
+class _ExecutionRecord(Protocol):
+    status: _ExecutionStatus
+    result_digest: "str | None"
+
+
+class _ExecutionRepository(Protocol):
+    async def get(self, execution_id: str, *, tenant_id: str) -> "_ExecutionRecord | None": ...
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTaskExecutionVerifier:
+    executions: _ExecutionRepository
+
+    async def verify(self, execution_id: str, *, tenant_id: str, result_digest: str) -> None:
+        record = await self.executions.get(execution_id, tenant_id=tenant_id)
+        if (
+            record is None
+            or record.status.value != "SUCCEEDED"
+            or record.result_digest is None
+            or record.result_digest != result_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "task node execution result could not be verified")
 
 
 class _TaskNodeState(Protocol):
@@ -74,11 +105,12 @@ class _TaskRepository(Protocol):
 class LocalTaskGraphLauncher:
     """Schedule DAG nodes while keeping durable truth in TaskRepository."""
 
-    def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner, *, owner: str) -> None:
+    def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner, verifier: TaskExecutionVerifier, *, owner: str) -> None:
         if not owner.strip():
             raise ValueError("task launcher owner is required")
         self._repository = repository
         self._runner = runner
+        self._verifier = verifier
         self._owner = owner
         self._graphs: dict[str, asyncio.Task[None]] = {}
         self._accepting = True
@@ -165,6 +197,7 @@ class LocalTaskGraphLauncher:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     dependency_execution_ids[dependency] = dependency_node.execution_id
                 result = await self._runner.run(node, graph_id=request.graph.graph_id, principal=request.principal, dependency_execution_ids=dependency_execution_ids)
+                await self._verifier.verify(result.execution_id, tenant_id=request.principal.tenant_id, result_digest=result.result_digest)
                 await self._repository.complete(lease, tenant_id=request.principal.tenant_id, execution_id=result.execution_id, result_digest=result.result_digest)
                 _logger.info("local task node completed: graph=%s task=%s execution=%s", request.graph.graph_id, node.task_id, result.execution_id)
             except asyncio.CancelledError:
@@ -192,4 +225,4 @@ def _node_by_id(nodes: "tuple[_TaskNodeState, ...]", task_id: str) -> "_TaskNode
     return next((node for node in nodes if node.task_id == task_id), None)
 
 
-__all__ = ["LocalTaskGraphLauncher", "TaskNodeRunResult", "TaskNodeRunner"]
+__all__ = ["LocalTaskGraphLauncher", "RuntimeTaskExecutionVerifier", "TaskExecutionVerifier", "TaskNodeRunResult", "TaskNodeRunner"]

@@ -9,15 +9,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-from linktools.ai.errors import ErrorCode, AIError
 from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.capability import ToolOperationRecord
 from linktools.ai.core import ToolOperationStatus
-from linktools.ai.storage import FilesystemContentCache, InMemoryContentCache
-from linktools.ai.storage import StorageAdapter, StorageComposition
-from linktools.ai.storage import StorageLayer
-from linktools.ai.storage import MetadataChange, MetadataLoad, MetadataLoadMode, StorageOwnedInfo
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import (
+    FilesystemContentCache,
+    InMemoryContentCache,
+    MetadataChange,
+    MetadataLoad,
+    MetadataLoadMode,
+    StorageComposition,
+    StorageEntryRevision,
+    StorageLayer,
+    StorageOwnedInfo,
+    StorageRevision,
+    StorageValueValidator,
+)
+
 from tests.ai.persistence.helper import open_sql_resources
 
 
@@ -37,14 +46,14 @@ class Value:
 class Backend:
     def __init__(self, values: tuple[Value, ...]) -> None:
         self.values = {value.key: value for value in values}
-        self.revision = max((value.revision for value in values), default=1)
+        self.revision = StorageRevision(str(max((value.revision for value in values), default=1)))
         self.get_calls: list[str] = []
         self.metadata_calls = 0
 
-    async def head_revision(self) -> int:
+    async def head_revision(self) -> StorageRevision:
         return self.revision
 
-    async def load_metadata(self, after_revision: int | None) -> MetadataLoad[str, Info, int]:
+    async def load_metadata(self, after_revision: "StorageRevision | None") -> "MetadataLoad[str, Info]":
         self.metadata_calls += 1
         mode = MetadataLoadMode.REPLACE if after_revision is None else MetadataLoadMode.PATCH
         changes = tuple(MetadataChange(value.key, Info(value.key, value.revision)) for value in self.values.values())
@@ -55,19 +64,7 @@ class Backend:
         return self.values.get(key)
 
 
-class Adapter(StorageAdapter[str, Value, str, Value, Info]):
-    def to_storage_key(self, key: str) -> str:
-        return key
-
-    def from_storage_key(self, key: str) -> str:
-        return key
-
-    def from_storage_value(self, value: Value) -> Value:
-        return value
-
-    def to_storage_value(self, value: Value) -> Value:
-        return value
-
+class Validator(StorageValueValidator[str, Value, Info]):
     def validate_value(self, key: str, value: Value, info: Info) -> None:
         if value.key != key or value.revision != info.revision:
             raise ValueError("storage value mismatch")
@@ -98,6 +95,20 @@ async def test_cache_contains_does_not_touch_lru_and_files_are_hashed(tmp_path: 
     assert await filesystem.contains_many(("stable-key",)) == frozenset({"stable-key"})
 
 
+def test_composition_exposes_only_domain_generics() -> None:
+    assert tuple(parameter.__name__ for parameter in StorageComposition.__parameters__) == (
+        "KeyT",
+        "ValueT",
+        "InfoT",
+    )
+    assert str(StorageEntryRevision(1)) == "1"
+    assert str(StorageRevision("revision")) == "revision"
+    with pytest.raises(ValueError):
+        StorageEntryRevision(0)
+    with pytest.raises(ValueError):
+        StorageRevision("")
+
+
 @pytest.mark.asyncio
 async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() -> None:
     primary = Backend((Value("primary", 1, b"p"),))
@@ -105,13 +116,17 @@ async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() 
     storage = StorageComposition(
         primary,
         layers=(StorageLayer("fallback", fallback),),
-        adapter=Adapter(),
+        validator=Validator(),
     )
     assert await storage.get("missing") is None
     assert primary.get_calls == []
     assert fallback.get_calls == []
     assert (await storage.get("fallback")).content == b"f"
     assert fallback.get_calls == ["fallback"]
+    location = await storage.locate("fallback")
+    assert location is not None
+    assert location.backend is fallback
+    assert location.layer == "fallback"
     assert (await storage.list_info_with_owners()) == (
         StorageOwnedInfo(Info("fallback", 1), "fallback", False),
         StorageOwnedInfo(Info("primary", 1), "primary", False),
@@ -121,12 +136,12 @@ async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() 
 @pytest.mark.asyncio
 async def test_refresh_single_flight_and_cancelled_waiter() -> None:
     class SlowBackend(Backend):
-        async def load_metadata(self, after_revision: int | None) -> MetadataLoad[str, Info, int]:
+        async def load_metadata(self, after_revision: "StorageRevision | None") -> "MetadataLoad[str, Info]":
             await asyncio.sleep(0.02)
             return await super().load_metadata(after_revision)
 
     backend = SlowBackend((Value("one", 1, b"1"),))
-    storage = StorageComposition(backend, adapter=Adapter())
+    storage = StorageComposition(backend, validator=Validator())
     first = asyncio.create_task(storage.refresh())
     second = asyncio.create_task(storage.refresh())
     second.cancel()
@@ -138,7 +153,7 @@ async def test_refresh_single_flight_and_cancelled_waiter() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_write_is_fail_closed() -> None:
-    storage = StorageComposition(Backend(()), adapter=Adapter())
+    storage = StorageComposition(Backend(()), validator=Validator())
     with pytest.raises(AIError) as error:
         await storage.put("key", Value("key", 1, b"value"))
     assert error.value.code == ErrorCode.STORAGE_READ_ONLY

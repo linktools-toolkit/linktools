@@ -12,48 +12,47 @@ from ._contracts import (
     InfoT,
     InitializableStorage,
     KeyT,
-    StorageChange,
     MetadataLoad,
     MetadataLoadMode,
     ReadableStorageBackend,
-    StoreRevisionT,
+    StorageChange,
     StorageMetadataReader,
+    StorageRevision,
 )
 from ._layer import LayerRefreshPolicy
 
-RevisionT = TypeVar("RevisionT")
 ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.storage.revision")
 
 
-class RevisionSource(Protocol[StoreRevisionT]):
-    async def head_revision(self) -> 'StoreRevisionT | None': ...
-    async def revision_bumped(self, revision: StoreRevisionT) -> None: ...
+class RevisionSource(Protocol):
+    async def head_revision(self) -> 'StorageRevision | None': ...
+    async def revision_bumped(self, revision: StorageRevision) -> None: ...
 
 
-class StorageRevisionSource(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
+class StorageRevisionSource(Generic[KeyT, ValueT, InfoT]):
     """Live revision source for a metadata backend."""
 
-    def __init__(self, backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT, StoreRevisionT]') -> None:
+    def __init__(self, backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT]') -> None:
         self._backend = backend
 
-    async def head_revision(self) -> 'StoreRevisionT | None':
+    async def head_revision(self) -> 'StorageRevision | None':
         return await self._backend.head_revision()
 
-    async def revision_bumped(self, revision: StoreRevisionT) -> None:
+    async def revision_bumped(self, revision: StorageRevision) -> None:
         return None
 
 
 @dataclass(frozen=True, slots=True)
-class MetadataState(Generic[KeyT, InfoT, StoreRevisionT]):
-    revision: StoreRevisionT
+class MetadataState(Generic[KeyT, InfoT]):
+    revision: StorageRevision
     entries: "dict[KeyT, InfoT]"
 
 
 def apply_metadata_load(
-    current: 'MetadataState[KeyT, InfoT, StoreRevisionT] | None',
-    load: 'MetadataLoad[KeyT, InfoT, StoreRevisionT]',
-) -> 'MetadataState[KeyT, InfoT, StoreRevisionT]':
+    current: 'MetadataState[KeyT, InfoT] | None',
+    load: 'MetadataLoad[KeyT, InfoT]',
+) -> 'MetadataState[KeyT, InfoT]':
     entries = {} if load.mode is MetadataLoadMode.REPLACE or current is None else dict(current.entries)
     for change in load.changes:
         if change.info is None:
@@ -63,29 +62,29 @@ def apply_metadata_load(
     return MetadataState(load.store_revision, entries)
 
 
-class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
+class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
     """Materialize one backend's metadata without publishing partial state."""
 
     def __init__(
         self,
-        backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT, StoreRevisionT]',
+        backend: 'ReadableStorageBackend[KeyT, ValueT, InfoT]',
         policy: LayerRefreshPolicy,
         *,
-        revision_source: 'RevisionSource[StoreRevisionT] | None' = None,
+        revision_source: 'RevisionSource | None' = None,
     ) -> None:
         self.backend = backend
         self.policy = policy
         self.revision_source = revision_source
-        self._state: MetadataState[KeyT, InfoT, StoreRevisionT] | None = None
+        self._state: MetadataState[KeyT, InfoT] | None = None
         self._lock = asyncio.Lock()
-        self._refresh_task: asyncio.Task[MetadataState[KeyT, InfoT, StoreRevisionT]] | None = None
+        self._refresh_task: asyncio.Task[MetadataState[KeyT, InfoT]] | None = None
         self._generation = 0
 
     async def initialize(self) -> None:
         if isinstance(self.backend, InitializableStorage):
             await self.backend.initialize()
 
-    async def refresh(self) -> 'MetadataState[KeyT, InfoT, StoreRevisionT]':
+    async def refresh(self) -> 'MetadataState[KeyT, InfoT]':
         if self.policy is LayerRefreshPolicy.STATIC and self._state is not None:
             return self._state
         if self.policy is not LayerRefreshPolicy.ALWAYS and self._state is not None:
@@ -122,7 +121,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
                     if self._refresh_task is task:
                         self._refresh_task = None
 
-    async def _load(self) -> 'MetadataState[KeyT, InfoT, StoreRevisionT]':
+    async def _load(self) -> 'MetadataState[KeyT, InfoT]':
         generation = self._generation
         if self.policy is LayerRefreshPolicy.ALWAYS:
             after = None
@@ -137,7 +136,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
         _logger.debug("metadata refreshed revision=%s entries=%s", state.revision, len(state.entries))
         return state
 
-    async def head_revision(self) -> 'StoreRevisionT | None':
+    async def head_revision(self) -> 'StorageRevision | None':
         if self.policy is LayerRefreshPolicy.ALWAYS:
             return None
         return await self.backend.head_revision()
@@ -146,7 +145,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
         self._state = None
         self._generation += 1
 
-    def apply_write(self, key: KeyT, info: InfoT, revision: StoreRevisionT) -> None:
+    def apply_write(self, key: KeyT, info: InfoT, revision: StorageRevision) -> None:
         if self._state is None:
             return
         entries = dict(self._state.entries)
@@ -156,7 +155,6 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT, StoreRevisionT]):
 
 
 __all__ = [
-    "StorageRevisionSource",
     "LayerMetadataView",
     "LayerRefreshPolicy",
     "MetadataLoad",
@@ -165,5 +163,6 @@ __all__ = [
     "RevisionSource",
     "StorageChange",
     "StorageMetadataReader",
+    "StorageRevisionSource",
     "apply_metadata_load",
 ]

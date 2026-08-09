@@ -15,7 +15,14 @@ from linktools.core import environ
 
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..storage import read_bytes, write_bytes_atomic
+from ..storage import (
+    MetadataChange,
+    MetadataLoad,
+    MetadataLoadMode,
+    StorageRevision,
+    read_bytes,
+    write_bytes_atomic,
+)
 from ._domain import (
     AssetDeleteResult,
     AssetEntryBatchResult,
@@ -73,7 +80,7 @@ class _IdentityAssetPathAdapter:
 
 
 class LocalDirectoryAssetBackend:
-    """Store the current AssetStore tree directly below a local directory."""
+    """Store a current-only tree without history or cross-file crash atomicity."""
 
     def __init__(
         self,
@@ -99,6 +106,10 @@ class LocalDirectoryAssetBackend:
     def writable(self) -> bool:
         return self._writable
 
+    @property
+    def atomic_batch(self) -> bool:
+        return False
+
     async def initialize(self) -> None:
         await asyncio.to_thread(self._root.mkdir, parents=True, exist_ok=True)
         _logger.info("local asset directory initialized: root=%s", self._root)
@@ -109,13 +120,37 @@ class LocalDirectoryAssetBackend:
     async def current_revision(self) -> AssetStoreRevision:
         return await asyncio.to_thread(self._tree_revision)
 
+    async def head_revision(self) -> StorageRevision:
+        return StorageRevision((await self.current_revision()).value)
+
+    async def load_metadata(
+        self,
+        after_revision: "StorageRevision | None",
+    ) -> "MetadataLoad[AssetKey, AssetInfo]":
+        revision = await self.head_revision()
+        if after_revision == revision:
+            return MetadataLoad(MetadataLoadMode.PATCH, revision, ())
+        changes = tuple(MetadataChange(info.key, info) for info in await self.list_assets())
+        return MetadataLoad(MetadataLoadMode.REPLACE, revision, changes)
+
+    async def get(self, key: AssetKey) -> "dict[str, bytes] | None":
+        info = await self.stat_asset(key)
+        if info is None or info.deleted:
+            return None
+        files = await self.snapshot_files(key, None, False)
+        return {
+            item.key.rel_path: item.content
+            for item in files
+            if item.content is not None
+        }
+
     async def stat_asset(self, key: AssetKey) -> "AssetInfo | None":
         files = await asyncio.to_thread(self._scan_asset, key)
         return await self._asset_info(key, files) if files else None
 
     async def list_assets(self) -> "tuple[AssetInfo, ...]":
         assets = await asyncio.to_thread(self._scan_assets)
-        result: "list[AssetInfo]" = []
+        result: list[AssetInfo] = []
         for key, files in assets:
             info = await self._asset_info(key, files)
             if info is not None:
@@ -208,7 +243,7 @@ class LocalDirectoryAssetBackend:
                 await asyncio.to_thread(self._unlink, self._file_path(key))
                 _logger.info("local asset file deleted: asset=%s/%s path=%s", key.asset.kind, key.asset.id, key.rel_path)
             token = await asyncio.to_thread(self._tree_revision)
-            return AssetEntryDeleteResult(key, existing is not None, AssetEntryRevision(1) if existing is not None else None, AssetRevision(1) if asset is not None else AssetRevision(1), token)
+            return AssetEntryDeleteResult(key, existing is not None, AssetEntryRevision(1) if existing is not None else None, asset.revision if asset is not None else AssetRevision(1), token)
 
     async def apply_file_batch(
         self,
@@ -245,14 +280,14 @@ class LocalDirectoryAssetBackend:
             final_files = await asyncio.to_thread(self._scan_asset, asset)
             info = await self._asset_info(asset, final_files)
             token = await asyncio.to_thread(self._tree_revision)
-            results: "list[AssetEntryInfo | AssetEntryDeleteResult]" = []
+            results: list[AssetEntryInfo | AssetEntryDeleteResult] = []
             for change in changes:
                 key = AssetEntryKey(asset, change.rel_path)
                 if change.operation == "PUT":
                     results.append(next(entry for entry, _content in _info_files(info, final_files) if entry.key == key))
                 else:
                     results.append(AssetEntryDeleteResult(key, change.rel_path in before, AssetEntryRevision(1) if change.rel_path in before else None, AssetRevision(1), token))
-            return AssetEntryBatchResult(asset, AssetRevision(1), token, True, tuple(results))
+            return AssetEntryBatchResult(asset, AssetRevision(1), token, False, tuple(results))
 
     async def apply_asset_batch(
         self,
@@ -279,7 +314,7 @@ class LocalDirectoryAssetBackend:
                 else:
                     raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             token = AssetStoreRevision(self._tree_revision_sync())
-            results: "list[AssetInfo | AssetDeleteResult]" = []
+            results: list[AssetInfo | AssetDeleteResult] = []
             for asset, _value, _path, operation, _expected in changes:
                 files = await asyncio.to_thread(self._scan_asset, asset)
                 info = await self._asset_info(asset, files)
@@ -377,7 +412,7 @@ class LocalDirectoryAssetBackend:
         if not directory.is_dir():
             return ()
         root = self._root.resolve()
-        result: "list[tuple[str, bytes, datetime]]" = []
+        result: list[tuple[str, bytes, datetime]] = []
         for path in directory.rglob("*"):
             if not path.is_file():
                 continue
