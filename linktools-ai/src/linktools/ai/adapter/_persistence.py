@@ -560,6 +560,10 @@ class _MemoryRepository(_Base):
     def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
         super().__init__(mode, namespace, atomic_domain_id)
         self._records: dict[tuple[str, str], MemoryRecord] = {}
+        self._operations: _OperationRepository | None = None
+
+    def bind_operation_repository(self, operations: "_OperationRepository") -> None:
+        self._operations = operations
 
     async def get_header(self, memory_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._ensure_open()
@@ -568,9 +572,21 @@ class _MemoryRepository(_Base):
         return None if record is None else ResourceRef(ResourceKind.MEMORY, memory_id, tenant_id, record.owner_id)
 
     async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord:
+        stored, replayed = await self.put_with_operation(record, expected_revision=expected_revision, operation=None)
+        if replayed or stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return stored
+
+    async def put_with_operation(self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[MemoryRecord | None, bool]":
         self._ensure_open()
         self._check_tenant(record.tenant_id)
         async with self._lock:
+            if operation is not None:
+                existing = self._operation(operation)
+                if existing is not None:
+                    if _operation_immutable(existing) != _operation_input_immutable(operation):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    return self._records.get((record.tenant_id, record.memory_id)), True
             key = (record.tenant_id, record.memory_id)
             current = self._records.get(key)
             if current is None and expected_revision not in (None, 0):
@@ -579,8 +595,10 @@ class _MemoryRepository(_Base):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             next_record = replace(record, revision=0 if current is None else current.revision + 1)
             self._records[key] = next_record
+            if operation is not None:
+                self._append_operation(operation)
             self._mark_changed()
-            return next_record
+            return next_record, False
 
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None:
         self._ensure_open()
@@ -596,6 +614,47 @@ class _MemoryRepository(_Base):
         start = 0 if cursor is None else next((index + 1 for index, item in enumerate(values) if item.memory_id == cursor), len(values))
         page = values[start:start + limit]
         return Page(page, page[-1].memory_id if len(values) > start + limit else None)
+
+    async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None:
+        deleted, replayed = await self.delete_with_operation(memory_id, tenant_id=tenant_id, expected_revision=expected_revision, operation=None)
+        if replayed or not deleted:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[bool, bool]":
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        async with self._lock:
+            if operation is not None:
+                existing = self._operation(operation)
+                if existing is not None:
+                    if _operation_immutable(existing) != _operation_input_immutable(operation):
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    return False, True
+            key = (tenant_id, memory_id)
+            current = self._records.get(key)
+            if current is None:
+                if expected_revision is not None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                deleted = False
+            elif current.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            else:
+                del self._records[key]
+                deleted = True
+            if operation is not None:
+                self._append_operation(operation)
+            self._mark_changed()
+            return deleted, False
+
+    def _operation(self, operation: OperationLedgerInput) -> OperationLedgerRecord | None:
+        if self._operations is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._operations._records.get((operation.tenant_id, operation.operation_id))
+
+    def _append_operation(self, record: OperationLedgerInput) -> OperationLedgerRecord:
+        if self._operations is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._operations._append_locked(record, mark_changed=False)
 
 
 class _ArtifactRepository(_Base):
@@ -739,25 +798,29 @@ class _OperationRepository(_Base):
         self._ensure_open()
         self._check_tenant(record.tenant_id)
         async with self._lock:
-            key = (record.tenant_id, record.operation_id)
-            current = self._records.get(key)
-            if current is not None:
-                if _operation_immutable(current) != _operation_input_immutable(record):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                return current
-            sequence = max(
-                (item.sequence for item in self._records.values() if item.tenant_id == record.tenant_id and item.resource_kind is record.resource_kind and item.resource_id == record.resource_id),
-                default=0,
-            ) + 1
-            created = OperationLedgerRecord(
-                record.operation_id, record.tenant_id, record.resource_kind, record.resource_id,
-                record.execution_id, record.kind, record.status, record.request_digest,
-                record.result_ref, record.result_digest, record.error_code, record.compactable,
-                sequence, record.created_at, record.updated_at,
-            )
-            self._records[key] = created
+            return self._append_locked(record)
+
+    def _append_locked(self, record: OperationLedgerInput, *, mark_changed: bool = True) -> OperationLedgerRecord:
+        key = (record.tenant_id, record.operation_id)
+        current = self._records.get(key)
+        if current is not None:
+            if _operation_immutable(current) != _operation_input_immutable(record):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return current
+        sequence = max(
+            (item.sequence for item in self._records.values() if item.tenant_id == record.tenant_id and item.resource_kind is record.resource_kind and item.resource_id == record.resource_id),
+            default=0,
+        ) + 1
+        created = OperationLedgerRecord(
+            record.operation_id, record.tenant_id, record.resource_kind, record.resource_id,
+            record.execution_id, record.kind, record.status, record.request_digest,
+            record.result_ref, record.result_digest, record.error_code, record.compactable,
+            sequence, record.created_at, record.updated_at,
+        )
+        self._records[key] = created
+        if mark_changed:
             self._mark_changed()
-            return created
+        return created
 
     async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None:
         self._ensure_open()
@@ -1730,7 +1793,7 @@ def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), memory_namespace=None if value.get("memory_namespace") is None else str(value["memory_namespace"]))
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
@@ -1852,6 +1915,8 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str |
     )
     executions.bind_start_repositories(components[3], components[4], components[11])
     components[2].bind_terminal_repositories(components[0], components[3], components[4], components[11])
+    if isinstance(components[7], _MemoryRepository) and isinstance(components[11], _OperationRepository):
+        components[7].bind_operation_repository(components[11])
     transaction_lock = _SharedTransactionLock()
     for component in components:
         if isinstance(component, _Base):

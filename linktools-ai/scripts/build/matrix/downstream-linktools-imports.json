@@ -12,6 +12,6 @@
   "status": "EXCLUDED_BY_SCOPE",
   "records_command": "PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m scripts.build.imports --root /workspace/projects/linktools3 --package linktools.ai --output scripts/build/matrix/downstream-linktools-imports.json",
   "scope_note": "The user explicitly excluded compatibility and migration work; the separate downstream repository is preserved unchanged.",
-  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
-  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
+  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
+  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
 }

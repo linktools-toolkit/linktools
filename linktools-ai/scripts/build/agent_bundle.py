@@ -40,12 +40,12 @@ def build_bundle(
     *,
     codec_manifest_digest: str = "",
     output_schema_fingerprint: str = "",
-    harness_version: str = "0.9.0",
-    pydantic_ai_version: str = "2.15.0",
+    harness_version: str = "0.13.0",
+    pydantic_ai_version: str = "2.27.0",
 ) -> AgentBundle:
     if not spec.model.strip() or spec.model.lower() in {"test", "testmodel"}:
         raise ValueError("production bundles require a released model route")
-    if harness_version != "0.9.0" or pydantic_ai_version != "2.15.0":
+    if harness_version != "0.13.0" or pydantic_ai_version != "2.27.0":
         raise ValueError("bundles require the locked Harness and Pydantic AI versions")
     spec_fingerprint = canonical_sha256(
         {

@@ -4,6 +4,7 @@
 """Crash-safe filesystem StepStore conformance checks."""
 
 import asyncio
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,6 +51,30 @@ async def test_filesystem_step_store_rejects_path_identifiers(tmp_path: Path) ->
     with pytest.raises(AIError) as error:
         await store.get_run(run_id="../escape")
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_step_store_filters_interrupted_snapshots_and_rejects_unknown_state(tmp_path: Path) -> None:
+    store = DurableFilesystemStepStore(tmp_path, "namespace")
+    await store.initialize()
+    run = _run("r-run")
+    await store.register_run(run)
+    message = ModelRequest(parts=[UserPromptPart(content="hello")], conversation_id=run.conversation_id)
+    complete = ContinuableSnapshot(run_id=run.run_id, step_index=1, messages=[message], conversation_id=run.conversation_id, parent_run_id=None, agent_name="agent", timestamp=datetime.now(timezone.utc), state="complete")
+    interrupted = ContinuableSnapshot(run_id=run.run_id, step_index=2, messages=[message], conversation_id=run.conversation_id, parent_run_id=None, agent_name="agent", timestamp=datetime.now(timezone.utc), state="interrupted")
+    await store.save_snapshot(complete)
+    await store.save_snapshot(interrupted)
+    assert await store.latest_snapshot(run_id=run.run_id) == complete
+    assert await store.latest_snapshot(run_id=run.run_id, include_interrupted=True) == interrupted
+    assert await store.list_snapshots(run_id=run.run_id) == [complete]
+    snapshot_path = sorted((tmp_path / "steps").rglob("snapshots/snapshot-*.json"))[-1]
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    payload["state"] = "unknown"
+    snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(AIError) as error:
+        await store.latest_snapshot(run_id=run.run_id, include_interrupted=True)
+    assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
     await store.close()
 
 

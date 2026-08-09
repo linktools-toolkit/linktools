@@ -13,7 +13,7 @@ from linktools.core import environ
 
 from ..asset import AssetCodecRegistry, AssetStore
 from ..adapter import DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, StepExecutionHistoryReader, build_filesystem_runtime, build_in_memory_runtime, open_sql_runtime
-from ..capability import MCPToolProvider, Sandbox, SkillProvider, SubagentProvider, ToolPolicy, ToolStateStore
+from ..capability import MCPToolProvider, Sandbox, SkillProvider, ToolPolicy, ToolStateStore
 from ..model import ModelRegistry, ModelResolver
 from ..observe import MiddlewarePipeline
 from ..runtime import (
@@ -246,7 +246,6 @@ def build_app_services(
     model_resolver: ModelResolver,
     skill_provider: SkillProvider,
     mcp_provider: MCPToolProvider,
-    subagent_provider: SubagentProvider,
     middleware: MiddlewarePipeline,
     sandbox: Sandbox,
     tool_policy: ToolPolicy,
@@ -263,7 +262,6 @@ def build_app_services(
             model_resolver,
             skill_provider,
             mcp_provider,
-            subagent_provider,
             middleware,
             sandbox,
             tool_policy,
@@ -285,7 +283,7 @@ def build_app_services(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not asset_store.codec_manifest.entries or not asset_store.codec_manifest.digest:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not skill_provider.manifest() or not mcp_provider.manifest() or not subagent_provider.manifest():
+    if not skill_provider.manifest() or not mcp_provider.manifest():
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     services = AppServices(runtime_services, build_runtime_access(runtime_services), _MissingRuntimeFactory(), principal_provider)
     _logger.info("agent services composed: model_revision=%s", model_registry.snapshot().revision)

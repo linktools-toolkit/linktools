@@ -166,7 +166,10 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             return await self._list_event(record_id, tenant_id=tenant_id, after_sequence=after_sequence, limit=limit)
         values = await self._list_records(tenant_id=tenant_id)
         if self._table_name == "memories":
-            return Page(tuple(item for item in values if isinstance(item, MemoryRecord) and item.owner_id == owner_id)[:limit], None)
+            memories = tuple(sorted((item for item in values if isinstance(item, MemoryRecord) and item.owner_id == owner_id), key=lambda item: item.memory_id))
+            start = 0 if cursor is None else next((index + 1 for index, item in enumerate(memories) if item.memory_id == cursor), len(memories))
+            page = memories[start:start + limit]
+            return Page(page, page[-1].memory_id if len(memories) > start + limit else None)
         return tuple(item for item in values if owner_principal_id is None or item.owner_principal_id == owner_principal_id)
 
     async def _list_records(self, *, tenant_id: str, table: "Table | None" = None) -> tuple[object, ...]:
@@ -321,16 +324,124 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return tuple(item for item in values if isinstance(item, EvaluationRecord) and item.execution_id == execution_id)
 
     async def put(self, record: MemoryRecord, *, expected_revision: "int | None") -> MemoryRecord:
-        current = await self._get(record.memory_id, tenant_id=record.tenant_id)
-        if current is None:
-            return await self._insert(record, record_id=record.memory_id, tenant_id=record.tenant_id, revision=record.revision, table=self._owner.tables["memories"])
-        if not isinstance(current, MemoryRecord) or expected_revision is None or current.revision != expected_revision:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return await self._replace(record, record_id=record.memory_id, tenant_id=record.tenant_id, expected_revision=expected_revision, revision=record.revision, table=self._owner.tables["memories"])
+        stored, replayed = await self.put_with_operation(record, expected_revision=expected_revision, operation=None)
+        if replayed or stored is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return stored
+
+    async def put_with_operation(self, record: MemoryRecord, *, expected_revision: "int | None", operation: "OperationLedgerInput | None") -> "tuple[MemoryRecord | None, bool]":
+        from sqlalchemy import insert, select, update
+
+        memory_table = self._owner.tables["memories"]
+        operation_table = self._owner.tables["operation_ledger"]
+        for attempt in range(32):
+            try:
+                async with self._owner.session_factory() as session:
+                    async with session.begin():
+                        if operation is not None:
+                            operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
+                            if operation_row is not None:
+                                existing_operation = _decode_payload("operation_ledger", operation_row["payload"])
+                                if not isinstance(existing_operation, OperationLedgerRecord) or _operation_identity(existing_operation) != _operation_identity(operation):
+                                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                                memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id))).mappings().first()
+                                current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
+                                return current if isinstance(current, MemoryRecord) else None, True
+                        memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id).with_for_update())).mappings().first()
+                        current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
+                        if current is not None and not isinstance(current, MemoryRecord):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if current is None and expected_revision not in (None, 0):
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        if current is not None and current.revision != expected_revision:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        now = _record_time(record)
+                        values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": record.memory_id, "sequence": 0, "revision": record.revision, "status": "", "payload": _encode_payload(record), "created_at": record.created_at, "updated_at": now}
+                        if current is None:
+                            await session.execute(insert(memory_table).values(values))
+                        else:
+                            outcome = await session.execute(update(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id, memory_table.c.revision == expected_revision).values(payload=values["payload"], revision=record.revision, updated_at=now))
+                            if outcome.rowcount != 1:
+                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        if operation is not None:
+                            await self._append_operation_in_session(session, operation)
+                        return record, False
+            except Exception as error:
+                if not _is_retryable_transaction(error) or attempt == 31:
+                    raise
+                await asyncio.sleep(0.01 * (attempt + 1))
 
     async def list_memories(self, *, tenant_id: str, owner_id: str, cursor: "str | None", limit: int) -> Page[MemoryRecord]:
         values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if isinstance(item, MemoryRecord) and item.owner_id == owner_id)
         return Page(values[:limit], None)
+
+    async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None:
+        deleted, replayed = await self.delete_with_operation(memory_id, tenant_id=tenant_id, expected_revision=expected_revision, operation=None)
+        if replayed or not deleted:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: "int | None", operation: "OperationLedgerInput | None") -> "tuple[bool, bool]":
+        from sqlalchemy import delete, select
+
+        memory_table = self._owner.tables["memories"]
+        operation_table = self._owner.tables["operation_ledger"]
+        for attempt in range(32):
+            try:
+                async with self._owner.session_factory() as session:
+                    async with session.begin():
+                        if operation is not None:
+                            operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
+                            if operation_row is not None:
+                                existing_operation = _decode_payload("operation_ledger", operation_row["payload"])
+                                if not isinstance(existing_operation, OperationLedgerRecord) or _operation_identity(existing_operation) != _operation_identity(operation):
+                                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                                return False, True
+                        memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == tenant_id, memory_table.c.record_id == memory_id).with_for_update())).mappings().first()
+                        current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
+                        if current is not None and not isinstance(current, MemoryRecord):
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if current is None:
+                            if expected_revision is not None:
+                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                            deleted = False
+                        else:
+                            if current.revision != expected_revision:
+                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                            outcome = await session.execute(delete(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == tenant_id, memory_table.c.record_id == memory_id, memory_table.c.revision == expected_revision))
+                            if outcome.rowcount != 1:
+                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                            deleted = True
+                        if operation is not None:
+                            await self._append_operation_in_session(session, operation)
+                        return deleted, False
+            except Exception as error:
+                if not _is_retryable_transaction(error) or attempt == 31:
+                    raise
+                await asyncio.sleep(0.01 * (attempt + 1))
+
+    async def _append_operation_in_session(self, session: "AsyncSession", record: OperationLedgerInput) -> OperationLedgerRecord:
+        from sqlalchemy import insert, select, update
+
+        counter_table = self._owner.tables["operation_counters"]
+        ledger_table = self._owner.tables["operation_ledger"]
+        row = (await session.execute(select(ledger_table).where(ledger_table.c.namespace_key == self.namespace_key, ledger_table.c.tenant_id == record.tenant_id, ledger_table.c.record_id == record.operation_id).with_for_update())).mappings().first()
+        if row is not None:
+            existing = _decode_payload("operation_ledger", row["payload"])
+            if not isinstance(existing, OperationLedgerRecord) or _operation_identity(existing) != _operation_identity(record):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return existing
+        counter = (await session.execute(select(counter_table).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
+        sequence = 1 if counter is None else int(counter["revision"]) + 1
+        counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
+        if counter is None:
+            await session.execute(insert(counter_table).values(counter_values))
+        else:
+            outcome = await session.execute(update(counter_table).where(counter_table.c.id == counter["id"], counter_table.c.revision == sequence - 1).values(sequence=sequence, revision=sequence, payload=_encode_payload(sequence), updated_at=record.updated_at))
+            if outcome.rowcount != 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        created = OperationLedgerRecord(record.operation_id, record.tenant_id, record.resource_kind, record.resource_id, record.execution_id, record.kind, record.status, record.request_digest, record.result_ref, record.result_digest, record.error_code, record.compactable, sequence, record.created_at, record.updated_at)
+        await session.execute(insert(ledger_table).values(namespace_key=self.namespace_key, tenant_id=record.tenant_id, record_id=record.operation_id, resource_kind=record.resource_kind.value, resource_id=record.resource_id, sequence=sequence, revision=0, status=record.status.value, payload=_encode_payload(created), created_at=record.created_at, updated_at=record.updated_at))
+        return created
 
     async def put_metadata(self, record: ArtifactRecord) -> ArtifactRecord:
         return await self.create(record)
@@ -1025,7 +1136,7 @@ def _session_record(value: "dict[str, JsonValue]") -> SessionRecord:
 
 
 def _execution_record(value: "dict[str, JsonValue]") -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=_enum(ExecutionLineageKind, value.get("lineage_kind", "RUN")), status=_enum(ExecutionStatus, value["status"]), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_utc(value["created_at"]), updated_at=_utc(value["updated_at"]))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=_enum(ExecutionLineageKind, value.get("lineage_kind", "RUN")), status=_enum(ExecutionStatus, value["status"]), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_utc(value["created_at"]), updated_at=_utc(value["updated_at"]), memory_namespace=None if value.get("memory_namespace") is None else str(value["memory_namespace"]))
 
 
 def _result_record(value: "dict[str, JsonValue]") -> ResultRecord:

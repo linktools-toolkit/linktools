@@ -61,6 +61,7 @@ class ExecutionRequest:
     prompt: str
     principal: Principal
     idempotency_key: "str | None" = None
+    memory_namespace: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
@@ -182,10 +183,13 @@ class ResumeSessionRequest:
     principal: Principal
     prompt: str
     idempotency_key: str = ""
+    memory_namespace: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
+        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,9 +249,12 @@ class LoadedSession:
 class RunEvaluationRequest:
     principal: Principal
     dataset_digest: str
+    memory_namespace: str
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -270,9 +277,12 @@ class CompareEvaluationRequest:
 @dataclass(frozen=True, slots=True)
 class ReplayEvaluationRequest:
     principal: Principal
+    memory_namespace: str
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
+        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         validate_idempotency_key(self.idempotency_key)
 
 

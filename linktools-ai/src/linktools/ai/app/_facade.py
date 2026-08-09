@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from linktools.core import environ
 
 from ..agent import AgentBinding
-from ..capability import MCPToolProvider, SkillProvider, SubagentProvider, ToolPolicy, ToolStateStore, Sandbox
+from ..capability import MCPToolProvider, SkillProvider, ToolPolicy, ToolStateStore, Sandbox
 from ..core import Page, Principal, PrincipalProvider
 from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
@@ -98,7 +98,6 @@ class RuntimeDependencies:
     model_resolver: ModelResolver
     skill_provider: SkillProvider
     mcp_provider: MCPToolProvider
-    subagent_provider: SubagentProvider
     middleware: MiddlewarePipeline
     sandbox: Sandbox
     tool_policy: ToolPolicy
@@ -120,7 +119,6 @@ def build_runtime(
             dependencies.model_resolver,
             dependencies.skill_provider,
             dependencies.mcp_provider,
-            dependencies.subagent_provider,
             dependencies.middleware,
             dependencies.sandbox,
             dependencies.tool_policy,
@@ -212,10 +210,8 @@ def _capability_digest(spec: AgentSpec, dependencies: RuntimeDependencies) -> st
                 resolved_revision = resolved.revision
                 fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "command": resolved.command, "args": list(resolved.args)})
             elif feature.kind == "subagent":
-                resolved = dependencies.subagent_provider.resolve_ref(feature.id, feature.revision)
-                provider_digest = dependencies.subagent_provider.manifest()
                 resolved_revision = feature.revision or 1
-                fingerprint = canonical_sha256(resolved)
+                fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": resolved_revision, "config": dict(feature.config)})
             elif feature.kind in {"tool", "sandbox", "middleware"}:
                 resolved_revision = feature.revision or 1
                 fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id})

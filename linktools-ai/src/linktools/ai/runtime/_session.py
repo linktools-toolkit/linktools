@@ -132,7 +132,7 @@ class DefaultSessionService:
         return await self._execution.run_for_session(
             binding_digest,
             session_id,
-            ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key),
+            ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key, memory_namespace=request.memory_namespace),
         )
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:

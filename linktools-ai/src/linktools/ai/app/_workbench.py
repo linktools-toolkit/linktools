@@ -17,7 +17,7 @@ from linktools.core import environ
 from pydantic_ai.models import Model
 from pydantic_ai_harness.step_persistence import continue_run, fork_run
 
-from ..agent import WorkspaceAgentResult, WorkspaceAgentRunner
+from ..agent import AgentCatalogView, SkillCatalogView, WorkspaceAgentResult, WorkspaceAgentRunner
 from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256, step_conversation_id, step_run_id
 from ..core import JsonValue
@@ -41,9 +41,9 @@ from ._assembly import (
     build_runtime_services,
     open_runtime_resources,
 )
-from ..adapter import StepExecutionHistoryReader
+from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
 from ..storage import FilesystemWriterLock
-from ..workspace import Workspace, trusted_workspace_principal
+from ..workspace import Workspace, build_workspace_capabilities, trusted_workspace_principal
 
 
 _logger = environ.get_logger("ai.app.workbench")
@@ -78,6 +78,7 @@ class WorkspaceRunResult:
 @dataclass(frozen=True, slots=True)
 class _LaunchContext:
     agent_id: str | None
+    memory_namespace: str | None
     on_text: TextHandler | None
     on_event: EventHandler | None
 
@@ -120,6 +121,8 @@ class WorkspaceExecutionLauncher:
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
         if not self._accepting or execution.session_id is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if request.memory_namespace != execution.memory_namespace:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = (execution.tenant_id, execution.session_id, hashlib.sha256(str(request.idempotency_key).encode("utf-8")).hexdigest())
         context = self._contexts.get(key)
         if context is None:
@@ -273,6 +276,11 @@ class WorkspaceExecutionLauncher:
                     await pending
 
         try:
+            memory_store = None if execution.memory_namespace is None else RuntimeMemoryStore(
+                self._resources.domain,
+                tenant_id=execution.tenant_id,
+                namespace=execution.memory_namespace,
+            )
             result = await self._runner.run(
                 context.agent_id,
                 request.prompt,
@@ -281,6 +289,8 @@ class WorkspaceExecutionLauncher:
                 step_store=self._resources.steps,
                 step_run_id=run_id,
                 segment_sequence=segment_sequence,
+                memory_namespace=execution.memory_namespace,
+                memory_store=memory_store,
                 on_event=on_event,
             )
             await self._commit_success(execution, result)
@@ -291,7 +301,7 @@ class WorkspaceExecutionLauncher:
             raise
         except Exception as error:
             await self._commit_failure(execution, error)
-            _logger.error("workspace execution failed: execution=%s", execution.execution_id, exc_info=environ.debug)
+            _logger.error("workspace execution failed: execution=%s", execution.execution_id, exc_info=True)
             raise
         finally:
             key = (execution.tenant_id, execution.session_id, hashlib.sha256(str(request.idempotency_key).encode("utf-8")).hexdigest())
@@ -428,18 +438,21 @@ class WorkspaceAgentRuntime:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return WorkspaceSession(view.session_id, persisted_cwd, view.revision)
 
-    async def run(self, session_id: str, prompt: str, *, cwd: str | Path | None = None, agent_id: str | None = None, idempotency_key: str | None = None, on_text: TextHandler | None = None, on_event: EventHandler | None = None) -> WorkspaceRunResult:
+    async def run(self, session_id: str, prompt: str, *, cwd: str | Path | None = None, agent_id: str | None = None, idempotency_key: str | None = None, memory_namespace: str, on_text: TextHandler | None = None, on_event: EventHandler | None = None) -> WorkspaceRunResult:
         if not prompt.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if not isinstance(memory_namespace, str) or memory_namespace == "":
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         effective_key = idempotency_key or secrets.token_urlsafe(32)
+        effective_memory_namespace = memory_namespace
         binding_digest = await self._runner.binding_digest(agent_id)
         _validate_identifier(session_id)
         try:
             async with self._lifecycle_lock:
                 self._ensure_open()
-                self._launcher.register_context(self._principal.tenant_id, session_id, effective_key, _LaunchContext(agent_id, on_text, on_event))
+                self._launcher.register_context(self._principal.tenant_id, session_id, effective_key, _LaunchContext(agent_id, effective_memory_namespace, on_text, on_event))
                 session = await self._open_session(session_id, cwd=cwd, agent_id=agent_id)
-                handle = await self._services.session.resume(binding_digest, session_id, ResumeSessionRequest(self._principal, prompt, effective_key))
+                handle = await self._services.session.resume(binding_digest, session_id, ResumeSessionRequest(self._principal, prompt, effective_key, effective_memory_namespace))
             try:
                 result = await self._launcher.wait(handle.execution_id)
             except AIError as error:
@@ -553,6 +566,8 @@ async def open_workspace_runtime(
     model: "str | Model | None" = None,
     base_url: str | None = None,
     api_key: str | None = None,
+    skill_catalog: SkillCatalogView | None = None,
+    agent_catalog: AgentCatalogView | None = None,
     grant_key: bytes | None = None,
     engine: "AsyncEngine | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
@@ -566,7 +581,16 @@ async def open_workspace_runtime(
         local_lock = FilesystemWriterLock(path.with_name(f"{path.name}.local.lock"))
         await local_lock.acquire()
     try:
-        workspace_runner = runner or WorkspaceAgentRunner(workspace.root, workspace.config, model=model, base_url=base_url, api_key=api_key)
+        workspace_runner = runner or WorkspaceAgentRunner(
+            workspace.root,
+            workspace.config,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            capabilities=build_workspace_capabilities(workspace.root),
+            skill_catalog=skill_catalog,
+            agent_catalog=agent_catalog,
+        )
         async with open_runtime_resources(persistence_config, engine=engine, session_factory=session_factory) as resources:
             launcher = WorkspaceExecutionLauncher(workspace, workspace_runner, resources)
             await launcher.reconcile()
@@ -611,6 +635,7 @@ def _terminal_record(record: ExecutionRecord, status: ExecutionStatus, now: date
         safe_error_details={} if safe_error_details is None else safe_error_details,
         created_at=record.created_at,
         updated_at=now,
+        memory_namespace=record.memory_namespace,
     )
 
 

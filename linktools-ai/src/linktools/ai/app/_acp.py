@@ -114,7 +114,7 @@ class ACPAgent:
             if update is not None:
                 await self._connection.session_update(session_id, update)
 
-        await self._runtime.run(session_id, text, on_event=on_event)
+        await self._runtime.run(session_id, text, memory_namespace=self._runtime.workspace.workspace_id, on_event=on_event)
         _logger.info("ACP prompt completed: session=%s", session_id)
         return schema.PromptResponse(stopReason="end_turn")
 

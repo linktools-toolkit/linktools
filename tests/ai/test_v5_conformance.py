@@ -150,6 +150,8 @@ class _BarrierRunner:
         step_run_id: str,
         segment_sequence: int,
         parent_step_run_id: str | None = None,
+        memory_namespace: str | None = None,
+        memory_store: object | None = None,
         on_event: object | None = None,
     ) -> WorkspaceAgentResult:
         async with self._guard:
@@ -179,6 +181,8 @@ class _BlockingRunner:
         step_run_id: str,
         segment_sequence: int,
         parent_step_run_id: str | None = None,
+        memory_namespace: str | None = None,
+        memory_store: object | None = None,
         on_event: object | None = None,
     ) -> WorkspaceAgentResult:
         self.started.set()
@@ -205,6 +209,8 @@ class _ReturnBarrierRunner:
         step_run_id: str,
         segment_sequence: int,
         parent_step_run_id: str | None = None,
+        memory_namespace: str | None = None,
+        memory_store: object | None = None,
         on_event: object | None = None,
     ) -> WorkspaceAgentResult:
         self.ready.set()
@@ -307,7 +313,7 @@ async def test_workspace_resume_advances_head_from_the_previous_session_head(tmp
     runtime_context = open_workspace_runtime(workspace, config=config, runner=runner) if backend == "memory" else _open_sql_workspace(workspace, config, runner=runner)
     async with runtime_context as runtime:
         results = [
-            await runtime.run("main", prompt, idempotency_key=key)
+            await runtime.run("main", prompt, idempotency_key=key, memory_namespace="test")
             for prompt, key in (("one", "k1"), ("two", "k2"), ("three", "k3"))
         ]
         records = [await runtime._resources.domain.executions.get(item.execution_id, tenant_id=workspace.workspace_id) for item in results]
@@ -326,8 +332,8 @@ async def test_concurrent_resume_has_one_session_head_winner(tmp_path: Path) -> 
     runner = _BarrierRunner()
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
         outcomes = await asyncio.gather(
-            runtime.run("main", "one", idempotency_key="first"),
-            runtime.run("main", "two", idempotency_key="second"),
+            runtime.run("main", "one", idempotency_key="first", memory_namespace="test"),
+            runtime.run("main", "two", idempotency_key="second", memory_namespace="test"),
             return_exceptions=True,
         )
         successful = tuple(item for item in outcomes if not isinstance(item, BaseException))
@@ -349,7 +355,7 @@ async def test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_fa
     runner = _ReturnBarrierRunner()
     principal = trusted_workspace_principal(workspace.workspace_id)
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        run_task = asyncio.create_task(runtime.run("main", "natural", idempotency_key="natural"))
+        run_task = asyncio.create_task(runtime.run("main", "natural", idempotency_key="natural", memory_namespace="test"))
         await runner.ready.wait()
         execution = (await runtime._resources.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
         cancel_entered = asyncio.Event()
@@ -409,7 +415,7 @@ async def test_confirmed_cancel_requires_task_cancelled_and_closes_operation(tmp
     runner = _BlockingRunner()
     principal = trusted_workspace_principal(workspace.workspace_id)
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        run_task = asyncio.create_task(runtime.run("main", "cancel", idempotency_key="cancel"))
+        run_task = asyncio.create_task(runtime.run("main", "cancel", idempotency_key="cancel", memory_namespace="test"))
         await runner.started.wait()
         execution = (await runtime._resources.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
         cancel_result = await runtime._services.execution.cancel(execution.execution_id, _cancel_request(principal, "confirmed-cancel"))
@@ -428,7 +434,7 @@ async def test_cancel_backend_failure_keeps_stable_error_in_operation_ledger(tmp
     runner = _ReturnBarrierRunner()
     principal = trusted_workspace_principal(workspace.workspace_id)
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        run_task = asyncio.create_task(runtime.run("main", "backend", idempotency_key="backend"))
+        run_task = asyncio.create_task(runtime.run("main", "backend", idempotency_key="backend", memory_namespace="test"))
         await runner.ready.wait()
         execution = (await runtime._resources.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
 
@@ -452,7 +458,7 @@ async def test_cancel_terminal_wins_before_request_cancel_cas(tmp_path: Path) ->
     runner = _ReturnBarrierRunner()
     principal = trusted_workspace_principal(workspace.workspace_id)
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        run_task = asyncio.create_task(runtime.run("main", "cas", idempotency_key="cas"))
+        run_task = asyncio.create_task(runtime.run("main", "cas", idempotency_key="cas", memory_namespace="test"))
         await runner.ready.wait()
         execution = (await runtime._resources.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
         cas_entered = asyncio.Event()
@@ -486,7 +492,7 @@ async def test_concurrent_cancel_request_ids_share_terminal_but_keep_ledgers(tmp
     runner = _BlockingRunner()
     principal = trusted_workspace_principal(workspace.workspace_id)
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        run_task = asyncio.create_task(runtime.run("main", "concurrent-cancel", idempotency_key="concurrent-cancel"))
+        run_task = asyncio.create_task(runtime.run("main", "concurrent-cancel", idempotency_key="concurrent-cancel", memory_namespace="test"))
         await runner.started.wait()
         execution = (await runtime._resources.domain.executions.list_by_session("main", tenant_id=workspace.workspace_id))[0]
         results = await asyncio.gather(
@@ -591,7 +597,7 @@ async def test_runtime_composition_is_driven_by_injected_dependencies() -> None:
             schema_digest=runtime.persistence.atomic_domain_id,
             execution_launcher=explicit,
         )
-        explicit_handle = await explicit_services.execution.run("b" * 64, ExecutionRequest("explicit", principal, "explicit-key"))
+        explicit_handle = await explicit_services.execution.run("b" * 64, ExecutionRequest("explicit", principal, "explicit-key", memory_namespace="test"))
         assert explicit.started == [explicit_handle.execution_id]
 
         gateway_services = build_runtime_services(
@@ -602,7 +608,7 @@ async def test_runtime_composition_is_driven_by_injected_dependencies() -> None:
             schema_digest=runtime.persistence.atomic_domain_id,
             workflow_gateway=gateway,
         )
-        gateway_handle = await gateway_services.execution.run("b" * 64, ExecutionRequest("gateway", principal, "gateway-key"))
+        gateway_handle = await gateway_services.execution.run("b" * 64, ExecutionRequest("gateway", principal, "gateway-key", memory_namespace="test"))
         assert gateway.execution_starts == [gateway_handle.execution_id]
 
         combined_launcher = _Launcher()
@@ -616,7 +622,7 @@ async def test_runtime_composition_is_driven_by_injected_dependencies() -> None:
             execution_launcher=combined_launcher,
             workflow_gateway=combined_gateway,
         )
-        combined_handle = await combined_services.execution.run("b" * 64, ExecutionRequest("combined", principal, "combined-key"))
+        combined_handle = await combined_services.execution.run("b" * 64, ExecutionRequest("combined", principal, "combined-key", memory_namespace="test"))
         graph = TaskGraph("combined-graph", (TaskNode("node"),))
         await combined_services.task.run_graph("b" * 64, TaskGraphRequest(graph, principal, "graph-key"))
         assert combined_launcher.started == [combined_handle.execution_id]
@@ -801,10 +807,10 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
         pre_legacy_operation = await runtime.persistence.operations.get(old_create.operation_id, tenant_id="tenant")
         pre_started = tuple(launcher.started)
         old_calls = (
-            services.execution.run(binding_digest, ExecutionRequest("run", principal, "old-run")),
+            services.execution.run(binding_digest, ExecutionRequest("run", principal, "old-run", memory_namespace="test")),
             services.execution.retry(binding_digest, "source", RetryExecutionRequest("retry", principal, "old-retry")),
             services.execution.fork(binding_digest, "source", ForkExecutionRequest("fork", principal, "old-fork")),
-            services.execution.run_for_session(binding_digest, "resume", ExecutionRequest("resume", principal, "old-resume")),
+            services.execution.run_for_session(binding_digest, "resume", ExecutionRequest("resume", principal, "old-resume", memory_namespace="test")),
             services.session.create(binding_digest, CreateSessionRequest(principal, "old-session", "old-create")),
         )
         for call in old_calls:
@@ -837,7 +843,7 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
         assert await runtime.persistence.sessions.get("old-session", tenant_id="tenant") is None
         assert await runtime.persistence.executions.get("old-run-execution", tenant_id="tenant") is None
 
-        fresh = await services.execution.run(binding_digest, ExecutionRequest("fresh", principal, "fresh-run"))
+        fresh = await services.execution.run(binding_digest, ExecutionRequest("fresh", principal, "fresh-run", memory_namespace="test"))
         identity = await runtime.persistence.idempotency.get("execution.run", idempotency_key_hash("fresh-run"), tenant_id="tenant")
         assert identity is not None
         assert identity.request_digest == canonical_sha256(
@@ -850,10 +856,11 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
                 "session_id": None,
                 "source_execution_id": None,
                 "base_execution_id": None,
-                "parent_execution_id": None,
-                "root_identity": "$self",
-                "lineage_kind": ExecutionLineageKind.RUN.value,
-            }
+                    "parent_execution_id": None,
+                    "root_identity": "$self",
+                    "lineage_kind": ExecutionLineageKind.RUN.value,
+                    "memory_namespace_digest": canonical_sha256("test"),
+                }
         )
         assert fresh.execution_id != "source"
         created = await services.session.create(binding_digest, CreateSessionRequest(principal, "fresh-session", "fresh-create"))
@@ -1182,7 +1189,7 @@ async def test_shutdown_cleans_active_execution_on_the_second_session_page(tmp_p
     async with _open_sql_workspace(workspace, config, runner=runner) as runtime:
         for index in range(201):
             await runtime.open_session(f"session-{index:03d}")
-        run_task = asyncio.create_task(runtime.run(target_id, "block", idempotency_key="blocking"))
+        run_task = asyncio.create_task(runtime.run(target_id, "block", idempotency_key="blocking", memory_namespace="test"))
         await runner.started.wait()
         execution = await runtime._resources.domain.executions.list_by_session(target_id, tenant_id=workspace.workspace_id)
         execution_id = execution[0].execution_id
@@ -1212,7 +1219,7 @@ async def test_history_trace_and_transcript_use_the_stable_cursor_error(tmp_path
     workspace = Workspace.load(tmp_path)
     runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
     async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-        result = await runtime.run("main", "hello", idempotency_key="history")
+        result = await runtime.run("main", "hello", idempotency_key="history", memory_namespace="test")
         principal = trusted_workspace_principal(workspace.workspace_id)
         access = build_runtime_access(runtime._services)
         trace = await access.execution.trace(result.execution_id, principal=principal)

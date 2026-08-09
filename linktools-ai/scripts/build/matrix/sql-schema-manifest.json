@@ -36,6 +36,6 @@
   ],
   "live_mysql": "not_run_no_environment_accepted",
   "live_postgresql": "not_run_no_environment_accepted",
-  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
-  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
+  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
+  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
 }

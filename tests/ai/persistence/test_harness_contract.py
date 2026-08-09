@@ -11,30 +11,38 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
+from pydantic_ai.models.test import TestModel
+from pydantic_ai_harness.compaction import DeduplicateFileReads
+from pydantic_ai_harness.conversation_search import ConversationSearch
+from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
+from pydantic_ai_harness.memory import InMemoryStore, Memory
+from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence, StepStore, continue_run, fork_run
+from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
+from linktools.ai.agent import AgentCapabilityScope, AgentCatalogItem, AgentCatalogSnapshot, EmptySkillCatalog, compose_parent_capabilities
 from linktools.ai.core import step_conversation_id, step_run_id
 from linktools.ai.adapter import DurableFilesystemStepStore
 
 
 def test_harness_versions_and_public_step_store() -> None:
-    assert version("pydantic-ai-harness") == "0.9.0"
-    assert version("pydantic-ai-slim") == "2.15.0"
+    assert version("pydantic-ai-harness") == "0.13.0"
+    assert version("pydantic-ai-slim") == "2.27.0"
     assert isinstance(InMemoryStepStore(), StepStore)
     assert isinstance(DurableFilesystemStepStore.__new__(DurableFilesystemStepStore), StepStore)
 
 
 def test_harness_public_signatures_are_the_locked_contract() -> None:
     run_parameters = signature(Agent.run_stream_events).parameters
-    assert "conversation_id" in run_parameters and "capabilities" in run_parameters and "run_id" not in run_parameters
+    assert "conversation_id" in run_parameters and "capabilities" in run_parameters and "run_id" in run_parameters
     assert "run_id" in ModelRequest.__dataclass_fields__ and "run_id" in ModelResponse.__dataclass_fields__
     persistence_parameters = signature(StepPersistence).parameters
     assert {"run_id", "agent_name", "parent_run_id", "metadata"} <= set(persistence_parameters)
-    assert "include_interrupted" not in signature(StepStore.latest_snapshot).parameters
+    assert "include_interrupted" in signature(StepStore.latest_snapshot).parameters
     assert {"parent_run_id", "conversation_id"} <= set(signature(StepStore.list_runs).parameters)
     for helper in (continue_run, fork_run):
         assert {"store", "run_id"} <= set(signature(helper).parameters)
-        assert "include_interrupted" not in signature(helper).parameters
+        assert "include_interrupted" in signature(helper).parameters
 
 
 @pytest.mark.asyncio
@@ -44,6 +52,41 @@ async def test_continue_and_fork_require_a_provider_valid_snapshot() -> None:
         await continue_run(store, run_id="missing")
     with pytest.raises(LookupError):
         await fork_run(store, run_id="missing")
+
+
+@pytest.mark.asyncio
+async def test_workspace_composition_uses_harness_capabilities_directly() -> None:
+    catalog = AgentCatalogSnapshot(
+        (
+            AgentCatalogItem("agent-z", "agent_z", "z", "execute z", None),
+            AgentCatalogItem("agent-a", "agent_a", "a", "execute a", None),
+        )
+    )
+    capabilities = await compose_parent_capabilities(
+        AgentCapabilityScope(
+            root=Path("."),
+            agent_name="parent",
+            conversation_id="conversation",
+            step_run_id="run",
+            segment_sequence=1,
+            memory_namespace="namespace",
+            step_store=InMemoryStepStore(),
+            workspace_capabilities=(),
+            skill_catalog=EmptySkillCatalog(),
+            agent_catalog=catalog,
+            memory_store=InMemoryStore(),
+        ),
+        model_factory=lambda value: TestModel(call_tools=[]),
+        parent_model=TestModel(call_tools=[]),
+    )
+
+    assert tuple(type(item) for item in capabilities[:3]) == (StepPersistence, Memory, Planning)
+    assert capabilities[4].__class__ is ConversationSearch
+    assert capabilities[5].__class__ is SubAgents
+    assert capabilities[6].__class__ is DynamicWorkflow
+    assert capabilities[7].__class__ is DeduplicateFileReads
+    assert all(isinstance(item, SubAgent) for item in capabilities[5].agents)
+    assert all(isinstance(item, Agent) for item in capabilities[6].agents)
 
 
 def test_step_ids_are_scoped_and_fixed_width() -> None:

@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 from linktools.core import environ
+from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
 from ..core import JsonValue
 from ..core import canonical_sha256
@@ -132,9 +134,6 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
 
 
 def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[None], ...]':
-    from pydantic_ai_harness.filesystem import FileSystem
-    from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
-
     project_root = Path(root).expanduser().resolve()
     _logger.info("local Harness capabilities configured root=%s", project_root)
     return (

@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "e5d5735a",
+  "baseline_commit": "edf84056",
   "status": "COMPLETE",
   "requirements": [
     {
@@ -84,7 +84,7 @@
     {
       "id": "DOD-009",
       "status": "complete",
-      "requirement": "SESSION_RESUME / RETRY / FORK / SUBAGENT lineage 全符合 3.2/3.3；",
+      "requirement": "SESSION_RESUME / RETRY / FORK lineage 保持 Runtime 语义，Harness child 使用独立 StepPersistence lineage；",
       "evidence": [
         "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
         "tests/ai/test_v5_conformance.py::test_sql_legacy_profile_tombstone_is_not_domain_semantic"
@@ -138,7 +138,8 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/adapter/_step.py",
+        "linktools-ai/src/linktools/ai/agent/_capabilities.py"
       ]
     },
     {
@@ -477,7 +478,7 @@
     {
       "id": "DOD-049",
       "status": "complete",
-      "requirement": "FILESYSTEM StepStore snapshot 只用 public ModelMessagesTypeAdapter，不新增 FILESYSTEM MediaStore/SnapshotState/include_interrupted；",
+      "requirement": "FILESYSTEM StepStore snapshot 只用 public ModelMessagesTypeAdapter，并保留 state 与 include_interrupted 语义；",
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
@@ -507,7 +508,7 @@
     {
       "id": "DOD-052",
       "status": "complete",
-      "requirement": "SubagentProvider child execution 同时拥有 Runtime child lineage 与 deterministic parent Step identity，不存在第二套 child persistence；",
+      "requirement": "Harness SubAgent child run 使用独立 Harness StepPersistence run_id 与 parent lineage，不创建 Runtime child Execution 或第二套 durable workflow；",
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
@@ -867,13 +868,13 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "e5d5735a",
-    "tests_ai": "passed: 90 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "validated_source_commit": "working-tree",
+    "tests_ai": "passed: 93 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
     "ruff": "passed",
     "architecture": "passed: exact S visibility, private-import, SCC, dynamic import, dependency, naming and cohesion gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
-  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
+  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
+  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
 }

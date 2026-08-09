@@ -217,7 +217,7 @@ async def test_workflow_gateway_validates_contract_and_unknown_operations() -> N
             return None
 
     gateway = WorkflowGateway(Client())
-    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key")
+    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_namespace="test")
     await gateway.start_execution("execution", local)
     with pytest.raises(ValueError):
         await gateway.query_execution("execution", "unknown")

@@ -25,7 +25,7 @@ def test_ai_run_executes_the_workspace_test_model(tmp_path: Path, capsys, monkey
     parser = run_command.create_parser()
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    args = parser.parse_args(["--model", "test", "hello"])
+    args = parser.parse_args(["--model", "test", "--memory-namespace", "test", "hello"])
     actions = {action.dest: action for action in parser._actions}
     assert all(isinstance(actions[name], ConfigAction) for name in ("api_key", "base_url", "model"))
     assert args.model == "test"
@@ -40,7 +40,7 @@ def test_workspace_runtime_uses_database_storage(tmp_path: Path) -> None:
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
         config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace=workspace.workspace_id, deployment_id="workspace")
         async with _open_sql_workspace(workspace, config, runner=runner) as runtime:
-            result = await runtime.run("main", "hello", idempotency_key="database-key")
+            result = await runtime.run("main", "hello", idempotency_key="database-key", memory_namespace="test")
             return result.output
 
     assert asyncio.run(run()) == "success (no tool calls)"
@@ -51,9 +51,9 @@ def test_workspace_runtime_rejects_reused_key_after_head_changes(tmp_path: Path)
         workspace = Workspace.load(tmp_path)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=TestModel())
         async with open_workspace_runtime(workspace, config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id), runner=runner) as runtime:
-            await runtime.run("main", "one", idempotency_key="same")
+            await runtime.run("main", "one", idempotency_key="same", memory_namespace="test")
             try:
-                await runtime.run("main", "two", idempotency_key="same")
+                await runtime.run("main", "two", idempotency_key="same", memory_namespace="test")
             except AIError as error:
                 assert error.code is ErrorCode.IDEMPOTENCY_CONFLICT
             else:

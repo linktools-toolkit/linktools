@@ -1,6 +1,6 @@
 {
   "status": "COMPLETE",
-  "validated_source_commit": "e5d5735a",
+  "validated_source_commit": "working-tree",
   "open_findings": [],
   "entries": [
     {
@@ -193,6 +193,6 @@
   "scope_exclusions": [
     "Downstream migration and compatibility work are explicitly excluded by the user."
   ],
-  "spec_revision": "linktools-ai-e5d5735-naming-fix-spec-final",
-  "review_scope": "linktools-ai-e5d5735-naming-fix-spec-final"
+  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
+  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
 }

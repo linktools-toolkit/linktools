@@ -91,6 +91,7 @@ class DefaultEvaluationService:
                     prompt=f"evaluation:{request.dataset_digest}",
                     principal=request.principal,
                     idempotency_key=f"evaluation:{request.idempotency_key}",
+                    memory_namespace=request.memory_namespace,
                 ),
             )
             record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
@@ -153,6 +154,7 @@ class DefaultEvaluationService:
                 prompt=f"replay:{record.evaluation_id}",
                 principal=request.principal,
                 idempotency_key=request.idempotency_key,
+                memory_namespace=request.memory_namespace,
             ),
         )
 

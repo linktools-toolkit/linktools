@@ -12,11 +12,11 @@ The package is deliberately small and has one owner per concern:
 | `spec` | Agent/Prompt/Feature DTOs, output registry and codecs |
 | `model` | Model registry, configuration and resolver |
 | `observe` | Run context, middleware, trace and snapshots |
-| `capability` | MCP, Skill, Subagent, Tool, Sandbox, Retrieval and Extension contracts |
+| `capability` | MCP, Skill, Tool, Sandbox, Retrieval and Extension contracts |
 | `task` | Task, Job, Swarm and DAG contracts |
 | `agent` | Pydantic AI boundary, dependencies, context and runner |
 | `runtime` | Runtime persistence contracts, services and the seven runtime APIs |
-| `workspace` | Workspace identity, discovery, index and local coding tools |
+| `workspace` | Workspace identity, discovery and local coding tools |
 | `adapter` | Non-Asset external adapters and runtime/task ports |
 | `temporal` | Durable workflows, activities, gateway, worker and launcher |
 | `scripts/build` | Bundle compilation, architecture, import, dependency and data gates |

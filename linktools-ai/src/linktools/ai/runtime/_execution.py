@@ -96,13 +96,15 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
 
-    async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
+    async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run", allow_legacy_memory_namespace: bool = False) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        if not allow_legacy_memory_namespace and (not isinstance(request.memory_namespace, str) or request.memory_namespace == ""):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if session_id is not None and source_execution_id is None:
             session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
@@ -161,6 +163,7 @@ class DefaultExecutionService:
             base_execution_id=base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
+            memory_namespace=request.memory_namespace,
         )
         reservation = await self._persistence.executions.reserve_start(
             ExecutionStartReservation(
@@ -239,8 +242,9 @@ class DefaultExecutionService:
             prompt=request.prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
+            memory_namespace=previous.memory_namespace,
         )
-        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
+        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id, allow_legacy_memory_namespace=True)
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
@@ -250,8 +254,9 @@ class DefaultExecutionService:
             prompt=request.prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
+            memory_namespace=previous.memory_namespace,
         )
-        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
+        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id, allow_legacy_memory_namespace=True)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         execution = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL)
@@ -527,6 +532,7 @@ def _request_digest(
             "parent_execution_id": parent_execution_id,
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
+            "memory_namespace_digest": None if request.memory_namespace is None else canonical_sha256(request.memory_namespace),
         }
     )
 
@@ -616,6 +622,7 @@ def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datet
         safe_error_details=record.safe_error_details,
         created_at=record.created_at,
         updated_at=now,
+        memory_namespace=record.memory_namespace,
     )
 
 

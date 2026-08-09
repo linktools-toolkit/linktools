@@ -122,16 +122,28 @@ class DurableFilesystemStepStore:
                 "parent_run_id": snapshot.parent_run_id,
                 "agent_name": snapshot.agent_name,
                 "timestamp": _file_time_json(snapshot.timestamp),
+                "state": snapshot.state,
                 "messages": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages)),
             }
             write_json_atomic(directory / f"snapshot-{index:020d}.json", payload, fsync=True)
             _fsync_directory(directory)
 
-    async def latest_snapshot(self, *, run_id: str) -> ContinuableSnapshot | None:
+    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         async with self._lock:
             self._ensure_open()
             paths = sorted((self._run_path(run_id).parent / "snapshots").glob("snapshot-*.json"))
-            return None if not paths else _file_snapshot_from_json(_file_read(paths[-1]))
+            for path in reversed(paths):
+                snapshot = _file_snapshot_from_json(_file_read(path))
+                if include_interrupted or snapshot.state == "complete":
+                    return snapshot
+            return None
+
+    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
+        async with self._lock:
+            self._ensure_open()
+            directory = self._run_path(run_id).parent / "snapshots"
+            snapshots = [_file_snapshot_from_json(_file_read(path)) for path in sorted(directory.glob("snapshot-*.json"))]
+            return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         async with self._lock:
@@ -224,7 +236,10 @@ def _file_event_from_json(value: dict[str, object]) -> StepEvent:
 
 
 def _file_snapshot_from_json(value: dict[str, object]) -> ContinuableSnapshot:
-    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(value.get("messages", [])), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), timestamp=_file_datetime(value["timestamp"]))
+    state = str(value.get("state", "complete"))
+    if state not in {"complete", "interrupted"}:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(value.get("messages", [])), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), timestamp=_file_datetime(value["timestamp"]), state=state)
 
 
 def _file_effect_json(record: ToolEffectRecord) -> dict[str, object]:
@@ -274,6 +289,7 @@ class SqlStepStore:
 
     async def initialize(self) -> None:
         await initialize_schema(self._database.engine, self._metadata)
+        await self._ensure_snapshot_state_column()
 
     async def close(self) -> None:
         return None
@@ -330,12 +346,37 @@ class SqlStepStore:
             async with session.begin():
                 await session.execute(insert(table).values(_snapshot_values(self._namespace_key, snapshot)))
 
-    async def latest_snapshot(self, *, run_id: str) -> ContinuableSnapshot | None:
+    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         from sqlalchemy import select
         table = self._tables["snapshots"]
         async with self._sessions() as session:
-            row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq.desc()).limit(1))).mappings().first()
-        return None if row is None else _snapshot_from_row(row)
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq.desc()))).mappings().all()
+        for row in rows:
+            snapshot = _snapshot_from_row(row)
+            if include_interrupted or snapshot.state == "complete":
+                return snapshot
+        return None
+
+    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
+        from sqlalchemy import select
+        table = self._tables["snapshots"]
+        async with self._sessions() as session:
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq))).mappings().all()
+        snapshots = [_snapshot_from_row(row) for row in rows]
+        return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
+
+    async def _ensure_snapshot_state_column(self) -> None:
+        from sqlalchemy import inspect, text
+
+        table = self._tables["snapshots"]
+
+        async with self._database.engine.begin() as connection:
+            columns = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_columns(table.name))
+            if not any(str(column["name"]) == "state" for column in columns):
+                await connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN state VARCHAR(16) NOT NULL DEFAULT 'complete'"))
+            columns = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_columns(table.name))
+            if not any(str(column["name"]) == "state" for column in columns):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         from sqlalchemy import delete, insert
@@ -433,7 +474,7 @@ def _build_tables() -> tuple[object, dict[str, object]]:
     tables = {
         "runs": Table(storage_name("step_runs"), metadata, Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("metadata_json", JSON, nullable=False), Column("started_at", DateTime(timezone=True), nullable=False), PrimaryKeyConstraint("namespace_key", "run_id"), UniqueConstraint("namespace_key", "conversation_id", "started_at", "run_id"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
         "events": Table(storage_name("step_events"), metadata, Column("seq", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True), Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("kind", String(64), nullable=False), Column("step_index", Integer, nullable=False), Column("timestamp", DateTime(timezone=True), nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("tool_call_id", String(256)), Column("tool_name", String(256)), Column("error", Text), Column("metadata_json", JSON, nullable=False), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
-        "snapshots": Table(storage_name("step_snapshots"), metadata, Column("seq", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True), Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("step_index", Integer, nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("timestamp", DateTime(timezone=True), nullable=False), Column("messages_json", JSON, nullable=False), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
+        "snapshots": Table(storage_name("step_snapshots"), metadata, Column("seq", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True), Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("step_index", Integer, nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("timestamp", DateTime(timezone=True), nullable=False), Column("state", String(16), nullable=False, server_default="complete"), Column("messages_json", JSON, nullable=False), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
         "effects": Table(storage_name("step_effects"), metadata, Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("tool_call_id", String(256), nullable=False), Column("tool_name", String(256), nullable=False), Column("status", String(64), nullable=False), Column("started_at", DateTime(timezone=True), nullable=False), Column("ended_at", DateTime(timezone=True)), Column("idempotency_key", String(256)), Column("effect_summary", Text), PrimaryKeyConstraint("namespace_key", "run_id", "tool_call_id"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
         "media": Table(storage_name("step_media"), metadata, Column("namespace_key", key, nullable=False), Column("sha256", key, nullable=False), Column("media_type", String(256)), Column("bytes", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False), Column("size_bytes", BigInteger, nullable=False), Column("metadata_json", JSON, nullable=False), PrimaryKeyConstraint("namespace_key", "sha256"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
     }
@@ -449,7 +490,7 @@ def _event_values(namespace_key: str, event: StepEvent) -> dict[str, object]:
 
 
 def _snapshot_values(namespace_key: str, snapshot: ContinuableSnapshot) -> dict[str, object]:
-    return {"namespace_key": namespace_key, "run_id": snapshot.run_id, "step_index": snapshot.step_index, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": _utc(snapshot.timestamp), "messages_json": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))}
+    return {"namespace_key": namespace_key, "run_id": snapshot.run_id, "step_index": snapshot.step_index, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": _utc(snapshot.timestamp), "state": snapshot.state, "messages_json": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))}
 
 
 def _effect_values(namespace_key: str, record: ToolEffectRecord) -> dict[str, object]:
@@ -465,7 +506,10 @@ def _event_from_row(row: Mapping[str, object]) -> StepEvent:
 
 
 def _snapshot_from_row(row: Mapping[str, object]) -> ContinuableSnapshot:
-    return ContinuableSnapshot(run_id=str(row["run_id"]), step_index=int(row["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(row["messages_json"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), timestamp=_utc(row["timestamp"]))
+    state = str(row.get("state", "complete"))
+    if state not in {"complete", "interrupted"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return ContinuableSnapshot(run_id=str(row["run_id"]), step_index=int(row["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(row["messages_json"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), timestamp=_utc(row["timestamp"]), state=state)
 
 
 def _effect_from_row(row: Mapping[str, object]) -> ToolEffectRecord:

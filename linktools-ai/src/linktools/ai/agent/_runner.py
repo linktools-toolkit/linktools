@@ -26,13 +26,18 @@ from pydantic_ai.messages import (
     PartStartEvent,
     TextPart,
     TextPartDelta,
+    RetryPromptPart,
+    ToolReturnPart,
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
+from pydantic_ai_harness.memory import SearchableMemoryStore
+from pydantic_ai_harness.step_persistence import StepStore
 
+from ._capabilities import AgentCapabilityScope, AgentCatalogView, EmptyAgentCatalog, EmptySkillCatalog, compose_parent_capabilities
+from ..capability import SkillCatalogView
 from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..core import JsonValue
@@ -50,6 +55,8 @@ class AgentRunner(Protocol):
         step_run_id: str,
         segment_sequence: int,
         parent_step_run_id: "str | None" = None,
+        memory_namespace: "str | None" = None,
+        memory_store: "SearchableMemoryStore | None" = None,
         on_event: "EventHandler | None" = None,
     ) -> "WorkspaceAgentResult": ...
 
@@ -90,6 +97,8 @@ class WorkspaceAgentRunner:
         api_key: "str | None" = None,
         tools: "tuple[AgentTool, ...]" = (),
         capabilities: "tuple[AgentCapability[None], ...]" = (),
+        skill_catalog: "SkillCatalogView | None" = None,
+        agent_catalog: "AgentCatalogView | None" = None,
     ) -> None:
         self._root = root.expanduser().resolve()
         self._config = config
@@ -97,7 +106,9 @@ class WorkspaceAgentRunner:
         self._base_url = base_url or os.getenv("OPENAI_BASE_URL")
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._tools = tools
-        self._capabilities = capabilities
+        self._workspace_capabilities = capabilities
+        self._skill_catalog = skill_catalog if skill_catalog is not None else EmptySkillCatalog()
+        self._agent_catalog = agent_catalog if agent_catalog is not None else EmptyAgentCatalog()
         self._agents: dict[tuple[str, str], Agent[None, str]] = {}
         self._agent_lock = asyncio.Lock()
         self._logger = environ.get_logger("ai.agent.runner")
@@ -117,6 +128,8 @@ class WorkspaceAgentRunner:
         step_run_id: str,
         segment_sequence: int,
         parent_step_run_id: "str | None" = None,
+        memory_namespace: "str | None" = None,
+        memory_store: "SearchableMemoryStore | None" = None,
         on_event: "EventHandler | None" = None,
     ) -> WorkspaceAgentResult:
         definition = await self._resolve_definition(agent_id)
@@ -124,12 +137,25 @@ class WorkspaceAgentRunner:
         if existing is not None:
             raise _SegmentAlreadyStarted(step_run_id)
         agent = await self._get_agent(definition)
-        step_persistence = StepPersistence(
-            store=step_store,
-            agent_name=definition.agent_name,
-            run_id=step_run_id,
-            parent_run_id=parent_step_run_id,
-            metadata={"segment_sequence": str(segment_sequence), "agent_name": definition.agent_name},
+        parent_model = self._materialize_model(definition.model)
+        capabilities = await compose_parent_capabilities(
+            AgentCapabilityScope(
+                root=self._root,
+                agent_name=definition.agent_name,
+                conversation_id=conversation_id,
+                step_run_id=step_run_id,
+                segment_sequence=segment_sequence,
+                memory_namespace=memory_namespace,
+                step_store=step_store,
+                workspace_capabilities=self._workspace_capabilities,
+                skill_catalog=self._skill_catalog,
+                agent_catalog=self._agent_catalog,
+                memory_store=memory_store,
+                context_target_tokens=_context_target_tokens(self._config),
+                parent_step_run_id=parent_step_run_id,
+            ),
+            model_factory=lambda value: self._materialize_model(definition.model if value is None else value),
+            parent_model=parent_model,
         )
         self._logger.info(
             "workspace agent segment started: agent=%s conversation=%s step=%s segment=%s",
@@ -145,7 +171,8 @@ class WorkspaceAgentRunner:
                 prompt,
                 message_history=history or None,
                 conversation_id=conversation_id,
-                capabilities=(step_persistence,),
+                run_id=step_run_id,
+                capabilities=capabilities,
             ) as events:
                 async for event in events:
                     if isinstance(event, AgentRunResultEvent):
@@ -202,7 +229,6 @@ class WorkspaceAgentRunner:
             "model": model_identity,
             "provider_endpoint": _endpoint_identity(self._base_url or _config_string(self._config, "base_url")),
             "tools": [f"{type(tool).__module__}.{type(tool).__qualname__}" for tool in self._tools],
-            "capabilities": [f"{type(capability).__module__}.{type(capability).__qualname__}" for capability in self._capabilities],
             "toolset_fingerprint": _config_string(self._config, "toolset_fingerprint") or "",
             "output_schema": _config_string(self._config, "output_schema") or "text",
             "output_schema_revision": _config_int(self._config, "output_schema_revision", 1),
@@ -216,24 +242,14 @@ class WorkspaceAgentRunner:
             existing = self._agents.get(cache_key)
             if existing is not None:
                 return existing
-            model: "str | Model" = definition.model
-            if isinstance(model, str) and model != "test":
-                model = OpenAIChatModel(
-                    model.removeprefix("openai:"),
-                    provider=OpenAIProvider(
-                        base_url=self._base_url or _config_string(self._config, "base_url"),
-                        api_key=self._api_key,
-                    ),
-                )
-            test_model = model == "test" or isinstance(model, TestModel)
+            model: "str | Model" = self._materialize_model(definition.model)
+            test_model = isinstance(model, TestModel)
             selected_tools = self._tools if test_model else ()
-            selected_capabilities = () if test_model else self._capabilities
             agent = Agent(
                 model,
                 name=definition.agent_name,
                 instructions=definition.instructions,
                 tools=selected_tools,
-                capabilities=selected_capabilities,
             )
             cached = cast("Agent[None, str]", agent)
             self._agents[cache_key] = cached
@@ -241,33 +257,34 @@ class WorkspaceAgentRunner:
                 self._agents.pop(next(iter(self._agents)))
             return cached
 
+    def _materialize_model(self, model: "str | Model") -> "str | Model":
+        if model == "test":
+            return TestModel(call_tools=[])
+        if isinstance(model, TestModel):
+            call_tools = [] if model.call_tools == "all" else list(model.call_tools)
+            return TestModel(
+                call_tools=call_tools,
+                custom_output_text=model.custom_output_text,
+                custom_output_args=model.custom_output_args,
+                seed=model.seed,
+                model_name=model.model_name,
+                profile=model.profile,
+                settings=model.settings,
+            )
+        if not isinstance(model, str):
+            return model
+        return OpenAIChatModel(
+            model.removeprefix("openai:"),
+            provider=OpenAIProvider(
+                base_url=self._base_url or _config_string(self._config, "base_url"),
+                api_key=self._api_key,
+            ),
+        )
+
     def _instructions(self, agent_id: str) -> str:
         _validate_agent_id(agent_id)
         configured = self._config.get("instructions")
-        if isinstance(configured, str) and configured.strip():
-            return configured
-        agents_root = (self._root / ".linktools" / "agents").resolve()
-        agent_file = (agents_root / f"{agent_id}.md").resolve()
-        try:
-            agent_file.relative_to(agents_root)
-        except ValueError as error:
-            raise AIError(ErrorCode.AGENT_INSTRUCTIONS_OUTSIDE_ROOT) from error
-        try:
-            exists = agent_file.exists()
-        except OSError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        if not exists:
-            return ""
-        try:
-            if not agent_file.is_file() or agent_file.stat().st_size > 1024 * 1024:
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            return agent_file.read_text(encoding="utf-8")
-        except AIError:
-            raise
-        except PermissionError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        except UnicodeDecodeError as error:
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID) from error
+        return configured if isinstance(configured, str) else ""
 
     def _selected_agent_name(self, agent_id: "str | None") -> str:
         selected = agent_id or str(self._config.get("default_agent", "default"))
@@ -301,6 +318,15 @@ def _config_int(config: Mapping[str, JsonValue], name: str, default: int) -> int
     return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
+def _context_target_tokens(config: Mapping[str, JsonValue]) -> "int | None":
+    value = config.get("context_target_tokens")
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return value
+
+
 def _stable_config(config: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     return {
         key: value
@@ -332,8 +358,11 @@ def _map_event(
         return cast("dict[str, JsonValue]", {"type": "tool", "phase": "start", "id": part.tool_call_id, "name": part.tool_name, "arguments_digest": canonical_sha256(part.args_as_dict()), "operation_id": part.tool_call_id, "status": "STARTED", "truncated": False})
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
-        success = part.outcome == "success"
-        return cast("dict[str, JsonValue]", {"type": "tool", "phase": "end", "id": part.tool_call_id, "name": part.tool_name, "operation_id": part.tool_call_id, "result_digest": canonical_sha256(part.content), "status": "SUCCEEDED" if success else "FAILED", "truncated": False, "safe_summary": "tool completed" if success else "tool failed"})
+        if isinstance(part, ToolReturnPart):
+            success = part.outcome == "success"
+            return cast("dict[str, JsonValue]", {"type": "tool", "phase": "end", "id": part.tool_call_id, "name": part.tool_name, "operation_id": part.tool_call_id, "result_digest": canonical_sha256(str(part.content)), "status": "SUCCEEDED" if success else "FAILED", "truncated": False, "safe_summary": "tool completed" if success else "tool failed"})
+        if isinstance(part, RetryPromptPart):
+            return cast("dict[str, JsonValue]", {"type": "tool", "phase": "end", "id": part.tool_call_id, "name": part.tool_name or "unknown", "operation_id": part.tool_call_id, "result_digest": canonical_sha256(str(part.content)), "status": "FAILED", "truncated": False, "safe_summary": "tool retry requested"})
     return None
 
 
