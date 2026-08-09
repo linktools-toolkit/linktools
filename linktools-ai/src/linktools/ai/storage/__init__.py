@@ -28,6 +28,7 @@ from ._contracts import (
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
+    StorageDeletionInfo,
     StorageEntryRevision,
     StorageMetadataReader,
     StorageOperation,
@@ -76,7 +77,7 @@ from ._files import (
     write_json_atomic,
 )
 from ._initialize import initialize_schema, initialize_storage
-from ._layer import LayerRefreshPolicy, StorageWriteVisibility
+from ._layer import LayerRefreshPolicy
 from ._lock import (
     FilesystemLeaseCoordinator,
     FilesystemWriterLock,
@@ -128,6 +129,7 @@ __all__ = [
     "StorageComposition",
     "StorageDatabase",
     "StorageDeleteResult",
+    "StorageDeletionInfo",
     "StorageEntryRevision",
     "StorageId",
     "StorageLayer",
@@ -142,7 +144,6 @@ __all__ = [
     "StorageRevision",
     "StorageRevisionSource",
     "StorageValueValidator",
-    "StorageWriteVisibility",
     "StorageWriter",
     "TieredContentCache",
     "VersionSummary",

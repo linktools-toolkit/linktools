@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ordered read layers and write visibility."""
+"""Ordered storage read layers."""
 
 from dataclasses import dataclass
 from enum import StrEnum
@@ -15,11 +15,6 @@ class LayerRefreshPolicy(StrEnum):
     ALWAYS = "ALWAYS"
 
 
-class StorageWriteVisibility(StrEnum):
-    READABLE = "READABLE"
-    EXTERNAL = "EXTERNAL"
-
-
 @dataclass(frozen=True, slots=True)
 class StorageLayer(Generic[KeyT, ValueT, InfoT]):
     id: str
@@ -31,4 +26,4 @@ class StorageLayer(Generic[KeyT, ValueT, InfoT]):
             raise ValueError("layer id must not be empty")
 
 
-__all__ = ["LayerRefreshPolicy", "StorageLayer", "StorageWriteVisibility"]
+__all__ = ["LayerRefreshPolicy", "StorageLayer"]

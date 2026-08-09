@@ -19,15 +19,6 @@ class SkillSpec:
         if not self.id.strip() or self.revision < 1:
             raise ValueError("skill spec is incomplete")
 
-    @property
-    def asset_kind(self) -> str:
-        return "skill"
-
-    @property
-    def asset_id(self) -> str:
-        return self.id
-
-
 class SkillProvider(Protocol):
     def manifest(self) -> str: ...
     def resolve_ref(self, skill_id: str, revision: 'int | None' = None) -> SkillSpec: ...

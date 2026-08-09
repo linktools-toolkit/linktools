@@ -11,8 +11,12 @@ from pydantic_ai.models import Model
 
 from ..asset import AssetInfo, AssetKey, AssetStore
 from ..errors import AIError, ErrorCode
-from ..spec import AgentSpec
+from ..spec import AgentSpec, AgentSpecCodec
+from ._codec import SkillSpecCodec
 from ._skill import SkillCatalogView, SkillDescriptor, SkillSpec
+
+_AGENT_CODEC = AgentSpecCodec()
+_SKILL_CODEC = SkillSpecCodec()
 
 
 class AgentCatalogView(Protocol):
@@ -59,9 +63,12 @@ class AssetAgentCatalog(AgentCatalogView):
     async def list_agents(self) -> "tuple[AgentCatalogItem, ...]":
         items: list[AgentCatalogItem] = []
         for info in await self._list_infos():
-            specification = await self.store.get(info.key, expected=AgentSpec)
-            if specification is None:
+            content = await self.store.get(info.key)
+            if content is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            specification = _decode_agent(content)
+            if specification.id != info.key.id:
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
             instructions = "\n".join(specification.instructions).strip() or "Execute the assigned task."
             items.append(
                 AgentCatalogItem(
@@ -73,6 +80,7 @@ class AssetAgentCatalog(AgentCatalogView):
                 )
             )
         return tuple(sorted(items, key=lambda item: item.id))
+
     async def _list_infos(self) -> "list[AssetInfo]":
         infos: "list[AssetInfo]" = []
         cursor = None
@@ -101,14 +109,23 @@ class AssetSkillCatalog(SkillCatalogView):
     async def list_skills(self) -> "tuple[SkillDescriptor, ...]":
         descriptors: list[SkillDescriptor] = []
         for info in await self._list_infos():
-            specification = await self.store.get(info.key, expected=SkillSpec)
-            if specification is None:
+            content = await self.store.get(info.key)
+            if content is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            specification = _decode_skill(content)
+            if specification.id != info.key.id:
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
             descriptors.append(SkillDescriptor(info.key.id, specification.revision, f"Authorized skill {info.key.id}"))
         return tuple(sorted(descriptors, key=lambda item: item.id))
 
     async def load_skill(self, skill_id: str) -> "SkillSpec | None":
-        return await self.store.get(AssetKey("skill", skill_id), expected=SkillSpec)
+        content = await self.store.get(AssetKey("skill", skill_id))
+        if content is None:
+            return None
+        specification = _decode_skill(content)
+        if specification.id != skill_id:
+            raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+        return specification
 
     async def _list_infos(self) -> "list[AssetInfo]":
         infos: "list[AssetInfo]" = []
@@ -121,6 +138,24 @@ class AssetSkillCatalog(SkillCatalogView):
             if page.next_cursor == cursor or not page.items:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             cursor = page.next_cursor
+
+
+def _decode_agent(content: bytes) -> AgentSpec:
+    try:
+        return _AGENT_CODEC.decode(content)
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+
+
+def _decode_skill(content: bytes) -> SkillSpec:
+    try:
+        return _SKILL_CODEC.decode(content)
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
 
 
 __all__ = [

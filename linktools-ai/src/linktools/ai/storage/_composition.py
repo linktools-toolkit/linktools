@@ -22,6 +22,7 @@ from ._contracts import (
     StorageBatchPartialError,
     StorageBatchResult,
     StorageChange,
+    StorageDeletionInfo,
     StorageDeleteResult,
     StorageEntryRevision,
     StorageOperation,
@@ -34,7 +35,7 @@ from ._contracts import (
     VersionedStorage,
     VersionSummary,
 )
-from ._layer import LayerRefreshPolicy, StorageLayer, StorageWriteVisibility
+from ._layer import LayerRefreshPolicy, StorageLayer
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 KeyT = TypeVar("KeyT", bound=Hashable)
@@ -42,6 +43,10 @@ ValueT = TypeVar("ValueT")
 InfoT = TypeVar("InfoT")
 
 _logger = environ.get_logger("ai.storage.composition")
+
+
+def _is_deleted(info: InfoT) -> bool:
+    return isinstance(info, StorageDeletionInfo) and info.deleted
 
 
 class StorageValueValidator(Protocol[KeyT, ValueT, InfoT]):
@@ -78,7 +83,6 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         primary: 'ReadableStorageBackend[KeyT, ValueT, InfoT]',
         *,
         writer: 'StorageWriter[KeyT, ValueT, InfoT] | None' = None,
-        write_visibility: StorageWriteVisibility = StorageWriteVisibility.READABLE,
         layers: 'Sequence[StorageLayer[KeyT, ValueT, InfoT]]' = (),
         validator: 'StorageValueValidator[KeyT, ValueT, InfoT] | None' = None,
         revision_source: 'RevisionSource | None' = None,
@@ -98,19 +102,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             raise ValueError("layer ids must be non-empty and unique")
         if any(layer.backend is primary for layer in layer_values):
             raise ValueError("primary backend cannot be repeated as a layer")
-        if write_visibility is StorageWriteVisibility.READABLE and writer is not None and writer is not primary and all(writer is not layer.backend for layer in layer_values):
-            raise ValueError("readable writer must be one of the read backends")
-        if write_visibility is StorageWriteVisibility.EXTERNAL and writer is not None and (writer is primary or any(writer is layer.backend for layer in layer_values)):
-            raise ValueError("external writer must not be readable")
-        if writer is None and write_visibility is not StorageWriteVisibility.READABLE:
-            raise ValueError("read-only compositions must use READABLE visibility")
+        if writer is not None and writer is not primary and all(writer is not layer.backend for layer in layer_values):
+            raise ValueError("writer must be one of the read backends")
         self.primary = primary
         self.writer = writer
         self.layers = layer_values
         self.validator = validator
         self.cache = cache
         self.cache_adapter = cache_adapter
-        self._write_visibility = write_visibility
         self.cache_concurrency = cache_concurrency
         self.preload_batch_size = preload_batch_size
         self.preload_concurrency = preload_concurrency
@@ -126,26 +125,33 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         self._initialized = False
 
     @property
-    def write_visibility(self) -> StorageWriteVisibility:
-        return self._write_visibility
-
-    @property
     def writer_is_primary(self) -> bool:
         return self.writer is self.primary
 
     @property
+    def writable(self) -> bool:
+        """Return whether generic storage mutations have a configured writer."""
+        return self.writer is not None
+
+    def is_writable_backend(self, backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]") -> bool:
+        """Return whether a backend is the composition's writable backend."""
+        return self.writer is backend
+
+    @property
     def primary_view(self) -> 'LayerMetadataView[KeyT, ValueT, InfoT]':
         return self._views[0]
+
+    @property
+    def backends(self) -> 'tuple[ReadableStorageBackend[KeyT, ValueT, InfoT], ...]':
+        """Return the primary backend followed by ordered layer backends."""
+        return tuple(view.backend for view in self._views)
 
     async def initialize(self) -> None:
         async with self._initialize_lock:
             if self._initialized:
                 return
             seen: set[int] = set()
-            backends = tuple(view.backend for view in self._views)
-            if self.writer is not None:
-                backends = (self.writer, *backends)
-            for backend in backends:
+            for backend in (view.backend for view in self._views):
                 identity = id(backend)
                 if identity in seen:
                     continue
@@ -231,7 +237,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             return None
         owner = state.owners[key]
         backend = self._views[owner].backend
-        return StorageLocation(key, info, backend, self._owner_id(owner), self.writer is backend)
+        return StorageLocation(key, info, backend, self._owner_id(owner), self.is_writable_backend(backend))
 
     def invalidate(self) -> None:
         """Discard materialized metadata and preload markers after an external mutation."""
@@ -259,7 +265,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         retried: bool,
     ) -> 'ValueT | None':
         info = state.entries.get(key)
-        if info is None:
+        if info is None or _is_deleted(info):
             return None
         owner = state.owners[key]
         cache_key = self.cache_adapter.cache_key(key, info) if self.cache_adapter is not None else None
@@ -318,7 +324,9 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
 
         async def _cache_read(key: KeyT) -> None:
             info = state.entries.get(key)
-            if info is None or self.cache is None or self.cache_adapter is None:
+            if info is None or _is_deleted(info):
+                return
+            if self.cache is None or self.cache_adapter is None:
                 misses.append(key)
                 return
             cache_key = self.cache_adapter.cache_key(key, info)
@@ -330,7 +338,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
                 values[key] = value
 
         await asyncio.gather(*(_cache_read(key) for key in keys))
-        misses = [key for key in misses if key in state.entries]
+        misses = [key for key in misses if key in state.entries and not _is_deleted(state.entries[key])]
         loaded = await self._load_origins(misses, state)
         raced: set[int] = set()
         for key in misses:
@@ -469,7 +477,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             StorageOwnedInfo(
                 state.entries[key],
                 self._owner_id(state.owners[key]),
-                self.writer is self._views[state.owners[key]].backend,
+                self.is_writable_backend(self._views[state.owners[key]].backend),
             )
             for key in sorted(state.entries, key=str)
         )
@@ -485,7 +493,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         identities = {
             key: self.cache_adapter.cache_key(key, state.entries[key])
             for key in selected
-            if key in state.entries
+            if key in state.entries and not _is_deleted(state.entries[key])
         }
         marked = {
             key
@@ -508,7 +516,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             if key not in marked and identity not in present
         )
         loaded_count = 0
-        failed = len(selected) - len(identities)
+        failed = sum(1 for key in selected if key not in state.entries)
         for offset in range(0, len(missing), self.preload_batch_size):
             batch = missing[offset : offset + self.preload_batch_size]
             raw_values = await self._load_origins(batch, state)
@@ -695,14 +703,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         revision: StorageRevision,
     ) -> None:
         self._preloaded.pop(key, None)
-        if self._write_visibility is not StorageWriteVisibility.READABLE or self.writer is None:
+        if self.writer is None:
             return
         for view in self._views:
             if view.backend is self.writer:
                 view.apply_write(key, info, revision)
 
     def _invalidate_writer_view(self) -> None:
-        if self._write_visibility is not StorageWriteVisibility.READABLE or self.writer is None:
+        if self.writer is None:
             return
         for view in self._views:
             if view.backend is self.writer:

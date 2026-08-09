@@ -20,9 +20,12 @@ from linktools.ai.storage import (
     MetadataLoad,
     MetadataLoadMode,
     StorageComposition,
+    StorageDeleteResult,
     StorageEntryRevision,
     StorageLayer,
     StorageOwnedInfo,
+    StoragePutResult,
+    StorageResetResult,
     StorageRevision,
     StorageValueValidator,
 )
@@ -62,6 +65,47 @@ class Backend:
     async def get(self, key: str) -> Value | None:
         self.get_calls.append(key)
         return self.values.get(key)
+
+
+class WritableBackend(Backend):
+    async def put(
+        self,
+        key: str,
+        value: Value,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StoragePutResult[Info]":
+        del expected_entry_revision
+        self.values[key] = value
+        self.revision = StorageRevision(str(int(self.revision.value) + 1))
+        return StoragePutResult(
+            Info(key, value.revision),
+            StorageEntryRevision(value.revision),
+            self.revision,
+            True,
+        )
+
+    async def delete(
+        self,
+        key: str,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageDeleteResult[str]":
+        del expected_entry_revision
+        value = self.values.pop(key, None)
+        self.revision = StorageRevision(str(int(self.revision.value) + 1))
+        return StorageDeleteResult(
+            key,
+            value is not None,
+            None if value is None else StorageEntryRevision(value.revision),
+            self.revision,
+        )
+
+    async def reset(self) -> StorageResetResult:
+        deleted_count = len(self.values)
+        self.values.clear()
+        self.revision = StorageRevision(str(int(self.revision.value) + 1))
+        return StorageResetResult(self.revision, deleted_count)
 
 
 class Validator(StorageValueValidator[str, Value, Info]):
@@ -107,6 +151,39 @@ def test_composition_exposes_only_domain_generics() -> None:
         StorageEntryRevision(0)
     with pytest.raises(ValueError):
         StorageRevision("")
+
+
+@pytest.mark.asyncio
+async def test_composition_writer_must_be_readable() -> None:
+    primary = WritableBackend(())
+    primary_storage = StorageComposition(primary, writer=primary, validator=Validator())
+    assert primary_storage.writer_is_primary is True
+    await primary_storage.list_info()
+    await primary_storage.put("primary", Value("primary", 2, b"primary"))
+    primary_location = await primary_storage.locate("primary")
+    assert primary_location is not None
+    assert primary_location.backend is primary
+    assert primary_location.writable is True
+    assert primary.metadata_calls == 1
+
+    layer = WritableBackend(())
+    layer_storage = StorageComposition(
+        Backend(()),
+        writer=layer,
+        layers=(StorageLayer("writer", layer),),
+        validator=Validator(),
+    )
+    assert layer_storage.writer_is_primary is False
+    await layer_storage.list_info()
+    await layer_storage.put("layer", Value("layer", 2, b"layer"))
+    layer_location = await layer_storage.locate("layer")
+    assert layer_location is not None
+    assert layer_location.backend is layer
+    assert layer_location.writable is True
+    assert layer.metadata_calls == 1
+
+    with pytest.raises(ValueError, match="writer must be one of the read backends"):
+        StorageComposition(primary, writer=WritableBackend(()))
 
 
 @pytest.mark.asyncio

@@ -81,12 +81,12 @@ async def test_workspace_composition_uses_harness_capabilities_directly() -> Non
     )
 
     assert tuple(type(item) for item in capabilities[:3]) == (StepPersistence, Memory, Planning)
-    assert capabilities[4].__class__ is ConversationSearch
-    assert capabilities[5].__class__ is SubAgents
-    assert capabilities[6].__class__ is DynamicWorkflow
-    assert capabilities[7].__class__ is DeduplicateFileReads
-    assert all(isinstance(item, SubAgent) for item in capabilities[5].agents)
-    assert all(isinstance(item, Agent) for item in capabilities[6].agents)
+    assert capabilities[3].__class__ is ConversationSearch
+    assert capabilities[4].__class__ is SubAgents
+    assert capabilities[5].__class__ is DynamicWorkflow
+    assert capabilities[6].__class__ is DeduplicateFileReads
+    assert all(isinstance(item, SubAgent) for item in capabilities[4].agents)
+    assert all(isinstance(item, Agent) for item in capabilities[5].agents)
 
 
 def test_step_ids_are_scoped_and_fixed_width() -> None:

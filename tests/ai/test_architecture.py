@@ -255,7 +255,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
     from linktools.ai.adapter import DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime
     from linktools.ai.agent import AgentDeps, WorkspaceAgentRunner
     from linktools.ai.app import ACPApplication
-    from linktools.ai.asset import AssetCodec, AssetLoaderSource, AssetSource, FilesystemAssetBackend, FilesystemAssetContentStore, InMemoryAssetBackend
+    from linktools.ai.asset import AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend
     from linktools.ai.asset import SqlAssetBackend
     from linktools.ai.capability import MCPServerSpecCodec, SkillSpecCodec
     from linktools.ai.storage import StorageBatchResult, StorageReader, StorageWriter
@@ -268,12 +268,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
     )
     assert adapter and app and asset and capability and storage and temporal
     assert all(command_modules)
-    assert all((AgentDeps, WorkspaceAgentRunner, ACPApplication, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCodec, AssetLoaderSource, AssetSource, FilesystemAssetBackend, FilesystemAssetContentStore, InMemoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
-    import linktools.ai.asset._domain as domain
-    from linktools.ai.asset._codec import AssetCodec as PrivateAssetCodec
-
-    assert not hasattr(domain, "AssetCodec")
-    assert AssetCodec is PrivateAssetCodec
+    assert all((AgentDeps, WorkspaceAgentRunner, ACPApplication, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").errors)
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]

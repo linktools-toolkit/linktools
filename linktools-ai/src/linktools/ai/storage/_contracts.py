@@ -236,6 +236,12 @@ class StorageStatReader(Protocol[KeyT, InfoT]):
     async def stat(self, key: KeyT) -> "InfoT | None": ...
 
 
+@runtime_checkable
+class StorageDeletionInfo(Protocol):
+    @property
+    def deleted(self) -> bool: ...
+
+
 __all__ = [
     "BatchStorageReader",
     "BatchStorageWriter",
@@ -250,6 +256,7 @@ __all__ = [
     "StorageBatchResult",
     "StorageChange",
     "StorageDeleteResult",
+    "StorageDeletionInfo",
     "StorageEntryRevision",
     "StorageMetadataReader",
     "StorageOperation",

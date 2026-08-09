@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable Agent and Prompt contracts and their asset codecs."""
+"""Immutable Agent and Prompt contracts and serializers."""
 
 import json
 from collections.abc import Mapping
@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
-from ..asset import AssetCodec
-from ..asset import AssetKey, AssetValue
 from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
 from ..core import JsonValue
@@ -30,7 +28,7 @@ class AgentFeatureRef:
 
 
 @dataclass(frozen=True, slots=True)
-class AgentSpec(AssetValue):
+class AgentSpec:
     id: str
     revision: int
     model: str
@@ -55,17 +53,9 @@ class AgentSpec(AssetValue):
             unique[key] = feature
         object.__setattr__(self, "features", tuple(unique.values()))
 
-    @property
-    def asset_kind(self) -> str:
-        return "agent"
-
-    @property
-    def asset_id(self) -> str:
-        return self.id
-
 
 @dataclass(frozen=True, slots=True)
-class PromptSpec(AssetValue):
+class PromptSpec:
     id: str
     revision: int
     system: str
@@ -78,36 +68,12 @@ class PromptSpec(AssetValue):
         object.__setattr__(self, "instructions", tuple(self.instructions))
         object.__setattr__(self, "variables", tuple(self.variables))
 
-    @property
-    def asset_kind(self) -> str:
-        return "prompt"
-
-    @property
-    def asset_id(self) -> str:
-        return self.id
-
 
 def _feature_digest(feature: AgentFeatureRef) -> str:
     return canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)})
 
 
-class AgentSpecCodec(AssetCodec[AgentSpec]):
-    @property
-    def kind(self) -> str:
-        return "agent"
-
-    @property
-    def primary_path(self) -> str:
-        return "agent.md"
-
-    @property
-    def value_type(self) -> 'type[AgentSpec]':
-        return AgentSpec
-
-    @property
-    def fingerprint(self) -> str:
-        return "agent-spec"
-
+class AgentSpecCodec:
     def encode(self, value: AgentSpec) -> bytes:
         return json.dumps({"id": value.id, "revision": value.revision, "model": value.model, "features": [{"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)} for feature in value.features], "output_schema": value.output_schema, "output_schema_revision": value.output_schema_revision, "instructions": list(value.instructions)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -117,38 +83,14 @@ class AgentSpecCodec(AssetCodec[AgentSpec]):
             raise AIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
         return AgentSpec(raw["id"], raw["revision"], raw["model"], tuple(AgentFeatureRef(item["kind"], item["id"], item.get("revision"), item.get("required", True), item.get("config", {})) for item in raw["features"]), raw["output_schema"], int(raw["output_schema_revision"]), tuple(raw.get("instructions", ())))
 
-    def validate_key(self, key: AssetKey, value: AgentSpec) -> None:
-        if value.asset_kind != key.kind or value.asset_id != key.id:
-            raise ValueError("agent spec key mismatch")
 
-
-class PromptSpecCodec(AssetCodec[PromptSpec]):
-    @property
-    def kind(self) -> str:
-        return "prompt"
-
-    @property
-    def primary_path(self) -> str:
-        return "prompt.md"
-
-    @property
-    def value_type(self) -> 'type[PromptSpec]':
-        return PromptSpec
-
-    @property
-    def fingerprint(self) -> str:
-        return "prompt-spec"
-
+class PromptSpecCodec:
     def encode(self, value: PromptSpec) -> bytes:
         return json.dumps({"id": value.id, "revision": value.revision, "system": value.system, "instructions": list(value.instructions), "variables": list(value.variables)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
     def decode(self, data: bytes) -> PromptSpec:
         raw = json.loads(data.decode("utf-8"))
         return PromptSpec(raw["id"], raw["revision"], raw["system"], tuple(raw["instructions"]), tuple(raw["variables"]))
-
-    def validate_key(self, key: AssetKey, value: PromptSpec) -> None:
-        if value.asset_kind != key.kind or value.asset_id != key.id:
-            raise ValueError("prompt spec key mismatch")
 
 
 __all__ = ["AgentFeatureRef", "AgentSpec", "AgentSpecCodec", "PromptSpec", "PromptSpecCodec"]

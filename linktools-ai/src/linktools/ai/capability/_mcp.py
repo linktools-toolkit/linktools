@@ -23,15 +23,6 @@ class MCPServerSpec:
         if not self.id.strip() or self.revision < 1 or not self.command.strip():
             raise ValueError("MCP server spec is incomplete")
 
-    @property
-    def asset_kind(self) -> str:
-        return "mcp"
-
-    @property
-    def asset_id(self) -> str:
-        return self.id
-
-
 @dataclass(frozen=True, slots=True)
 class MCPCallRequest:
     principal: Principal

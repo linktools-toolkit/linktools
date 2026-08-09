@@ -8,7 +8,7 @@ The package is deliberately small and has one owner per concern:
 |---|---|
 | `core` | Pure values, errors, IDs, JSON, paging and principals |
 | `storage` | Generic layers, cache, revision, versioning, files, locks and SQL setup |
-| `asset` | Asset values, roots, codecs, `AssetStore` and asset backends |
+| `asset` | Raw Asset file keys, metadata, `AssetStore` and file backends |
 | `spec` | Agent/Prompt/Feature DTOs, output registry and codecs |
 | `model` | Model registry, configuration and resolver |
 | `observe` | Run context, middleware, trace and snapshots |
@@ -25,8 +25,8 @@ The package is deliberately small and has one owner per concern:
 Normal library modules are directly under `linktools/ai/<package>/`. A
 cross-package public boundary module may live directly under `linktools/ai/`
 only when listed in `public_modules`. Build-time gates live under `scripts/build/`. Only Temporal
-may use `workflow/` and `activity/` subpackages. `AssetStore` is the only
-typed asset storage abstraction; the spec package contains DTOs and codecs.
+may use `workflow/` and `activity/` subpackages. `AssetStore` stores raw files;
+the spec and capability packages own their DTO serialization.
 
 ## Boundaries and style
 

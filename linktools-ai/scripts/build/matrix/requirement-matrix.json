@@ -662,7 +662,7 @@
       "requirement": "Asset backend、path validation、journal/recovery、local/source parsing、SQL backend 与 storage contract behavior 在 organization merge 后保持。",
       "constraints": "不改变 durable data format、schema owner literal 或 backend behavior。",
       "implementation": ["linktools-ai/src/linktools/ai/asset/_backend.py", "linktools-ai/src/linktools/ai/asset/_filesystem.py", "linktools-ai/src/linktools/ai/asset/_sql.py", "linktools-ai/src/linktools/ai/storage/_contracts.py"],
-      "tests": ["tests/ai/test_asset_and_commands.py::test_in_memory_asset_store_cas_tombstone_and_history", "tests/ai/test_asset_and_commands.py::test_filesystem_asset_store_recovers_history_after_restart", "tests/ai/test_storage_asset_restoration.py::test_filesystem_asset_content_store_restores_atomic_path_mapping_and_batch_io", "tests/ai/test_storage_asset_restoration.py::test_sql_asset_backend_keeps_lightweight_asset_surface", "tests/ai/test_storage_asset_restoration.py::test_asset_loader_index_and_config_are_available"],
+      "tests": ["tests/ai/test_asset_and_commands.py::test_in_memory_asset_store_cas_tombstone_and_history", "tests/ai/test_asset_and_commands.py::test_filesystem_asset_store_recovers_history_after_restart", "tests/ai/test_storage_asset_restoration.py::test_local_directory_asset_backend_maps_single_files", "tests/ai/test_storage_asset_restoration.py::test_sql_asset_backend_uses_one_state_table", "tests/ai/test_storage_asset_restoration.py::test_asset_path_adapter_and_config_are_available"],
       "finding_mapping": "F-15/T-36",
       "status": "PASS"
     },

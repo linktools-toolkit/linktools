@@ -755,6 +755,7 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
             history_reader=_History(),
             schema_digest=runtime.persistence.atomic_domain_id,
             execution_launcher=launcher,
+            workflow_gateway=_TaskGateway(),
         )
         now = datetime.now(timezone.utc)
         await runtime.persistence.sessions.create(SessionRecord("resume", "tenant", "owner", binding_digest, SessionStatus.OPEN, 0, 0, None, {}, now, now, None, None))

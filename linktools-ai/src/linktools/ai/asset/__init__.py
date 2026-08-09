@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Typed asset values, codecs and the single AssetStore boundary."""
+"""Raw Asset file storage."""
 
 from ..errors import (
     AssetConflictError,
@@ -10,13 +10,6 @@ from ..errors import (
     InvalidAssetError,
 )
 from ._backend import InMemoryAssetBackend
-from ._codec import (
-    AssetCodec,
-    AssetCodecManifest,
-    AssetCodecManifestEntry,
-    AssetCodecRegistry,
-)
-from ._composition import AssetBackend, AssetComposition
 from ._config import StrictConfigReader, resolved_name
 from ._directory import (
     AssetPathAdapter,
@@ -24,67 +17,23 @@ from ._directory import (
     PrefixAssetPathAdapter,
     local_directory_root,
 )
-from ._domain import (
-    AssetBatchResult,
-    AssetChange,
-    AssetDeleteResult,
-    AssetEntryBatchResult,
-    AssetEntryChange,
-    AssetEntryDeleteResult,
-    AssetEntryInfo,
-    AssetEntryKey,
-    AssetEntryOrigin,
-    AssetEntryRevision,
-    AssetEntrySnapshot,
-    AssetEntryVersion,
-    AssetInfo,
-    AssetKey,
-    AssetRequest,
-    AssetRevision,
-    AssetRoot,
-    AssetSource,
-    AssetStoreRevision,
-    AssetValue,
-    AssetVersion,
-)
+from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot
 from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._sql import SqlAssetBackend, SqlAssetTables
-from ._store import AssetStore
+from ._store import AssetCacheAdapter, AssetStore
 
 __all__ = [
     "AssetBackend",
-    "AssetBatchResult",
-    "AssetChange",
-    "AssetCodec",
-    "AssetCodecManifest",
-    "AssetCodecManifestEntry",
-    "AssetCodecRegistry",
-    "AssetComposition",
+    "AssetCacheAdapter",
     "AssetConflictError",
-    "AssetDeleteResult",
-    "AssetEntryBatchResult",
-    "AssetEntryChange",
-    "AssetEntryDeleteResult",
-    "AssetEntryInfo",
-    "AssetEntryKey",
-    "AssetEntryOrigin",
-    "AssetEntryRevision",
-    "AssetEntrySnapshot",
-    "AssetEntryVersion",
     "AssetError",
     "AssetInfo",
     "AssetKey",
     "AssetNotFoundError",
     "AssetParseError",
     "AssetPathAdapter",
-    "AssetRequest",
-    "AssetRevision",
     "AssetRoot",
-    "AssetSource",
     "AssetStore",
-    "AssetStoreRevision",
-    "AssetValue",
-    "AssetVersion",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
     "InvalidAssetError",

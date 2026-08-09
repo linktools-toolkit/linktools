@@ -26,13 +26,11 @@ from ..adapter import (
     open_sql_runtime,
 )
 from ..agent import AgentCatalogView, BindingExecutionRegistry, ModelMaterializer
-from ..asset import AssetCodecRegistry, AssetComposition, AssetSource, AssetStore
+from ..asset import AssetInfo, AssetKey, AssetStore
 from ..capability import (
-    MCPServerSpecCodec,
     MCPToolProvider,
     Sandbox,
     SkillProvider,
-    SkillSpecCodec,
     ToolPolicy,
     ToolStateStore,
 )
@@ -60,7 +58,8 @@ from ..runtime import (
     WorkflowTaskGraphLauncher,
     new_runtime_service_identity,
 )
-from ..spec import AgentSpecCodec, OutputTypeRegistry, PromptSpecCodec
+from ..spec import OutputTypeRegistry
+from ..storage import StorageComposition
 from ..task import (
     LocalTaskGraphLauncher,
     RuntimeTaskExecutionVerifier,
@@ -263,18 +262,9 @@ class _WorkflowExecutionLauncher:
 
 
 def build_asset_store(
-    storage: AssetComposition,
-    *,
-    sources: "Sequence[AssetSource]" = (),
+    storage: "StorageComposition[AssetKey, bytes, AssetInfo]",
 ) -> AssetStore:
-    codecs = AssetCodecRegistry()
-    codecs.register(AgentSpecCodec())
-    codecs.register(PromptSpecCodec())
-    codecs.register(SkillSpecCodec())
-    codecs.register(MCPServerSpecCodec())
-    manifest = codecs.freeze()
-    _logger.info("asset codecs frozen: entries=%s digest=%s", len(manifest.entries), manifest.digest)
-    return AssetStore(storage, codecs=codecs, sources=sources)
+    return AssetStore(storage)
 
 
 def build_app_services(
@@ -319,8 +309,6 @@ def build_app_services(
     if not output_types.frozen:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not asset_store.ready:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not asset_store.codec_manifest.entries or not asset_store.codec_manifest.digest:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not skill_provider.manifest() or not mcp_provider.manifest():
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
