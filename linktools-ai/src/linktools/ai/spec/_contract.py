@@ -97,6 +97,10 @@ class AgentSpecCodec(AssetCodec[AgentSpec]):
         return "agent"
 
     @property
+    def primary_path(self) -> str:
+        return "agent.md"
+
+    @property
     def value_type(self) -> 'type[AgentSpec]':
         return AgentSpec
 
@@ -122,6 +126,10 @@ class PromptSpecCodec(AssetCodec[PromptSpec]):
     @property
     def kind(self) -> str:
         return "prompt"
+
+    @property
+    def primary_path(self) -> str:
+        return "prompt.md"
 
     @property
     def value_type(self) -> 'type[PromptSpec]':

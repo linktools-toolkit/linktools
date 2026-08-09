@@ -5,9 +5,9 @@
 from dataclasses import dataclass
 from typing import Protocol, TypeVar, runtime_checkable
 
-from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
-from ._domain import AssetKey, AssetValue
+from ..errors import AIError, ErrorCode
+from ._domain import AssetKey, AssetValue, validate_rel_path
 
 TAsset = TypeVar("TAsset", bound=AssetValue)
 
@@ -16,6 +16,10 @@ TAsset = TypeVar("TAsset", bound=AssetValue)
 class AssetCodec(Protocol[TAsset]):
     @property
     def kind(self) -> str:
+        ...
+
+    @property
+    def primary_path(self) -> str:
         ...
 
     @property
@@ -40,6 +44,7 @@ class AssetCodec(Protocol[TAsset]):
 @dataclass(frozen=True, slots=True)
 class AssetCodecManifestEntry:
     kind: str
+    primary_path: str
     value_type: str
     fingerprint: str
     codec_version: int
@@ -59,12 +64,18 @@ class AssetCodecRegistry:
     def register(self, codec: 'AssetCodec[TAsset]') -> None:
         if self._manifest is not None:
             raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "codec registry is frozen")
-        if not codec.kind.strip() or not codec.fingerprint.strip():
+        if not codec.kind.strip() or not codec.primary_path.strip() or not codec.fingerprint.strip():
             raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
+        try:
+            validate_rel_path(codec.primary_path)
+        except AIError as error:
+            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT) from error
         existing = self._codecs.get(codec.kind)
         if existing is not None:
-            if existing.value_type is codec.value_type and existing.fingerprint == codec.fingerprint:
+            if existing.value_type is codec.value_type and existing.fingerprint == codec.fingerprint and existing.primary_path == codec.primary_path:
                 return
+            raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
+        if any(existing_codec.primary_path == codec.primary_path for existing_codec in self._codecs.values()):
             raise AIError(ErrorCode.ASSET_CODEC_CONFLICT)
         self._codecs[codec.kind] = codec
 
@@ -72,6 +83,7 @@ class AssetCodecRegistry:
         entries = tuple(
             AssetCodecManifestEntry(
                 kind=kind,
+                primary_path=codec.primary_path,
                 value_type=f"{codec.value_type.__module__}.{codec.value_type.__qualname__}",
                 fingerprint=codec.fingerprint,
                 codec_version=1,
@@ -83,6 +95,7 @@ class AssetCodecRegistry:
                 "entries": [
                     {
                         "kind": entry.kind,
+                        "primary_path": entry.primary_path,
                         "value_type": entry.value_type,
                         "fingerprint": entry.fingerprint,
                         "codec_version": entry.codec_version,
@@ -106,6 +119,18 @@ class AssetCodecRegistry:
         if self._manifest is None:
             return self.freeze()
         return self._manifest
+
+    def primary_path(self, kind: str) -> str:
+        codec = self._codecs.get(kind)
+        if codec is None:
+            raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN)
+        return codec.primary_path
+
+    def codec(self, kind: str) -> "AssetCodec[AssetValue]":
+        codec = self._codecs.get(kind)
+        if codec is None:
+            raise AIError(ErrorCode.ASSET_CODEC_UNKNOWN)
+        return codec
 
 
 __all__ = ["AssetCodec", "AssetCodecManifest", "AssetCodecManifestEntry", "AssetCodecRegistry"]

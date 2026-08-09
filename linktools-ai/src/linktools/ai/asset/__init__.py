@@ -2,41 +2,55 @@
 # -*- coding: utf-8 -*-
 """Typed asset values, codecs and the single AssetStore boundary."""
 
-from ._codec import AssetCodec, AssetCodecManifest, AssetCodecManifestEntry, AssetCodecRegistry
-from ._cache import AssetCacheCodec, AssetObjectCache
+from ..errors import (
+    AssetConflictError,
+    AssetError,
+    AssetNotFoundError,
+    AssetParseError,
+    InvalidAssetError,
+)
+from ._backend import InMemoryAssetBackend
+from ._codec import (
+    AssetCodec,
+    AssetCodecManifest,
+    AssetCodecManifestEntry,
+    AssetCodecRegistry,
+)
 from ._config import StrictConfigReader, resolved_name
-from ._content import AssetContent, AssetContentInfo, AssetContentSource, compute_asset_etag
-from ._domain import AssetSource
-from ._index import AssetIndex
+from ._directory import (
+    AssetPathAdapter,
+    LocalDirectoryAssetBackend,
+    PrefixAssetPathAdapter,
+    local_directory_root,
+)
 from ._domain import (
-    AssetBackend,
-    AssetBatchPartialError,
     AssetBatchResult,
     AssetChange,
     AssetDeleteResult,
+    AssetEntryBatchResult,
+    AssetEntryChange,
+    AssetEntryDeleteResult,
+    AssetEntryInfo,
+    AssetEntryKey,
+    AssetEntryOrigin,
+    AssetEntryRevision,
+    AssetEntrySnapshot,
+    AssetEntryVersion,
     AssetInfo,
     AssetKey,
     AssetRequest,
     AssetRevision,
     AssetRoot,
+    AssetSource,
     AssetStoreRevision,
     AssetValue,
     AssetVersion,
-    BatchAssetReader,
-    BatchAssetWriter,
-    OwnedAssetInfo,
-    VersionedAssetBackend,
 )
-from ._store import AssetStore
+from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._sql import SqlAssetBackend, SqlAssetTables
-from ._backend import FilesystemAssetBackend, InMemoryAssetBackend
-from ._filesystem import AssetPathAdapter, FilesystemAssetContentStore, PrefixAssetPathAdapter
-from ._parsing import AssetLoader, AssetLoaderSource, load_markdown_text, load_yaml_text, parse_json_text, parse_markdown_text, parse_yaml_text
-from ..errors import AssetConflictError, AssetError, AssetNotFoundError, AssetParseError, InvalidAssetError
+from ._store import AssetStore
 
 __all__ = [
-    "AssetBackend",
-    "AssetBatchPartialError",
     "AssetBatchResult",
     "AssetChange",
     "AssetConflictError",
@@ -45,19 +59,22 @@ __all__ = [
     "AssetCodecManifestEntry",
     "AssetCodecRegistry",
     "AssetDeleteResult",
+    "AssetEntryBatchResult",
+    "AssetEntryChange",
+    "AssetEntryDeleteResult",
+    "AssetEntryInfo",
+    "AssetEntryKey",
+    "AssetEntryOrigin",
+    "AssetEntryRevision",
+    "AssetEntrySnapshot",
+    "AssetEntryVersion",
     "AssetError",
-    "AssetContent",
-    "AssetContentInfo",
     "AssetInfo",
-    "AssetIndex",
     "AssetKey",
-    "AssetLoader",
-    "AssetLoaderSource",
     "AssetNotFoundError",
-    "AssetObjectCache",
+    "AssetPathAdapter",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
-    "AssetPathAdapter",
     "AssetParseError",
     "AssetRequest",
     "AssetRevision",
@@ -66,24 +83,14 @@ __all__ = [
     "AssetStoreRevision",
     "AssetValue",
     "AssetVersion",
-    "BatchAssetReader",
-    "BatchAssetWriter",
-    "OwnedAssetInfo",
-    "VersionedAssetBackend",
-    "AssetCacheCodec",
     "AssetSource",
+    "filesystem_root",
     "InvalidAssetError",
-    "FilesystemAssetContentStore",
+    "LocalDirectoryAssetBackend",
     "PrefixAssetPathAdapter",
     "StrictConfigReader",
     "SqlAssetBackend",
     "SqlAssetTables",
-    "AssetContentSource",
-    "compute_asset_etag",
-    "load_markdown_text",
-    "load_yaml_text",
-    "parse_json_text",
-    "parse_markdown_text",
-    "parse_yaml_text",
+    "local_directory_root",
     "resolved_name",
 ]

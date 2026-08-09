@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
@@ -24,9 +24,10 @@ from ..runtime import (
     DefaultExecutionService,
     DefaultSessionService,
     DefaultTaskService,
+    WorkflowTaskGraphLauncher,
     RuntimeServices,
 )
-from ._facade import Runtime, RuntimeAccess, build_runtime_access
+from ._facade import RuntimeAccess, build_runtime_access
 from ..runtime import CancelEffectOutcome, ExecutionLauncher
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore, StepStore
 
@@ -38,6 +39,7 @@ from ..errors import ErrorCode, AIError
 from ..spec import AgentSpecCodec, PromptSpecCodec
 from ..capability import MCPServerSpecCodec, SkillSpecCodec
 from ..spec import OutputTypeRegistry
+from ..task import TaskGraphLauncher
 
 _logger = environ.get_logger("ai.app.assembly")
 
@@ -190,6 +192,7 @@ async def open_runtime_services(
     grant_key: bytes,
     workflow_gateway: "WorkflowGateway | None" = None,
     execution_launcher: "ExecutionLauncher | None" = None,
+    task_launcher: "TaskGraphLauncher | None" = None,
     engine: "AsyncEngine | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[RuntimeServices]:
@@ -201,6 +204,7 @@ async def open_runtime_services(
             grant_key=grant_key,
             workflow_gateway=workflow_gateway,
             execution_launcher=execution_launcher,
+            task_launcher=task_launcher,
             history_reader=history_reader,
             schema_digest=resources.domain.atomic_domain_id,
         )
@@ -209,12 +213,7 @@ async def open_runtime_services(
 class AppServices:
     runtime_services: RuntimeServices
     access: RuntimeAccess
-    runtime_factory: "RuntimeFactory"
     principal_provider: "PrincipalProvider | None" = None
-
-
-class RuntimeFactory(Protocol):
-    async def build_for_request(self, request: ExecutionRequest) -> Runtime: ...
 
 
 class _WorkflowExecutionLauncher:
@@ -281,18 +280,15 @@ def build_app_services(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not output_types.frozen:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if not asset_store.ready:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not asset_store.codec_manifest.entries or not asset_store.codec_manifest.digest:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not skill_provider.manifest() or not mcp_provider.manifest():
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    services = AppServices(runtime_services, build_runtime_access(runtime_services), _MissingRuntimeFactory(), principal_provider)
+    services = AppServices(runtime_services, build_runtime_access(runtime_services), principal_provider)
     _logger.info("agent services composed: model_revision=%s", model_registry.snapshot().revision)
     return services
-
-
-class _MissingRuntimeFactory:
-    async def build_for_request(self, request: ExecutionRequest) -> Runtime:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
 def build_runtime_services(
@@ -304,6 +300,7 @@ def build_runtime_services(
     schema_digest: str,
     workflow_gateway: "WorkflowGateway | None" = None,
     execution_launcher: "ExecutionLauncher | None" = None,
+    task_launcher: "TaskGraphLauncher | None" = None,
 ) -> RuntimeServices:
     """Compose all default services from one persistence and authorization root."""
     identity = new_runtime_service_identity(
@@ -321,11 +318,12 @@ def build_runtime_services(
     else:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     execution = DefaultExecutionService(persistence, authorization, launcher=launcher, history_reader=history_reader)
+    graph_launcher = task_launcher if task_launcher is not None else WorkflowTaskGraphLauncher(workflow_gateway) if workflow_gateway is not None else None
     services = RuntimeServices(
         identity,
         execution,
         DefaultSessionService(persistence, authorization, execution, HmacCursorSigner("session", grant_key)),
-        DefaultTaskService(persistence, authorization, workflow_gateway),
+        DefaultTaskService(persistence, authorization, graph_launcher),
         DefaultEvaluationService(persistence, authorization, execution),
         DefaultApprovalService(persistence, authorization, execution_gateway),
         DefaultEventService(persistence, authorization),
@@ -335,4 +333,4 @@ def build_runtime_services(
     return services
 
 
-__all__ = ["AppServices", "RuntimeFactory", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_codecs", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_services", "open_runtime_resources"]
+__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_codecs", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_services", "open_runtime_resources"]

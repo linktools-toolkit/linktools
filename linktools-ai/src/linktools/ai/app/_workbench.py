@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Workspace application facade and the in-process execution launcher."""
 
 import asyncio
@@ -14,26 +13,59 @@ from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 
 from linktools.core import environ
+from pydantic import ValidationError
 from pydantic_ai.models import Model
 from pydantic_ai_harness.step_persistence import continue_run, fork_run
 
-from ..agent import AgentCatalogView, SkillCatalogView, WorkspaceAgentResult, WorkspaceAgentRunner
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256, step_conversation_id, step_run_id
-from ..core import JsonValue
-from ..core import TenantAuthorizationPolicy
-from ..core import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
-from ..runtime import BlobRef, ExecutionRecord, ExecutionTerminalCommit, IdempotencyTerminalUpdate, ResultRecord, RuntimeBackend, SessionHeadAdvance
-from ..runtime import CancelEffectOutcome
+from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
+from ..agent import (
+    AgentCatalogView,
+    BindingAgentRunner,
+    BindingExecutionPlan,
+    BindingExecutionRegistry,
+    ModelMaterializer,
+    SkillCatalogView,
+    WorkspaceAgentResult,
+    WorkspaceAgentRunner,
+)
+from ..capability import MCPToolProvider
+from ..core import (
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    IdempotencyStatus,
+    JsonValue,
+    SessionStatus,
+    StopReason,
+    TenantAuthorizationPolicy,
+    canonical_sha256,
+    step_conversation_id,
+    step_run_id,
+)
+from ..errors import AIError, ErrorCode
 from ..runtime import (
+    BlobRef,
+    CancelEffectOutcome,
     CancelExecutionRequest,
     CreateSessionRequest,
+    ExecutionRecord,
     ExecutionRequest,
+    ExecutionTerminalCommit,
     ForkSessionRequest,
+    IdempotencyTerminalUpdate,
     ListSessionRequest,
+    ResultRecord,
     ResumeSessionRequest,
+    RuntimeBackend,
     RuntimeServices,
+    SessionHeadAdvance,
     SessionView,
+)
+from ..storage import FilesystemWriterLock
+from ..workspace import (
+    Workspace,
+    build_workspace_capabilities,
+    trusted_workspace_principal,
 )
 from ._assembly import (
     RuntimePersistenceConfig,
@@ -41,10 +73,6 @@ from ._assembly import (
     build_runtime_services,
     open_runtime_resources,
 )
-from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
-from ..storage import FilesystemWriterLock
-from ..workspace import Workspace, build_workspace_capabilities, trusted_workspace_principal
-
 
 _logger = environ.get_logger("ai.app.workbench")
 
@@ -110,7 +138,7 @@ class WorkspaceExecutionLauncher:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._contexts[key] = context
 
-    def active_execution_ids(self) -> tuple[str, ...]:
+    def active_execution_ids(self) -> "tuple[str, ...]":
         """Return the stable snapshot of process-local execution handles."""
         return tuple(sorted(self._tasks))
 
@@ -390,6 +418,98 @@ class WorkspaceExecutionLauncher:
         return IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, status, identity.request_digest, result_digest, error_code)
 
 
+class BindingExecutionLauncher:
+    """Run registered immutable bindings against the shared Runtime persistence."""
+
+    def __init__(
+        self,
+        registry: BindingExecutionRegistry,
+        materializer: ModelMaterializer,
+        resources: RuntimeResources,
+        *,
+        agent_catalog: "AgentCatalogView | None" = None,
+        mcp_provider: "MCPToolProvider | None" = None,
+    ) -> None:
+        self._registry = registry
+        self._materializer = materializer
+        self._resources = resources
+        self._agent_catalog = agent_catalog
+        self._mcp_provider = mcp_provider
+        self._tasks: dict[str, asyncio.Task[WorkspaceAgentResult]] = {}
+        self._accepting = True
+
+    async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
+        if not self._accepting:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        plan = self._registry.resolve(execution.binding_digest)
+        model = self._materializer.materialize(plan.model_route)
+        if execution.execution_id in self._tasks:
+            return
+        self._tasks[execution.execution_id] = asyncio.create_task(self._execute(plan, model, request, execution))
+        _logger.info("binding launch registered: execution=%s binding=%s", execution.execution_id, execution.binding_digest)
+
+    def validate_binding(self, binding_digest: str) -> None:
+        self._registry.resolve(binding_digest)
+
+    async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome":
+        task = self._tasks.get(execution.execution_id)
+        if task is None:
+            return CancelEffectOutcome.UNKNOWN
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        _logger.info("binding cancellation resolved: execution=%s", execution.execution_id)
+        return CancelEffectOutcome.CONFIRMED
+
+    async def shutdown(self) -> None:
+        self._accepting = False
+        tasks = tuple(self._tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
+    async def _execute(self, plan: BindingExecutionPlan, model: Model, request: ExecutionRequest, execution: ExecutionRecord) -> WorkspaceAgentResult:
+        binding_plan = plan
+        runner = BindingAgentRunner(binding_plan, self._materializer, materialized_model=model, agent_catalog=self._agent_catalog, mcp_provider=self._mcp_provider)
+        run_id = step_run_id(namespace=self._resources.domain.namespace, tenant_id=execution.tenant_id, execution_id=execution.execution_id, segment_sequence=execution.agent_run_sequence)
+        conversation_id = step_conversation_id(namespace=self._resources.domain.namespace, tenant_id=execution.tenant_id, execution_id=execution.execution_id)
+        try:
+            result = await runner.run(request.prompt, [], conversation_id, step_store=self._resources.steps, step_run_id=run_id, segment_sequence=execution.agent_run_sequence, memory_namespace=execution.memory_namespace, memory_store=None if execution.memory_namespace is None else RuntimeMemoryStore(self._resources.domain, tenant_id=execution.tenant_id, namespace=execution.memory_namespace))
+            await self._commit_success(binding_plan, execution, result)
+            return result
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self._commit_failure(binding_plan, execution, error)
+            _logger.error("binding execution failed: execution=%s", execution.execution_id, exc_info=True)
+            raise
+        finally:
+            self._tasks.pop(execution.execution_id, None)
+
+    async def _commit_success(self, plan: BindingExecutionPlan, execution: ExecutionRecord, result: WorkspaceAgentResult) -> None:
+        now = datetime.now(timezone.utc)
+        blob = await self._resources.domain.blobs.put_bytes(tenant_id=execution.tenant_id, data=result.output.encode("utf-8"))
+        current = await self._resources.domain.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        terminal = _terminal_record(current, ExecutionStatus.SUCCEEDED, now, result_ref=blob.digest, result_digest=blob.digest)
+        identity = await _terminal_idempotency_for(self._resources, current, IdempotencyStatus.COMPLETED, blob.digest, None)
+        binding = plan.binding
+        await self._resources.domain.results.commit_terminal(ExecutionTerminalCommit(expected_revision=current.revision, expected_event_sequence=current.event_sequence, execution=terminal, result=ResultRecord(current.execution_id, current.tenant_id, ExecutionStatus.SUCCEEDED, binding.spec.output_schema, binding.spec.output_schema_revision, binding.output_schema_fingerprint, blob.digest, blob.digest, StopReason.END_TURN, 0, 0, 0, now), terminal_event_type=ExecutionEventType.EXECUTION_SUCCEEDED, terminal_event_payload={"run_id": result.run_id}, idempotency=identity))
+
+    async def _commit_failure(self, plan: BindingExecutionPlan, execution: ExecutionRecord, error: Exception) -> None:
+        current = await self._resources.domain.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+        if current is None or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            return
+        now = datetime.now(timezone.utc)
+        error_code = ErrorCode.OUTPUT_VALIDATION_FAILED.value if isinstance(error, ValidationError) else error.code.value if isinstance(error, AIError) else ErrorCode.EXECUTION_FAILED.value
+        terminal = _terminal_record(current, ExecutionStatus.FAILED, now, error_code=error_code)
+        identity = await _terminal_idempotency_for(self._resources, current, IdempotencyStatus.FAILED, None, error_code)
+        binding = plan.binding
+        await self._resources.domain.results.commit_terminal(ExecutionTerminalCommit(expected_revision=current.revision, expected_event_sequence=current.event_sequence, execution=terminal, result=ResultRecord(current.execution_id, current.tenant_id, ExecutionStatus.FAILED, binding.spec.output_schema, binding.spec.output_schema_revision, binding.output_schema_fingerprint, None, None, StopReason.OUTPUT_VALIDATION_FAILED if error_code == ErrorCode.OUTPUT_VALIDATION_FAILED.value else StopReason.ERROR, 0, 0, 0, now), terminal_event_type=ExecutionEventType.EXECUTION_FAILED, terminal_event_payload={"error_code": error_code}, idempotency=identity))
+
+
 class WorkspaceAgentRuntime:
     """Translate workspace operations into Runtime service requests."""
 
@@ -473,7 +593,7 @@ class WorkspaceAgentRuntime:
                 await self._cancel_execution(execution_id)
             return True
 
-    async def list_sessions(self, *, cwd: str | Path | None = None) -> tuple[WorkspaceSession, ...]:
+    async def list_sessions(self, *, cwd: "str | Path | None" = None) -> "tuple[WorkspaceSession, ...]":
         normalized = None if cwd is None else self._normalize_cwd(cwd)
         result: list[WorkspaceSession] = []
         for view in await self._session_views():
@@ -574,7 +694,7 @@ async def open_workspace_runtime(
 ) -> AsyncIterator[WorkspaceAgentRuntime]:
     persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.storage_root), workspace_id=workspace.workspace_id)
     authorization = TenantAuthorizationPolicy()
-    key = grant_key or hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
+    key = grant_key or hashlib.sha256(f"workspace:{workspace.workspace_id}".encode()).digest()
     local_lock = None
     if persistence_config.backend is RuntimeBackend.SQLITE:
         path = Path(str(persistence_config.location))
@@ -639,9 +759,19 @@ def _terminal_record(record: ExecutionRecord, status: ExecutionStatus, now: date
     )
 
 
+async def _terminal_idempotency_for(resources: RuntimeResources, execution: ExecutionRecord, status: IdempotencyStatus, result_digest: str | None, error_code: str | None) -> IdempotencyTerminalUpdate | None:
+    records = await resources.domain.idempotency.list_by_execution(execution.execution_id, tenant_id=execution.tenant_id)
+    if len(records) > 1:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if not records:
+        return None
+    identity = records[0]
+    return IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, status, identity.request_digest, result_digest, error_code)
+
+
 def _validate_identifier(value: str) -> None:
     if not value.strip() or value in {".", ".."} or any(char in value for char in "/\\\x00"):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-__all__ = ["EventHandler", "TextHandler", "WorkspaceAgentRuntime", "WorkspaceExecutionLauncher", "WorkspaceRunResult", "WorkspaceSession", "open_workspace_runtime"]
+__all__ = ["BindingExecutionLauncher", "EventHandler", "TextHandler", "WorkspaceAgentRuntime", "WorkspaceExecutionLauncher", "WorkspaceRunResult", "WorkspaceSession", "open_workspace_runtime"]

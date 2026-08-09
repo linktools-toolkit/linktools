@@ -1,43 +1,73 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Memory and crash-recoverable file Asset backends."""
+"""Unified container/file-tree AssetStore backends."""
 
 import asyncio
 import base64
-import binascii
 import hashlib
-import os
-import uuid
+from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from typing import Literal
 
 from linktools.core import environ
 
-from ..errors import ErrorCode, AIError
-from ..storage import read_bytes, read_json, write_bytes_atomic, write_json_atomic
-from ..storage import (
-    MetadataChange,
-    MetadataLoad,
-    MetadataLoadMode,
-    StorageDeleteResult,
-    StoragePutResult,
-    StorageResetResult,
-    VersionSummary,
+from ..core import canonical_sha256
+from ..errors import AIError, ErrorCode
+from ._domain import (
+    AssetDeleteOrigin,
+    AssetDeleteResult,
+    AssetEntryBatchResult,
+    AssetEntryChange,
+    AssetEntryDeleteResult,
+    AssetEntryInfo,
+    AssetEntryKey,
+    AssetEntryOrigin,
+    AssetEntryRevision,
+    AssetEntrySnapshot,
+    AssetEntryVersion,
+    AssetInfo,
+    AssetKey,
+    AssetRevision,
+    AssetRoot,
+    AssetStoreRevision,
+    AssetVersion,
+    empty_etag,
+    validate_rel_path,
 )
-from ._domain import AssetInfo, AssetKey, AssetRevision, AssetRoot, AssetStoreRevision
 
 _logger = environ.get_logger("ai.asset.backend")
-_EMPTY_ETAG = hashlib.sha256(b"").hexdigest()
-_RESERVED_ROOT_NAMES = frozenset({".asset-revision", ".history", ".txn"})
+
+
+@dataclass(frozen=True, slots=True)
+class _DesiredEntry:
+    content: bytes
+    deleted: bool
+    origin: AssetEntryOrigin
+    source_digest: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _Manifest:
+    info: AssetInfo
+    files: tuple[AssetEntrySnapshot, ...]
 
 
 class InMemoryAssetBackend:
-    def __init__(self, root: 'AssetRoot | None' = None, *, writable: bool = True) -> None:
+    """Atomic in-process container and file history backend."""
+
+    def __init__(self, root: "AssetRoot | None" = None, *, writable: bool = True) -> None:
         self._root = root or AssetRoot("memory:default", "memory", "memory", "memory")
         self._writable = writable
-        self._entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
-        self._versions: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}
-        self._revision = 0
+        self._store_revision = 0
+        self._assets: dict[AssetKey, AssetInfo] = {}
+        self._asset_history: dict[AssetKey, dict[int, _Manifest]] = {}
+        self._entries: dict[AssetEntryKey, AssetEntryInfo] = {}
+        self._contents: dict[AssetEntryKey, bytes] = {}
+        self._entry_history: dict[AssetEntryKey, dict[int, tuple[AssetEntryVersion, bytes]]] = {}
+        self._source_files: dict[AssetKey, dict[str, tuple[bytes, str]]] = {}
+        self._overrides: dict[AssetKey, dict[str, bytes]] = {}
+        self._tombstones: dict[AssetKey, set[str]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -49,721 +79,503 @@ class InMemoryAssetBackend:
         return self._writable
 
     async def initialize(self) -> None:
-        return None
+        return
 
     async def initialize_storage(self) -> None:
         await self.initialize()
 
-    async def head_revision(self) -> AssetStoreRevision:
+    async def current_revision(self) -> AssetStoreRevision:
         async with self._lock:
-            return AssetStoreRevision(str(self._revision))
+            return self._store_token()
 
-    async def load_metadata(self, after_revision: 'AssetStoreRevision | None') -> 'MetadataLoad[AssetKey, AssetInfo, AssetStoreRevision]':
+    async def stat_asset(self, key: AssetKey) -> "AssetInfo | None":
         async with self._lock:
-            current = AssetStoreRevision(str(self._revision))
-            if after_revision is not None and after_revision == current:
-                return MetadataLoad(MetadataLoadMode.PATCH, current, ())
-            return MetadataLoad(
-                MetadataLoadMode.REPLACE,
-                current,
-                tuple(MetadataChange(key, info) for key, (info, _) in self._entries.items()),
-            )
+            return self._assets.get(key)
 
-    async def get(self, key: AssetKey) -> 'bytes | None':
+    async def list_assets(self) -> "tuple[AssetInfo, ...]":
         async with self._lock:
-            entry = self._entries.get(key)
-            return None if entry is None or entry[0].deleted else entry[1]
+            return tuple(self._assets[key] for key in sorted(self._assets, key=lambda item: (item.kind, item.id)) if not self._assets[key].deleted)
 
-    async def get_many(self, keys: 'tuple[AssetKey, ...]') -> 'dict[AssetKey, bytes]':
-        values: dict[AssetKey, bytes] = {}
+    async def list_asset_versions(self, key: AssetKey) -> "tuple[AssetVersion, ...]":
         async with self._lock:
-            for key in keys:
-                entry = self._entries.get(key)
-                if entry is not None and not entry[0].deleted:
-                    values[key] = entry[1]
-        return values
+            history = self._asset_history.get(key, {})
+            return tuple(_asset_version(manifest.info) for _, manifest in sorted(history.items(), reverse=True))
 
-    async def stat(self, key: AssetKey) -> 'AssetInfo | None':
+    async def asset_revision_files(self, key: AssetKey, revision: AssetRevision) -> "tuple[AssetEntrySnapshot, ...]":
         async with self._lock:
-            entry = self._entries.get(key)
-            return None if entry is None else entry[0]
+            try:
+                return self._asset_history[key][revision.value].files
+            except KeyError as error:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND) from error
 
-    async def list_info(self, *, kind: 'str | None' = None) -> 'tuple[AssetInfo, ...]':
+    async def current_file(self, key: AssetEntryKey, *, include_deleted: bool = False) -> "tuple[AssetEntryInfo, bytes] | None":
         async with self._lock:
-            return tuple(
-                info
-                for info, _ in sorted(
-                    self._entries.values(),
-                    key=lambda item: (item[0].key.kind, item[0].key.id),
-                )
-                if kind is None or info.key.kind == kind
-            )
-
-    async def put(
-        self,
-        key: AssetKey,
-        value: bytes,
-        *,
-        expected_entry_revision: 'AssetRevision | None' = None,
-    ) -> 'StoragePutResult[AssetInfo, AssetRevision, AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            previous = self._entries.get(key)
-            _check_entry_revision(previous, expected_entry_revision)
-            etag = _etag(value)
-            if previous is not None and not previous[0].deleted and previous[0].etag == etag:
-                return StoragePutResult(previous[0], previous[0].entry_revision, previous[0].store_revision, False)
-            info = self._next_info(key, value, previous, deleted=False)
-            self._entries[key] = (info, value)
-            self._versions.setdefault(key, []).append((info, value))
-            return StoragePutResult(info, info.entry_revision, info.store_revision, True)
-
-    async def delete(
-        self,
-        key: AssetKey,
-        *,
-        expected_entry_revision: 'AssetRevision | None' = None,
-    ) -> 'StorageDeleteResult[AssetKey, AssetRevision, AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            previous = self._entries.get(key)
-            _check_entry_revision(previous, expected_entry_revision)
-            if previous is None or previous[0].deleted:
-                return StorageDeleteResult(key, False, None, AssetStoreRevision(str(self._revision)))
-            info = self._next_info(key, b"", previous, deleted=True)
-            self._entries[key] = (info, b"")
-            self._versions.setdefault(key, []).append((info, b""))
-            return StorageDeleteResult(key, True, info.entry_revision, info.store_revision)
-
-    async def reset(self) -> 'StorageResetResult[AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            active = tuple(
-                key for key, (info, _) in self._entries.items() if not info.deleted
-            )
-            for key in active:
-                previous = self._entries[key]
-                info = self._next_info(key, b"", previous, deleted=True)
-                self._entries[key] = (info, b"")
-                self._versions.setdefault(key, []).append((info, b""))
-            count = len(active)
-            return StorageResetResult(AssetStoreRevision(str(self._revision)), count)
-
-    async def list_versions(self, key: AssetKey) -> 'tuple[VersionSummary[AssetRevision], ...]':
-        async with self._lock:
-            return tuple(
-                VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at, info.deleted)
-                for info, _ in self._versions.get(key, ())
-            )
-
-    async def get_at_revision(self, key: AssetKey, entry_revision: AssetRevision) -> 'bytes | None':
-        async with self._lock:
-            for info, value in self._versions.get(key, ()):
-                if info.entry_revision == entry_revision:
-                    return None if info.deleted else value
-            return None
-
-    async def get_at_version(self, key: AssetKey, version: int) -> 'bytes | None':
-        return await self.get_at_revision(key, AssetRevision(version))
-
-    def _next_info(self, key: AssetKey, value: bytes, previous: 'tuple[AssetInfo, bytes] | None', *, deleted: bool) -> AssetInfo:
-        self._revision += 1
-        entry_revision = AssetRevision(0 if previous is None else previous[0].entry_revision.value + 1)
-        return AssetInfo(
-            key,
-            entry_revision,
-            AssetStoreRevision(str(self._revision)),
-            _etag(value),
-            len(value),
-            deleted,
-            self._root.root_id,
-            self._root.digest,
-            datetime.now(timezone.utc),
-        )
-
-    def _require_writable(self) -> None:
-        if not self._writable:
-            raise AIError(ErrorCode.STORAGE_READ_ONLY)
-
-
-class FilesystemAssetBackend:
-    def __init__(self, root: 'AssetRoot | str', *, writable: bool = True) -> None:
-        resolved = filesystem_root(root) if isinstance(root, str) else root
-        if resolved.scheme != "file":
-            raise ValueError("FilesystemAssetBackend requires a filesystem root")
-        self._root = resolved
-        self._directory = Path(resolved.locator)
-        self._transaction_directory = self._directory / ".txn"
-        self._history_directory = self._directory / ".history"
-        self._marker = self._directory / ".asset-revision"
-        self._writable = writable
-        self._entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
-        self._versions: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}
-        self._changes: dict[int, tuple[MetadataChange[AssetKey, AssetInfo], ...]] = {}
-        self._revision = 0
-        self._lock = asyncio.Lock()
-
-    @property
-    def root(self) -> AssetRoot:
-        return self._root
-
-    @property
-    def writable(self) -> bool:
-        return self._writable
-
-    async def initialize(self) -> None:
-        async with self._lock:
-            self._directory.mkdir(parents=True, exist_ok=True)
-            self._transaction_directory.mkdir(parents=True, exist_ok=True)
-            self._recover()
-            self._load_history()
-            self._load_entries()
-        _logger.info("filesystem asset backend initialized: root=%s revision=%s", self._directory, self._revision)
-
-    async def initialize_storage(self) -> None:
-        await self.initialize()
-
-    async def head_revision(self) -> AssetStoreRevision:
-        async with self._lock:
-            return AssetStoreRevision(str(self._revision))
-
-    async def load_metadata(self, after_revision: 'AssetStoreRevision | None') -> 'MetadataLoad[AssetKey, AssetInfo, AssetStoreRevision]':
-        async with self._lock:
-            current = AssetStoreRevision(str(self._revision))
-            if after_revision is None:
-                return self._snapshot(current)
-            previous = _revision_number(after_revision)
-            if previous == self._revision:
-                return MetadataLoad(MetadataLoadMode.PATCH, current, ())
-            changes = tuple(change for revision in sorted(self._changes) if revision > previous for change in self._changes[revision])
-            if changes and previous >= min(self._changes):
-                return MetadataLoad(MetadataLoadMode.PATCH, current, changes)
-            return self._snapshot(current)
-
-    async def get(self, key: AssetKey) -> 'bytes | None':
-        async with self._lock:
-            entry = self._entries.get(key)
-            if entry is None or entry[0].deleted:
+            info = self._entries.get(key)
+            if info is None or (info.deleted and not include_deleted):
                 return None
-            try:
-                content = read_bytes(asset_path(self._root, key))
-            except FileNotFoundError:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
-            if _etag(content) != entry[0].etag:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return content
+            asset = self._assets.get(key.asset)
+            if asset is None or asset.deleted:
+                return None
+            return info, self._contents.get(key, b"")
 
-    async def get_many(self, keys: 'tuple[AssetKey, ...]') -> 'dict[AssetKey, bytes]':
-        values: dict[AssetKey, bytes] = {}
+    async def list_current_files(self, asset: AssetKey, *, prefix: "str | None", include_deleted: bool) -> "tuple[tuple[AssetEntryInfo, bytes], ...]":
         async with self._lock:
-            for key in keys:
-                entry = self._entries.get(key)
-                if entry is None or entry[0].deleted:
+            container = self._assets.get(asset)
+            if container is None or container.deleted:
+                return ()
+            values = []
+            for key, info in self._entries.items():
+                if key.asset != asset or (info.deleted and not include_deleted) or (prefix is not None and not key.rel_path.startswith(prefix)):
                     continue
+                values.append((info, self._contents.get(key, b"")))
+            return tuple(sorted(values, key=lambda item: item[0].key.rel_path))
+
+    async def list_file_versions(self, key: AssetEntryKey) -> "tuple[AssetEntryVersion, ...]":
+        async with self._lock:
+            return tuple(version for version, _ in sorted(self._entry_history.get(key, {}).values(), key=lambda item: item[0].entry_revision.value, reverse=True))
+
+    async def get_file_at_revision(self, key: AssetEntryKey, revision: AssetEntryRevision) -> "bytes | None":
+        async with self._lock:
+            history = self._entry_history.get(key)
+            if history is None or revision.value not in history:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND)
+            version, content = history[revision.value]
+            return None if version.deleted else content
+
+    async def snapshot_files(self, asset: AssetKey, revision: "AssetRevision | None", include_deleted: bool) -> "tuple[AssetEntrySnapshot, ...]":
+        async with self._lock:
+            if revision is None:
+                info = self._assets.get(asset)
+                if info is None or info.deleted:
+                    return ()
+                manifest = self._asset_history[asset][info.revision.value]
+            else:
                 try:
-                    content = read_bytes(asset_path(self._root, key))
-                except FileNotFoundError:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from None
-                if _etag(content) != entry[0].etag:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                values[key] = content
-        return values
+                    manifest = self._asset_history[asset][revision.value]
+                except KeyError as error:
+                    raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND) from error
+            return tuple(item for item in manifest.files if include_deleted or not item.deleted)
 
-    async def stat(self, key: AssetKey) -> 'AssetInfo | None':
-        async with self._lock:
-            entry = self._entries.get(key)
-            return None if entry is None else entry[0]
-
-    async def list_info(self, *, kind: 'str | None' = None) -> 'tuple[AssetInfo, ...]':
-        async with self._lock:
-            return tuple(
-                info
-                for info, _ in sorted(
-                    self._entries.values(),
-                    key=lambda item: (item[0].key.kind, item[0].key.id),
-                )
-                if kind is None or info.key.kind == kind
-            )
-
-    async def put(self, key: AssetKey, value: bytes, *, expected_entry_revision: 'AssetRevision | None' = None) -> 'StoragePutResult[AssetInfo, AssetRevision, AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            previous = self._entries.get(key)
-            _check_entry_revision(previous, expected_entry_revision)
-            if previous is not None and not previous[0].deleted and previous[0].etag == _etag(value):
-                return StoragePutResult(previous[0], previous[0].entry_revision, previous[0].store_revision, False)
-            info = self._next_info(key, value, previous, deleted=False)
-            self._publish(info, value, previous=previous)
-            self._record(info, value)
-            return StoragePutResult(info, info.entry_revision, info.store_revision, True)
-
-    async def delete(self, key: AssetKey, *, expected_entry_revision: 'AssetRevision | None' = None) -> 'StorageDeleteResult[AssetKey, AssetRevision, AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            previous = self._entries.get(key)
-            _check_entry_revision(previous, expected_entry_revision)
-            if previous is None or previous[0].deleted:
-                return StorageDeleteResult(key, False, None, AssetStoreRevision(str(self._revision)))
-            info = self._next_info(key, b"", previous, deleted=True)
-            self._publish(info, b"", previous=previous)
-            self._record(info, b"")
-            return StorageDeleteResult(key, True, info.entry_revision, info.store_revision)
-
-    async def reset(self) -> 'StorageResetResult[AssetStoreRevision]':
-        async with self._lock:
-            self._require_writable()
-            active = tuple(key for key, (info, _) in self._entries.items() if not info.deleted)
-            deleted = 0
-            for key in active:
-                previous = self._entries[key]
-                info = self._next_info(key, b"", previous, deleted=True)
-                self._publish(info, b"", previous=previous)
-                self._record(info, b"")
-                deleted += 1
-            return StorageResetResult(AssetStoreRevision(str(self._revision)), deleted)
-
-    async def list_versions(self, key: AssetKey) -> 'tuple[VersionSummary[AssetRevision], ...]':
-        async with self._lock:
-            return tuple(VersionSummary(info.entry_revision, info.etag, info.size, info.modified_at, info.deleted) for info, _ in self._versions.get(key, ()))
-
-    async def get_at_revision(self, key: AssetKey, entry_revision: AssetRevision) -> 'bytes | None':
-        async with self._lock:
-            for info, value in self._versions.get(key, ()):
-                if info.entry_revision == entry_revision:
-                    return None if info.deleted else value
-            return None
-
-    async def get_at_version(self, key: AssetKey, version: int) -> 'bytes | None':
-        return await self.get_at_revision(key, AssetRevision(version))
-
-    def _snapshot(self, revision: AssetStoreRevision) -> 'MetadataLoad[AssetKey, AssetInfo, AssetStoreRevision]':
-        return MetadataLoad(MetadataLoadMode.REPLACE, revision, tuple(MetadataChange(key, info) for key, (info, _) in self._entries.items()))
-
-    def _next_info(self, key: AssetKey, value: bytes, previous: 'tuple[AssetInfo, bytes] | None', *, deleted: bool) -> AssetInfo:
-        self._revision += 1
-        return AssetInfo(key, AssetRevision(0 if previous is None else previous[0].entry_revision.value + 1), AssetStoreRevision(str(self._revision)), _etag(value), len(value), deleted, self._root.root_id, self._root.digest, datetime.now(timezone.utc))
-
-    def _record(self, info: AssetInfo, value: bytes) -> None:
-        self._entries[info.key] = (info, value)
-        self._versions.setdefault(info.key, []).append((info, value))
-        self._changes[self._revision] = (MetadataChange(info.key, info),)
-
-    def _publish(
+    async def put_file(
         self,
-        info: AssetInfo,
+        key: AssetEntryKey,
         value: bytes,
         *,
-        previous: 'tuple[AssetInfo, bytes] | None',
-    ) -> None:
-        operation_id = uuid.uuid4().hex
-        content = asset_path(self._root, info.key)
-        metadata = _metadata_path(content)
-        temporary_content = content.with_name(f".{content.name}.{operation_id}.tmp")
-        temporary_metadata = metadata.with_name(f".{metadata.name}.{operation_id}.tmp")
-        history = self._history_path(info.key, info.entry_revision)
-        temporary_history = history.with_name(f".{history.name}.{operation_id}.tmp")
-        journal = self._transaction_directory / f"{operation_id}.json"
-        payload = {
-            "operation_id": operation_id,
-            "asset_key": f"{info.key.kind}/{info.key.id}",
-            "kind": info.key.kind,
-            "id": info.key.id,
-            "deleted": info.deleted,
-            "old_content_digest": None if previous is None else previous[0].etag,
-            "new_content_digest": info.etag,
-            "old_store_revision": None if previous is None else previous[0].store_revision.value,
-            "entry_revision": info.entry_revision.value,
-            "store_revision": info.store_revision.value,
-            "temporary_content": str(temporary_content),
-            "temporary_metadata": str(temporary_metadata),
-            "content": str(content),
-            "metadata": str(metadata),
-            "temporary_history": str(temporary_history),
-            "history": str(history),
-            "final_content": str(content),
-            "final_metadata": str(metadata),
-            "final_history": str(history),
-            "revision": info.store_revision.value,
-            "content_etag": info.etag,
-        }
-        write_json_atomic(journal, payload, fsync=True)
-        write_bytes_atomic(temporary_content, value, fsync=True) if not info.deleted else None
-        write_json_atomic(temporary_metadata, _info_json(info), fsync=True)
-        write_json_atomic(temporary_history, _version_json(info, value), fsync=True)
-        try:
-            content.parent.mkdir(parents=True, exist_ok=True)
-            if not info.deleted:
-                os.replace(temporary_content, content)
+        primary_path: str,
+        expected_entry_revision: "AssetEntryRevision | None",
+        expected_revision: "AssetRevision | None",
+    ) -> AssetEntryInfo:
+        result = await self.apply_file_batch(
+            key.asset,
+            (AssetEntryChange("PUT", key.rel_path, bytes(value), expected_entry_revision),),
+            primary_path=primary_path,
+            expected_revision=expected_revision,
+            expected_store_revision=None,
+        )
+        item = result.results[0]
+        if not isinstance(item, AssetEntryInfo):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return item
+
+    async def delete_file(
+        self,
+        key: AssetEntryKey,
+        *,
+        primary_path: str,
+        expected_entry_revision: AssetEntryRevision | None,
+        expected_revision: AssetRevision | None,
+    ) -> AssetEntryDeleteResult:
+        if key.rel_path == primary_path:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "primary asset file cannot be deleted")
+        async with self._lock:
+            self._require_writable()
+            self._check_asset_cas(key.asset, expected_revision)
+            container = self._assets.get(key.asset)
+            if container is not None and container.deleted:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            current = self._entries.get(key)
+            self._check_entry_cas(current, expected_entry_revision)
+            if current is None or current.deleted and current.origin == "TOMBSTONE":
+                info = self._assets.get(key.asset)
+                return AssetEntryDeleteResult(key, False, None if current is None else current.entry_revision, info.revision if info else AssetRevision(1), self._store_token())
+            desired = self._desired_for_asset(key.asset)
+            desired[key.rel_path] = _DesiredEntry(b"", True, "TOMBSTONE", None)
+            results = self._commit_locked({key.asset: desired}, {key.asset: None})
+            info = self._entries[key]
+            return AssetEntryDeleteResult(key, True, info.entry_revision, results[key.asset].revision, results[key.asset].store_revision)
+
+    async def apply_file_batch(
+        self,
+        asset: AssetKey,
+        changes: "Sequence[AssetEntryChange]",
+        *,
+        primary_path: str,
+        expected_revision: "AssetRevision | None",
+        expected_store_revision: "AssetStoreRevision | None",
+    ) -> AssetEntryBatchResult:
+        async with self._lock:
+            self._require_writable()
+            if expected_store_revision is not None and expected_store_revision != self._store_token():
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self._check_asset_cas(asset, expected_revision)
+            container = self._assets.get(asset)
+            if container is not None and container.deleted:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if len({item.rel_path for item in changes}) != len(changes):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "duplicate asset file path")
+            desired = self._desired_for_asset(asset)
+            no_op_deletes: set[str] = set()
+            for change in changes:
+                key = AssetEntryKey(asset, change.rel_path)
+                self._check_entry_cas(self._entries.get(key), change.expected_entry_revision)
+                if change.operation == "PUT":
+                    if change.value is None:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                    desired[change.rel_path] = _DesiredEntry(bytes(change.value), False, "OVERRIDE", None)
+                elif change.operation == "DELETE":
+                    if change.rel_path == primary_path:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "primary asset file cannot be deleted")
+                    current = self._entries.get(key)
+                    if current is not None and current.deleted and current.origin == "TOMBSTONE":
+                        no_op_deletes.add(change.rel_path)
+                        continue
+                    if current is None:
+                        no_op_deletes.add(change.rel_path)
+                        continue
+                    desired[change.rel_path] = _DesiredEntry(b"", True, "TOMBSTONE", None)
+                else:
+                    raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            results = self._commit_locked({asset: desired}, {asset: None})
+            current_revision = results.get(asset, self._assets.get(asset))
+            if current_revision is None:
+                store_revision = self._store_token()
+                return AssetEntryBatchResult(
+                    asset,
+                    AssetRevision(1),
+                    store_revision,
+                    True,
+                    tuple(
+                        AssetEntryDeleteResult(AssetEntryKey(asset, change.rel_path), False, None, AssetRevision(1), store_revision)
+                        for change in changes
+                    ),
+                )
+            result_items: list[AssetEntryInfo | AssetEntryDeleteResult] = []
+            for change in changes:
+                key = AssetEntryKey(asset, change.rel_path)
+                info = self._entries.get(key)
+                if info is None:
+                    result_items.append(AssetEntryDeleteResult(key, False, None, current_revision.revision, current_revision.store_revision))
+                elif info.deleted:
+                    result_items.append(AssetEntryDeleteResult(key, change.rel_path not in no_op_deletes, info.entry_revision, current_revision.revision, current_revision.store_revision))
+                else:
+                    result_items.append(info)
+            return AssetEntryBatchResult(asset, current_revision.revision, current_revision.store_revision, True, tuple(result_items))
+
+    async def replace_tree(
+        self,
+        asset: AssetKey,
+        files: "Mapping[str, bytes]",
+        *,
+        deleted_rel_paths: "Collection[str]",
+        primary_path: str,
+        expected_revision: "AssetRevision | None",
+    ) -> AssetInfo:
+        async with self._lock:
+            self._require_writable()
+            self._check_asset_cas(asset, expected_revision)
+            normalized = {validate_rel_path(path): bytes(value) for path, value in files.items()}
+            deleted = {validate_rel_path(path) for path in deleted_rel_paths}
+            if primary_path not in normalized or set(normalized).intersection(deleted):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            desired = {path: _DesiredEntry(value, False, "OVERRIDE", None) for path, value in normalized.items()}
+            for path in set(self._desired_for_asset(asset)).union(deleted):
+                if path not in desired:
+                    desired[path] = _DesiredEntry(b"", True, "TOMBSTONE", None)
+            result = self._commit_locked({asset: desired}, {asset: None})
+            return result[asset]
+
+    async def delete_asset(self, key: AssetKey, *, expected_revision: "AssetRevision | None") -> "tuple[bool, AssetInfo | None]":
+        async with self._lock:
+            self._require_writable()
+            self._check_asset_cas(key, expected_revision)
+            current = self._assets.get(key)
+            if current is None or current.deleted and current.deleted_by == "OVERRIDE":
+                return False, current
+            desired = self._desired_for_asset(key)
+            desired = {path: _DesiredEntry(b"", True, "TOMBSTONE", None) for path in desired}
+            result = self._commit_locked({key: desired}, {key: "OVERRIDE"})
+            return True, result[key]
+
+    async def apply_asset_batch(self, changes: "Sequence[tuple[AssetKey, bytes | None, str, Literal['PUT', 'DELETE'], AssetRevision | None]]", *, expected_store_revision: "AssetStoreRevision | None") -> "tuple[AssetInfo | AssetDeleteResult, ...]":
+        async with self._lock:
+            self._require_writable()
+            if expected_store_revision is not None and expected_store_revision != self._store_token():
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if len({asset for asset, *_rest in changes}) != len(changes):
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "duplicate asset key")
+            desired_by_asset: dict[AssetKey, dict[str, _DesiredEntry]] = {}
+            delete_origins: dict[AssetKey, AssetDeleteOrigin | None] = {}
+            for asset, value, primary_path, operation, expected_revision in changes:
+                self._check_asset_cas(asset, expected_revision)
+                current = self._assets.get(asset)
+                if current is not None and current.deleted:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if asset not in desired_by_asset:
+                    desired_by_asset[asset] = self._desired_for_asset(asset)
+                if operation == "PUT":
+                    if value is None:
+                        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+                    desired_by_asset[asset][primary_path] = _DesiredEntry(value, False, "OVERRIDE", None)
+                else:
+                    desired_by_asset[asset] = self._desired_for_asset(asset)
+                    delete_origins[asset] = "OVERRIDE"
+            committed = self._commit_locked(desired_by_asset, delete_origins)
+            result: list[AssetInfo | AssetDeleteResult] = []
+            for asset, value, _primary_path, operation, _expected_revision in changes:
+                info = committed.get(asset, self._assets.get(asset))
+                if operation == "DELETE":
+                    result.append(AssetDeleteResult(asset, info is not None and info.deleted, None if info is None else info.revision, self._store_token()))
+                elif info is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                else:
+                    result.append(info)
+            return tuple(result)
+
+    async def restore_asset(self, key: AssetKey, revision: AssetRevision, *, expected_revision: AssetRevision) -> AssetInfo:
+        async with self._lock:
+            self._require_writable()
+            self._check_asset_cas(key, expected_revision)
+            try:
+                manifest = self._asset_history[key][revision.value]
+            except KeyError as error:
+                raise AIError(ErrorCode.ASSET_VERSION_NOT_FOUND) from error
+            if manifest.info.deleted:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID, "deleted asset revision cannot be restored")
+            desired = {item.key.rel_path: _DesiredEntry(item.content or b"", item.deleted, "OVERRIDE" if not item.deleted else "TOMBSTONE", None) for item in manifest.files}
+            for path in set(self._desired_for_asset(key)).difference(desired):
+                desired[path] = _DesiredEntry(b"", True, "TOMBSTONE", None)
+            return self._commit_locked({key: desired}, {key: None})[key]
+
+    async def rename_asset(self, source: AssetKey, target: AssetKey, *, expected_source_revision: AssetRevision) -> AssetInfo:
+        async with self._lock:
+            self._require_writable()
+            self._check_asset_cas(source, expected_source_revision)
+            if target in self._assets or target in self._asset_history:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            source_info = self._assets.get(source)
+            if source_info is None or source_info.deleted:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            source_desired = self._desired_for_asset(source)
+            target_desired = {path: _DesiredEntry(item.content, item.deleted, "OVERRIDE" if not item.deleted else "TOMBSTONE", None) for path, item in source_desired.items()}
+            result = self._commit_locked({target: target_desired, source: source_desired}, {source: "OVERRIDE", target: None})
+            return result[target]
+
+    async def sync_sources(self, source_files: "Mapping[AssetKey, Mapping[str, tuple[bytes, str]]]", primary_paths: "Mapping[str, str]") -> AssetStoreRevision:
+        async with self._lock:
+            self._require_writable()
+            self._source_files = {asset: dict(files) for asset, files in source_files.items()}
+            desired_by_asset: dict[AssetKey, dict[str, _DesiredEntry]] = {}
+            delete_origins: dict[AssetKey, AssetDeleteOrigin | None] = {}
+            all_assets = set(source_files).union(self._assets)
+            for asset in all_assets:
+                desired = self._desired_for_asset(asset, source_override=source_files.get(asset, {}))
+                primary = primary_paths.get(asset.kind)
+                has_primary = primary is not None and primary in desired and not desired[primary].deleted
+                current = self._assets.get(asset)
+                if current is not None and current.deleted_by == "OVERRIDE":
+                    delete_origins[asset] = "OVERRIDE"
+                elif not has_primary and (current is not None or desired):
+                    delete_origins[asset] = "SOURCE"
+                else:
+                    delete_origins[asset] = None
+                desired_by_asset[asset] = desired
+            self._commit_locked(desired_by_asset, delete_origins)
+            _logger.info("asset source refresh committed: assets=%s store_revision=%s", len(source_files), self._store_revision)
+            return self._store_token()
+
+    def _desired_for_asset(self, asset: AssetKey, *, source_override: "Mapping[str, tuple[bytes, str]] | None" = None) -> "dict[str, _DesiredEntry]":
+        source = source_override if source_override is not None else self._source_files.get(asset, {})
+        paths = set(source).union(self._overrides.get(asset, {})).union(self._tombstones.get(asset, set())).union(key.rel_path for key in self._entries if key.asset == asset)
+        if self._assets.get(asset) is not None and self._assets[asset].deleted_by == "OVERRIDE":
+            return {path: _DesiredEntry(b"", True, "TOMBSTONE", None) for path in paths}
+        result: dict[str, _DesiredEntry] = {}
+        for path in paths:
+            if path in self._tombstones.get(asset, set()):
+                result[path] = _DesiredEntry(b"", True, "TOMBSTONE", None)
+            elif path in self._overrides.get(asset, {}):
+                result[path] = _DesiredEntry(self._overrides[asset][path], False, "OVERRIDE", None)
+            elif path in source:
+                content, digest = source[path]
+                result[path] = _DesiredEntry(content, False, "SOURCE", digest)
             else:
-                content.unlink(missing_ok=True)
-            os.replace(temporary_metadata, metadata)
-            history.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary_history, history)
-            write_json_atomic(self._marker, {"revision": int(info.store_revision.value)}, fsync=True)
-            journal.unlink(missing_ok=True)
-            self._transaction_directory_fdatasync()
-        except BaseException:
-            _logger.error("filesystem asset publish interrupted: operation=%s", operation_id, exc_info=environ.debug)
-            raise
+                result[path] = _DesiredEntry(b"", True, "SOURCE", None)
+        return result
 
-    def _recover(self) -> None:
-        for journal in sorted(self._transaction_directory.glob("*.json")):
-            payload = read_json(journal)
-            deleted = bool(payload.get("deleted", False))
-            temporary_content = self._journal_path(payload, "temporary_content", journal)
-            temporary_metadata = self._journal_path(payload, "temporary_metadata", journal)
-            temporary_history = self._journal_path(payload, "temporary_history", journal)
-            content = self._journal_path(payload, "content", journal)
-            metadata = self._journal_path(payload, "metadata", journal)
-            history = self._journal_path(payload, "history", journal)
-            revision = _positive_int(payload.get("revision"), ErrorCode.ASSET_RECOVERY_REQUIRED)
-            if not temporary_metadata.exists() and not metadata.exists():
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            if not deleted and temporary_content.exists():
-                content_matches = False
-                if content.exists():
-                    content_matches = _etag(content.read_bytes()) == str(payload.get("content_etag"))
-                if not content_matches:
-                    content.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(temporary_content, content)
-            elif deleted:
-                content.unlink(missing_ok=True)
-            if temporary_metadata.exists():
-                metadata_matches = False
-                if metadata.exists():
-                    existing = _info_from_json(read_json(metadata), self._root)
-                    metadata_matches = existing.store_revision.value == str(revision)
-                if not metadata_matches:
-                    metadata.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(temporary_metadata, metadata)
-            if temporary_history.exists():
-                history_matches = False
-                if history.exists():
-                    existing = _info_from_json(read_json(history), self._root)
-                    history_matches = existing.store_revision.value == str(revision)
-                if not history_matches:
-                    history.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(temporary_history, history)
-            if not metadata.exists() or not history.exists() or (not deleted and not content.exists()):
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            recovered_info = _info_from_json(read_json(metadata), self._root)
-            recovered_version = _info_from_json(read_json(history), self._root)
-            if (
-                content != asset_path(self._root, recovered_info.key)
-                or metadata != _metadata_path(asset_path(self._root, recovered_info.key))
-                or history != self._history_path(recovered_info.key, recovered_info.entry_revision)
-                or recovered_version != recovered_info
-                or recovered_info.store_revision.value != str(revision)
-            ):
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            if not _journal_matches_info(payload, recovered_info, deleted):
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            if recovered_info.entry_revision.value:
-                previous_history = self._history_path(
-                    recovered_info.key,
-                    AssetRevision(recovered_info.entry_revision.value - 1),
-                )
-                if not previous_history.exists():
-                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-                previous_info = _info_from_json(read_json(previous_history), self._root)
-                if (
-                    payload.get("old_content_digest") != previous_info.etag
-                    or payload.get("old_store_revision") != previous_info.store_revision.value
-                ):
-                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            if deleted:
-                if content.exists():
-                    raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            elif _etag(content.read_bytes()) != recovered_info.etag:
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-            marker_revision = 0
-            if self._marker.exists():
-                marker_revision = _positive_int(
-                    read_json(self._marker).get("revision", 0),
-                    ErrorCode.ASSET_RECOVERY_REQUIRED,
-                )
-            write_json_atomic(self._marker, {"revision": max(marker_revision, revision)}, fsync=True)
-            temporary_content.unlink(missing_ok=True)
-            temporary_metadata.unlink(missing_ok=True)
-            temporary_history.unlink(missing_ok=True)
-            journal.unlink(missing_ok=True)
-            self._transaction_directory_fdatasync()
-
-    def _load_entries(self) -> None:
-        self._entries.clear()
-        self._revision = 0
-        if self._marker.exists():
-            marker = read_json(self._marker)
-            self._revision = _positive_int(marker.get("revision", 0), ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for metadata in self._directory.rglob("*.meta"):
-            if self._transaction_directory in metadata.parents:
-                continue
-            if self._history_directory in metadata.parents:
-                continue
-            raw = read_json(metadata)
-            info = _info_from_json(raw, self._root)
-            expected_metadata = _metadata_path(asset_path(self._root, info.key))
-            if metadata.resolve() != expected_metadata.resolve():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            content_path = asset_path(self._root, info.key)
-            try:
-                content = b"" if info.deleted else read_bytes(content_path)
-            except FileNotFoundError as exc:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
-            if not info.deleted and (_etag(content) != info.etag or len(content) != info.size):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.root_id != self._root.root_id or info.root_digest != self._root.digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.key in self._entries:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            self._entries[info.key] = (info, content)
-            self._revision = max(self._revision, _revision_number(info.store_revision))
-        self._load_legacy_entries()
-
-    def _load_legacy_entries(self) -> None:
-        root = self._directory.resolve()
-        for path in sorted(self._directory.rglob("*")):
-            if not path.is_file() or path.name.endswith(".meta"):
-                continue
-            if self._transaction_directory in path.parents or self._history_directory in path.parents:
-                continue
-            if path == self._marker:
-                continue
-            relative = path.relative_to(root)
-            if len(relative.parts) < 2:
-                continue
-            try:
-                key = AssetKey(relative.parts[0], "/".join(relative.parts[1:]))
-                asset_path(self._root, key)
-            except (ValueError, AIError):
-                continue
-            if key in self._entries:
-                continue
-            content = read_bytes(path)
-            timestamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-            info = AssetInfo(
-                key,
-                AssetRevision(0),
-                AssetStoreRevision(str(self._revision)),
-                _etag(content),
-                len(content),
-                False,
-                self._root.root_id,
-                self._root.digest,
-                timestamp,
+    def _commit_locked(self, desired_by_asset: Mapping[AssetKey, Mapping[str, _DesiredEntry]], delete_origins: "Mapping[AssetKey, AssetDeleteOrigin | None]") -> "dict[AssetKey, AssetInfo]":
+        mutations = {asset: desired for asset, desired in desired_by_asset.items() if self._asset_changed(asset, desired, delete_origins.get(asset))}
+        if not mutations:
+            return {asset: info for asset, info in self._assets.items() if asset in desired_by_asset}
+        self._store_revision += 1
+        store_revision = self._store_token()
+        results: dict[AssetKey, AssetInfo] = {}
+        for asset, desired in mutations.items():
+            previous = self._assets.get(asset)
+            asset_revision = AssetRevision(1 if previous is None else previous.revision.value + 1)
+            deleted_by = delete_origins.get(asset)
+            active_entries = [item for path, item in desired.items() if not item.deleted]
+            container_deleted = deleted_by is not None or not active_entries
+            if deleted_by is None and not active_entries and previous is not None and previous.deleted_by is not None:
+                deleted_by = previous.deleted_by
+                container_deleted = True
+            entries = self._materialize_entries(asset, desired, asset_revision, store_revision)
+            tree_etag = _tree_etag(entries)
+            source_layers = tuple(sorted({"source" if item.origin == "SOURCE" else "override" for item in entries}))
+            composition_digest = canonical_sha256(
+                {
+                    "source": sorted((path, digest) for path, (_content, digest) in self._source_files.get(asset, {}).items()),
+                    "overrides": sorted((path, _etag(content)) for path, content in self._overrides.get(asset, {}).items()),
+                    "tombstones": sorted(self._tombstones.get(asset, set())),
+                }
             )
-            self._entries[key] = (info, content)
-            self._versions.setdefault(key, []).append((info, content))
+            info = AssetInfo(asset, asset_revision, store_revision, empty_etag() if container_deleted else tree_etag, 0 if container_deleted else sum(item.size for item in entries if not item.deleted), 0 if container_deleted else sum(not item.deleted for item in entries), container_deleted, deleted_by if container_deleted else None, composition_digest, source_layers, datetime.now(timezone.utc))
+            self._assets[asset] = info
+            for item in entries:
+                self._entries[item.key] = item
+            manifest = _Manifest(info, tuple(_snapshot(item, self._contents.get(item.key, b"")) for item in sorted(entries, key=lambda value: value.key.rel_path)))
+            self._asset_history.setdefault(asset, {})[asset_revision.value] = manifest
+            results[asset] = info
+        return results
 
-    def _load_history(self) -> None:
-        self._versions.clear()
-        if not self._history_directory.exists():
-            return
-        for history in sorted(self._history_directory.rglob("*.json")):
-            raw = read_json(history)
-            info = _info_from_json(raw, self._root)
-            expected = self._history_path(info.key, info.entry_revision)
-            if history.resolve() != expected.resolve():
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            encoded = raw.get("content")
-            if not isinstance(encoded, str):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            try:
-                content = base64.b64decode(encoded, validate=True)
-            except (ValueError, binascii.Error) as exc:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
-            if info.deleted:
-                content = b""
-            elif _etag(content) != info.etag or len(content) != info.size:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            versions = self._versions.setdefault(info.key, [])
-            if any(existing.entry_revision == info.entry_revision for existing, _ in versions):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            versions.append((info, content))
-        for versions in self._versions.values():
-            versions.sort(key=lambda item: item[0].entry_revision.value)
+    def _materialize_entries(self, asset: AssetKey, desired: Mapping[str, _DesiredEntry], asset_revision: AssetRevision, store_revision: AssetStoreRevision) -> tuple[AssetEntryInfo, ...]:
+        result: list[AssetEntryInfo] = []
+        for path, state in sorted(desired.items()):
+            key = AssetEntryKey(asset, path)
+            previous = self._entries.get(key)
+            if previous is None or _entry_state(previous, self._contents.get(key, b"")) != state:
+                history = self._entry_history.setdefault(key, {})
+                next_revision = AssetEntryRevision(max((value for value in history), default=0) + 1)
+                content = b"" if state.deleted else state.content
+                version = AssetEntryVersion(next_revision, _etag(content), len(content), datetime.now(timezone.utc), state.deleted, state.origin, state.source_digest)
+                history[next_revision.value] = (version, content)
+                self._contents[key] = content
+                self._overrides.setdefault(asset, {}).pop(path, None)
+                self._tombstones.setdefault(asset, set()).discard(path)
+                if state.origin == "OVERRIDE" and not state.deleted:
+                    self._overrides.setdefault(asset, {})[path] = state.content
+                elif state.origin == "TOMBSTONE":
+                    self._tombstones.setdefault(asset, set()).add(path)
+                info = _entry_info(key, next_revision, asset_revision, store_revision, state, content)
+            else:
+                info = AssetEntryInfo(key, key.file_id, previous.entry_revision, asset_revision, store_revision, previous.etag, previous.size, previous.deleted, previous.origin, previous.source_digest, previous.layer, previous.writable, previous.modified_at)
+            result.append(info)
+        return tuple(result)
 
-    def _history_path(self, key: AssetKey, revision: AssetRevision) -> Path:
-        asset_path(self._root, key)
-        return self._history_directory / key.kind / key.id / f"{revision.value}.json"
+    def _asset_changed(self, asset: AssetKey, desired: Mapping[str, _DesiredEntry], deleted_by: "AssetDeleteOrigin | None") -> bool:
+        current = self._assets.get(asset)
+        if current is None:
+            return bool(desired)
+        if current.deleted_by == "OVERRIDE" and deleted_by == "OVERRIDE":
+            return False
+        if current.deleted_by != deleted_by and (deleted_by is not None or current.deleted_by is not None):
+            return True
+        current_states = {key.rel_path: _entry_state(info, self._contents.get(key, b"")) for key, info in self._entries.items() if key.asset == asset}
+        return current_states != dict(desired)
 
-    def _journal_path(self, payload: 'dict[str, str | int | bool | None]', name: str, journal: Path) -> Path:
-        value = payload.get(name)
-        if not isinstance(value, str) or not value:
-            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-        candidate = Path(value).resolve()
-        root = self._directory.resolve()
-        try:
-            candidate.relative_to(root)
-        except ValueError as exc:
-            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED) from exc
-        if name.startswith("temporary_"):
-            if candidate.parent == self._transaction_directory.resolve() or not candidate.name.startswith(".") or not candidate.name.endswith(".tmp"):
-                raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-        elif name in {"content", "metadata"} and candidate.parent == self._transaction_directory.resolve():
-            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-        if journal.resolve().parent != self._transaction_directory.resolve():
-            raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED)
-        return candidate
+    def _check_asset_cas(self, asset: AssetKey, expected: "AssetRevision | None") -> None:
+        if expected is not None and (self._assets.get(asset) is None or self._assets[asset].revision != expected):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
-    def _transaction_directory_fdatasync(self) -> None:
-        descriptor = os.open(self._transaction_directory, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+    @staticmethod
+    def _check_entry_cas(current: "AssetEntryInfo | None", expected: "AssetEntryRevision | None") -> None:
+        if expected is not None and (current is None or current.entry_revision != expected):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    def _store_token(self) -> AssetStoreRevision:
+        return AssetStoreRevision(str(self._store_revision))
 
     def _require_writable(self) -> None:
         if not self._writable:
             raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
+    def _dump_state(self) -> "dict[str, object]":
+        return {
+            "store_revision": self._store_revision,
+            "assets": [
+                _encode_manifest(manifest)
+                for histories in self._asset_history.values()
+                for manifest in histories.values()
+            ],
+        }
 
-def _check_entry_revision(previous: 'tuple[AssetInfo, bytes] | None', expected: 'AssetRevision | None') -> None:
-    if expected is not None and (previous is None or previous[0].entry_revision != expected):
-        raise AIError(ErrorCode.ASSET_REVISION_CONFLICT)
+    def _load_state(self, raw: object) -> None:
+        if not isinstance(raw, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._store_revision = int(raw.get("store_revision", 0))
+        for item in raw.get("assets", []):
+            if not isinstance(item, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            manifest = _decode_manifest(item)
+            self._assets[manifest.info.key] = manifest.info
+            self._asset_history.setdefault(manifest.info.key, {})[manifest.info.revision.value] = manifest
+            for snapshot in manifest.files:
+                info = _entry_info_from_snapshot(snapshot, manifest.info)
+                self._entries[snapshot.key] = info
+                self._contents[snapshot.key] = snapshot.content or b""
+                version = AssetEntryVersion(snapshot.entry_revision, snapshot.etag, len(snapshot.content or b""), manifest.info.modified_at, snapshot.deleted, snapshot.origin, snapshot.source_digest)
+                self._entry_history.setdefault(snapshot.key, {})[snapshot.entry_revision.value] = (version, snapshot.content or b"")
+                if snapshot.origin == "OVERRIDE" and not snapshot.deleted:
+                    self._overrides.setdefault(snapshot.key.asset, {})[snapshot.key.rel_path] = snapshot.content or b""
+                if snapshot.origin == "TOMBSTONE":
+                    self._tombstones.setdefault(snapshot.key.asset, set()).add(snapshot.key.rel_path)
+
+
+def _entry_state(info: AssetEntryInfo, content: bytes) -> _DesiredEntry:
+    return _DesiredEntry(content, info.deleted, info.origin, info.source_digest)
+
+
+def _entry_info(key: AssetEntryKey, revision: AssetEntryRevision, asset_revision: AssetRevision, store_revision: AssetStoreRevision, state: _DesiredEntry, content: bytes) -> AssetEntryInfo:
+    return AssetEntryInfo(key, key.file_id, revision, asset_revision, store_revision, _etag(content), len(content), state.deleted, state.origin, state.source_digest, "source" if state.origin == "SOURCE" else "primary", state.origin != "SOURCE", datetime.now(timezone.utc))
+
+
+def _entry_info_from_snapshot(snapshot: AssetEntrySnapshot, asset: AssetInfo) -> AssetEntryInfo:
+    return AssetEntryInfo(snapshot.key, snapshot.key.file_id, snapshot.entry_revision, asset.revision, asset.store_revision, snapshot.etag, len(snapshot.content or b""), snapshot.deleted, snapshot.origin, snapshot.source_digest, "source" if snapshot.origin == "SOURCE" else "primary", snapshot.origin != "SOURCE", asset.modified_at)
+
+
+def _snapshot(info: AssetEntryInfo, content: bytes) -> AssetEntrySnapshot:
+    return AssetEntrySnapshot(info.key, info.entry_revision, info.etag, info.deleted, info.origin, info.source_digest, None if info.deleted else content)
+
+
+def _tree_etag(entries: Sequence[AssetEntryInfo]) -> str:
+    return canonical_sha256([{"path": item.key.rel_path, "etag": item.etag, "deleted": item.deleted} for item in sorted(entries, key=lambda value: value.key.rel_path)])
+
+
+def _asset_version(info: AssetInfo) -> AssetVersion:
+    return AssetVersion(info.revision, info.etag, info.size, info.file_count, info.composition_digest, info.modified_at, info.deleted, info.deleted_by)
 
 
 def _etag(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _revision_number(revision: AssetStoreRevision) -> int:
-    try:
-        return int(revision.value)
-    except ValueError as exc:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from exc
+def _encode_manifest(manifest: _Manifest) -> "dict[str, object]":
+    info = manifest.info
+    return {"key": [info.key.kind, info.key.id], "revision": info.revision.value, "store_revision": info.store_revision.value, "etag": info.etag, "size": info.size, "file_count": info.file_count, "deleted": info.deleted, "deleted_by": info.deleted_by, "composition_digest": info.composition_digest, "source_layers": list(info.source_layers), "modified_at": info.modified_at.isoformat(), "files": [{"path": item.key.rel_path, "entry_revision": item.entry_revision.value, "etag": item.etag, "deleted": item.deleted, "origin": item.origin, "source_digest": item.source_digest, "content": None if item.content is None else base64.b64encode(item.content).decode("ascii")} for item in manifest.files]}
 
 
-def _info_json(info: AssetInfo) -> 'dict[str, str | int | bool | None]':
-    return {
-        "kind": info.key.kind,
-        "id": info.key.id,
-        "entry_revision": info.entry_revision.value,
-        "store_revision": info.store_revision.value,
-        "etag": info.etag,
-        "size": info.size,
-        "deleted": info.deleted,
-        "root_id": info.root_id,
-        "root_digest": info.root_digest,
-        "modified_at": info.modified_at.isoformat(),
-    }
-
-
-def _info_from_json(value: 'dict[str, str | int | bool | None]', root: AssetRoot) -> AssetInfo:
-    required = ("kind", "id", "entry_revision", "store_revision", "etag", "size", "deleted", "root_id", "root_digest", "modified_at")
-    if any(key not in value for key in required):
+def _decode_manifest(raw: "dict[str, object]") -> _Manifest:
+    key_value = raw.get("key")
+    if not isinstance(key_value, list) or len(key_value) != 2:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    key = AssetKey(str(value["kind"]), str(value["id"]))
-    asset_path(root, key)
-    entry_revision = _positive_int(value["entry_revision"], ErrorCode.STORAGE_INTEGRITY_ERROR)
-    store_revision = _positive_int(value["store_revision"], ErrorCode.STORAGE_INTEGRITY_ERROR)
-    etag = str(value["etag"])
-    if len(etag) != 64 or any(character not in "0123456789abcdef" for character in etag):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if not isinstance(value["deleted"], bool):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if value["deleted"] and (etag != _EMPTY_ETAG or int(str(value["size"])) != 0):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    modified_at = datetime.fromisoformat(str(value["modified_at"]))
-    if modified_at.tzinfo is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return AssetInfo(
-        key,
-        AssetRevision(entry_revision),
-        AssetStoreRevision(str(store_revision)),
-        etag,
-        _positive_int(value["size"], ErrorCode.STORAGE_INTEGRITY_ERROR),
-        bool(value["deleted"]),
-        str(value["root_id"]),
-        str(value["root_digest"]),
-        modified_at,
-    )
+    key = AssetKey(str(key_value[0]), str(key_value[1]))
+    info = AssetInfo(key, AssetRevision(int(raw["revision"])), AssetStoreRevision(str(raw["store_revision"])), str(raw["etag"]), int(raw["size"]), int(raw["file_count"]), bool(raw["deleted"]), raw.get("deleted_by"), str(raw["composition_digest"]), tuple(str(item) for item in raw.get("source_layers", [])), datetime.fromisoformat(str(raw["modified_at"])))
+    files = []
+    for value in raw.get("files", []):
+        if not isinstance(value, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        content = value.get("content")
+        decoded = None if content is None else base64.b64decode(str(content), validate=True)
+        files.append(AssetEntrySnapshot(AssetEntryKey(key, str(value["path"])), AssetEntryRevision(int(value["entry_revision"])), str(value["etag"]), bool(value["deleted"]), value["origin"], value.get("source_digest"), decoded))
+    return _Manifest(info, tuple(files))
 
 
-def _version_json(info: AssetInfo, value: bytes) -> 'dict[str, str | int | bool | None]':
-    result = _info_json(info)
-    result["content"] = base64.b64encode(value).decode("ascii")
-    return result
-
-
-def _journal_matches_info(
-    payload: 'dict[str, str | int | bool | None]',
-    info: AssetInfo,
-    deleted: bool,
-) -> bool:
-    asset_key = payload.get("asset_key")
-    if asset_key != f"{info.key.kind}/{info.key.id}":
-        return False
-    if payload.get("kind") != info.key.kind or payload.get("id") != info.key.id:
-        return False
-    if payload.get("deleted") is not deleted:
-        return False
-    if payload.get("new_content_digest") != info.etag or payload.get("content_etag") != info.etag:
-        return False
-    if payload.get("entry_revision") != info.entry_revision.value:
-        return False
-    if payload.get("store_revision") != info.store_revision.value or payload.get("revision") != info.store_revision.value:
-        return False
-    old_content_digest = payload.get("old_content_digest")
-    old_store_revision = payload.get("old_store_revision")
-    if info.entry_revision.value == 0:
-        return old_content_digest is None and old_store_revision is None
-    if not isinstance(old_content_digest, str) or not isinstance(old_store_revision, str):
-        return False
-    try:
-        return int(old_store_revision) < int(info.store_revision.value)
-    except ValueError:
-        return False
-
-
-def _positive_int(value: 'str | int | bool | None', code: ErrorCode) -> int:
-    if isinstance(value, bool):
-        raise AIError(code)
-    try:
-        result = int(str(value))
-    except (TypeError, ValueError) as exc:
-        raise AIError(code) from exc
-    if result < 0:
-        raise AIError(code)
-    return result
-
-
-def _metadata_path(content: Path) -> Path:
-    return content.with_name(f"{content.name}.meta")
-
-
-def filesystem_root(locator: str) -> AssetRoot:
-    path = Path(locator).resolve()
-    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
-    return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
-
-
-def asset_path(root: AssetRoot, key: AssetKey) -> Path:
-    if root.scheme != "file" or not key.kind or not key.id:
-        raise AIError(ErrorCode.ASSET_PATH_ABSOLUTE)
-    if key.kind in _RESERVED_ROOT_NAMES:
-        raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
-    for index, value in enumerate((key.kind, key.id)):
-        if (
-            not value
-            or len(value.encode("utf-8")) > 512
-            or "\x00" in value
-            or "\\" in value
-            or (index == 0 and "/" in value)
-            or value in {".", ".."}
-            or any(part in {".", ".."} for part in Path(value).parts)
-        ):
-            raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT)
-        if Path(value).is_absolute() or (len(value) > 1 and value[1] == ":"):
-            raise AIError(ErrorCode.ASSET_PATH_ABSOLUTE)
-    root_path = Path(root.locator).resolve()
-    relative = Path(key.kind) / key.id
-    candidate = (root_path / relative).resolve()
-    try:
-        candidate.relative_to(root_path)
-    except ValueError as exc:
-        raise AIError(ErrorCode.ASSET_PATH_OUTSIDE_ROOT) from exc
-    return candidate
-
-
-__all__ = ["FilesystemAssetBackend", "InMemoryAssetBackend"]
+__all__ = ["InMemoryAssetBackend"]

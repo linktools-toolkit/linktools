@@ -14,11 +14,10 @@ from ._assembly import AppServices
 class CliApplication:
     services: AppServices
 
-    async def run(self, prompt: str, *, memory_namespace: str, principal_id: str = "local") -> ExecutionHandle:
+    async def run(self, prompt: str, *, binding_digest: str, memory_namespace: str, principal_id: str = "local") -> ExecutionHandle:
         principal = trusted_workspace_principal(principal_id)
         request = ExecutionRequest(prompt=prompt, principal=principal, idempotency_key=uuid4().hex, memory_namespace=memory_namespace)
-        runtime = await self.services.runtime_factory.build_for_request(request)
-        return await runtime.execution.run(request)
+        return await self.services.runtime_services.execution.run(binding_digest, request)
 
 
 __all__ = ["CliApplication"]

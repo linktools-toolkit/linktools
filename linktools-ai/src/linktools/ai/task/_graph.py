@@ -94,6 +94,7 @@ class TaskTerminalRecord:
     error_code: "str | None"
     error_digest: "str | None"
     completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
         if self.completed_at.tzinfo is None:
@@ -106,11 +107,11 @@ class TaskCompletionLedger:
     def __init__(self) -> None:
         self._records: dict[str, TaskTerminalRecord] = {}
 
-    def complete(self, task_id: str, owner: str, fence: int, result_digest: str) -> TaskTerminalRecord:
+    def complete(self, task_id: str, owner: str, fence: int, result_digest: str, execution_id: "str | None" = None) -> TaskTerminalRecord:
         if not result_digest:
             raise ValueError("result digest is required")
         return self._apply(
-            TaskTerminalRecord(task_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None)
+            TaskTerminalRecord(task_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
         )
 
     def fail(self, task_id: str, owner: str, fence: int, error_code: str, error_digest: str) -> TaskTerminalRecord:
@@ -156,6 +157,7 @@ def _same_terminal_result(left: TaskTerminalRecord, right: TaskTerminalRecord) -
         and left.result_digest == right.result_digest
         and left.error_code == right.error_code
         and left.error_digest == right.error_digest
+        and left.execution_id == right.execution_id
     )
 
 
@@ -176,6 +178,17 @@ class TaskGraphResult:
     graph_id: str
     status: TaskStatus
     execution_ids: "tuple[str, ...]"
+    node_results: "tuple[TaskNodeResult, ...]" = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TaskNodeResult:
+    task_id: str
+    status: TaskStatus
+    execution_id: "str | None"
+    result_digest: "str | None"
+    error_code: "str | None"
+    error_digest: "str | None"
 
 
 @dataclass(frozen=True, slots=True)

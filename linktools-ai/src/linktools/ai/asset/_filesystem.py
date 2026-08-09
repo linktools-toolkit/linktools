@@ -1,168 +1,141 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Content-oriented filesystem asset store with atomic batch operations."""
+"""Crash-recoverable filesystem AssetStore backend."""
 
-import asyncio
-from dataclasses import dataclass
+import hashlib
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Literal
 
 from linktools.core import environ
 
-from ..errors import AssetConflictError
-from ..storage import atomic_write_bytes, read_bytes
-from ._content import AssetContent, AssetContentInfo, compute_asset_etag
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
+from ..storage import read_json, write_json_atomic
+from ._backend import InMemoryAssetBackend
+from ._domain import (
+    AssetDeleteResult,
+    AssetEntryBatchResult,
+    AssetEntryChange,
+    AssetEntryDeleteResult,
+    AssetEntryInfo,
+    AssetEntryKey,
+    AssetEntryRevision,
+    AssetInfo,
+    AssetKey,
+    AssetRevision,
+    AssetRoot,
+    AssetStoreRevision,
+)
 
 _logger = environ.get_logger("ai.asset.filesystem")
 
 
-@runtime_checkable
-class AssetPathAdapter(Protocol):
-    def to_disk(self, asset_path: str) -> str: ...
+class FilesystemAssetBackend(InMemoryAssetBackend):
+    """Filesystem backend persisting the same tree ledger as the memory backend."""
 
-    def from_disk(self, disk_path: str) -> str: ...
+    def __init__(self, root: "AssetRoot | str", *, writable: bool = True) -> None:
+        resolved = filesystem_root(root) if isinstance(root, str) else root
+        if resolved.scheme != "file":
+            raise ValueError("FilesystemAssetBackend requires a filesystem root")
+        super().__init__(resolved, writable=writable)
+        self._directory = Path(resolved.locator)
+        self._state_path = self._directory / ".asset-tree.json"
 
+    async def initialize(self) -> None:
+        async with self._lock:
+            self._directory.mkdir(parents=True, exist_ok=True)
+            if self._state_path.exists():
+                self._load_state(read_json(self._state_path))
+        _logger.info("filesystem asset tree initialized: root=%s revision=%s", self._directory, self._store_revision)
 
-@dataclass(frozen=True, slots=True)
-class _IdentityAssetPathAdapter:
-    def to_disk(self, asset_path: str) -> str:
-        return asset_path
+    def _persist(self) -> None:
+        write_json_atomic(self._state_path, self._dump_state(), fsync=True)
 
-    def from_disk(self, disk_path: str) -> str:
-        return disk_path
-
-
-@dataclass(frozen=True, slots=True)
-class PrefixAssetPathAdapter:
-    mapping: "Mapping[str, str]"
-
-    def to_disk(self, asset_path: str) -> str:
-        kind, separator, rest = asset_path.partition("/")
-        return f"{self.mapping.get(kind, kind)}{separator}{rest}"
-
-    def from_disk(self, disk_path: str) -> str:
-        source_root, separator, rest = disk_path.partition("/")
-        reverse = {value: key for key, value in self.mapping.items()}
-        return f"{reverse.get(source_root, source_root)}{separator}{rest}"
-
-
-_IDENTITY = _IdentityAssetPathAdapter()
-
-
-class FilesystemAssetContentStore:
-    def __init__(
+    async def put_file(
         self,
-        root: "str | Path" = ".linktools",
+        key: AssetEntryKey,
+        value: bytes,
         *,
-        path_adapter: "AssetPathAdapter | None" = None,
-    ) -> None:
-        self.root = Path(root)
-        self._adapter = path_adapter or _IDENTITY
-
-    async def initialize_storage(self) -> None:
-        await asyncio.to_thread(self.root.mkdir, parents=True, exist_ok=True)
-        _logger.debug("initialized filesystem asset content store: root=%s", self.root)
-
-    async def get(self, path: str) -> "AssetContent | None":
-        target = self._resolve(path)
-        try:
-            content = await asyncio.to_thread(read_bytes, target)
-        except FileNotFoundError:
-            return None
-        return AssetContent(_info(path, content), content)
-
-    async def get_many(self, paths: "tuple[str, ...]") -> "dict[str, AssetContent]":
-        result: dict[str, AssetContent] = {}
-        for path in paths:
-            content = await self.get(path)
-            if content is not None:
-                result[path] = content
+        primary_path: str,
+        expected_entry_revision: "AssetEntryRevision | None",
+        expected_revision: "AssetRevision | None",
+    ) -> AssetEntryInfo:
+        result = await super().put_file(key, value, primary_path=primary_path, expected_entry_revision=expected_entry_revision, expected_revision=expected_revision)
+        self._persist()
         return result
 
-    async def stat(self, path: str) -> "AssetContentInfo | None":
-        content = await self.get(path)
-        return None if content is None else content.info
-
-    async def list_info(self, *, kind: "str | None" = None) -> "tuple[AssetContentInfo, ...]":
-        root = self.root.resolve()
-        adapter = self._adapter
-
-        def scan() -> "tuple[tuple[str, bytes], ...]":
-            if not root.exists():
-                return ()
-            found: list[tuple[str, bytes]] = []
-            for file in root.rglob("*"):
-                if not file.is_file():
-                    continue
-                asset_path = adapter.from_disk(file.relative_to(root).as_posix())
-                if kind is None or _kind_of(asset_path) == kind:
-                    found.append((asset_path, file.read_bytes()))
-            return tuple(sorted(found, key=lambda item: item[0]))
-
-        return tuple(_info(path, content) for path, content in await asyncio.to_thread(scan))
-
-    async def put(self, entry: AssetContent) -> "tuple[AssetContent, None]":
-        entry.validate_etag()
-        await asyncio.to_thread(atomic_write_bytes, self._resolve(entry.info.path), entry.content)
-        _logger.info("stored filesystem asset content: path=%s", entry.info.path)
-        return entry, None
-
-    async def delete(self, path: str) -> None:
-        await asyncio.to_thread(_unlink_if_exists, self._resolve(path))
-        _logger.info("deleted filesystem asset content: path=%s", path)
-
-    async def reset(self, entries: "tuple[AssetContent, ...]") -> None:
-        for entry in entries:
-            entry.validate_etag()
-        keep = {entry.info.path for entry in entries}
-        for info in await self.list_info():
-            if info.path not in keep:
-                await asyncio.to_thread(_unlink_if_exists, self._resolve(info.path))
-        for entry in entries:
-            await asyncio.to_thread(atomic_write_bytes, self._resolve(entry.info.path), entry.content)
-
-    async def apply_batch(
+    async def delete_file(
         self,
-        puts: "tuple[AssetContent, ...]",
-        deletes: "tuple[str, ...]",
-    ) -> None:
-        for entry in puts:
-            entry.validate_etag()
-        put_paths = {entry.info.path for entry in puts}
-        for entry in puts:
-            await asyncio.to_thread(atomic_write_bytes, self._resolve(entry.info.path), entry.content)
-        for path in deletes:
-            if path not in put_paths:
-                await asyncio.to_thread(_unlink_if_exists, self._resolve(path))
+        key: AssetEntryKey,
+        *,
+        primary_path: str,
+        expected_entry_revision: AssetEntryRevision | None,
+        expected_revision: AssetRevision | None,
+    ) -> AssetEntryDeleteResult:
+        result = await super().delete_file(key, primary_path=primary_path, expected_entry_revision=expected_entry_revision, expected_revision=expected_revision)
+        self._persist()
+        return result
 
-    def _resolve(self, path: str) -> Path:
-        if not path or "\x00" in path:
-            raise AssetConflictError(f"invalid asset path: {path!r}")
-        target = (self.root / self._adapter.to_disk(path)).resolve()
-        root = self.root.resolve()
-        try:
-            target.relative_to(root)
-        except ValueError as error:
-            raise AssetConflictError(f"asset path escapes root: {path!r}") from error
-        return target
+    async def apply_file_batch(
+        self,
+        asset: AssetKey,
+        changes: "Sequence[AssetEntryChange]",
+        *,
+        primary_path: str,
+        expected_revision: "AssetRevision | None",
+        expected_store_revision: "AssetStoreRevision | None",
+    ) -> AssetEntryBatchResult:
+        result = await super().apply_file_batch(asset, changes, primary_path=primary_path, expected_revision=expected_revision, expected_store_revision=expected_store_revision)
+        self._persist()
+        return result
+
+    async def apply_asset_batch(
+        self,
+        changes: "Sequence[tuple[AssetKey, bytes | None, str, Literal['PUT', 'DELETE'], AssetRevision | None]]",
+        *,
+        expected_store_revision: AssetStoreRevision | None,
+    ) -> "tuple[AssetInfo | AssetDeleteResult, ...]":
+        result = await super().apply_asset_batch(changes, expected_store_revision=expected_store_revision)
+        self._persist()
+        return result
+
+    async def replace_tree(
+        self,
+        asset: AssetKey,
+        files: "Mapping[str, bytes]",
+        *,
+        deleted_rel_paths: "Collection[str]",
+        primary_path: str,
+        expected_revision: "AssetRevision | None",
+    ) -> AssetInfo:
+        result = await super().replace_tree(asset, files, deleted_rel_paths=deleted_rel_paths, primary_path=primary_path, expected_revision=expected_revision)
+        self._persist()
+        return result
+
+    async def delete_asset(self, key: AssetKey, *, expected_revision: AssetRevision | None) -> "tuple[bool, AssetInfo | None]":
+        result = await super().delete_asset(key, expected_revision=expected_revision)
+        self._persist()
+        return result
+
+    async def restore_asset(self, key: AssetKey, revision: AssetRevision, *, expected_revision: AssetRevision) -> AssetInfo:
+        result = await super().restore_asset(key, revision, expected_revision=expected_revision)
+        self._persist()
+        return result
+
+    async def rename_asset(self, source: AssetKey, target: AssetKey, *, expected_source_revision: AssetRevision) -> AssetInfo:
+        result = await super().rename_asset(source, target, expected_source_revision=expected_source_revision)
+        self._persist()
+        return result
+
+    async def sync_sources(self, source_files: "Mapping[AssetKey, Mapping[str, tuple[bytes, str]]]", primary_paths: "Mapping[str, str]") -> AssetStoreRevision:
+        result = await super().sync_sources(source_files, primary_paths)
+        self._persist()
+        return result
 
 
-def _info(path: str, content: bytes) -> AssetContentInfo:
-    return AssetContentInfo(path, _kind_of(path), 1, compute_asset_etag(content), True)
+def filesystem_root(locator: str) -> AssetRoot:
+    path = Path(locator).resolve()
+    digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+    return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
 
 
-def _kind_of(path: str) -> str:
-    return path.split("/", 1)[0] if "/" in path else "asset"
-
-
-def _unlink_if_exists(target: Path) -> None:
-    try:
-        target.unlink(missing_ok=True)
-    except OSError as error:
-        _logger.warning("failed to delete filesystem asset file: path=%s error=%s", target, error)
-
-
-__all__ = ["AssetPathAdapter", "FilesystemAssetContentStore", "PrefixAssetPathAdapter"]
+__all__ = ["FilesystemAssetBackend", "filesystem_root"]

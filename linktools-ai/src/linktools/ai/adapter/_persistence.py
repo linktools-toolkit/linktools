@@ -896,6 +896,47 @@ class _TaskRepository(_Base):
         self._check_tenant(tenant_id)
         return self._plans.get((tenant_id, graph_id))
 
+    async def reconcile_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        async with self._lock:
+            current = self._plans.get((tenant_id, graph_id))
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            nodes = {key[2]: value for key, value in self._nodes.items() if key[:2] == (tenant_id, graph_id)}
+            if current.status is not TaskStatus.CANCELLED:
+                for task_id, node in tuple(nodes.items()):
+                    if node.status in {TaskStatus.PENDING, TaskStatus.READY}:
+                        dependencies = tuple(nodes[dependency] for dependency in node.dependencies)
+                        if any(dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED} for dependency in dependencies):
+                            nodes[task_id] = replace(node, status=TaskStatus.BLOCKED, error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value, error_digest=canonical_sha256({"graph_id": graph_id, "task_id": task_id, "reason": "dependency_failed"}))
+                        elif node.status is TaskStatus.PENDING and all(dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies):
+                            nodes[task_id] = replace(node, status=TaskStatus.READY)
+                for task_id, node in nodes.items():
+                    self._nodes[(tenant_id, graph_id, task_id)] = node
+                statuses = tuple(node.status for node in nodes.values())
+                if not statuses:
+                    status = TaskStatus.SUCCEEDED
+                elif all(value in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED} for value in statuses):
+                    if TaskStatus.FAILED in statuses:
+                        status = TaskStatus.FAILED
+                    elif TaskStatus.BLOCKED in statuses:
+                        status = TaskStatus.BLOCKED
+                    elif TaskStatus.CANCELLED in statuses:
+                        status = TaskStatus.CANCELLED
+                    else:
+                        status = TaskStatus.SUCCEEDED
+                elif TaskStatus.RUNNING in statuses:
+                    status = TaskStatus.RUNNING
+                elif TaskStatus.READY in statuses:
+                    status = TaskStatus.READY
+                else:
+                    status = TaskStatus.PENDING
+                current = replace(current, status=status)
+                self._plans[(tenant_id, graph_id)] = current
+                self._mark_changed()
+            return current
+
     async def cancel_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         self._ensure_open()
         self._check_tenant(tenant_id)
@@ -954,19 +995,19 @@ class _TaskRepository(_Base):
         self._mark_changed()
         return replace(lease, lease_expires_at=expiry)
 
-    async def complete(self, lease: TaskLease, *, tenant_id: str, result_digest: str) -> TaskTerminalRecord:
+    async def complete(self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> TaskTerminalRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
         if current is None or current.owner != lease.owner or current.fence != lease.fence:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-            if current.status is TaskStatus.SUCCEEDED and current.result_digest == result_digest:
-                return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, result_digest, None, None)
+            if current.status is TaskStatus.SUCCEEDED and current.result_digest == result_digest and current.execution_id == execution_id:
+                return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, result_digest, None, None, execution_id=execution_id)
             raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.SUCCEEDED, result_digest=result_digest, lease_expires_at=None)
+        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.SUCCEEDED, result_digest=result_digest, execution_id=execution_id, lease_expires_at=None)
         self._mark_changed()
-        return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None)
+        return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
 
     async def fail(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> TaskTerminalRecord:
         self._ensure_open()
@@ -1827,7 +1868,7 @@ def _task_plan_from_json(value: dict[str, JsonValue]) -> TaskGraphView:
 
 
 def _task_node_from_json(value: dict[str, JsonValue]) -> TaskNodeView:
-    return TaskNodeView(str(value["graph_id"]), str(value["task_id"]), tuple(value.get("dependencies", [])), TaskStatus(str(value["status"])), None if value.get("owner") is None else str(value["owner"]), int(value["fence"]), None if value.get("lease_expires_at") is None else _time(str(value["lease_expires_at"])), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), None if value.get("error_digest") is None else str(value["error_digest"]))
+    return TaskNodeView(str(value["graph_id"]), str(value["task_id"]), tuple(value.get("dependencies", [])), TaskStatus(str(value["status"])), None if value.get("owner") is None else str(value["owner"]), int(value["fence"]), None if value.get("lease_expires_at") is None else _time(str(value["lease_expires_at"])), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), None if value.get("error_digest") is None else str(value["error_digest"]), None if value.get("execution_id") is None else str(value["execution_id"]))
 
 
 def _evaluation_from_json(value: dict[str, JsonValue]) -> EvaluationRecord:

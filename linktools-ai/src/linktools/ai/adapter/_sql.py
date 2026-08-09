@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """SQL RuntimePersistence owner shared by SQLite, MySQL and PostgreSQL."""
 
-import base64
 import asyncio
+import base64
+import hashlib
 import json
 import re
-import hashlib
 from collections.abc import AsyncIterator
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -16,24 +16,60 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ..capability import ToolOperationRecord, ToolStateStore
-from ..errors import ErrorCode, AIError
-from ..core import JsonValue, canonical_json_bytes
-from ..core import Page
-from ..core import ResourceRef
 from ..core import (
-    ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType,
-    ExecutionStatus, ExternalCallStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind,
-    SessionStatus, StopReason, TaskStatus, ToolOperationStatus, ExecutionLineageKind,
+    ApprovalDecision,
+    ApprovalStatus,
+    EvaluationStatus,
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    ExternalCallStatus,
+    IdempotencyStatus,
+    JsonValue,
+    OperationKind,
+    OperationStatus,
+    Page,
+    ResourceKind,
+    ResourceRef,
+    SessionStatus,
+    StopReason,
+    TaskStatus,
+    ToolOperationStatus,
+    canonical_json_bytes,
+    canonical_sha256,
 )
+from ..errors import AIError, ErrorCode
 from ..runtime import (
-    ApprovalRecord, ArtifactRecord, BlobRef, BlobStore, EvaluationRecord, ExecutionEventRecord,
-    ExecutionRecord, ExecutionStartClaim, ExecutionStartReservation, ExecutionStartReservationResult, ExecutionCancelRequestCommit, ExecutionStartUnknownCommit, ExecutionTerminalCommit, ExecutionTerminalCommitResult, ExternalResultRecord,
-    IdempotencyRecord, MemoryRecord, OperationLedgerInput, OperationLedgerRecord, RuntimeBackend,
-    ResultRecord, RuntimePersistence, RuntimePersistenceMode, RuntimeRepository, SessionRecord,
-    TaskLease, TaskNodeView,
+    ApprovalRecord,
+    ArtifactRecord,
+    BlobRef,
+    BlobStore,
+    EvaluationRecord,
+    ExecutionCancelRequestCommit,
+    ExecutionEventRecord,
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionStartReservation,
+    ExecutionStartReservationResult,
+    ExecutionStartUnknownCommit,
+    ExecutionTerminalCommit,
+    ExecutionTerminalCommitResult,
+    ExternalResultRecord,
+    IdempotencyRecord,
+    MemoryRecord,
+    OperationLedgerInput,
+    OperationLedgerRecord,
+    ResultRecord,
+    RuntimeBackend,
+    RuntimePersistence,
+    RuntimePersistenceMode,
+    RuntimeRepository,
+    SessionRecord,
+    TaskLease,
+    TaskNodeView,
 )
-from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ..storage import StorageDatabase
+from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._schema import SqlRuntimeTables
 
 if TYPE_CHECKING:
@@ -230,6 +266,46 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         value = await self._get(graph_id, tenant_id=tenant_id, table=self._owner.tables["task_graphs"])
         return value if isinstance(value, TaskGraphView) else None
 
+    async def reconcile_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
+        view = await self.get_plan(graph_id, tenant_id=tenant_id)
+        if view is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if view.status is TaskStatus.CANCELLED:
+            return view
+        nodes = {item.task_id: item for item in await self.list_nodes(graph_id, tenant_id=tenant_id)}
+        changed: list[TaskNodeView] = []
+        for task_id, node in nodes.items():
+            dependencies = tuple(nodes[dependency] for dependency in node.dependencies)
+            next_status = node.status
+            error_code = node.error_code
+            error_digest = node.error_digest
+            if node.status in {TaskStatus.PENDING, TaskStatus.READY} and any(item.status in {TaskStatus.FAILED, TaskStatus.BLOCKED} for item in dependencies):
+                next_status = TaskStatus.BLOCKED
+                error_code = ErrorCode.TASK_DEPENDENCY_FAILED.value
+                error_digest = canonical_sha256({"graph_id": graph_id, "task_id": task_id, "reason": "dependency_failed"})
+            elif node.status is TaskStatus.PENDING and all(item.status is TaskStatus.SUCCEEDED for item in dependencies):
+                next_status = TaskStatus.READY
+            if next_status is not node.status or error_code != node.error_code or error_digest != node.error_digest:
+                updated = replace(node, status=next_status, error_code=error_code, error_digest=error_digest)
+                await self._task_update(updated, tenant_id=tenant_id, expected_status=node.status, expected_owner=node.owner, expected_fence=node.fence)
+                changed.append(updated)
+                nodes[task_id] = updated
+        statuses = tuple(item.status for item in nodes.values())
+        if not statuses:
+            graph_status = TaskStatus.SUCCEEDED
+        elif all(item in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED} for item in statuses):
+            graph_status = TaskStatus.FAILED if TaskStatus.FAILED in statuses else TaskStatus.BLOCKED if TaskStatus.BLOCKED in statuses else TaskStatus.CANCELLED if TaskStatus.CANCELLED in statuses else TaskStatus.SUCCEEDED
+        elif TaskStatus.RUNNING in statuses:
+            graph_status = TaskStatus.RUNNING
+        elif TaskStatus.READY in statuses:
+            graph_status = TaskStatus.READY
+        else:
+            graph_status = TaskStatus.PENDING
+        updated_view = replace(view, status=graph_status)
+        if updated_view != view:
+            await self._replace(updated_view, record_id=graph_id, tenant_id=tenant_id, expected_revision=0, revision=0, status=graph_status.value, table=self._owner.tables["task_graphs"])
+        return updated_view
+
     async def cancel_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         view = await self.get_plan(graph_id, tenant_id=tenant_id)
         if view is None:
@@ -251,7 +327,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         now = datetime.now(timezone.utc)
         expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= now
         if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
-            raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
+            raise AIError(ErrorCode.TASK_NOT_READY)
         lease = TaskLease(graph_id, task_id, tenant_id, owner, node.fence + 1, now + timedelta(seconds=lease_seconds))
         updated = replace(node, status=TaskStatus.RUNNING, owner=owner, fence=lease.fence, lease_expires_at=lease.lease_expires_at)
         await self._task_update(updated, tenant_id=tenant_id, expected_status=node.status, expected_owner=node.owner if expired else None, expected_fence=node.fence, expected_lease_before=now if expired else None)
@@ -263,10 +339,10 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         await self._task_update(replace(node, lease_expires_at=renewed.lease_expires_at), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=datetime.now(timezone.utc))
         return renewed
 
-    async def _complete_task(self, lease: TaskLease, *, tenant_id: str, result_digest: str) -> TaskTerminalRecord:
+    async def _complete_task(self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> TaskTerminalRecord:
         node = await self._task_node(lease, tenant_id)
-        terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None)
-        await self._task_update(replace(node, status=TaskStatus.SUCCEEDED, owner=None, lease_expires_at=None, result_digest=result_digest), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=datetime.now(timezone.utc))
+        terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
+        await self._task_update(replace(node, status=TaskStatus.SUCCEEDED, owner=None, lease_expires_at=None, result_digest=result_digest, execution_id=execution_id), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=datetime.now(timezone.utc))
         return terminal
 
     async def _fail_task(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> TaskTerminalRecord:
@@ -577,7 +653,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 return updated
 
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord:
-        from sqlalchemy import select, update, insert
+        from sqlalchemy import insert, select, update
         if self._table_name != "executions":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         event_table = self._owner.tables["execution_events"]
@@ -904,11 +980,11 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         now = datetime.now(timezone.utc)
         return await self._tool_update(replace(current, lease_expires_at=now + timedelta(seconds=lease_seconds), updated_at=now), tenant_id=tenant_id, expected_status=ToolOperationStatus.CLAIMED, expected_owner=owner, expected_fence=fence, expected_lease_after=now)
 
-    async def complete(self, operation_id: "str | TaskLease", *, tenant_id: str, owner: "str | None" = None, fence: "int | None" = None, result_ref: "str | None" = None, result_digest: str) -> "ToolOperationRecord | TaskTerminalRecord":
+    async def complete(self, operation_id: "str | TaskLease", *, tenant_id: str, owner: "str | None" = None, fence: "int | None" = None, result_ref: "str | None" = None, execution_id: "str | None" = None, result_digest: str) -> "ToolOperationRecord | TaskTerminalRecord":
         if self._table_name == "task_graphs":
             if not isinstance(operation_id, TaskLease):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-            return await self._complete_task(operation_id, tenant_id=tenant_id, result_digest=result_digest)
+            return await self._complete_task(operation_id, tenant_id=tenant_id, execution_id=execution_id, result_digest=result_digest)
         if not isinstance(operation_id, str) or owner is None or fence is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         current = await self.get_operation(operation_id, tenant_id=tenant_id)
@@ -1157,7 +1233,7 @@ def _task_graph(value: "dict[str, JsonValue]") -> TaskGraphView:
 
 
 def _task_node(value: "dict[str, JsonValue]") -> TaskNodeView:
-    return TaskNodeView(str(value["graph_id"]), str(value["task_id"]), tuple(value.get("dependencies", [])), _enum(TaskStatus, value["status"]), None if value.get("owner") is None else str(value["owner"]), int(value["fence"]), None if value.get("lease_expires_at") is None else _utc(value["lease_expires_at"]), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), None if value.get("error_digest") is None else str(value["error_digest"]))
+    return TaskNodeView(str(value["graph_id"]), str(value["task_id"]), tuple(value.get("dependencies", [])), _enum(TaskStatus, value["status"]), None if value.get("owner") is None else str(value["owner"]), int(value["fence"]), None if value.get("lease_expires_at") is None else _utc(value["lease_expires_at"]), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), None if value.get("error_digest") is None else str(value["error_digest"]), None if value.get("execution_id") is None else str(value["execution_id"]))
 
 
 def _evaluation(value: "dict[str, JsonValue]") -> EvaluationRecord:

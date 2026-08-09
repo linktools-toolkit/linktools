@@ -2,23 +2,34 @@
 # -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
-from dataclasses import dataclass
-from collections.abc import AsyncIterator, Mapping
-from typing import Protocol
-import uuid
 import secrets
 import time
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import dataclass
+from typing import Protocol
 
-from ..core import ApprovalDecision, ApprovalStatus, EvaluationStatus, ExecutionEventType, ExecutionStatus, Page, Principal, SessionStatus
-from ..errors import ErrorCode, AIError
-from ..core import validate_idempotency_key, validate_prompt, validate_resource_id
-from ..core import canonical_sha256
-from ..core import JsonValue
+from ..core import (
+    ApprovalDecision,
+    ApprovalStatus,
+    EvaluationStatus,
+    ExecutionEventType,
+    ExecutionStatus,
+    JsonValue,
+    Page,
+    Principal,
+    SessionStatus,
+    canonical_sha256,
+    validate_idempotency_key,
+    validate_prompt,
+    validate_resource_id,
+)
+from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
 from ..task import (
     CancelGraphRequest,
-    TaskGraphRequest,
     TaskGraphHandle,
+    TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
 )
@@ -123,7 +134,10 @@ class ExecutionView:
 class ExecutionResult:
     execution_id: str
     status: ExecutionStatus
-    output: str
+    output: JsonValue | None
+    output_schema_id: str
+    output_schema_revision: int
+    output_schema_fingerprint: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +154,30 @@ class TranscriptItem:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class ExecutionHistoryItem:
+    execution_id: str
+    sequence: int
+    kind: str
+    content: JsonValue
+    tool_name: "str | None" = None
+    tool_call_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.sequence < 0 or self.kind not in {"system", "user", "assistant", "tool_call", "tool_result", "retry"}:
+            raise ValueError("execution history item is invalid")
+
+
 class ExecutionHistoryReader(Protocol):
+    async def history(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> Page[ExecutionHistoryItem]: ...
+
     async def trace(
         self,
         execution_id: str,
@@ -473,11 +510,14 @@ class ExecutionService(Protocol):
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
+    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
+    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
     async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TraceItem]': ...
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
+    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
 
 
 class SessionService(Protocol):
@@ -493,7 +533,9 @@ class SessionService(Protocol):
 
 class TaskService(Protocol):
     async def run_graph(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphResult: ...
+    async def run_graph_and_wait(self, binding_digest: str, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...
+    async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult: ...
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
 
@@ -594,7 +636,7 @@ __all__ = [
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
     "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStreamItem", "ExecutionView",
-    "ExecutionHistoryReader",
+    "ExecutionHistoryItem", "ExecutionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
     "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "RuntimeServices", "SessionService", "SessionView",

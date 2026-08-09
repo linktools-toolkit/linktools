@@ -1,46 +1,67 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Execution query API and the persistence-backed default service."""
 
 import asyncio
+import hashlib
+import json
 import re
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from ..core import Page, Principal
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256, idempotency_key_hash
-from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, StopReason
 from linktools.core import environ
+
+from ..core import (
+    AuthorizationAction,
+    AuthorizationPolicy,
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    IdempotencyStatus,
+    JsonValue,
+    OperationKind,
+    OperationStatus,
+    Page,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+    StopReason,
+    canonical_sha256,
+    idempotency_key_hash,
+)
+from ..errors import AIError, ErrorCode
 from ._persistence import (
+    ExecutionCancelRequestCommit,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartUnknownCommit,
-    ExecutionCancelRequestCommit,
-    ExecutionTerminalCommit, IdempotencyTerminalUpdate, OperationTerminalUpdate,
+    ExecutionTerminalCommit,
     IdempotencyRecord,
+    IdempotencyTerminalUpdate,
     OperationLedgerInput,
     OperationLedgerRecord,
+    OperationTerminalUpdate,
     ResultRecord,
     RuntimePersistence,
 )
 from ._services import (
+    BlobPayloadService,
     CancelExecutionRequest,
     CancelExecutionResult,
     ExecutionHandle,
+    ExecutionHistoryItem,
+    ExecutionHistoryReader,
     ExecutionRequest,
     ExecutionResult,
     ExecutionView,
     ForkExecutionRequest,
+    PayloadRef,
     RetryExecutionRequest,
     TraceItem,
     TranscriptItem,
-    ExecutionHistoryReader,
 )
 
 _logger = environ.get_logger("ai.runtime.execution")
@@ -49,12 +70,15 @@ _logger = environ.get_logger("ai.runtime.execution")
 class ExecutionQueryApi(Protocol):
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
+    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
     async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TraceItem]': ...
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
+    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
 
 
 class ExecutionApi(ExecutionQueryApi, Protocol):
     async def run(self, request: ExecutionRequest) -> ExecutionHandle: ...
+    async def run_and_wait(self, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
     async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
@@ -63,6 +87,11 @@ class ExecutionApi(ExecutionQueryApi, Protocol):
 class ExecutionLauncher(Protocol):
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
+
+
+@runtime_checkable
+class BindingDigestValidator(Protocol):
+    def validate_binding(self, binding_digest: str) -> None: ...
 
 
 class CancelEffectOutcome(StrEnum):
@@ -101,6 +130,8 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if isinstance(self._launcher, BindingDigestValidator):
+            self._launcher.validate_binding(binding_digest)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         if not allow_legacy_memory_namespace and (not isinstance(request.memory_namespace, str) or request.memory_namespace == ""):
@@ -232,7 +263,44 @@ class DefaultExecutionService:
         result = await self._persistence.results.get(execution_id, tenant_id=principal.tenant_id)
         if result is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return ExecutionResult(execution.execution_id, result.status, result.payload_ref or "")
+        if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            return ExecutionResult(execution.execution_id, result.status, None, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
+        if not result.payload_ref or not result.payload_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            payload = await BlobPayloadService(self._persistence.blobs, tenant_id=principal.tenant_id).load(PayloadRef(result.payload_ref))
+            if hashlib.sha256(payload).hexdigest() != result.payload_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if result.output_schema_id == "text":
+                output: JsonValue = payload.decode("utf-8")
+            else:
+                decoded = json.loads(payload.decode("utf-8"))
+                output = decoded
+            return ExecutionResult(execution.execution_id, result.status, output, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
+        except AIError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        if timeout_seconds is not None and timeout_seconds < 0:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+        async def poll() -> ExecutionResult:
+            while True:
+                view = await self.inspect(execution_id, principal=principal)
+                if view.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                    return await self.result(execution_id, principal=principal)
+                await asyncio.sleep(0.05)
+
+        try:
+            return await asyncio.wait_for(poll(), timeout_seconds)
+        except asyncio.TimeoutError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "execution wait timed out") from error
+
+    async def run_and_wait(self, binding_digest: str, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        handle = await self.run(binding_digest, request)
+        return await self.wait(handle.execution_id, principal=request.principal, timeout_seconds=timeout_seconds)
 
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
@@ -496,6 +564,10 @@ class DefaultExecutionService:
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[TranscriptItem]:
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.transcript(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
+
+    async def history(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> "Page[ExecutionHistoryItem]":
+        record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        return await self._history_reader.history(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
 
     async def _load_authorized(self, execution_id: str, principal: Principal, action: AuthorizationAction) -> ExecutionRecord:
         header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)

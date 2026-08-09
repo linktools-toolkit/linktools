@@ -7,11 +7,11 @@ from collections.abc import AsyncIterator
 
 from linktools.core import environ
 
-from ..agent import AgentBinding
+from ..agent import AgentBinding, AgentCatalogView, BindingDependencies, BindingExecutionRegistry, build_binding_plan
+from pydantic_ai_harness.step_persistence import StepStore
 from ..capability import MCPToolProvider, SkillProvider, ToolPolicy, ToolStateStore, Sandbox
 from ..core import Page, Principal, PrincipalProvider
 from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256
 from ..model import ModelResolver
 from ..observe import MiddlewarePipeline
 from ..observe import RunSnapshot
@@ -43,6 +43,7 @@ from ..runtime import (
     EventService,
     ExecutionEvent,
     ExecutionHandle,
+    ExecutionHistoryItem,
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
@@ -105,6 +106,19 @@ class RuntimeDependencies:
     tool_state: ToolStateStore
     principal_provider: PrincipalProvider
     services: RuntimeServices
+    binding_registry: "BindingExecutionRegistry | None" = None
+
+    @property
+    def binding(self) -> BindingDependencies:
+        return BindingDependencies(
+            self.model_resolver,
+            self.skill_provider,
+            self.mcp_provider,
+            self.middleware,
+            self.sandbox,
+            self.tool_policy,
+            self.output_types,
+        )
 
 
 def build_runtime(
@@ -131,41 +145,47 @@ def build_runtime(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not spec.id or not prompt.id or spec.revision < 1 or prompt.revision < 1:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "invalid Agent or Prompt revision")
-    route = dependencies.model_resolver.resolve(spec.model)
-    model_revision = dependencies.model_resolver.snapshot().revision
-    spec_fingerprint = canonical_sha256(
-        {
-            "id": spec.id,
-            "revision": spec.revision,
-            "model": spec.model,
-            "features": [
-                {"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)}
-                for feature in spec.features
-            ],
-            "output_schema": spec.output_schema,
-            "output_schema_revision": spec.output_schema_revision,
-            "instructions": list(spec.instructions),
-        }
-    )
-    prompt_fingerprint = canonical_sha256(
-        {"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions), "variables": list(prompt.variables)}
-    )
-    output_schema_fingerprint = dependencies.output_types.fingerprint(spec.output_schema, spec.output_schema_revision)
-    capability_manifest_digest = _capability_digest(spec, dependencies)
-    binding = AgentBinding(
-        spec,
-        prompt,
-        spec_fingerprint,
-        prompt_fingerprint,
-        model_revision,
-        output_schema_fingerprint,
-        capability_manifest_digest,
-        dependencies.tool_policy.fingerprint,
-        dependencies.sandbox.fingerprint,
-        dependencies.middleware.fingerprint,
-    )
+    plan = build_binding_plan(spec, prompt, dependencies=dependencies.binding)
+    if dependencies.binding_registry is not None:
+        dependencies.binding_registry.register(plan)
+    binding = plan.binding
     logger = environ.get_logger("ai.app.facade")
-    logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, route.route_id)
+    logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, plan.model_route.route_id)
+    return Runtime(
+        dependencies.services.identity,
+        binding,
+        _ExecutionApi(dependencies.services.execution, binding),
+        _SessionApi(dependencies.services.session, binding),
+        _TaskApi(dependencies.services.task, binding),
+        _EvaluationApi(dependencies.services.evaluation, binding),
+        _ApprovalApi(dependencies.services.approval),
+        _EventApi(dependencies.services.event),
+        _ArtifactApi(dependencies.services.artifact),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalRuntimeDependencies:
+    binding: BindingDependencies
+    binding_registry: BindingExecutionRegistry
+    agent_catalog: AgentCatalogView
+    steps: StepStore
+    tool_state: ToolStateStore
+    principal_provider: PrincipalProvider
+    services: RuntimeServices
+
+
+def build_local_runtime(
+    spec: AgentSpec,
+    prompt: PromptSpec,
+    *,
+    dependencies: LocalRuntimeDependencies,
+) -> Runtime:
+    plan = build_binding_plan(spec, prompt, dependencies=dependencies.binding)
+    dependencies.binding_registry.register(plan)
+    binding = plan.binding
+    _logger = environ.get_logger("ai.app.facade")
+    _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.digest)
     return Runtime(
         dependencies.services.identity,
         binding,
@@ -194,39 +214,6 @@ def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
     )
 
 
-def _capability_digest(spec: AgentSpec, dependencies: RuntimeDependencies) -> str:
-    manifests: list[dict[str, str | int | bool]] = []
-    for feature in spec.features:
-        provider_digest = ""
-        try:
-            if feature.kind == "skill":
-                resolved = dependencies.skill_provider.resolve_ref(feature.id, feature.revision)
-                provider_digest = dependencies.skill_provider.manifest()
-                resolved_revision = resolved.revision
-                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "content": resolved.content})
-            elif feature.kind == "mcp":
-                resolved = dependencies.mcp_provider.resolve_ref(feature.id, feature.revision)
-                provider_digest = dependencies.mcp_provider.manifest()
-                resolved_revision = resolved.revision
-                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "command": resolved.command, "args": list(resolved.args)})
-            elif feature.kind == "subagent":
-                resolved_revision = feature.revision or 1
-                fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": resolved_revision, "config": dict(feature.config)})
-            elif feature.kind in {"tool", "sandbox", "middleware"}:
-                resolved_revision = feature.revision or 1
-                fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id})
-            else:
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING if feature.required else ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        except AIError as error:
-            if feature.required:
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING) from error
-            resolved_revision = 0
-            fingerprint = "UNRESOLVED"
-            provider_digest = "UNRESOLVED"
-        manifests.append({"kind": feature.kind, "id": feature.id, "requested_revision": feature.revision or 0, "resolved_revision": resolved_revision, "config_digest": canonical_sha256(dict(feature.config)), "fingerprint": fingerprint, "provider_manifest_digest": provider_digest, "required": feature.required})
-    return canonical_sha256({"features": sorted(manifests, key=lambda value: (str(value["kind"]), str(value["id"]), int(value["resolved_revision"])))})
-
-
 class _ExecutionApi(ExecutionApi):
     def __init__(self, service: ExecutionService, binding: AgentBinding) -> None:
         self._service = service
@@ -241,11 +228,20 @@ class _ExecutionApi(ExecutionApi):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
+    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
+
     async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[TraceItem]":
         return await self._service.trace(execution_id, principal=principal, cursor=cursor, limit=limit)
 
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[TranscriptItem]":
         return await self._service.transcript(execution_id, principal=principal, cursor=cursor, limit=limit)
+
+    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[ExecutionHistoryItem]":
+        return await self._service.history(execution_id, principal=principal, cursor=cursor, limit=limit)
+
+    async def run_and_wait(self, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        return await self._service.run_and_wait(self._binding.digest, request, timeout_seconds=timeout_seconds)
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
         return await self._service.retry(self._binding.digest, execution_id, request)
@@ -267,11 +263,17 @@ class _ExecutionAccess(ExecutionQueryApi):
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         return await self._service.result(execution_id, principal=principal)
 
+    async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        return await self._service.wait(execution_id, principal=principal, timeout_seconds=timeout_seconds)
+
     async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[TraceItem]":
         return await self._service.trace(execution_id, principal=principal, cursor=cursor, limit=limit)
 
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[TranscriptItem]":
         return await self._service.transcript(execution_id, principal=principal, cursor=cursor, limit=limit)
+
+    async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> "Page[ExecutionHistoryItem]":
+        return await self._service.history(execution_id, principal=principal, cursor=cursor, limit=limit)
 
 
 class _SessionApi(SessionApi):
@@ -326,8 +328,14 @@ class _TaskApi:
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
         return await self._service.run_graph(self._binding.digest, request)
 
+    async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult:
+        return await self._service.run_graph_and_wait(self._binding.digest, request, timeout_seconds=timeout_seconds)
+
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         return await self._service.inspect_graph(graph_id, principal=principal)
+
+    async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult:
+        return await self._service.wait_graph(graph_id, principal=principal, timeout_seconds=timeout_seconds)
 
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
         return await self._service.cancel_graph(graph_id, request)
@@ -339,6 +347,9 @@ class _TaskAccess(TaskQueryApi):
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         return await self._service.inspect_graph(graph_id, principal=principal)
+
+    async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult:
+        return await self._service.wait_graph(graph_id, principal=principal, timeout_seconds=timeout_seconds)
 
 
 class _EvaluationApi(EvaluationApi):
@@ -419,4 +430,4 @@ class _ArtifactApi:
         return await self._service.get(artifact_id, principal=principal)
 
 
-__all__ = ["RuntimeDependencies", "build_runtime", "build_runtime_access"]
+__all__ = ["LocalRuntimeDependencies", "RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]

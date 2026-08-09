@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Single-word filename and namespace-scoped package policy."""
+"""Snake-case filename and namespace-scoped package policy."""
 
 import re
 from dataclasses import dataclass
@@ -65,7 +65,7 @@ def check_names(source_root: "str | Path") -> "tuple[str, ...]":
     packages = _package_nodes(root)
     errors: list[str] = []
     for node in modules:
-        if not re.fullmatch(r"_?[a-z][a-z0-9]*", node.path.stem):
+        if not re.fullmatch(r"_?[a-z][a-z0-9]*(?:_[a-z][a-z0-9]*)*", node.path.stem):
             errors.append(str(node.path))
     for node in packages:
         if not re.fullmatch(r"[a-z][a-z0-9]*", node.path.name):

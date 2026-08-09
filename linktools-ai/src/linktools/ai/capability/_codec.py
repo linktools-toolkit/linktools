@@ -23,6 +23,10 @@ class SkillSpecCodec(AssetCodec[SkillSpec]):
         return "skill"
 
     @property
+    def primary_path(self) -> str:
+        return "SKILL.md"
+
+    @property
     def value_type(self) -> 'type[SkillSpec]':
         return SkillSpec
 
@@ -50,6 +54,10 @@ class MCPServerSpecCodec(AssetCodec[MCPServerSpec]):
     @property
     def kind(self) -> str:
         return "mcp"
+
+    @property
+    def primary_path(self) -> str:
+        return "mcp.yaml"
 
     @property
     def value_type(self) -> 'type[MCPServerSpec]':

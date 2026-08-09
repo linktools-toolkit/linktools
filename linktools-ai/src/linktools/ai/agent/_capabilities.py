@@ -9,29 +9,36 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
-from pydantic_ai_harness.compaction import ClearToolResults, DeduplicateFileReads, SummarizingCompaction, TieredCompaction
-from pydantic_ai_harness.conversation_search import ConversationSearch, SnapshotHistorySource
+from pydantic_ai_harness.compaction import (
+    ClearToolResults,
+    DeduplicateFileReads,
+    SummarizingCompaction,
+    TieredCompaction,
+)
+from pydantic_ai_harness.conversation_search import (
+    ConversationSearch,
+    SnapshotHistorySource,
+)
 from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
-from pydantic_ai.messages import ToolCallPart
 
 from ..capability import (
     AgentCatalogItem,
     AgentCatalogSnapshot,
     AgentCatalogView,
+    SkillCapability,
     SkillCatalogSnapshot,
     SkillCatalogView,
-    SkillCapability,
     SkillDescriptor,
     SkillSpec,
 )
 from ..core import canonical_sha256
-from ..errors import ErrorCode, AIError
-
+from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.agent.capabilities")
 
@@ -79,7 +86,8 @@ async def compose_parent_capabilities(
         capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
     capabilities.append(Planning())
     skill_catalog = await _snapshot_skills(scope.skill_catalog)
-    capabilities.append(SkillCapability(skill_catalog))
+    if skill_catalog.descriptors:
+        capabilities.append(SkillCapability(skill_catalog))
     if scope.conversation_id:
         capabilities.append(ConversationSearch(SnapshotHistorySource(scope.step_store), scope="conversation"))
     agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents())
@@ -174,7 +182,8 @@ def _compose_child_capabilities(scope: AgentCapabilityScope, agent_name: str) ->
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
     capabilities.append(Planning())
-    capabilities.append(SkillCapability(scope.skill_catalog))
+    if scope.skill_catalog.descriptors:
+        capabilities.append(SkillCapability(scope.skill_catalog))
     capabilities.append(_build_compaction(scope.context_target_tokens))
     return tuple(capabilities)
 
@@ -215,17 +224,17 @@ def _namespace_digest(namespace: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class EmptySkillCatalog(SkillCatalogView):
-    async def list_skills(self) -> tuple[SkillDescriptor, ...]:
+    async def list_skills(self) -> "tuple[SkillDescriptor, ...]":
         return ()
 
-    async def load_skill(self, skill_id: str) -> SkillSpec | None:
+    async def load_skill(self, skill_id: str) -> "SkillSpec | None":
         del skill_id
         return None
 
 
 @dataclass(frozen=True, slots=True)
 class EmptyAgentCatalog(AgentCatalogView):
-    async def list_agents(self) -> tuple[AgentCatalogItem, ...]:
+    async def list_agents(self) -> "tuple[AgentCatalogItem, ...]":
         return ()
 
 

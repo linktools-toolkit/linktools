@@ -13,6 +13,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from linktools.core import environ
+from pydantic import BaseModel
 from pydantic_ai import Agent, AgentRunResultEvent
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.messages import (
@@ -24,9 +25,9 @@ from pydantic_ai.messages import (
     PartDeltaEvent,
     PartEndEvent,
     PartStartEvent,
+    RetryPromptPart,
     TextPart,
     TextPartDelta,
-    RetryPromptPart,
     ToolReturnPart,
 )
 from pydantic_ai.models import Model
@@ -36,11 +37,23 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
-from ._capabilities import AgentCapabilityScope, AgentCatalogView, EmptyAgentCatalog, EmptySkillCatalog, compose_parent_capabilities
-from ..capability import SkillCatalogView
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256
-from ..core import JsonValue
+from ..capability import (
+    MCPToolProvider,
+    SkillCatalogSnapshot,
+    SkillCatalogView,
+    SkillDescriptor,
+)
+from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..errors import AIError, ErrorCode
+from ..model import ModelRoute
+from ._binding import BindingExecutionPlan
+from ._capabilities import (
+    AgentCapabilityScope,
+    AgentCatalogView,
+    EmptyAgentCatalog,
+    EmptySkillCatalog,
+    compose_parent_capabilities,
+)
 
 
 class AgentRunner(Protocol):
@@ -63,6 +76,10 @@ class AgentRunner(Protocol):
 
 class AgentTool(Protocol):
     async def __call__(self, **kwargs: JsonValue) -> "dict[str, JsonValue]": ...
+
+
+class ModelMaterializer(Protocol):
+    def materialize(self, route: ModelRoute) -> Model: ...
 
 
 class EventHandler(Protocol):
@@ -298,6 +315,127 @@ class _SegmentAlreadyStarted(RuntimeError):
         self.step_run_id = step_run_id
 
 
+class BindingAgentRunner:
+    """Execute a frozen binding through the same Harness segment pipeline."""
+
+    def __init__(
+        self,
+        plan: BindingExecutionPlan,
+        materializer: ModelMaterializer,
+        *,
+        materialized_model: "Model | None" = None,
+        agent_catalog: "AgentCatalogView | None" = None,
+        mcp_provider: "MCPToolProvider | None" = None,
+        capabilities: "tuple[AgentCapability[None], ...]" = (),
+        memory_store: "SearchableMemoryStore | None" = None,
+    ) -> None:
+        self._plan = plan
+        self._materializer = materializer
+        self._model = materialized_model
+        self._agent_catalog = agent_catalog if agent_catalog is not None else EmptyAgentCatalog()
+        self._mcp_provider = mcp_provider
+        self._capabilities = capabilities
+        self._memory_store = memory_store
+        self._agent: "Agent[None, object] | None" = None
+        self._lock = asyncio.Lock()
+        self._logger = environ.get_logger("ai.agent.binding")
+
+    async def run(
+        self,
+        prompt: str,
+        history: "list[ModelMessage]",
+        conversation_id: str,
+        *,
+        step_store: StepStore,
+        step_run_id: str,
+        segment_sequence: int,
+        parent_step_run_id: "str | None" = None,
+        memory_namespace: "str | None" = None,
+        memory_store: "SearchableMemoryStore | None" = None,
+        on_event: "EventHandler | None" = None,
+    ) -> WorkspaceAgentResult:
+        existing = await step_store.get_run(run_id=step_run_id)
+        if existing is not None:
+            raise _SegmentAlreadyStarted(step_run_id)
+        if self._plan.mcp_servers and self._mcp_provider is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        agent = await self._get_agent()
+        model = self._model
+        if model is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        skill_catalog = SkillCatalogSnapshot(
+            tuple(SkillDescriptor(item.id, item.revision, "") for item in self._plan.skills),
+            self._plan.skills,
+        )
+        scope = AgentCapabilityScope(
+            root=Path.cwd(),
+            agent_name=self._plan.binding.spec.id,
+            conversation_id=conversation_id,
+            step_run_id=step_run_id,
+            segment_sequence=segment_sequence,
+            memory_namespace=memory_namespace,
+            step_store=step_store,
+            workspace_capabilities=self._capabilities,
+            skill_catalog=skill_catalog,
+            agent_catalog=self._agent_catalog,
+            memory_store=memory_store if memory_store is not None else self._memory_store,
+            parent_step_run_id=parent_step_run_id,
+        )
+        composed = await compose_parent_capabilities(scope, model_factory=lambda _value: model, parent_model=model)
+        self._logger.info("binding agent segment started: agent=%s execution_step=%s binding=%s", self._plan.binding.spec.id, step_run_id, self._plan.binding.digest)
+        final_result = None
+        output_parts: list[str] = []
+        async with agent.run_stream_events(
+            prompt,
+            message_history=history or None,
+            conversation_id=conversation_id,
+            run_id=step_run_id,
+            capabilities=composed,
+        ) as events:
+            async for event in events:
+                if isinstance(event, AgentRunResultEvent):
+                    final_result = event.result
+                    continue
+                mapped = _map_event(event)
+                if mapped is None:
+                    continue
+                if mapped["type"] == "text":
+                    output_parts.append(str(mapped["text"]))
+                if on_event is not None:
+                    pending = on_event(mapped)
+                    if pending is not None:
+                        await pending
+        if final_result is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        record = await step_store.get_run(run_id=step_run_id)
+        snapshot = await step_store.latest_snapshot(run_id=step_run_id)
+        unresolved_effects = await step_store.list_unresolved_tool_effects(run_id=step_run_id)
+        if record is None or snapshot is None or unresolved_effects or record.conversation_id != conversation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        output = final_result.output
+        if not isinstance(output, BaseModel):
+            raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
+        encoded = canonical_json_bytes(output.model_dump(mode="json")).decode("utf-8")
+        self._logger.info("binding agent segment completed: agent=%s run=%s", self._plan.binding.spec.id, final_result.run_id)
+        return WorkspaceAgentResult(final_result.run_id, encoded or "null", final_result.all_messages())
+
+    async def _get_agent(self) -> "Agent[None, object]":
+        async with self._lock:
+            if self._agent is not None:
+                return self._agent
+            model = self._model or self._materializer.materialize(self._plan.model_route)
+            self._model = model
+            agent = Agent(
+                model,
+                name=self._plan.binding.spec.id,
+                system_prompt=self._plan.binding.prompt.system,
+                instructions="\n".join((*self._plan.binding.spec.instructions, *self._plan.binding.prompt.instructions)),
+                output_type=self._plan.output_type,
+            )
+            self._agent = cast("Agent[None, object]", agent)
+            return self._agent
+
+
 def _validate_agent_id(agent_id: str) -> None:
     normalized = unicodedata.normalize("NFC", agent_id)
     if normalized != agent_id or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", agent_id):
@@ -366,4 +504,4 @@ def _map_event(
     return None
 
 
-__all__ = ["AgentRunner", "AgentTool", "EventHandler", "WorkspaceAgentResult", "WorkspaceAgentRunner"]
+__all__ = ["AgentRunner", "AgentTool", "BindingAgentRunner", "EventHandler", "ModelMaterializer", "WorkspaceAgentResult", "WorkspaceAgentRunner"]

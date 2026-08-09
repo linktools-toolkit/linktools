@@ -1,7 +1,6 @@
 dependencies:
-  - pydantic-ai-slim[mcp,openai]==2.27.0
-  - pydantic-ai-harness[dynamic-workflow]==0.13.0
-  - pydantic>=2.12,<3
+  - pydantic-ai-slim[mcp,openai]>=2.27.0
+  - pydantic-ai-harness[dynamic-workflow]>=0.13.0
   - jsonschema>=4.23.0
 
 dev-dependencies:
@@ -23,6 +22,6 @@ optional-dependencies:
     - sqlalchemy[asyncio]>=2.0.51,<3.0.0
     - aiosqlite>=0.22.1,<0.23.0
   evaluation:
-    - pydantic-evals>=0.1.0,<0.2.0
+    - pydantic-evals>=0.1.0
   temporal:
-    - pydantic-ai-slim[temporal,mcp,openai]==2.27.0
+    - pydantic-ai-slim[temporal,mcp,openai]>=2.27.0
