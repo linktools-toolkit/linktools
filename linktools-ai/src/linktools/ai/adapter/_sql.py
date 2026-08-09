@@ -131,11 +131,11 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         if isinstance(record, ExecutionRecord):
             values.update(session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
         if isinstance(record, ToolOperationRecord):
-            values.update(run_id=record.run_id, tool_call_id=record.tool_call_id, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
+            values.update(run_id=record.run_id, tool_call_id=record.tool_call_id, call_key=_composite_key(record.run_id, record.tool_call_id), owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
         if isinstance(record, TaskNodeView):
             values.update(owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
         if isinstance(record, IdempotencyRecord):
-            values.update(scope=record.scope, key_hash=record.key_hash)
+            values.update(scope=record.scope, key_hash=record.key_hash, identity_key=_composite_key(record.scope, record.key_hash))
         if isinstance(record, OperationLedgerRecord):
             values.update(resource_kind=record.resource_kind.value, resource_id=record.resource_id)
         from sqlalchemy import insert
@@ -156,11 +156,11 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 if isinstance(record, ExecutionRecord):
                     values.update(session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
                 if isinstance(record, ToolOperationRecord):
-                    values.update(run_id=record.run_id, tool_call_id=record.tool_call_id, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
+                    values.update(run_id=record.run_id, tool_call_id=record.tool_call_id, call_key=_composite_key(record.run_id, record.tool_call_id), owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
                 if isinstance(record, TaskNodeView):
                     values.update(owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
                 if isinstance(record, IdempotencyRecord):
-                    values.update(scope=record.scope, key_hash=record.key_hash)
+                    values.update(scope=record.scope, key_hash=record.key_hash, identity_key=_composite_key(record.scope, record.key_hash))
                 if isinstance(record, OperationLedgerRecord):
                     values.update(resource_kind=record.resource_kind.value, resource_id=record.resource_id)
                 result = await session.execute(update(target).where(target.c.namespace_key == self.namespace_key, target.c.tenant_id == tenant_id, target.c.record_id == record_id, target.c.revision == expected_revision).values(values))
@@ -508,7 +508,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             return existing
         counter = (await session.execute(select(counter_table).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
         sequence = 1 if counter is None else int(counter["revision"]) + 1
-        counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
+        counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "partition_key": _composite_key(record.resource_kind.value, record.resource_id), "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
         if counter is None:
             await session.execute(insert(counter_table).values(counter_values))
         else:
@@ -609,7 +609,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         try:
             async with self._owner.session_factory() as session:
                 async with session.begin():
-                    await session.execute(insert(idempotency_table).values(namespace_key=self.namespace_key, tenant_id=identity.tenant_id, record_id=f"{identity.scope}:{identity.key_hash}", scope=identity.scope, key_hash=identity.key_hash, sequence=0, revision=0, status=identity.status.value, payload=_encode_payload(identity), created_at=identity.created_at, updated_at=identity.updated_at))
+                    await session.execute(insert(idempotency_table).values(namespace_key=self.namespace_key, tenant_id=identity.tenant_id, record_id=f"{identity.scope}:{identity.key_hash}", scope=identity.scope, key_hash=identity.key_hash, identity_key=_composite_key(identity.scope, identity.key_hash), sequence=0, revision=0, status=identity.status.value, payload=_encode_payload(identity), created_at=identity.created_at, updated_at=identity.updated_at))
                     values = {"namespace_key": self.namespace_key, "tenant_id": execution.tenant_id, "record_id": execution.execution_id, "sequence": execution.event_sequence, "revision": execution.revision, "status": execution.status.value, "payload": _encode_payload(execution), "created_at": execution.created_at, "updated_at": execution.updated_at, "session_id": execution.session_id, "parent_execution_id": execution.parent_execution_id, "source_execution_id": execution.source_execution_id, "base_execution_id": execution.base_execution_id, "lineage_kind": execution.lineage_kind, "agent_run_sequence": execution.agent_run_sequence}
                     await session.execute(insert(execution_table).values(values))
         except Exception as error:
@@ -892,7 +892,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     return existing
                 counter = (await session.execute(select(counter_table).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
                 sequence = 1 if counter is None else int(counter["revision"]) + 1
-                counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
+                counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "partition_key": _composite_key(record.resource_kind.value, record.resource_id), "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
                 if counter is None:
                     await session.execute(insert(counter_table).values(counter_values))
                 else:
@@ -1088,7 +1088,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                         digest.update(chunk)
                         size += len(chunk)
                         now = datetime.now(timezone.utc)
-                        await session.execute(insert(chunk_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=f"{expected_digest}:{index}", digest=expected_digest, chunk_index=index, content=chunk, sequence=index, revision=0, status="", payload=_encode_payload(chunk), created_at=now, updated_at=now))
+                        await session.execute(insert(chunk_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=f"{expected_digest}:{index}", digest=expected_digest, chunk_index=index, chunk_key=_composite_key(expected_digest, str(index)), content=chunk, sequence=index, revision=0, status="", payload=_encode_payload(chunk), created_at=now, updated_at=now))
                         index += 1
                     if size != expected_size or digest.hexdigest() != expected_digest:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1313,6 +1313,10 @@ def _record_id(record: object) -> str:
             return record.call_id
         return record.operation_id
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _composite_key(*values: str) -> str:
+    return hashlib.sha256("\x00".join(values).encode("utf-8")).hexdigest()
 
 
 def _record_time(record: object) -> datetime:

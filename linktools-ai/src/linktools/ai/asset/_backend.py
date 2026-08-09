@@ -141,18 +141,13 @@ class InMemoryAssetBackend:
     async def reset(self) -> StorageResetResult:
         async with self._lock:
             self._require_writable()
-            active = tuple(
-                (key, current)
-                for key, current in self._entries.items()
-                if not current[0].deleted
-            )
-            if not active:
+            cleared_count = len(self._entries)
+            if not cleared_count:
                 return StorageResetResult(self._store_revision(), 0)
             self._revision += 1
-            for key, previous in active:
-                self._record(self._next_info(key, b"", previous, deleted=True), b"")
-            _logger.info("asset backend reset: deleted=%s revision=%s", len(active), self._revision)
-            return StorageResetResult(self._store_revision(), len(active))
+            self._entries.clear()
+            _logger.info("asset backend reset: cleared=%s revision=%s", cleared_count, self._revision)
+            return StorageResetResult(self._store_revision(), cleared_count)
 
     async def apply_batch(
         self,
@@ -218,6 +213,10 @@ class InMemoryAssetBackend:
     def export_state(self) -> "dict[str, object]":
         return {
             "store_revision": self._revision,
+            "entries": [
+                _encode_entry(info, value)
+                for info, value in self._entries.values()
+            ],
             "versions": [
                 _encode_entry(info, value)
                 for history in self._versions.values()
@@ -229,15 +228,27 @@ class InMemoryAssetBackend:
         if not isinstance(raw, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         revision = raw.get("store_revision")
+        current = raw.get("entries")
         versions = raw.get("versions")
         if not isinstance(revision, int) or revision < 0 or not isinstance(versions, list):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        entries: dict[AssetKey, tuple[AssetInfo, bytes]] = {}
         histories: dict[AssetKey, list[tuple[AssetInfo, bytes]]] = {}
         for item in versions:
             info, value = _decode_entry(item, self._root)
             histories.setdefault(info.key, []).append((info, value))
-            entries[info.key] = (info, value)
+        if current is None:
+            entries = {
+                key: history[-1]
+                for key, history in histories.items()
+                if history
+            }
+        elif isinstance(current, list):
+            entries = {}
+            for item in current:
+                info, value = _decode_entry(item, self._root)
+                entries[info.key] = (info, value)
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._revision = revision
         self._entries = entries
         self._versions = histories
@@ -250,7 +261,14 @@ class InMemoryAssetBackend:
         *,
         deleted: bool,
     ) -> AssetInfo:
-        entry_revision = StorageEntryRevision(1 if previous is None else previous[0].revision.value + 1)
+        history = self._versions.get(key, ())
+        if previous is not None:
+            previous_revision = previous[0].revision.value
+        elif history:
+            previous_revision = history[-1][0].revision.value
+        else:
+            previous_revision = 0
+        entry_revision = StorageEntryRevision(previous_revision + 1)
         return AssetInfo(
             key,
             entry_revision,

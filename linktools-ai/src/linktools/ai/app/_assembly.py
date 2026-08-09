@@ -3,7 +3,7 @@
 """唯一 Composition Root for process-local Runtime services."""
 
 import hashlib
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path

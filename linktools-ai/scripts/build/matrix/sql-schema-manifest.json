@@ -1,8 +1,9 @@
 {
   "runtime_owner": "adapter.sql",
   "step_owner": "adapter._step",
-  "runtime_digest": "e4b926efa6940529736e410ac768e5585308eb22bbc5bdc60d55cf332f02f634",
-  "step_digest": "bed3e48b59dede415436327a8a279b9c3f6114f18b289d381890e9476899d7d8",
+  "asset_owner": "asset.sql",
+  "runtime_digest": "f601a969b26dd9598ca082a4b2a0a8582828c80d78ed397e4483b7ab61609960",
+  "step_digest": "e550cb9b40ebcc18d55e395658e2a9bac7febfe0a300049fae0bd4f29ed74060",
   "runtime_tables": [
     "ai_runtime_approvals",
     "ai_runtime_artifacts",
@@ -28,6 +29,12 @@
     "ai_step_snapshots",
     "ai_step_effects",
     "ai_step_media"
+  ],
+  "asset_tables": [
+    "ai_asset_entries",
+    "ai_asset_changes",
+    "ai_asset_blobs",
+    "ai_asset_revision"
   ],
   "forbidden_runtime_tables": [
     "ai_runtime_session_turns",

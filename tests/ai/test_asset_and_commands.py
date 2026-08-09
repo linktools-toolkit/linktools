@@ -175,6 +175,32 @@ def test_asset_store_reads_effective_layer_owner() -> None:
     asyncio.run(run())
 
 
+def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
+    async def run() -> None:
+        primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
+        fallback = InMemoryAssetBackend(AssetRoot("memory:fallback", "memory", "fallback", "fallback"))
+        key = AssetKey("sample", "reset")
+        await fallback.put(key, b"builtin")
+        storage = StorageComposition(
+            primary,
+            writer=primary,
+            layers=(StorageLayer("fallback", fallback),),
+        )
+        store = AssetStore(storage)
+        await store.initialize()
+        await store.put(key, b"override")
+        assert await store.get(key) == b"override"
+        await store.reset()
+        assert await store.get(key) == b"builtin"
+        location = await storage.locate(key)
+        assert location is not None and location.layer == "fallback"
+        await store.put(key, b"override-again")
+        await store.delete(key)
+        assert await store.get(key) is None
+
+    asyncio.run(run())
+
+
 def test_ai_asset_command_is_removed() -> None:
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]

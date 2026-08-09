@@ -15,6 +15,7 @@ from ._assembly import (
     open_runtime_resources,
     open_runtime_services,
 )
+from ._catalog import AssetAgentCatalog, AssetSkillCatalog
 from ._facade import (
     LocalRuntimeServices,
     Runtime,
@@ -37,7 +38,7 @@ from ._workbench import (
 
 __all__ = [
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "REMOTE_RUNTIME_URL", "ACPAgent", "ACPApplication",
-    "ACPConnection", "AppServices", "BindingExecutionLauncher", "EventHandler", "LocalRuntimeServices", "Runtime",
+    "ACPConnection", "AppServices", "AssetAgentCatalog", "AssetSkillCatalog", "BindingExecutionLauncher", "EventHandler", "LocalRuntimeServices", "Runtime",
     "RuntimeDependencies", "RuntimePersistenceConfig", "RuntimeResources", "TextHandler", "WorkspaceAgentRuntime",
     "WorkspaceExecutionLauncher", "WorkspaceRunResult", "WorkspaceSession", "build_app_services", "build_asset_store",
     "build_local_runtime", "build_local_runtime_services", "build_runtime", "build_runtime_access", "build_runtime_services",

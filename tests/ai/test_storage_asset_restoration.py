@@ -9,6 +9,8 @@ import pytest
 from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
+    AssetStore,
+    InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     SqlAssetBackend,
     StrictConfigReader,
@@ -19,6 +21,8 @@ from linktools.ai.storage import (
     PostgreSQLDialect,
     SQLiteDialect,
     SqlSchemaRegistry,
+    StorageComposition,
+    StorageLayer,
     resolve_dialect,
 )
 
@@ -63,8 +67,37 @@ async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -
     await backend.put(key, b"one")
     assert (tmp_path / "mapped/mcp/one.json").read_bytes() == b"one"
     assert await backend.get(key) == b"one"
+    info = await backend.stat(key)
+    assert info is not None
+    assert isinstance(info.revision.value, int)
+    repeated = await backend.stat(key)
+    assert repeated is not None
+    assert info.revision == repeated.revision
     await backend.delete(key)
     assert await backend.get(key) is None
+
+
+@pytest.mark.asyncio
+async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: Path) -> None:
+    path = tmp_path / "mapped" / "mcp" / "one.json"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"one")
+    primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
+    builtin = LocalDirectoryAssetBackend(
+        AssetRoot("file:directory", "file", str(tmp_path), "directory"),
+        path_adapter=_MappedPathAdapter(),
+    )
+    store = AssetStore(
+        StorageComposition(
+            primary,
+            writer=primary,
+            layers=(StorageLayer("builtin", builtin),),
+        )
+    )
+    await store.initialize()
+    info = await store.stat(AssetKey("mcp", "one"))
+    assert info is not None
+    assert isinstance(info.revision.value, int)
 
 
 @pytest.mark.asyncio
@@ -98,11 +131,51 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
 
 
-def test_sql_asset_backend_uses_one_state_table() -> None:
+def test_sql_asset_backend_uses_normalized_history_tables() -> None:
     tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
     backend = SqlAssetBackend(lambda: None, namespace="test")
     assert backend.root.scheme == "sql"
-    assert tables.state.name.startswith(TABLE_PREFIX)
+    assert tuple(table.name for table in (tables.entry, tables.change, tables.blob, tables.revision)) == (
+        f"{TABLE_PREFIX}asset_entries",
+        f"{TABLE_PREFIX}asset_changes",
+        f"{TABLE_PREFIX}asset_blobs",
+        f"{TABLE_PREFIX}asset_revision",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_backend_persists_history_outside_revision_row() -> None:
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
+    backend = SqlAssetBackend(session_factory, namespace="history")
+    try:
+        await backend.initialize_storage(engine)
+        key = AssetKey("mcp", "history.yaml")
+        first = await backend.put(key, b"one")
+        second = await backend.put(key, b"two", expected_entry_revision=first.entry_revision)
+        await backend.delete(key, expected_entry_revision=second.entry_revision)
+        assert await backend.get_at_version(key, 1) == b"one"
+        assert await backend.get_at_version(key, 2) == b"two"
+        assert await backend.get(key) is None
+        assert len(await backend.list_versions(key)) == 3
+        reset = await backend.reset()
+        assert reset.deleted_count == 1
+        assert await backend.get(key) is None
+        assert len(await backend.list_versions(key)) == 3
+        await backend.initialize()
+        assert await backend.get(key) is None
+        async with session_factory() as session:
+            counts = []
+            for table in (tables.entry, tables.change, tables.blob, tables.revision):
+                counts.append(await session.scalar(select(func.count()).select_from(table)))
+        assert counts == [0, 3, 2, 1]
+        assert not hasattr(tables.revision.c, "payload")
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

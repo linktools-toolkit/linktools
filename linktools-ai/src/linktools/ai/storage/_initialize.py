@@ -77,7 +77,7 @@ def _validate_schema(connection: "Connection", database: StorageDatabase) -> Non
         expected_indexes = {
             index.name + ":" + ",".join(column.name for column in index.columns)
             for index in table.indexes
-            if index.name is not None
+            if index.name is not None and index.info.get("ddl_dialect", connection.dialect.name) == connection.dialect.name
         }
         if actual_indexes != expected_indexes:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

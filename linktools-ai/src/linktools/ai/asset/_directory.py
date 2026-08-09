@@ -168,8 +168,10 @@ class LocalDirectoryAssetBackend:
             self._require_writable()
             path = self._file_path(key)
             exists = path.is_file()
-            self._check_revision(exists, expected_entry_revision)
-            if exists and _etag(await asyncio.to_thread(read_bytes, path)) == _etag(value):
+            current = await asyncio.to_thread(read_bytes, path) if exists else None
+            current_revision = None if current is None else _entry_revision(current)
+            self._check_revision(current_revision, expected_entry_revision)
+            if current is not None and _etag(current) == _etag(value):
                 entries = await asyncio.to_thread(self._scan)
                 revision = _store_revision(entries)
                 current = next(item for item in entries if item[0] == key)
@@ -197,14 +199,16 @@ class LocalDirectoryAssetBackend:
             self._require_writable()
             path = self._file_path(key)
             exists = path.is_file()
-            self._check_revision(exists, expected_entry_revision)
+            current = await asyncio.to_thread(read_bytes, path) if exists else None
+            current_revision = None if current is None else _entry_revision(current)
+            self._check_revision(current_revision, expected_entry_revision)
             if not exists:
                 return StorageDeleteResult(key, False, None, _store_revision(await asyncio.to_thread(self._scan)))
             await asyncio.to_thread(path.unlink)
             self._remove_empty_parents(path.parent)
             revision = _store_revision(await asyncio.to_thread(self._scan))
             _logger.info("local asset file deleted: kind=%s id=%s", key.kind, key.id)
-            return StorageDeleteResult(key, True, StorageEntryRevision(1), revision)
+            return StorageDeleteResult(key, True, current_revision, revision)
 
     async def reset(self) -> StorageResetResult:
         async with self._lock:
@@ -298,7 +302,7 @@ class LocalDirectoryAssetBackend:
     ) -> AssetInfo:
         return AssetInfo(
             key,
-            StorageEntryRevision(1),
+            _entry_revision(content),
             store_revision,
             _etag(content),
             len(content),
@@ -309,8 +313,8 @@ class LocalDirectoryAssetBackend:
         )
 
     @staticmethod
-    def _check_revision(exists: bool, expected: "StorageEntryRevision | None") -> None:
-        if expected is not None and (not exists or expected != StorageEntryRevision(1)):
+    def _check_revision(current: "StorageEntryRevision | None", expected: "StorageEntryRevision | None") -> None:
+        if expected is not None and current != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _require_writable(self) -> None:
@@ -351,6 +355,10 @@ def _store_revision(entries: "Sequence[tuple[AssetKey, bytes, datetime]]") -> St
 
 def _etag(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _entry_revision(value: bytes) -> StorageEntryRevision:
+    return StorageEntryRevision(int.from_bytes(hashlib.sha256(value).digest(), "big"))
 
 
 __all__ = [

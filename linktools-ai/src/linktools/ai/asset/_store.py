@@ -119,7 +119,7 @@ class AssetStore:
         return result
 
     async def reset(self) -> StorageResetResult:
-        """Delete every writable Asset file and return the reset summary."""
+        """Clear the writer overlay so lower read layers become effective."""
         self._ensure_ready()
         return await self._storage.reset()
 

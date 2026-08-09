@@ -27,7 +27,7 @@ from ..storage import storage_name
 from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
-    from sqlalchemy import MetaData
+    from sqlalchemy import Index, MetaData
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -336,7 +336,7 @@ class SqlStepStore:
         from sqlalchemy import select
         table = self._tables["events"]
         async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq))).mappings().all()
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id))).mappings().all()
         return [_event_from_row(row) for row in rows]
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
@@ -350,7 +350,7 @@ class SqlStepStore:
         from sqlalchemy import select
         table = self._tables["snapshots"]
         async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq.desc()))).mappings().all()
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id.desc()))).mappings().all()
         for row in rows:
             snapshot = _snapshot_from_row(row)
             if include_interrupted or snapshot.state == "complete":
@@ -361,7 +361,7 @@ class SqlStepStore:
         from sqlalchemy import select
         table = self._tables["snapshots"]
         async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.seq))).mappings().all()
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id))).mappings().all()
         snapshots = [_snapshot_from_row(row) for row in rows]
         return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
 
@@ -467,22 +467,131 @@ class SqlMediaStore:
 
 
 def _build_tables() -> tuple[object, dict[str, object]]:
-    from sqlalchemy import BigInteger, CHAR, DateTime, Integer, JSON, LargeBinary, String, Table, Text, Column, PrimaryKeyConstraint, UniqueConstraint
+    from sqlalchemy import BigInteger, CHAR, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, Text, UniqueConstraint
     from sqlalchemy.dialects import mysql
+    from sqlalchemy.sql import func
+
     metadata = new_step_metadata()
-    key = CHAR(64).with_variant(mysql.CHAR(64, charset="ascii", collation="ascii_bin"), "mysql")
+    key = CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+    integer_id = BigInteger().with_variant(Integer, "sqlite")
     tables = {
-        "runs": Table(storage_name("step_runs"), metadata, Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("metadata_json", JSON, nullable=False), Column("started_at", DateTime(timezone=True), nullable=False), PrimaryKeyConstraint("namespace_key", "run_id"), UniqueConstraint("namespace_key", "conversation_id", "started_at", "run_id"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
-        "events": Table(storage_name("step_events"), metadata, Column("seq", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True), Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("kind", String(64), nullable=False), Column("step_index", Integer, nullable=False), Column("timestamp", DateTime(timezone=True), nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("tool_call_id", String(256)), Column("tool_name", String(256)), Column("error", Text), Column("metadata_json", JSON, nullable=False), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
-        "snapshots": Table(storage_name("step_snapshots"), metadata, Column("seq", BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True), Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("step_index", Integer, nullable=False), Column("conversation_id", String(200)), Column("parent_run_id", String(200)), Column("agent_name", String(256)), Column("timestamp", DateTime(timezone=True), nullable=False), Column("state", String(16), nullable=False, server_default="complete"), Column("messages_json", JSON, nullable=False), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
-        "effects": Table(storage_name("step_effects"), metadata, Column("namespace_key", key, nullable=False), Column("run_id", String(200), nullable=False), Column("tool_call_id", String(256), nullable=False), Column("tool_name", String(256), nullable=False), Column("status", String(64), nullable=False), Column("started_at", DateTime(timezone=True), nullable=False), Column("ended_at", DateTime(timezone=True)), Column("idempotency_key", String(256)), Column("effect_summary", Text), PrimaryKeyConstraint("namespace_key", "run_id", "tool_call_id"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
-        "media": Table(storage_name("step_media"), metadata, Column("namespace_key", key, nullable=False), Column("sha256", key, nullable=False), Column("media_type", String(256)), Column("bytes", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False), Column("size_bytes", BigInteger, nullable=False), Column("metadata_json", JSON, nullable=False), PrimaryKeyConstraint("namespace_key", "sha256"), mysql_engine="InnoDB", mysql_charset="utf8mb4", mysql_collate="utf8mb4_bin"),
+        "runs": Table(
+            storage_name("step_runs"),
+            metadata,
+            Column("id", integer_id, primary_key=True, autoincrement=True),
+            Column("namespace_key", key, nullable=False),
+            Column("run_id", String(200), nullable=False),
+            Column("conversation_id", String(200), nullable=False),
+            Column("parent_run_id", String(200)),
+            Column("agent_name", String(256)),
+            Column("metadata_json", JSON, nullable=False),
+            Column("started_at", DateTime(timezone=True), nullable=False),
+            Column("run_key", key, nullable=False),
+            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+            UniqueConstraint("namespace_key", "run_id", name="uk_namespace_key_run_id"),
+            UniqueConstraint("namespace_key", "run_key", name="uk_namespace_key_run_key"),
+            mysql_engine="InnoDB",
+            mysql_charset="utf8mb4",
+            mysql_collate="utf8mb4_bin",
+        ),
+        "events": Table(
+            storage_name("step_events"),
+            metadata,
+            Column("id", integer_id, primary_key=True, autoincrement=True),
+            Column("namespace_key", key, nullable=False),
+            Column("run_id", String(200), nullable=False),
+            Column("kind", String(64), nullable=False),
+            Column("step_index", Integer, nullable=False),
+            Column("timestamp", DateTime(timezone=True), nullable=False),
+            Column("conversation_id", String(200)),
+            Column("parent_run_id", String(200)),
+            Column("agent_name", String(256)),
+            Column("tool_call_id", String(256)),
+            Column("tool_name", String(256)),
+            Column("error", Text),
+            Column("metadata_json", JSON, nullable=False),
+            _mysql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
+            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+            mysql_engine="InnoDB",
+            mysql_charset="utf8mb4",
+            mysql_collate="utf8mb4_bin",
+        ),
+        "snapshots": Table(
+            storage_name("step_snapshots"),
+            metadata,
+            Column("id", integer_id, primary_key=True, autoincrement=True),
+            Column("namespace_key", key, nullable=False),
+            Column("run_id", String(200), nullable=False),
+            Column("step_index", Integer, nullable=False),
+            Column("conversation_id", String(200)),
+            Column("parent_run_id", String(200)),
+            Column("agent_name", String(256)),
+            Column("timestamp", DateTime(timezone=True), nullable=False),
+            Column("state", String(16), nullable=False, server_default="complete"),
+            Column("messages_json", JSON, nullable=False),
+            _mysql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
+            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+            mysql_engine="InnoDB",
+            mysql_charset="utf8mb4",
+            mysql_collate="utf8mb4_bin",
+        ),
+        "effects": Table(
+            storage_name("step_effects"),
+            metadata,
+            Column("id", integer_id, primary_key=True, autoincrement=True),
+            Column("namespace_key", key, nullable=False),
+            Column("run_id", String(200), nullable=False),
+            Column("tool_call_id", String(256), nullable=False),
+            Column("tool_name", String(256), nullable=False),
+            Column("status", String(64), nullable=False),
+            Column("started_at", DateTime(timezone=True), nullable=False),
+            Column("ended_at", DateTime(timezone=True)),
+            Column("idempotency_key", String(256)),
+            Column("effect_summary", Text),
+            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+            UniqueConstraint("namespace_key", "run_id", "tool_call_id", name="uk_namespace_key_run_id_tool_call_id"),
+            mysql_engine="InnoDB",
+            mysql_charset="utf8mb4",
+            mysql_collate="utf8mb4_bin",
+        ),
+        "media": Table(
+            storage_name("step_media"),
+            metadata,
+            Column("id", integer_id, primary_key=True, autoincrement=True),
+            Column("namespace_key", key, nullable=False),
+            Column("sha256", key, nullable=False),
+            Column("media_type", String(256)),
+            Column("bytes", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False),
+            Column("size_bytes", BigInteger, nullable=False),
+            Column("metadata_json", JSON, nullable=False),
+            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+            UniqueConstraint("namespace_key", "sha256", name="uk_namespace_key_sha256"),
+            mysql_engine="InnoDB",
+            mysql_charset="utf8mb4",
+            mysql_collate="utf8mb4_bin",
+        ),
     }
+    for name, table in tables.items():
+        _mysql_index(Index("ix_updated_at", table.c.updated_at))
+        _mysql_index(Index("ix_created_at", table.c.created_at))
     return metadata, tables
 
 
 def _run_values(namespace_key: str, record: RunRecord) -> dict[str, object]:
-    return {"namespace_key": namespace_key, "run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata_json": dict(record.metadata), "started_at": _utc(record.started_at)}
+    if record.conversation_id is None:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    started_at = _utc(record.started_at)
+    return {"namespace_key": namespace_key, "run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata_json": dict(record.metadata), "started_at": started_at, "run_key": _file_digest(f"{record.conversation_id}\x00{started_at.isoformat()}\x00{record.run_id}")}
+
+
+def _mysql_index(index: "Index") -> "Index":
+    index.info["ddl_dialect"] = "mysql"
+    return index.ddl_if(dialect="mysql")
 
 
 def _event_values(namespace_key: str, event: StepEvent) -> dict[str, object]:

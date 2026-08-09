@@ -177,7 +177,9 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         expected_entry_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StorageDeleteResult[KeyT]': ...
 
-    async def reset(self) -> StorageResetResult: ...
+    async def reset(self) -> StorageResetResult:
+        """Clear current writer entries while retaining backend history when supported."""
+        ...
 
 
 @runtime_checkable
