@@ -96,12 +96,12 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
         self,
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
-        expected_store_revision: "StorageRevision | None" = None,
+        expected_revision: "StorageRevision | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
         return await self._mutate(
             lambda: super(FilesystemAssetBackend, self).apply_batch(
                 changes,
-                expected_store_revision=expected_store_revision,
+                expected_revision=expected_revision,
             )
         )
 

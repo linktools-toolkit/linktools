@@ -162,11 +162,11 @@ class InMemoryAssetBackend:
         self,
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
-        expected_store_revision: "StorageRevision | None" = None,
+        expected_revision: "StorageRevision | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
         async with self._lock:
             self._require_writable()
-            if expected_store_revision is not None and expected_store_revision != self._store_revision():
+            if expected_revision is not None and expected_revision != self._store_revision():
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if len({change.key for change in changes}) != len(changes):
                 raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)

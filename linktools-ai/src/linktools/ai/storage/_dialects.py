@@ -12,7 +12,7 @@ SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from sqlalchemy import Column, Table
+    from sqlalchemy import Table
     from sqlalchemy.engine import RowMapping
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
@@ -79,8 +79,9 @@ class SqlAlchemyDialect(Protocol):
         session: "AsyncSession",
         *,
         table: "Table",
-        primary_key: SqlValue,
+        values: "Mapping[str, SqlValue]",
         column: str,
+        index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int: ...
 
@@ -90,16 +91,6 @@ class SqlAlchemyDialect(Protocol):
         *,
         table: "Table",
         where: "ColumnElement[bool]",
-        returning: "Sequence[str]",
-    ) -> "tuple[RowMapping, ...]": ...
-
-    async def update_returning(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        where: "ColumnElement[bool]",
-        values: "Mapping[str, SqlValue]",
         returning: "Sequence[str]",
     ) -> "tuple[RowMapping, ...]": ...
 
@@ -166,18 +157,18 @@ class SQLiteDialect:
         session: "AsyncSession",
         *,
         table: "Table",
-        primary_key: SqlValue,
+        values: "Mapping[str, SqlValue]",
         column: str,
+        index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int:
         from sqlalchemy.dialects.sqlite import insert
 
-        primary_key_column = _primary_key_column(table)
         value_column = table.c[column]
-        statement = insert(table).values(
-            {primary_key_column.name: primary_key, column: step}
-        ).on_conflict_do_update(
-            index_elements=[primary_key_column.name],
+        insert_values = dict(values)
+        insert_values[column] = step
+        statement = insert(table).values(insert_values).on_conflict_do_update(
+            index_elements=list(index_elements),
             set_={column: value_column + step},
         ).returning(value_column)
         return int((await session.execute(statement)).scalar_one())
@@ -214,21 +205,6 @@ class SQLiteDialect:
 
         columns = [table.c[column] for column in returning]
         statement = delete(table).where(where).returning(*columns)
-        return tuple((await session.execute(statement)).mappings().all())
-
-    async def update_returning(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        where: "ColumnElement[bool]",
-        values: "Mapping[str, SqlValue]",
-        returning: "Sequence[str]",
-    ) -> "tuple[RowMapping, ...]":
-        from sqlalchemy import update
-
-        columns = [table.c[column] for column in returning]
-        statement = update(table).where(where).values(dict(values)).returning(*columns)
         return tuple((await session.execute(statement)).mappings().all())
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
@@ -295,18 +271,18 @@ class PostgreSQLDialect(SQLiteDialect):
         session: "AsyncSession",
         *,
         table: "Table",
-        primary_key: SqlValue,
+        values: "Mapping[str, SqlValue]",
         column: str,
+        index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int:
         from sqlalchemy.dialects.postgresql import insert
 
-        primary_key_column = _primary_key_column(table)
         value_column = table.c[column]
-        statement = insert(table).values(
-            {primary_key_column.name: primary_key, column: step}
-        ).on_conflict_do_update(
-            index_elements=[primary_key_column.name],
+        insert_values = dict(values)
+        insert_values[column] = step
+        statement = insert(table).values(insert_values).on_conflict_do_update(
+            index_elements=list(index_elements),
             set_={column: value_column + step},
         ).returning(value_column)
         return int((await session.execute(statement)).scalar_one())
@@ -388,25 +364,28 @@ class MySQLDialect(SQLiteDialect):
         session: "AsyncSession",
         *,
         table: "Table",
-        primary_key: SqlValue,
+        values: "Mapping[str, SqlValue]",
         column: str,
+        index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int:
         from sqlalchemy import func, select
         from sqlalchemy.dialects.mysql import insert
 
-        primary_key_column = _primary_key_column(table)
         value_column = table.c[column]
-        statement = insert(table).values(
-            {primary_key_column.name: primary_key, column: func.last_insert_id(step)}
-        ).on_duplicate_key_update(
+        insert_values = dict(values)
+        insert_values[column] = step
+        statement = insert(table).values(insert_values).on_duplicate_key_update(
             **{column: func.last_insert_id(value_column + step)}
         )
         result = await session.execute(statement)
+        if result.rowcount == 1:
+            return step
         value = result.lastrowid
         if value:
             return int(value)
-        return int(await session.scalar(select(value_column).where(primary_key_column == primary_key)))
+        predicates = [table.c[index] == values[index] for index in index_elements]
+        return int(await session.scalar(select(value_column).where(*predicates)))
 
     async def upsert_many(
         self,
@@ -439,25 +418,20 @@ class MySQLDialect(SQLiteDialect):
         from sqlalchemy import delete, select
 
         columns = [table.c[column] for column in returning]
-        rows = tuple((await session.execute(select(*columns).where(where))).mappings().all())
+        rows = tuple(
+            (
+                await session.execute(
+                    select(*columns).where(where).with_for_update()
+                )
+            )
+            .mappings()
+            .all()
+        )
         if rows:
-            await session.execute(delete(table).where(where))
+            result = await session.execute(delete(table).where(where))
+            if result.rowcount != len(rows):
+                return ()
         return rows
-
-    async def update_returning(
-        self,
-        session: "AsyncSession",
-        *,
-        table: "Table",
-        where: "ColumnElement[bool]",
-        values: "Mapping[str, SqlValue]",
-        returning: "Sequence[str]",
-    ) -> "tuple[RowMapping, ...]":
-        from sqlalchemy import select, update
-
-        await session.execute(update(table).where(where).values(dict(values)))
-        columns = [table.c[column] for column in returning]
-        return tuple((await session.execute(select(*columns).where(where))).mappings().all())
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         return _classify_error(error, ("duplicate entry", "1062"))
@@ -475,17 +449,6 @@ def resolve_dialect(session: "AsyncSession") -> SqlAlchemyDialect:
     if name in {"mysql", "mariadb"}:
         return MySQLDialect()
     raise ValueError(f"unsupported SQLAlchemy dialect: {name}")
-
-
-def _primary_key_column(table: "Table") -> "Column":
-    return primary_key_column(table)
-
-
-def primary_key_column(table: "Table") -> "Column":
-    columns = tuple(table.primary_key.columns)
-    if len(columns) != 1:
-        raise ValueError("dialect counter tables require one primary-key column")
-    return columns[0]
 
 
 def classify_integrity_error_by_message(
@@ -522,10 +485,9 @@ __all__ = [
     "MySQLDialect",
     "PostgreSQLDialect",
     "SQLiteDialect",
-    "SqliteDialect",
     "SqlAlchemyDialect",
     "SqlValue",
+    "SqliteDialect",
     "classify_integrity_error_by_message",
-    "primary_key_column",
     "resolve_dialect",
 ]

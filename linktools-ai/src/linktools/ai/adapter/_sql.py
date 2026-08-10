@@ -69,18 +69,20 @@ from ..runtime import (
     ToolOperationRecord,
     ToolStateStore,
 )
-from ..storage import StorageDatabase
+from ..storage import StorageDatabase, resolve_dialect
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._schema import SqlRuntimeTables
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.sql.elements import ColumnElement
 
 
 _MAX_SQL_BLOB_BYTES = 2 * 1024 * 1024 * 1024
 _MAX_SQL_BLOB_CHUNK = 1024 * 1024
 _MAX_SQL_INLINE_BLOB_BYTES = 4 * 1024 * 1024
+_SQL_CHUNK_INSERT_ROWS = 64
 _logger = environ.get_logger("ai.adapter.sql")
 
 
@@ -120,8 +122,26 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         from sqlalchemy import select
         target = self._table if table is None else table
         async with self._owner.session_factory() as session:
-            row = (await session.execute(select(target).where(target.c.namespace_key == self.namespace_key, target.c.tenant_id == tenant_id, target.c.record_id == record_id))).mappings().first()
-        return None if row is None else _decode_payload(self._owner.table_name(target), row["payload"])
+            payload = await session.scalar(
+                select(target.c.payload).where(
+                    target.c.namespace_key == self.namespace_key,
+                    target.c.tenant_id == tenant_id,
+                    target.c.record_id == record_id,
+                )
+            )
+        return None if payload is None else _decode_payload(self._owner.table_name(target), payload)
+
+    async def _exists(self, record_id: str, *, tenant_id: str) -> bool:
+        from sqlalchemy import select
+        async with self._owner.session_factory() as session:
+            row_id = await session.scalar(
+                select(self._table.c.id).where(
+                    self._table.c.namespace_key == self.namespace_key,
+                    self._table.c.tenant_id == tenant_id,
+                    self._table.c.record_id == record_id,
+                )
+            )
+        return row_id is not None
 
     async def _insert(self, record: object, *, record_id: str, tenant_id: str, sequence: int = 0, revision: int = 0, status: str = "", table: "Table | None" = None) -> object:
         target = self._table if table is None else table
@@ -164,8 +184,17 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     values.update(scope=record.scope, key_hash=record.key_hash, identity_key=_composite_key(record.scope, record.key_hash))
                 if isinstance(record, OperationLedgerRecord):
                     values.update(resource_kind=record.resource_kind.value, resource_id=record.resource_id)
-                result = await session.execute(update(target).where(target.c.namespace_key == self.namespace_key, target.c.tenant_id == tenant_id, target.c.record_id == record_id, target.c.revision == expected_revision).values(values))
-                if result.rowcount != 1:
+                updated = await session.execute(
+                    update(target)
+                    .where(
+                        target.c.namespace_key == self.namespace_key,
+                        target.c.tenant_id == tenant_id,
+                        target.c.record_id == record_id,
+                        target.c.revision == expected_revision,
+                    )
+                    .values(values)
+                )
+                if updated.rowcount != 1:
                     current = await self._get(record_id, tenant_id=tenant_id, table=target)
                     if current is None:
                         raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -186,8 +215,9 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise
 
     async def get_header(self, record_id: str, *, tenant_id: str) -> ResourceRef | None:
-        record = await self._get(record_id, tenant_id=tenant_id)
-        return None if record is None else ResourceRef(_resource_kind(self._table_name), record_id, tenant_id)
+        if not await self._exists(record_id, tenant_id=tenant_id):
+            return None
+        return ResourceRef(_resource_kind(self._table_name), record_id, tenant_id)
 
     async def get(self, record_id: str, key_hash: "str | None" = None, *, tenant_id: str) -> "object | None":
         if self._table_name == "idempotency":
@@ -201,21 +231,41 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             if record_id is None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             return await self._list_event(record_id, tenant_id=tenant_id, after_sequence=after_sequence, limit=limit)
-        values = await self._list_records(tenant_id=tenant_id)
         if self._table_name == "memories":
-            memories = tuple(sorted((item for item in values if isinstance(item, MemoryRecord) and item.owner_id == owner_id), key=lambda item: item.memory_id))
-            start = 0 if cursor is None else next((index + 1 for index, item in enumerate(memories) if item.memory_id == cursor), len(memories))
-            page = memories[start:start + limit]
-            return Page(page, page[-1].memory_id if len(memories) > start + limit else None)
-        return tuple(item for item in values if owner_principal_id is None or item.owner_principal_id == owner_principal_id)
+            return await self.list_memories(
+                tenant_id=tenant_id,
+                owner_id="" if owner_id is None else owner_id,
+                cursor=cursor,
+                limit=limit,
+            )
+        predicates = ()
+        if owner_principal_id is not None:
+            predicates = (self._table.c.payload["value"]["owner_principal_id"].as_string() == owner_principal_id,)
+        values = await self._list_records(tenant_id=tenant_id, predicates=predicates)
+        return tuple(item for item in values if isinstance(item, SessionRecord))
 
-    async def _list_records(self, *, tenant_id: str, table: "Table | None" = None) -> tuple[object, ...]:
+    async def _list_records(
+        self,
+        *,
+        tenant_id: str,
+        table: "Table | None" = None,
+        predicates: "tuple[ColumnElement[bool], ...]" = (),
+        order_by: "tuple[ColumnElement[object], ...]" = (),
+        limit: "int | None" = None,
+    ) -> tuple[object, ...]:
         from sqlalchemy import select
         target = self._table if table is None else table
+        statement = select(target.c.payload).where(
+            target.c.namespace_key == self.namespace_key,
+            target.c.tenant_id == tenant_id,
+            *predicates,
+        ).order_by(*(order_by or (target.c.record_id,)))
+        if limit is not None:
+            statement = statement.limit(limit)
         async with self._owner.session_factory() as session:
-            rows = (await session.execute(select(target).where(target.c.namespace_key == self.namespace_key, target.c.tenant_id == tenant_id).order_by(target.c.record_id))).mappings().all()
+            payloads = (await session.execute(statement)).scalars().all()
         logical_name = self._owner.table_name(target)
-        return tuple(_decode_payload(logical_name, row["payload"]) for row in rows)
+        return tuple(_decode_payload(logical_name, payload) for payload in payloads)
 
     async def compare_and_swap(self, record_id: str, *, tenant_id: str, expected_revision: int = 0, expected_status: "IdempotencyStatus | None" = None, next_record: object) -> object:
         if self._table_name == "idempotency":
@@ -237,12 +287,18 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return await self._replace(next_record, record_id=record_id, tenant_id=tenant_id, expected_revision=expected_revision, revision=expected_revision + 1, status=_status(next_record))
 
     async def list_by_session(self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None) -> tuple[ExecutionRecord, ...]:
-        values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if item.session_id == session_id)
-        return tuple(item for item in values if statuses is None or item.status in statuses)
+        predicates = [self._table.c.session_id == session_id]
+        if statuses is not None:
+            predicates.append(self._table.c.status.in_(tuple(status.value for status in statuses)))
+        values = await self._list_records(tenant_id=tenant_id, predicates=tuple(predicates))
+        return tuple(item for item in values if isinstance(item, ExecutionRecord))
 
     async def list_children(self, execution_id: str, *, tenant_id: str) -> tuple[ExecutionRecord, ...]:
-        values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if item.parent_execution_id == execution_id)
-        return tuple(sorted(values, key=lambda item: item.execution_id))
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=(self._table.c.parent_execution_id == execution_id,),
+        )
+        return tuple(item for item in values if isinstance(item, ExecutionRecord))
 
     async def create_plan(self, graph: TaskGraph, *, tenant_id: str) -> TaskGraphView:
         from sqlalchemy import insert
@@ -254,9 +310,16 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             async with self._owner.session_factory() as session:
                 async with session.begin():
                     await session.execute(insert(graph_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=graph.graph_id, sequence=0, revision=0, status=view.status.value, payload=_encode_payload(view), created_at=now, updated_at=now))
+                    node_values = []
                     for node in graph.nodes:
                         record = TaskNodeView(graph.graph_id, node.task_id, node.dependencies, TaskStatus.PENDING, None, 0, None, None, None, None)
-                        await session.execute(insert(node_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=f"{graph.graph_id}:{node.task_id}", sequence=0, revision=0, status=TaskStatus.PENDING.value, owner=None, fence=0, lease_expires_at=None, payload=_encode_payload(record), created_at=now, updated_at=now))
+                        node_values.append({"namespace_key": self.namespace_key, "tenant_id": tenant_id, "record_id": f"{graph.graph_id}:{node.task_id}", "sequence": 0, "revision": 0, "status": TaskStatus.PENDING.value, "owner": None, "fence": 0, "lease_expires_at": None, "payload": _encode_payload(record), "created_at": now, "updated_at": now})
+                    for offset in range(0, len(node_values), _SQL_CHUNK_INSERT_ROWS):
+                        await session.execute(
+                            insert(node_table).values(
+                                node_values[offset:offset + _SQL_CHUNK_INSERT_ROWS]
+                            )
+                        )
         except Exception as error:
             if _is_integrity(error):
                 raise AIError(ErrorCode.STORAGE_CONFLICT) from error
@@ -316,15 +379,32 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return updated
 
     async def _claim_task(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
-        node = await self._get(f"{graph_id}:{task_id}", tenant_id=tenant_id, table=self._owner.tables["task_nodes"])
+        table = self._owner.tables["task_nodes"]
+        graph_nodes = await self._list_records(
+            tenant_id=tenant_id,
+            table=table,
+            predicates=(table.c.record_id.startswith(f"{graph_id}:", autoescape=True),),
+        )
+        node = next(
+            (
+                item
+                for item in graph_nodes
+                if isinstance(item, TaskNodeView) and item.task_id == task_id
+            ),
+            None,
+        )
         if not isinstance(node, TaskNodeView):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        dependencies_ready = True
-        for dependency in node.dependencies:
-            dependency_node = await self._get(f"{graph_id}:{dependency}", tenant_id=tenant_id, table=self._owner.tables["task_nodes"])
-            if not isinstance(dependency_node, TaskNodeView) or dependency_node.status is not TaskStatus.SUCCEEDED:
-                dependencies_ready = False
-                break
+        dependency_ids = frozenset(node.dependencies)
+        dependency_nodes = {
+            dependency.task_id: dependency
+            for dependency in graph_nodes
+            if isinstance(dependency, TaskNodeView) and dependency.task_id in dependency_ids
+        }
+        dependencies_ready = len(dependency_nodes) == len(dependency_ids) and all(
+            dependency.status is TaskStatus.SUCCEEDED
+            for dependency in dependency_nodes.values()
+        )
         now = datetime.now(timezone.utc)
         expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= now
         if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
@@ -359,45 +439,47 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return node
 
     async def _task_update(self, record: TaskNodeView, *, tenant_id: str, expected_status: TaskStatus, expected_owner: "str | None", expected_fence: int, expected_lease_after: "datetime | None" = None, expected_lease_before: "datetime | None" = None) -> TaskNodeView:
-        from sqlalchemy import select, update
+        from sqlalchemy import update
         table = self._owner.tables["task_nodes"]
         record_id = f"{record.graph_id}:{record.task_id}"
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id))).mappings().first()
-                if row is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.revision == row["revision"], table.c.status == expected_status.value, table.c.fence == expected_fence]
+                predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.status == expected_status.value, table.c.fence == expected_fence]
                 predicate.append(table.c.owner.is_(None) if expected_owner is None else table.c.owner == expected_owner)
                 if expected_lease_after is not None:
                     predicate.append(table.c.lease_expires_at > expected_lease_after)
                 if expected_lease_before is not None:
                     predicate.append(table.c.lease_expires_at <= expected_lease_before)
-                outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=int(row["revision"]) + 1, status=record.status.value, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=_record_time(record)))
+                outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=table.c.revision + 1, status=record.status.value, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=_record_time(record)))
                 if outcome.rowcount != 1:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
         return record
 
     async def _replace_status(self, record: object, *, table_name: str, tenant_id: str, record_id: str, expected_status: object) -> object:
-        from sqlalchemy import select, update
+        from sqlalchemy import update
         table = self._owner.tables[table_name]
         status = expected_status.value if isinstance(expected_status, StrEnum) else str(expected_status)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id))).mappings().first()
-                if row is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                outcome = await session.execute(update(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.revision == row["revision"], table.c.status == status).values(payload=_encode_payload(record), revision=int(row["revision"]) + 1, status=_status(record), updated_at=_record_time(record)))
+                outcome = await session.execute(update(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.status == status).values(payload=_encode_payload(record), revision=table.c.revision + 1, status=_status(record), updated_at=_record_time(record)))
                 if outcome.rowcount != 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
         return record
 
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]:
-        values = await self._list_records(tenant_id=tenant_id, table=self._owner.tables["task_nodes"])
-        return tuple(item for item in values if item.graph_id == graph_id)
+        table = self._owner.tables["task_nodes"]
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            table=table,
+            predicates=(table.c.record_id.startswith(f"{graph_id}:", autoescape=True),),
+        )
+        return tuple(item for item in values if isinstance(item, TaskNodeView))
 
     async def _list_evaluations(self, execution_id: str, *, tenant_id: str) -> tuple[EvaluationRecord, ...]:
-        values = await self._list_records(tenant_id=tenant_id)
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=(self._table.c.payload["value"]["execution_id"].as_string() == execution_id,),
+        )
         return tuple(item for item in values if isinstance(item, EvaluationRecord) and item.execution_id == execution_id)
 
     async def put(self, record: MemoryRecord, *, expected_revision: "int | None") -> MemoryRecord:
@@ -416,15 +498,15 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 async with self._owner.session_factory() as session:
                     async with session.begin():
                         if operation is not None:
-                            operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
+                            operation_row = (await session.execute(select(operation_table.c.payload).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
                             if operation_row is not None:
                                 existing_operation = _decode_payload("operation_ledger", operation_row["payload"])
                                 if not isinstance(existing_operation, OperationLedgerRecord) or _operation_identity(existing_operation) != _operation_identity(operation):
                                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-                                memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id))).mappings().first()
+                                memory_row = (await session.execute(select(memory_table.c.payload).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id))).mappings().first()
                                 current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
                                 return current if isinstance(current, MemoryRecord) else None, True
-                        memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id).with_for_update())).mappings().first()
+                        memory_row = (await session.execute(select(memory_table.c.payload).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == record.tenant_id, memory_table.c.record_id == record.memory_id).with_for_update())).mappings().first()
                         current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
                         if current is not None and not isinstance(current, MemoryRecord):
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -449,8 +531,19 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 await asyncio.sleep(0.01 * (attempt + 1))
 
     async def list_memories(self, *, tenant_id: str, owner_id: str, cursor: "str | None", limit: int) -> Page[MemoryRecord]:
-        values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if isinstance(item, MemoryRecord) and item.owner_id == owner_id)
-        return Page(values[:limit], None)
+        if not 1 <= limit <= 200:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        predicates = [self._table.c.payload["value"]["owner_id"].as_string() == owner_id]
+        if cursor is not None:
+            predicates.append(self._table.c.record_id > cursor)
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=tuple(predicates),
+            limit=limit + 1,
+        )
+        memories = tuple(item for item in values if isinstance(item, MemoryRecord))
+        page = memories[:limit]
+        return Page(page, page[-1].memory_id if len(memories) > limit else None)
 
     async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None:
         deleted, replayed = await self.delete_with_operation(memory_id, tenant_id=tenant_id, expected_revision=expected_revision, operation=None)
@@ -458,7 +551,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: "int | None", operation: "OperationLedgerInput | None") -> "tuple[bool, bool]":
-        from sqlalchemy import delete, select
+        from sqlalchemy import and_, select
 
         memory_table = self._owner.tables["memories"]
         operation_table = self._owner.tables["operation_ledger"]
@@ -467,26 +560,37 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 async with self._owner.session_factory() as session:
                     async with session.begin():
                         if operation is not None:
-                            operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
+                            operation_row = (await session.execute(select(operation_table.c.payload).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == operation.tenant_id, operation_table.c.record_id == operation.operation_id).with_for_update())).mappings().first()
                             if operation_row is not None:
                                 existing_operation = _decode_payload("operation_ledger", operation_row["payload"])
                                 if not isinstance(existing_operation, OperationLedgerRecord) or _operation_identity(existing_operation) != _operation_identity(operation):
                                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                                 return False, True
-                        memory_row = (await session.execute(select(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == tenant_id, memory_table.c.record_id == memory_id).with_for_update())).mappings().first()
-                        current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
-                        if current is not None and not isinstance(current, MemoryRecord):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        if current is None:
-                            if expected_revision is not None:
+                        if expected_revision is None:
+                            memory_row = (await session.execute(select(memory_table.c.payload).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == tenant_id, memory_table.c.record_id == memory_id).with_for_update())).mappings().first()
+                            current = None if memory_row is None else _decode_payload("memories", memory_row["payload"])
+                            if current is not None and not isinstance(current, MemoryRecord):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            if current is not None:
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             deleted = False
                         else:
-                            if current.revision != expected_revision:
+                            rows = await resolve_dialect(session).delete_returning(
+                                session,
+                                table=memory_table,
+                                where=and_(
+                                    memory_table.c.namespace_key == self.namespace_key,
+                                    memory_table.c.tenant_id == tenant_id,
+                                    memory_table.c.record_id == memory_id,
+                                    memory_table.c.revision == expected_revision,
+                                ),
+                                returning=("payload",),
+                            )
+                            if not rows:
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-                            outcome = await session.execute(delete(memory_table).where(memory_table.c.namespace_key == self.namespace_key, memory_table.c.tenant_id == tenant_id, memory_table.c.record_id == memory_id, memory_table.c.revision == expected_revision))
-                            if outcome.rowcount != 1:
-                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                            current = _decode_payload("memories", rows[0]["payload"])
+                            if not isinstance(current, MemoryRecord):
+                                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                             deleted = True
                         if operation is not None:
                             await self._append_operation_in_session(session, operation)
@@ -501,13 +605,13 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
 
         counter_table = self._owner.tables["operation_counters"]
         ledger_table = self._owner.tables["operation_ledger"]
-        row = (await session.execute(select(ledger_table).where(ledger_table.c.namespace_key == self.namespace_key, ledger_table.c.tenant_id == record.tenant_id, ledger_table.c.record_id == record.operation_id).with_for_update())).mappings().first()
+        row = (await session.execute(select(ledger_table.c.payload).where(ledger_table.c.namespace_key == self.namespace_key, ledger_table.c.tenant_id == record.tenant_id, ledger_table.c.record_id == record.operation_id).with_for_update())).mappings().first()
         if row is not None:
             existing = _decode_payload("operation_ledger", row["payload"])
             if not isinstance(existing, OperationLedgerRecord) or _operation_identity(existing) != _operation_identity(record):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return existing
-        counter = (await session.execute(select(counter_table).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
+        counter = (await session.execute(select(counter_table.c.id, counter_table.c.revision).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
         sequence = 1 if counter is None else int(counter["revision"]) + 1
         counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "partition_key": _composite_key(record.resource_kind.value, record.resource_id), "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
         if counter is None:
@@ -528,13 +632,29 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return value if isinstance(value, ArtifactRecord) else None
 
     async def list_by_execution(self, execution_id: str, *, tenant_id: str, cursor: "str | None" = None, limit: int = 100) -> "Page[ArtifactRecord] | tuple[EvaluationRecord, ...]":
+        execution_predicate = self._table.c.payload["value"]["execution_id"].as_string() == execution_id
         if self._table_name == "idempotency":
-            values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if isinstance(item, IdempotencyRecord) and item.execution_id == execution_id)
-            return tuple(sorted(values, key=lambda item: (item.scope, item.key_hash)))
+            values = await self._list_records(
+                tenant_id=tenant_id,
+                predicates=(execution_predicate,),
+                order_by=(self._table.c.scope, self._table.c.key_hash),
+            )
+            return tuple(item for item in values if isinstance(item, IdempotencyRecord))
         if self._table_name == "evaluations":
             return await self._list_evaluations(execution_id, tenant_id=tenant_id)
-        values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if isinstance(item, ArtifactRecord) and item.execution_id == execution_id)
-        return Page(values[:limit], None)
+        if not 1 <= limit <= 200:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        predicates = [execution_predicate]
+        if cursor is not None:
+            predicates.append(self._table.c.record_id > cursor)
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=tuple(predicates),
+            limit=limit + 1,
+        )
+        artifacts = tuple(item for item in values if isinstance(item, ArtifactRecord))
+        page = artifacts[:limit]
+        return Page(page, page[-1].artifact_id if len(artifacts) > limit else None)
 
     async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, decision_id: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord:
         current = await self._get(approval_id, tenant_id=tenant_id)
@@ -544,8 +664,22 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return await self._replace_status(updated, table_name="approvals", tenant_id=tenant_id, record_id=approval_id, expected_status=expected_status)
 
     async def _list_external(self, execution_id: str, *, tenant_id: str) -> tuple[object, ...]:
-        values = await self._list_records(tenant_id=tenant_id)
-        return tuple(item for item in values if (isinstance(item, ApprovalRecord) and item.execution_id == execution_id and item.status is ApprovalStatus.PENDING) or (isinstance(item, ExternalResultRecord) and item.execution_id == execution_id and item.status is ExternalCallStatus.PENDING))
+        pending_status = (
+            ApprovalStatus.PENDING.value
+            if self._table_name == "approvals"
+            else ExternalCallStatus.PENDING.value
+        )
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=(
+                self._table.c.payload["value"]["execution_id"].as_string() == execution_id,
+                self._table.c.status == pending_status,
+            ),
+        )
+        return tuple(
+            item for item in values
+            if isinstance(item, (ApprovalRecord, ExternalResultRecord))
+        )
 
     async def create_call(self, record: ExternalResultRecord) -> ExternalResultRecord:
         return await self.create(record)
@@ -579,8 +713,8 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         event_table = self._owner.tables["execution_events"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                execution_row = (await session.execute(select(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == claim.tenant_id, execution_table.c.record_id == claim.execution_id, execution_table.c.status == ExecutionStatus.PENDING_START.value, execution_table.c.revision == claim.expected_revision, execution_table.c.sequence == claim.expected_event_sequence, execution_table.c.agent_run_sequence == 0))).mappings().first()
-                identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == claim.tenant_id, idempotency_table.c.scope == claim.scope, idempotency_table.c.key_hash == claim.key_hash))).mappings().first()
+                execution_row = (await session.execute(select(execution_table.c.payload).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == claim.tenant_id, execution_table.c.record_id == claim.execution_id, execution_table.c.status == ExecutionStatus.PENDING_START.value, execution_table.c.revision == claim.expected_revision, execution_table.c.sequence == claim.expected_event_sequence, execution_table.c.agent_run_sequence == 0))).mappings().first()
+                identity_row = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == claim.tenant_id, idempotency_table.c.scope == claim.scope, idempotency_table.c.key_hash == claim.key_hash))).mappings().first()
                 if execution_row is None or identity_row is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 current = _decode_payload("executions", execution_row["payload"])
@@ -617,7 +751,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             if not _is_integrity(error):
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             async with self._owner.session_factory() as session:
-                identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == identity.tenant_id, idempotency_table.c.scope == identity.scope, idempotency_table.c.key_hash == identity.key_hash))).mappings().first()
+                identity_row = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == identity.tenant_id, idempotency_table.c.scope == identity.scope, idempotency_table.c.key_hash == identity.key_hash))).mappings().first()
                 if identity_row is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT) from error
                 existing_identity = _decode_payload("idempotency", identity_row["payload"])
@@ -625,7 +759,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 if existing_identity.request_digest != identity.request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                execution_row = (await session.execute(select(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == identity.tenant_id, execution_table.c.record_id == existing_identity.execution_id))).mappings().first()
+                execution_row = (await session.execute(select(execution_table.c.payload).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == identity.tenant_id, execution_table.c.record_id == existing_identity.execution_id))).mappings().first()
                 if execution_row is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 existing_execution = _decode_payload("executions", execution_row["payload"])
@@ -641,7 +775,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         now = datetime.now(timezone.utc)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(self._table).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == tenant_id, self._table.c.record_id == execution_id, self._table.c.revision == expected_revision, self._table.c.status == ExecutionStatus.STARTED.value, self._table.c.agent_run_sequence == expected_agent_run_sequence))).mappings().first()
+                row = (await session.execute(select(self._table.c.payload).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == tenant_id, self._table.c.record_id == execution_id, self._table.c.revision == expected_revision, self._table.c.status == ExecutionStatus.STARTED.value, self._table.c.agent_run_sequence == expected_agent_run_sequence))).mappings().first()
                 if row is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 current = _decode_payload("executions", row["payload"])
@@ -661,8 +795,8 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         idempotency_table = self._owner.tables["idempotency"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(self._table).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == commit.tenant_id, self._table.c.record_id == commit.execution_id, self._table.c.revision == commit.expected_revision, self._table.c.status == ExecutionStatus.STARTED.value))).mappings().first()
-                identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == commit.tenant_id, idempotency_table.c.scope == commit.scope, idempotency_table.c.key_hash == commit.key_hash))).mappings().first()
+                row = (await session.execute(select(self._table.c.payload).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == commit.tenant_id, self._table.c.record_id == commit.execution_id, self._table.c.revision == commit.expected_revision, self._table.c.status == ExecutionStatus.STARTED.value))).mappings().first()
+                identity_row = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == commit.tenant_id, idempotency_table.c.scope == commit.scope, idempotency_table.c.key_hash == commit.key_hash))).mappings().first()
                 if row is None or identity_row is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 current = _decode_payload("executions", row["payload"])
@@ -686,8 +820,8 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         event_table = self._owner.tables["execution_events"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == commit.tenant_id, operation_table.c.record_id == commit.operation_id).with_for_update())).mappings().first()
-                execution_row = (await session.execute(select(self._table).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == commit.tenant_id, self._table.c.record_id == commit.execution_id).with_for_update())).mappings().first()
+                operation_row = (await session.execute(select(operation_table.c.payload).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == commit.tenant_id, operation_table.c.record_id == commit.operation_id).with_for_update())).mappings().first()
+                execution_row = (await session.execute(select(self._table.c.payload).where(self._table.c.namespace_key == self.namespace_key, self._table.c.tenant_id == commit.tenant_id, self._table.c.record_id == commit.execution_id).with_for_update())).mappings().first()
                 if operation_row is None or execution_row is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 operation = _decode_payload("operation_ledger", operation_row["payload"])
@@ -735,22 +869,22 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == execution.tenant_id, execution_table.c.record_id == execution.execution_id).with_for_update())).mappings().first()
+                row = (await session.execute(select(execution_table.c.payload).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == execution.tenant_id, execution_table.c.record_id == execution.execution_id).with_for_update())).mappings().first()
                 if row is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 current = _decode_payload("executions", row["payload"])
-                existing_result_row = (await session.execute(select(result_table).where(result_table.c.namespace_key == self.namespace_key, result_table.c.tenant_id == execution.tenant_id, result_table.c.record_id == execution.execution_id))).mappings().first()
+                existing_result_row = (await session.execute(select(result_table.c.payload).where(result_table.c.namespace_key == self.namespace_key, result_table.c.tenant_id == execution.tenant_id, result_table.c.record_id == execution.execution_id))).mappings().first()
                 if existing_result_row is not None:
                     existing_result = _decode_payload("results", existing_result_row["payload"])
-                    terminal_event = (await session.execute(select(event_table).where(event_table.c.namespace_key == self.namespace_key, event_table.c.tenant_id == execution.tenant_id, event_table.c.record_id == f"{execution.execution_id}:{commit.expected_event_sequence + 1}"))).mappings().first()
+                    terminal_event = (await session.execute(select(event_table.c.payload).where(event_table.c.namespace_key == self.namespace_key, event_table.c.tenant_id == execution.tenant_id, event_table.c.record_id == f"{execution.execution_id}:{commit.expected_event_sequence + 1}"))).mappings().first()
                     identity_ok = True
                     if commit.idempotency is not None:
-                        identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id, idempotency_table.c.scope == commit.idempotency.scope, idempotency_table.c.key_hash == commit.idempotency.key_hash))).mappings().first()
+                        identity_row = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id, idempotency_table.c.scope == commit.idempotency.scope, idempotency_table.c.key_hash == commit.idempotency.key_hash))).mappings().first()
                         identity_value = None if identity_row is None else _decode_payload("idempotency", identity_row["payload"])
                         identity_ok = isinstance(identity_value, IdempotencyRecord) and identity_value.execution_id == execution.execution_id and identity_value.request_digest == commit.idempotency.request_digest and identity_value.status is commit.idempotency.next_status and identity_value.result_digest == commit.idempotency.result_digest and identity_value.error_code == commit.idempotency.error_code
                     operation_ok = True
                     if commit.operation is not None:
-                        operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == execution.tenant_id, operation_table.c.record_id == commit.operation.operation_id))).mappings().first()
+                        operation_row = (await session.execute(select(operation_table.c.payload).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == execution.tenant_id, operation_table.c.record_id == commit.operation.operation_id))).mappings().first()
                         operation_value = None if operation_row is None else _decode_payload("operation_ledger", operation_row["payload"])
                         operation_ok = isinstance(operation_value, OperationLedgerRecord) and operation_value.execution_id == execution.execution_id and operation_value.status is commit.operation.next_status and operation_value.result_ref == commit.operation.result_ref and operation_value.result_digest == commit.operation.result_digest and operation_value.error_code == commit.operation.error_code
                     if isinstance(existing_result, ResultRecord) and existing_result == commit.result and isinstance(current, ExecutionRecord) and current == execution and terminal_event is not None and _decode_payload("execution_events", terminal_event["payload"]) == ExecutionEventRecord(execution.execution_id, execution.tenant_id, commit.expected_event_sequence + 1, commit.terminal_event_type, commit.terminal_event_payload) and identity_ok and operation_ok:
@@ -760,7 +894,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 locked_session = None
                 if commit.session_head is not None:
-                    locked_session_row = (await session.execute(select(session_table).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id).with_for_update())).mappings().first()
+                    locked_session_row = (await session.execute(select(session_table.c.payload).where(session_table.c.namespace_key == self.namespace_key, session_table.c.tenant_id == execution.tenant_id, session_table.c.session_id == commit.session_head.session_id).with_for_update())).mappings().first()
                     if locked_session_row is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     locked_session = _decode_payload("sessions", locked_session_row["payload"])
@@ -769,20 +903,32 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                 identity = None
                 if commit.idempotency is not None:
-                    identity_row = (await session.execute(select(idempotency_table).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id, idempotency_table.c.scope == commit.idempotency.scope, idempotency_table.c.key_hash == commit.idempotency.key_hash).with_for_update())).mappings().first()
+                    identity_row = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id, idempotency_table.c.scope == commit.idempotency.scope, idempotency_table.c.key_hash == commit.idempotency.key_hash).with_for_update())).mappings().first()
                     if identity_row is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     identity = _decode_payload("idempotency", identity_row["payload"])
                     if not isinstance(identity, IdempotencyRecord) or identity.execution_id != execution.execution_id or identity.request_digest != commit.idempotency.request_digest or identity.status is not commit.idempotency.expected_status:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                 else:
-                    identity_rows = (await session.execute(select(idempotency_table.c.payload).where(idempotency_table.c.namespace_key == self.namespace_key, idempotency_table.c.tenant_id == execution.tenant_id))).all()
-                    identities = tuple(_decode_payload("idempotency", row[0]) for row in identity_rows)
-                    if sum(isinstance(identity, IdempotencyRecord) and identity.execution_id == execution.execution_id for identity in identities) > 1:
+                    from sqlalchemy import func
+                    matching_identities = (
+                        select(idempotency_table.c.id)
+                        .where(
+                            idempotency_table.c.namespace_key == self.namespace_key,
+                            idempotency_table.c.tenant_id == execution.tenant_id,
+                            idempotency_table.c.payload["value"]["execution_id"].as_string() == execution.execution_id,
+                        )
+                        .limit(2)
+                        .subquery()
+                    )
+                    identity_count = await session.scalar(
+                        select(func.count()).select_from(matching_identities)
+                    )
+                    if identity_count is not None and identity_count > 1:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 operation = None
                 if commit.operation is not None:
-                    operation_row = (await session.execute(select(operation_table).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == execution.tenant_id, operation_table.c.record_id == commit.operation.operation_id).with_for_update())).mappings().first()
+                    operation_row = (await session.execute(select(operation_table.c.payload).where(operation_table.c.namespace_key == self.namespace_key, operation_table.c.tenant_id == execution.tenant_id, operation_table.c.record_id == commit.operation.operation_id).with_for_update())).mappings().first()
                     if operation_row is None:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     operation = _decode_payload("operation_ledger", operation_row["payload"])
@@ -820,7 +966,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         execution_table = self._owner.tables["executions"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == tenant_id, execution_table.c.record_id == execution_id))).mappings().first()
+                row = (await session.execute(select(execution_table.c.payload).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == tenant_id, execution_table.c.record_id == execution_id))).mappings().first()
                 if row is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 current = _decode_payload("executions", row["payload"])
@@ -838,7 +984,17 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 return item
 
     async def _list_event(self, execution_id: str, *, tenant_id: str, after_sequence: int, limit: int) -> Page[object]:
-        values = tuple(item for item in await self._list_records(tenant_id=tenant_id) if item.execution_id == execution_id and item.sequence > after_sequence)
+        if not 1 <= limit <= 200:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            predicates=(
+                self._table.c.record_id.startswith(f"{execution_id}:", autoescape=True),
+                self._table.c.sequence > after_sequence,
+            ),
+            order_by=(self._table.c.sequence,),
+            limit=limit + 1,
+        )
         page = values[:limit]
         return Page(page, str(page[-1].sequence) if len(values) > len(page) else None)
 
@@ -850,7 +1006,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         table = self._owner.tables["idempotency"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.scope == scope, table.c.key_hash == key_hash))).mappings().first()
+                row = (await session.execute(select(table.c.payload, table.c.revision).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.scope == scope, table.c.key_hash == key_hash))).mappings().first()
                 if row is None:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 current = _decode_payload("idempotency", row["payload"])
@@ -885,13 +1041,13 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         ledger_table = self._owner.tables["operation_ledger"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(ledger_table).where(ledger_table.c.namespace_key == self.namespace_key, ledger_table.c.tenant_id == record.tenant_id, ledger_table.c.record_id == record.operation_id))).mappings().first()
+                row = (await session.execute(select(ledger_table.c.payload).where(ledger_table.c.namespace_key == self.namespace_key, ledger_table.c.tenant_id == record.tenant_id, ledger_table.c.record_id == record.operation_id))).mappings().first()
                 if row is not None:
                     existing = _decode_payload("operation_ledger", row["payload"])
                     if _operation_identity(existing) != _operation_identity(record):
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     return existing
-                counter = (await session.execute(select(counter_table).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
+                counter = (await session.execute(select(counter_table.c.id, counter_table.c.revision).where(counter_table.c.namespace_key == self.namespace_key, counter_table.c.tenant_id == record.tenant_id, counter_table.c.resource_kind == record.resource_kind.value, counter_table.c.resource_id == record.resource_id).with_for_update())).mappings().first()
                 sequence = 1 if counter is None else int(counter["revision"]) + 1
                 counter_values = {"namespace_key": self.namespace_key, "tenant_id": record.tenant_id, "record_id": f"{record.resource_kind.value}:{record.resource_id}", "resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "partition_key": _composite_key(record.resource_kind.value, record.resource_id), "sequence": sequence, "revision": sequence, "status": "", "payload": _encode_payload(sequence), "created_at": record.created_at, "updated_at": record.updated_at}
                 if counter is None:
@@ -909,8 +1065,21 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             return await self._list_external(str(resource_kind), tenant_id=tenant_id)
         if resource_id is None or not isinstance(resource_kind, ResourceKind):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        values = await self._list_records(tenant_id=tenant_id, table=self._owner.tables["operation_ledger"])
-        return tuple(item for item in values if item.resource_kind is resource_kind and item.resource_id == resource_id and item.status in {OperationStatus.PENDING, OperationStatus.RUNNING})[:limit]
+        if not 1 <= limit <= 1000:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        table = self._owner.tables["operation_ledger"]
+        values = await self._list_records(
+            tenant_id=tenant_id,
+            table=table,
+            predicates=(
+                table.c.resource_kind == resource_kind.value,
+                table.c.resource_id == resource_id,
+                table.c.status.in_((OperationStatus.PENDING.value, OperationStatus.RUNNING.value)),
+            ),
+            order_by=(table.c.sequence,),
+            limit=limit,
+        )
+        return tuple(item for item in values if isinstance(item, OperationLedgerRecord))
 
     async def compact_terminal(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, through_sequence: int) -> str:
         return hashlib.sha256(f"{self.namespace}:{tenant_id}:{resource_kind.value}:{resource_id}:{through_sequence}".encode()).hexdigest()
@@ -932,11 +1101,6 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if re.fullmatch(r"[0-9a-f]{64}", record.idempotency_key_hash) is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        existing = await self.get_operation(record.operation_id, tenant_id=record.tenant_id)
-        if existing is not None:
-            if _tool_identity(existing) != _tool_identity(record):
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
-            return existing
         try:
             return await self.create(record)
         except AIError as error:
@@ -1018,14 +1182,11 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
         return await self._tool_update(replace(current, status=ToolOperationStatus.FAILED, error_code=error_code, lease_expires_at=None, updated_at=now), tenant_id=tenant_id, expected_status=ToolOperationStatus.CLAIMED, expected_owner=owner, expected_fence=fence, expected_lease_after=now)
 
     async def _tool_update(self, record: ToolOperationRecord, *, tenant_id: str, expected_status: ToolOperationStatus, expected_owner: "str | None", expected_fence: "int | None", expected_lease_after: "datetime | None" = None, expected_lease_before: "datetime | None" = None) -> ToolOperationRecord:
-        from sqlalchemy import select, update
+        from sqlalchemy import update
         table = self._owner.tables["tool_operations"]
         async with self._owner.session_factory() as session:
             async with session.begin():
-                row = (await session.execute(select(table).where(table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record.operation_id))).mappings().first()
-                if row is None:
-                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-                predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record.operation_id, table.c.revision == row["revision"], table.c.status == expected_status.value]
+                predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record.operation_id, table.c.status == expected_status.value]
                 predicate.append(table.c.owner.is_(None) if expected_owner is None else table.c.owner == expected_owner)
                 if expected_fence is not None:
                     predicate.append(table.c.fence == expected_fence)
@@ -1033,10 +1194,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     predicate.append(table.c.lease_expires_at > expected_lease_after)
                 if expected_lease_before is not None:
                     predicate.append(table.c.lease_expires_at <= expected_lease_before)
-                current = _decode_payload("tool_operations", row["payload"])
-                if not isinstance(current, ToolOperationRecord) or (expected_owner is not None and current.owner != expected_owner) or (expected_fence is not None and current.fence != expected_fence) or (expected_lease_after is not None and (current.lease_expires_at is None or current.lease_expires_at <= expected_lease_after)) or (expected_lease_before is not None and (current.lease_expires_at is None or current.lease_expires_at > expected_lease_before)):
-                    raise AIError(ErrorCode.TASK_FENCE_STALE)
-                outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=int(row["revision"]) + 1, status=record.status.value, owner=record.owner, tool_call_id=record.tool_call_id, run_id=record.run_id, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=record.updated_at))
+                outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=table.c.revision + 1, status=record.status.value, owner=record.owner, tool_call_id=record.tool_call_id, run_id=record.run_id, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=record.updated_at))
                 if outcome.rowcount != 1:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
         return record
@@ -1062,21 +1220,17 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
     async def put_stream(self, *, tenant_id: str, chunks: AsyncIterator[bytes], expected_size: int, expected_digest: str) -> BlobRef:
         if expected_size < 0 or expected_size > _MAX_SQL_BLOB_BYTES or not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        existing = await self._get(expected_digest, tenant_id=tenant_id, table=self._owner.tables["blobs"])
-        if existing is not None:
-            if not isinstance(existing, BlobRef) or existing.size != expected_size:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return existing
         from sqlalchemy import insert, select
         blob_table = self._owner.tables["blobs"]
         chunk_table = self._owner.tables["blob_chunks"]
         digest = hashlib.sha256()
         size = 0
         index = 0
+        chunk_values: list[dict[str, object]] = []
         try:
             async with self._owner.session_factory() as session:
                 async with session.begin():
-                    manifest = (await session.execute(select(blob_table).where(blob_table.c.namespace_key == self.namespace_key, blob_table.c.tenant_id == tenant_id, blob_table.c.record_id == expected_digest))).mappings().first()
+                    manifest = (await session.execute(select(blob_table.c.payload).where(blob_table.c.namespace_key == self.namespace_key, blob_table.c.tenant_id == tenant_id, blob_table.c.record_id == expected_digest))).mappings().first()
                     if manifest is not None:
                         existing = _decode_payload("blobs", manifest["payload"])
                         if not isinstance(existing, BlobRef) or existing.size != expected_size:
@@ -1089,10 +1243,15 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                         digest.update(chunk)
                         size += len(chunk)
                         now = datetime.now(timezone.utc)
-                        await session.execute(insert(chunk_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=f"{expected_digest}:{index}", digest=expected_digest, chunk_index=index, chunk_key=_composite_key(expected_digest, str(index)), content=chunk, sequence=index, revision=0, status="", payload=_encode_payload(chunk), created_at=now, updated_at=now))
+                        chunk_values.append({"namespace_key": self.namespace_key, "tenant_id": tenant_id, "record_id": f"{expected_digest}:{index}", "digest": expected_digest, "chunk_index": index, "chunk_key": _composite_key(expected_digest, str(index)), "content": chunk, "sequence": index, "revision": 0, "status": "", "payload": _encode_payload(chunk), "created_at": now, "updated_at": now})
+                        if len(chunk_values) >= _SQL_CHUNK_INSERT_ROWS:
+                            await session.execute(insert(chunk_table).values(chunk_values))
+                            chunk_values.clear()
                         index += 1
                     if size != expected_size or digest.hexdigest() != expected_digest:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if chunk_values:
+                        await session.execute(insert(chunk_table).values(chunk_values))
                     ref = BlobRef(tenant_id, expected_digest, size, f"sql:{self.namespace}:{expected_digest}")
                     now = datetime.now(timezone.utc)
                     await session.execute(insert(blob_table).values(namespace_key=self.namespace_key, tenant_id=tenant_id, record_id=expected_digest, digest=expected_digest, size=size, sequence=0, revision=0, status="COMPLETED", payload=_encode_payload(ref), created_at=now, updated_at=now))

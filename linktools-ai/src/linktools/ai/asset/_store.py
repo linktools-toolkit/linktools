@@ -135,13 +135,13 @@ class AssetStore:
         self,
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
-        expected_store_revision: "StorageRevision | None" = None,
+        expected_revision: "StorageRevision | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
         """Apply file changes using the writer backend's batch guarantees."""
         self._ensure_ready()
         return await self._storage.apply_batch(
             changes,
-            expected_store_revision=expected_store_revision,
+            expected_revision=expected_revision,
         )
 
     async def list_info(

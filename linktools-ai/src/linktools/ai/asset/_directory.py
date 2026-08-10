@@ -234,12 +234,12 @@ class LocalDirectoryAssetBackend:
         self,
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
-        expected_store_revision: "StorageRevision | None" = None,
+        expected_revision: "StorageRevision | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
         if len({change.key for change in changes}) != len(changes):
             raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
         current = await self.head_revision()
-        if expected_store_revision is not None and expected_store_revision != current:
+        if expected_revision is not None and expected_revision != current:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]] = []
         for change in changes:

@@ -30,6 +30,7 @@ from ..storage import (
     sql_integer_id,
     sql_table_options,
     sql_text_key,
+    resolve_dialect,
     VersionSummary,
     storage_name,
     validate_schema,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.asset.sql")
 _ResultT = TypeVar("_ResultT")
+_SQL_BATCH_ROWS = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +192,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
         self._session_factory = session_factory
         self._tables = self._registered_tables
         self._namespace = namespace
+        self._state_loaded = False
 
     async def initialize(self) -> None:
         await self._validate_schema()
@@ -207,8 +210,10 @@ class SqlAssetBackend(InMemoryAssetBackend):
         await validate_schema(self._session_factory, self._tables.revision.metadata)
 
     async def head_revision(self) -> StorageRevision:
-        await self._refresh_state()
-        return await super().head_revision()
+        session = self._session_factory()
+        async with session:
+            revision = await self._load_revision(session)
+        return StorageRevision(str(0 if revision is None else revision))
 
     async def load_metadata(
         self,
@@ -290,26 +295,36 @@ class SqlAssetBackend(InMemoryAssetBackend):
         self,
         changes: "Sequence[StorageChange[AssetKey, bytes]]",
         *,
-        expected_store_revision: "StorageRevision | None" = None,
+        expected_revision: "StorageRevision | None" = None,
     ) -> "StorageBatchResult[AssetInfo, AssetKey]":
         return await self._mutate(
             lambda backend: backend.apply_batch(
                 changes,
-                expected_store_revision=expected_store_revision,
+                expected_revision=expected_revision,
             )
         )
 
     async def _refresh_state(self) -> None:
         session = self._session_factory()
         async with session:
-            raw = await self._load_state(session)
+            for _ in range(3):
+                revision = await self._load_revision(session)
+                resolved_revision = 0 if revision is None else revision
+                if self._state_loaded and resolved_revision == self._revision:
+                    return
+                raw = await self._load_state_for_revision(session, revision)
+                if await self._load_revision(session) == revision:
+                    break
+            else:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.import_state(raw)
+        self._state_loaded = True
 
     async def _mutate(
         self,
         mutation: "Callable[[InMemoryAssetBackend], Awaitable[_ResultT]]",
     ) -> _ResultT:
-        from sqlalchemy import insert, select, update
+        from sqlalchemy import select
         from sqlalchemy.exc import IntegrityError, OperationalError
 
         session = self._session_factory()
@@ -326,7 +341,10 @@ class SqlAssetBackend(InMemoryAssetBackend):
                         )
                     ).first()
                     expected_revision = 0 if state_row is None else int(state_row[0])
-                    previous_state = await self._load_state(session)
+                    previous_state = await self._load_state_for_revision(
+                        session,
+                        None if state_row is None else int(state_row[0]),
+                    )
                     previous_versions = previous_state["versions"]
                     if not isinstance(previous_versions, list):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -349,29 +367,21 @@ class SqlAssetBackend(InMemoryAssetBackend):
                             next_versions[len(previous_versions) :],
                             next_entries,
                         )
-                        if state_row is None:
-                            await session.execute(
-                                insert(self._tables.revision).values(
-                                    namespace=self._namespace,
-                                    store_revision=next_revision,
-                                )
-                            )
-                        else:
-                            updated = await session.execute(
-                                update(self._tables.revision)
-                                .where(
-                                    self._tables.revision.c.namespace == self._namespace,
-                                    self._tables.revision.c.store_revision == expected_revision,
-                                )
-                                .values(store_revision=next_revision)
-                            )
-                            if updated.rowcount != 1:
-                                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        stored_revision = await resolve_dialect(session).upsert_increment(
+                            session,
+                            table=self._tables.revision,
+                            values={"namespace": self._namespace},
+                            column="store_revision",
+                            index_elements=("namespace",),
+                        )
+                        if stored_revision != next_revision:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
         except AIError:
             raise
         except (IntegrityError, OperationalError) as error:
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         self.import_state(next_state)
+        self._state_loaded = True
         _logger.info(
             "SQL asset mutation committed: namespace=%s revision=%s",
             self._namespace,
@@ -379,7 +389,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
         )
         return result
 
-    async def _load_state(self, session: "AsyncSession") -> dict[str, object]:
+    async def _load_revision(self, session: "AsyncSession") -> "int | None":
         from sqlalchemy import select
 
         revision = await session.scalar(
@@ -387,8 +397,51 @@ class SqlAssetBackend(InMemoryAssetBackend):
                 self._tables.revision.c.namespace == self._namespace
             )
         )
-        change_rows = await self._load_records(session, self._tables.change)
-        entry_rows = await self._load_records(session, self._tables.entry)
+        return None if revision is None else int(revision)
+
+    async def _load_state_for_revision(
+        self,
+        session: "AsyncSession",
+        revision: "int | None",
+    ) -> dict[str, object]:
+        from sqlalchemy import literal, select, union_all
+
+        def record_select(table: "Table", source: str) -> object:
+            return select(
+                literal(source).label("_source"),
+                table.c.id.label("_record_id"),
+                table.c.asset_kind,
+                table.c.asset_id,
+                table.c.entry_revision,
+                table.c.store_revision,
+                table.c.etag,
+                table.c.size,
+                table.c.status,
+                table.c.modified_at,
+                self._tables.blob.c.content.label("content"),
+            ).select_from(
+                table.outerjoin(
+                    self._tables.blob,
+                    table.c.blob_digest == self._tables.blob.c.digest,
+                )
+            ).where(table.c.namespace == self._namespace)
+
+        rows = (
+            await session.execute(
+                union_all(
+                    record_select(self._tables.change, "change"),
+                    record_select(self._tables.entry, "entry"),
+                )
+            )
+        ).mappings().all()
+        change_rows = sorted(
+            (row for row in rows if row["_source"] == "change"),
+            key=lambda row: int(row["_record_id"]),
+        )
+        entry_rows = sorted(
+            (row for row in rows if row["_source"] == "entry"),
+            key=lambda row: int(row["_record_id"]),
+        )
         if revision is None:
             if change_rows or entry_rows:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset revision counter is missing")
@@ -399,110 +452,88 @@ class SqlAssetBackend(InMemoryAssetBackend):
             "versions": [_version_state(row) for row in change_rows],
         }
 
-    async def _load_records(self, session: "AsyncSession", table: "Table") -> list[object]:
-        from sqlalchemy import select
-
-        return list(
-            (
-                await session.execute(
-                    select(
-                        table.c.asset_kind,
-                        table.c.asset_id,
-                        table.c.entry_revision,
-                        table.c.store_revision,
-                        table.c.etag,
-                        table.c.size,
-                        table.c.status,
-                        table.c.modified_at,
-                        self._tables.blob.c.content.label("content"),
-                    )
-                    .select_from(
-                        table.outerjoin(
-                            self._tables.blob,
-                            table.c.blob_digest == self._tables.blob.c.digest,
-                        )
-                    )
-                    .where(table.c.namespace == self._namespace)
-                    .order_by(table.c.id)
-                )
-            )
-            .mappings()
-            .all()
-        )
-
     async def _persist_changes(
         self,
         session: "AsyncSession",
         changes: "Sequence[object]",
         entries: "Sequence[object]",
     ) -> None:
-        from sqlalchemy import delete, insert, select, update
+        from sqlalchemy import insert, select
 
+        change_values: list[dict[str, object]] = []
+        entry_values: list[dict[str, object]] = []
+        blob_contents: dict[str, bytes] = {}
+        changed_hashes: set[str] = set()
         for raw in changes:
             values, content = _change_values(raw, self._namespace)
-            if values["blob_digest"] is not None:
-                await self._ensure_blob(session, values["blob_digest"], content)
-            await session.execute(insert(self._tables.change).values(**values))
-        entry_values: list[dict[str, object]] = []
+            change_values.append(values)
+            changed_hashes.add(str(values["asset_key_hash"]))
+            digest = values["blob_digest"]
+            if digest is not None:
+                blob_contents[str(digest)] = content
         for raw in entries:
             values, content = _change_values(raw, self._namespace)
-            if values["blob_digest"] is not None:
-                await self._ensure_blob(session, values["blob_digest"], content)
+            if str(values["asset_key_hash"]) not in changed_hashes:
+                continue
             entry_values.append(values)
-        desired_hashes = {str(values["asset_key_hash"]) for values in entry_values}
-        current_rows = (
+            digest = values["blob_digest"]
+            if digest is not None:
+                blob_contents[str(digest)] = content
+        dialect = resolve_dialect(session)
+        if blob_contents:
+            blob_values = tuple(
+                {"digest": digest, "content": content}
+                for digest, content in blob_contents.items()
+            )
+            blob_rows = []
+            for offset in range(0, len(blob_values), _SQL_BATCH_ROWS):
+                batch = blob_values[offset:offset + _SQL_BATCH_ROWS]
+                await dialect.insert_ignore_conflict_many(
+                    session,
+                    table=self._tables.blob,
+                    rows=batch,
+                    index_elements=("digest",),
+                )
+                digests = tuple(str(values["digest"]) for values in batch)
+                blob_rows.extend(
+                    (
+                        await session.execute(
+                            select(self._tables.blob.c.digest, self._tables.blob.c.content).where(
+                                self._tables.blob.c.digest.in_(digests)
+                            )
+                        )
+                    )
+                    .all()
+                )
+            if len(blob_rows) != len(blob_contents):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            for digest, content in blob_rows:
+                if hashlib.sha256(bytes(content)).hexdigest() != str(digest):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        for offset in range(0, len(change_values), _SQL_BATCH_ROWS):
             await session.execute(
-                select(self._tables.entry.c.id, self._tables.entry.c.asset_key_hash).where(
-                    self._tables.entry.c.namespace == self._namespace
+                insert(self._tables.change).values(
+                    change_values[offset:offset + _SQL_BATCH_ROWS]
                 )
             )
-        ).all()
-        for current_id, key_hash in current_rows:
-            if str(key_hash) not in desired_hashes:
-                await session.execute(delete(self._tables.entry).where(self._tables.entry.c.id == current_id))
-        for values in entry_values:
-            current_id = await session.scalar(
-                select(self._tables.entry.c.id).where(
-                    self._tables.entry.c.namespace == self._namespace,
-                    self._tables.entry.c.asset_key_hash == values["asset_key_hash"],
-                )
+        for offset in range(0, len(entry_values), _SQL_BATCH_ROWS):
+            await dialect.upsert_many(
+                session,
+                table=self._tables.entry,
+                rows=entry_values[offset:offset + _SQL_BATCH_ROWS],
+                set_columns=(
+                    "asset_kind",
+                    "asset_id",
+                    "entry_revision",
+                    "store_revision",
+                    "etag",
+                    "size",
+                    "status",
+                    "blob_digest",
+                    "modified_at",
+                ),
+                index_elements=("namespace", "asset_key_hash"),
             )
-            if current_id is None:
-                await session.execute(insert(self._tables.entry).values(**values))
-            else:
-                await session.execute(
-                    update(self._tables.entry)
-                    .where(self._tables.entry.c.id == current_id)
-                    .values(**values)
-                )
-
-    async def _ensure_blob(
-        self,
-        session: "AsyncSession",
-        digest: object,
-        content: bytes,
-    ) -> None:
-        from sqlalchemy import insert, select
-        from sqlalchemy.exc import IntegrityError
-
-        existing = await session.scalar(
-            select(self._tables.blob.c.content).where(self._tables.blob.c.digest == digest)
-        )
-        if existing is not None:
-            if hashlib.sha256(bytes(existing)).hexdigest() != str(digest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return
-        try:
-            async with session.begin_nested():
-                await session.execute(
-                    insert(self._tables.blob).values(digest=digest, content=content)
-                )
-        except IntegrityError:
-            existing = await session.scalar(
-                select(self._tables.blob.c.content).where(self._tables.blob.c.digest == digest)
-            )
-            if existing is None or hashlib.sha256(bytes(existing)).hexdigest() != str(digest):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _version_state(row: object) -> dict[str, object]:

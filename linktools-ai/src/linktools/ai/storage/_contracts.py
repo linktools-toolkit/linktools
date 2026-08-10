@@ -201,7 +201,7 @@ class BatchStorageWriter(Protocol[KeyT, ValueT, InfoT]):
         self,
         changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
-        expected_store_revision: 'StorageRevision | None' = None,
+        expected_revision: 'StorageRevision | None' = None,
     ) -> 'StorageBatchResult[InfoT, KeyT]': ...
 
 

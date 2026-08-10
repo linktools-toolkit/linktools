@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Protocol
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
-from ._database import StorageDatabase, _resolve_engine, sql_constraint_signature
+from ._database import StorageDatabase, resolve_engine, sql_constraint_signature
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -34,7 +34,7 @@ async def validate_schema(
     metadata: "MetaData",
 ) -> None:
     """Validate owned tables without issuing schema-changing statements."""
-    engine = await _resolve_engine(session_factory)
+    engine = await resolve_engine(session_factory)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_validate_schema, metadata)
@@ -48,14 +48,23 @@ def _validate_schema(connection: "Connection", metadata: "MetaData") -> None:
     from sqlalchemy import inspect
     inspector = inspect(connection)
     actual_tables = set(inspector.get_table_names())
-    expected_tables = set(metadata.tables)
+    expected_tables = {table.name for table in metadata.tables.values()}
     if not expected_tables.issubset(actual_tables):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for table_name, table in metadata.tables.items():
-        primary_key = set(inspector.get_pk_constraint(table_name).get("constrained_columns", ()))
+    filter_names = tuple(sorted(expected_tables))
+    columns = inspector.get_multi_columns(filter_names=filter_names)
+    primary_keys = inspector.get_multi_pk_constraint(filter_names=filter_names)
+    check_constraints = inspector.get_multi_check_constraints(filter_names=filter_names)
+    unique_constraints = inspector.get_multi_unique_constraints(filter_names=filter_names)
+    foreign_keys = inspector.get_multi_foreign_keys(filter_names=filter_names)
+    indexes = inspector.get_multi_indexes(filter_names=filter_names)
+    for table in metadata.tables.values():
+        table_key = (table.schema, table.name)
+        primary_key_record = primary_keys.get(table_key, {})
+        primary_key = set(primary_key_record.get("constrained_columns", ()))
         actual_columns = {
             f"{column['name']}:{_type_name(column['type'], column['name'])}:{int(bool(column['nullable']))}:{int(column['name'] in primary_key)}"
-            for column in inspector.get_columns(table_name)
+            for column in columns.get(table_key, ())
         }
         expected_columns = {
             f"{column.name}:{_type_name(column.type.dialect_impl(connection.dialect), column.name)}:{int(bool(column.nullable))}:{int(column.primary_key)}"
@@ -68,25 +77,25 @@ def _validate_schema(connection: "Connection", metadata: "MetaData") -> None:
             for constraint in table.constraints
         }
         actual_constraints = {
-            f"PrimaryKeyConstraint::{','.join(inspector.get_pk_constraint(table_name).get('constrained_columns', ())) }:"
+            f"PrimaryKeyConstraint::{','.join(primary_key_record.get('constrained_columns', ())) }:"
         }
         actual_constraints.update(
             f"CheckConstraint:{item.get('name') or ''}::{item.get('sqltext') or ''}"
-            for item in inspector.get_check_constraints(table_name)
+            for item in check_constraints.get(table_key, ())
         )
         actual_constraints.update(
             f"UniqueConstraint:{item.get('name') or ''}:{','.join(item.get('column_names', ())) }:"
-            for item in inspector.get_unique_constraints(table_name)
+            for item in unique_constraints.get(table_key, ())
         )
         actual_constraints.update(
             f"ForeignKeyConstraint:{item.get('name') or ''}:{','.join(item.get('constrained_columns', ())) }:"
-            for item in inspector.get_foreign_keys(table_name)
+            for item in foreign_keys.get(table_key, ())
         )
         if actual_constraints != expected_constraints:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         actual_indexes = {
             f"{item.get('name') or ''}:{','.join(item.get('column_names', ())) }"
-            for item in inspector.get_indexes(table_name)
+            for item in indexes.get(table_key, ())
             if not item.get("unique")
         }
         expected_indexes = {

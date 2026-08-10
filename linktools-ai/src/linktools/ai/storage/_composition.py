@@ -618,12 +618,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self,
         changes: 'Sequence[StorageChange[KeyT, ValueT]]',
         *,
-        expected_store_revision: 'StorageRevision | None' = None,
+        expected_revision: 'StorageRevision | None' = None,
     ) -> 'StorageBatchResult[InfoT, KeyT]':
         self._validate_batch(changes)
         writer = self._require_writer()
         if isinstance(writer, BatchStorageWriter):
-            result = await writer.apply_batch(changes, expected_store_revision=expected_store_revision)
+            result = await writer.apply_batch(changes, expected_revision=expected_revision)
             self._validate_writer_batch_result(changes, result)
             for change in changes:
                 self._preloaded.pop(change.key, None)
@@ -648,12 +648,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             ):
                 await self._notify_revision(result.store_revision)
             return result
-        if expected_store_revision is not None:
+        if expected_revision is not None:
             current = await self.current_revision()
-            if current != expected_store_revision:
+            if current != expected_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT]] = []
-        revision = expected_store_revision
+        revision = expected_revision
         for index, change in enumerate(changes):
             try:
                 if change.operation is StorageOperation.PUT:

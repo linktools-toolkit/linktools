@@ -67,7 +67,6 @@ from ._dialects import (
     SqliteDialect,
     SqlValue,
     classify_integrity_error_by_message,
-    primary_key_column,
     resolve_dialect,
 )
 from ._files import (
@@ -161,7 +160,6 @@ __all__ = [
     "build_storage",
     "classify_integrity_error_by_message",
     "initialize_storage",
-    "primary_key_column",
     "read_bytes",
     "read_json",
     "resolve_dialect",

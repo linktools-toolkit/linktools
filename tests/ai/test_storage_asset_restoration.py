@@ -24,7 +24,9 @@ from linktools.ai.storage import (
     SQLiteDialect,
     SqlSchemaRegistry,
     StorageLayer,
+    StorageChange,
     StorageOverlay,
+    StorageOperation,
     resolve_dialect,
 )
 
@@ -34,8 +36,17 @@ class _DialectSession:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name))
         self.statements = []
 
-    async def execute(self, statement: object) -> None:
+    async def execute(self, statement: object) -> "_DialectResult":
         self.statements.append(statement)
+        return _DialectResult()
+
+
+class _DialectResult:
+    rowcount = 1
+    lastrowid = None
+
+    def scalar_one(self) -> int:
+        return 1
 
 
 class _MappedPathAdapter:
@@ -113,6 +124,7 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
         Column("id", Integer, primary_key=True),
         Column("path", String(128), nullable=False),
         Column("value", String(128), nullable=False),
+        Column("revision", Integer, nullable=False),
         UniqueConstraint("path"),
     )
     cases = (
@@ -131,6 +143,15 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
             index_elements=("path",),
         )
         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
+        session.statements.clear()
+        assert await dialect.upsert_increment(
+            session,
+            table=table,
+            values={"path": "sample/one", "value": "one"},
+            column="revision",
+            index_elements=("path",),
+        ) == 1
+        assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
 
 
 def test_sql_asset_backend_uses_normalized_history_tables() -> None:
@@ -147,13 +168,26 @@ def test_sql_asset_backend_uses_normalized_history_tables() -> None:
 
 @pytest.mark.asyncio
 async def test_sql_asset_backend_persists_history_outside_revision_row() -> None:
-    from sqlalchemy import func, select
+    from sqlalchemy import event, func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
     backend = SqlAssetBackend(session_factory, namespace="history")
+    statements: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
     try:
         await provision_database(engine)
         await backend.initialize_storage()
@@ -171,6 +205,16 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
         assert len(await backend.list_versions(key)) == 4
         await backend.initialize()
         assert await backend.get(key) is None
+        statements.clear()
+        assert await backend.stat(key) is not None
+        assert await backend.stat(key) is not None
+        selects = tuple(
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith("SELECT")
+        )
+        assert len(selects) == 2
+        assert all("asset_revision" in statement for statement in selects)
         async with session_factory() as session:
             counts = []
             for table in (tables.entry, tables.change, tables.blob, tables.revision):
@@ -232,3 +276,82 @@ async def test_sql_dialects_restore_batch_upsert_surface() -> None:
             index_elements=("path",),
         )
         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_dialect_uses_native_atomic_returning_operations() -> None:
+    from sqlalchemy import Column, Integer, MetaData, String, Table, UniqueConstraint
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    metadata = MetaData()
+    table = Table(
+        "dialect_counter",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("namespace", String(64), nullable=False),
+        Column("revision", Integer, nullable=False),
+        UniqueConstraint("namespace"),
+    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(metadata.create_all)
+        async with session_factory() as session, session.begin():
+            dialect = resolve_dialect(session)
+            assert await dialect.upsert_increment(
+                session,
+                table=table,
+                values={"namespace": "test"},
+                column="revision",
+                index_elements=("namespace",),
+            ) == 1
+            assert await dialect.upsert_increment(
+                session,
+                table=table,
+                values={"namespace": "test"},
+                column="revision",
+                index_elements=("namespace",),
+            ) == 2
+            deleted = await dialect.delete_returning(
+                session,
+                table=table,
+                where=table.c.namespace == "test",
+                returning=("revision",),
+            )
+            assert tuple(row["revision"] for row in deleted) == (2,)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_backend_batches_large_file_sets() -> None:
+    from sqlalchemy import func, select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
+    backend = SqlAssetBackend(session_factory, namespace="batch")
+    try:
+        await provision_database(engine)
+        await backend.initialize()
+        changes = tuple(
+            StorageChange(
+                StorageOperation.PUT,
+                AssetKey("skill", f"skill-{index}/SKILL.md"),
+                f"skill-{index}".encode(),
+                None,
+            )
+            for index in range(130)
+        )
+        result = await backend.apply_batch(changes)
+        assert len(result.results) == 130
+        assert await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
+        async with session_factory() as session:
+            counts = []
+            for table in (tables.entry, tables.change, tables.blob):
+                counts.append(await session.scalar(select(func.count()).select_from(table)))
+        assert tuple(counts) == (130, 130, 130)
+    finally:
+        await engine.dispose()

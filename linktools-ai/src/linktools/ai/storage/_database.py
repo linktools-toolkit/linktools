@@ -208,7 +208,7 @@ async def build_sqlite_storage(
     )
 
 
-async def _resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
+async def resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
     from sqlalchemy.ext.asyncio import AsyncEngine
 
     async with session_factory() as session:
@@ -226,19 +226,25 @@ def _new_metadata() -> "MetaData":
 async def _configure_sqlite_engine(session_factory: "async_sessionmaker[AsyncSession]") -> None:
     from sqlalchemy import event
 
-    bound = await _resolve_engine(session_factory)
+    bound = await resolve_engine(session_factory)
+    if not event.contains(bound.sync_engine, "checkout", _configure_sqlite_connection):
+        event.listen(bound.sync_engine, "checkout", _configure_sqlite_connection)
+    async with bound.connect() as connection:
+        result = await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+        if str(result.scalar_one()).lower() != "wal":
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
 
-    @event.listens_for(bound.sync_engine, "connect")
-    def _configure_sqlite(connection: object, _: object) -> None:
-        cursor: Any = connection.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL")
-            if str(cursor.fetchone()[0]).lower() != "wal":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=5000")
-        finally:
-            cursor.close()
+
+def _configure_sqlite_connection(connection: Any, connection_record: Any, _: Any) -> None:
+    if connection_record.info.get("linktools_ai_sqlite_configured"):
+        return
+    cursor = connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+    connection_record.info["linktools_ai_sqlite_configured"] = True
 
 
 __all__ = [

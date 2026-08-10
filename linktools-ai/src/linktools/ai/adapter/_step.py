@@ -33,6 +33,7 @@ from ..storage import (
     sql_index,
     sql_integer_id,
     sql_table_options,
+    resolve_dialect,
     storage_name,
     validate_schema,
     write_json_atomic,
@@ -362,28 +363,40 @@ class SqlStepStore:
         from sqlalchemy import select
         table = self._tables["snapshots"]
         async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id.desc()))).mappings().all()
-        for row in rows:
-            snapshot = _snapshot_from_row(row)
-            if include_interrupted or snapshot.state == "complete":
-                return snapshot
-        return None
+            statement = select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id)
+            if not include_interrupted:
+                statement = statement.where(table.c.state == "complete")
+            row = (await session.execute(statement.order_by(table.c.id.desc()).limit(1))).mappings().first()
+        return None if row is None else _snapshot_from_row(row)
 
     async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
         from sqlalchemy import select
         table = self._tables["snapshots"]
         async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id))).mappings().all()
+            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.state == "complete").order_by(table.c.id))).mappings().all()
         snapshots = [_snapshot_from_row(row) for row in rows]
         return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        from sqlalchemy import delete, insert
+        values = _effect_values(self._namespace_key, record)
         table = self._tables["effects"]
         async with self._sessions() as session:
             async with session.begin():
-                await session.execute(delete(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == record.run_id, table.c.tool_call_id == record.tool_call_id))
-                await session.execute(insert(table).values(_effect_values(self._namespace_key, record)))
+                await resolve_dialect(session).upsert(
+                    session,
+                    table=table,
+                    values=values,
+                    set_values={
+                        "tool_name": values["tool_name"],
+                        "status": values["status"],
+                        "started_at": values["started_at"],
+                        "ended_at": values["ended_at"],
+                        "idempotency_key": values["idempotency_key"],
+                        "effect_summary": values["effect_summary"],
+                        "updated_at": values["updated_at"],
+                    },
+                    index_elements=("namespace_key", "run_id", "tool_call_id"),
+                )
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
         from sqlalchemy import select
@@ -441,7 +454,17 @@ class SqlMediaStore:
         return data
 
     async def exists(self, uri: str, *, context: MediaContext = MediaContext()) -> bool:
-        return await self._media_row(uri) is not None
+        from sqlalchemy import select
+        digest = parse_media_uri(uri)
+        table = self._tables["media"]
+        async with self._sessions() as session:
+            row_id = await session.scalar(
+                select(table.c.id).where(
+                    table.c.namespace_key == self._namespace_key,
+                    table.c.sha256 == digest,
+                )
+            )
+        return row_id is not None
 
     async def public_url(self, uri: str, *, context: MediaContext = MediaContext()) -> str | None:
         return None

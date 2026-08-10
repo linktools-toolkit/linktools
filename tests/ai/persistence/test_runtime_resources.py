@@ -39,11 +39,13 @@ from linktools.ai.runtime import (
     ExecutionTerminalCommit,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
+    MemoryRecord,
     ResultRecord,
     SessionHeadAdvance,
     SessionRecord,
 )
 from linktools.ai.storage import SqlSchemaRegistry, validate_schema
+from linktools.ai.task import TaskGraph, TaskNode
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -149,6 +151,124 @@ async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_p
         claimed = await resources.domain.executions.claim_start(ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now))
         assert claimed.status is ExecutionStatus.STARTED
         assert claimed.agent_run_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_sqlite_queries_are_filtered_bounded_and_not_n_plus_one(tmp_path: Path) -> None:
+    from sqlalchemy import event, text
+
+    path = tmp_path / "queries.db"
+    config = RuntimePersistenceConfig.sqlite(str(path), namespace="queries", deployment_id="test")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    statements: list[str] = []
+    journal_changes: list[str] = []
+
+    @event.listens_for(engine.sync_engine, "before_cursor_execute")
+    def capture_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+        if statement.strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
+            journal_changes.append(statement)
+
+    try:
+        await provision_database(engine)
+        async with open_runtime_resources(config, session_factory=session_factory) as resources:
+            now = datetime.now(timezone.utc)
+            for memory_id, owner_id in (
+                ("memory-a", "owner"),
+                ("memory-b", "owner"),
+                ("memory-c", "other"),
+            ):
+                await resources.domain.memories.put(
+                    MemoryRecord(
+                        memory_id,
+                        "tenant",
+                        owner_id,
+                        "note",
+                        f"ref:{memory_id}",
+                        memory_id,
+                        {},
+                        1,
+                        now,
+                        now,
+                    ),
+                    expected_revision=None,
+                )
+            statements.clear()
+            first_page = await resources.domain.memories.list(
+                tenant_id="tenant",
+                owner_id="owner",
+                cursor=None,
+                limit=1,
+            )
+            assert tuple(item.memory_id for item in first_page.items) == ("memory-a",)
+            assert first_page.next_cursor == "memory-a"
+            selects = tuple(statement for statement in statements if statement.lstrip().upper().startswith("SELECT"))
+            assert len(selects) == 1
+            assert "JSON_EXTRACT" in selects[0]
+            assert "LIMIT" in selects[0]
+            second_page = await resources.domain.memories.list(
+                tenant_id="tenant",
+                owner_id="owner",
+                cursor=first_page.next_cursor,
+                limit=1,
+            )
+            assert tuple(item.memory_id for item in second_page.items) == ("memory-b",)
+            assert second_page.next_cursor is None
+
+            dependencies = ("dependency-a", "dependency-b", "dependency-c")
+            await resources.domain.tasks.create_plan(
+                TaskGraph(
+                    "query-graph",
+                    tuple(TaskNode(task_id) for task_id in dependencies)
+                    + (TaskNode("target", dependencies),),
+                ),
+                tenant_id="tenant",
+            )
+            for task_id in dependencies:
+                lease = await resources.domain.tasks.claim(
+                    "query-graph",
+                    task_id,
+                    tenant_id="tenant",
+                    owner="worker",
+                    lease_seconds=60,
+                )
+                await resources.domain.tasks.complete(
+                    lease,
+                    tenant_id="tenant",
+                    execution_id=None,
+                    result_digest=task_id,
+                )
+            statements.clear()
+            await resources.domain.tasks.claim(
+                "query-graph",
+                "target",
+                tenant_id="tenant",
+                owner="worker",
+                lease_seconds=60,
+            )
+            task_statements = tuple(
+                statement
+                for statement in statements
+                if statement.lstrip().upper().startswith(("SELECT", "UPDATE"))
+            )
+            assert len(task_statements) == 2
+
+            async def ping() -> None:
+                async with session_factory() as session:
+                    await session.execute(text("SELECT 1"))
+
+            await asyncio.gather(*(ping() for _ in range(8)))
+        assert len(journal_changes) == 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
