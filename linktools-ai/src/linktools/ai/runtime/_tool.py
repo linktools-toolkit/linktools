@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..core import Principal, ResourceRef, ToolOperationStatus
+from ..core import Principal, ResourceRef, ToolOperationStatus, canonical_sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +53,22 @@ class ToolAuthorization(StrEnum):
     REQUIRE_APPROVAL = "REQUIRE_APPROVAL"
 
 
+class AllowAllToolPolicy:
+    @property
+    def fingerprint(self) -> str:
+        return canonical_sha256({"tool_policy": "allow_all", "version": 1})
+
+    async def authorize_tool(
+        self,
+        principal: Principal,
+        execution: ResourceRef,
+        tool: ToolDescriptor,
+        arguments_digest: str,
+    ) -> ToolAuthorization:
+        del principal, execution, tool, arguments_digest
+        return ToolAuthorization.ALLOW
+
+
 class ToolPolicy(Protocol):
     @property
     def fingerprint(self) -> str: ...
@@ -66,4 +82,4 @@ class ToolPolicy(Protocol):
     ) -> ToolAuthorization: ...
 
 
-__all__ = ["ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore"]
+__all__ = ["AllowAllToolPolicy", "ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore"]

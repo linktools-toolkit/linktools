@@ -80,18 +80,18 @@ class PromptSpecCodec:
                 "revision": value.revision,
                 "system": value.system,
                 "instructions": list(value.instructions),
-                "variables": list(value.variables),
             }
         )
 
     def decode(self, data: bytes) -> PromptSpec:
         raw = _decode(data)
+        if "variables" in raw:
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "PromptSpec.variables is unsupported")
         return PromptSpec(
             str(raw["id"]),
             int(raw["revision"]),
             str(raw["system"]),
             tuple(str(item) for item in cast("list[object]", raw["instructions"])),
-            tuple(str(item) for item in cast("list[object]", raw["variables"])),
         )
 
 

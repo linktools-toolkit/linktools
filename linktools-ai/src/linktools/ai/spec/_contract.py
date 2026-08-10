@@ -112,13 +112,11 @@ class PromptSpec:
     revision: int
     system: str
     instructions: "tuple[str, ...]"
-    variables: "tuple[str, ...]"
 
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1:
             raise ValueError("prompt spec is incomplete")
         object.__setattr__(self, "instructions", tuple(self.instructions))
-        object.__setattr__(self, "variables", tuple(self.variables))
 
 
 @dataclass(frozen=True, slots=True)

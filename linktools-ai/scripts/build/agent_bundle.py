@@ -68,7 +68,7 @@ def build_bundle(
             "instructions": list(spec.instructions),
         }
     )
-    prompt_fingerprint = canonical_sha256({"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions), "variables": list(prompt.variables)})
+    prompt_fingerprint = canonical_sha256({"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions)})
     capability_ids = tuple(f"{capability.provider}:{capability.id}" for capability in spec.capabilities)
     toolset_ids: tuple[str, ...] = ()
     bundle_digest = canonical_sha256(

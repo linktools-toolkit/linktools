@@ -29,8 +29,7 @@
         {"name": "id", "type": "str"},
         {"name": "revision", "type": "int"},
         {"name": "system", "type": "str"},
-        {"name": "instructions", "type": "tuple[str, ...]"},
-        {"name": "variables", "type": "tuple[str, ...]"}
+        {"name": "instructions", "type": "tuple[str, ...]"}
       ]
     },
     "SkillSpec": {

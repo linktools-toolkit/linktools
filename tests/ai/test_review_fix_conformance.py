@@ -86,7 +86,7 @@ async def test_local_runtime_uses_launcher_registry_and_catalog() -> None:
         )
         runtime = build_runtime(
             AgentSpec("parent", 1, "route", (), "output", 1),
-            PromptSpec("prompt", 1, "system", (), ()),
+            PromptSpec("prompt", 1, "system", ()),
             dependencies=_runtime_dependencies(local),
         )
         result = await runtime.run(
@@ -114,7 +114,7 @@ def test_model_connection_identity_excludes_secret_and_tracks_configuration() ->
             capability_resolvers=CapabilityResolverRegistry(()),
             execution_profile_fingerprint=canonical_sha256("review-fix-profile"),
         )
-        return binder.bind(AgentSpec("agent", 1, "route", (), "output", 1), PromptSpec("prompt", 1, "system", (), ())).manifest.digest
+        return binder.bind(AgentSpec("agent", 1, "route", (), "output", 1), PromptSpec("prompt", 1, "system", ())).manifest.digest
 
     base = ModelConnectionConfig("connection", "https://example.test/v1", 10.0, "credential-a")
     digests = []

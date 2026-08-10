@@ -91,7 +91,7 @@ class AgentBundleCompiler:
                     canonical_sha256(capability),
                 )
             )
-        selected_prompt = prompt or PromptSpec("bundle", 1, "", (), ())
+        selected_prompt = prompt or PromptSpec("bundle", 1, "", ())
         bundle = build_bundle(
             spec,
             selected_prompt,

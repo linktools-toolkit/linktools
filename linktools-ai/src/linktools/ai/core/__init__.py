@@ -17,6 +17,7 @@ from ._principal import (
     PrincipalProvider,
     ResourceRef,
     TenantAuthorizationPolicy,
+    service_principal,
 )
 from ._redaction import (
     RedactedValue,
@@ -67,7 +68,7 @@ __all__ = [
     "HmacCursorSigner",
     "AuthorizationAction",
     "AuthorizationPolicy",
-    "ResourceRef", "TenantAuthorizationPolicy",
+    "ResourceRef", "TenantAuthorizationPolicy", "service_principal",
     "RedactedValue",
     "RedactionClass",
     "RedactionPolicy",

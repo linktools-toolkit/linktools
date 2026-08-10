@@ -56,6 +56,12 @@ class AuthorizationPolicy(Protocol):
     ) -> None: ...
 
 
+def service_principal(tenant_id: str, principal_id: str) -> Principal:
+    if not tenant_id.strip() or not principal_id.strip():
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return Principal(principal_id=principal_id, tenant_id=tenant_id, kind=PrincipalKind.SERVICE.value)
+
+
 class TenantAuthorizationPolicy:
     """Default deny-by-tenant policy used by local and service composition roots."""
 
@@ -87,4 +93,4 @@ class PrincipalProvider(Protocol):
     async def current(self) -> Principal: ...
 
 
-__all__ = ["AuthorizationAction", "AuthorizationPolicy", "PrincipalProvider", "ResourceRef", "TenantAuthorizationPolicy"]
+__all__ = ["AuthorizationAction", "AuthorizationPolicy", "PrincipalProvider", "ResourceRef", "TenantAuthorizationPolicy", "service_principal"]

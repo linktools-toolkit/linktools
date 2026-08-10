@@ -50,7 +50,7 @@ def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
     with pytest.raises(ValueError):
         TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
     spec = AgentSpec("agent", 1, "route", (AgentCapabilityRef("tool", "bash"),), "text", 1, ("answer",))
-    prompt = PromptSpec("prompt", 1, "system", ("answer",), ())
+    prompt = PromptSpec("prompt", 1, "system", ("answer",))
     assert build_bundle(spec, prompt, "capabilities").digest == build_bundle(spec, prompt, "capabilities").digest
 
 

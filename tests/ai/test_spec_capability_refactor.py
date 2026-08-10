@@ -106,7 +106,7 @@ def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
     assert nested == {"values": [1]}
     assert spec.capabilities[0].config["nested"] is not nested
     assert dict(spec.metadata) == metadata
-    binding = _binder().bind(spec, PromptSpec("prompt", 1, "system", (), ()))
+    binding = _binder().bind(spec, PromptSpec("prompt", 1, "system", ()))
     binding_digest = binding.manifest.digest
     metadata["depends_on"].append("other-agent")
     assert spec.metadata["depends_on"] == ["base-agent"]
@@ -125,7 +125,7 @@ def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
 
 def test_binder_groups_resolvers_and_registry_uses_only_manifest_identity() -> None:
     binder = _binder()
-    prompt = PromptSpec("prompt", 1, "system", (), ())
+    prompt = PromptSpec("prompt", 1, "system", ())
     spec = AgentSpec(
         "agent",
         1,
@@ -145,7 +145,7 @@ def test_binder_groups_resolvers_and_registry_uses_only_manifest_identity() -> N
 
 def test_unknown_provider_and_injection_contracts_are_explicit() -> None:
     binder = _binder()
-    prompt = PromptSpec("prompt", 1, "system", (), ())
+    prompt = PromptSpec("prompt", 1, "system", ())
     with pytest.raises(AIError) as error:
         binder.bind(AgentSpec("agent", 1, "route", (AgentCapabilityRef("unknown", "x"),), "output", 1), prompt)
     assert error.value.code is ErrorCode.CAPABILITY_PROVIDER_UNKNOWN
@@ -197,7 +197,7 @@ def test_declaration_codecs_round_trip_each_owned_spec() -> None:
     assert dict(decoded_agent.capabilities[0].config) == dict(agent.capabilities[0].config)
     assert dict(decoded_agent.metadata) == dict(agent.metadata)
 
-    prompt = PromptSpec("prompt", 2, "system", ("instruction",), ("name",))
+    prompt = PromptSpec("prompt", 2, "system", ("instruction",))
     decoded_prompt = PromptSpecCodec().decode(PromptSpecCodec().encode(prompt))
     assert decoded_prompt == prompt
 
@@ -245,7 +245,11 @@ def test_local_runtime_services_is_not_a_public_constructor() -> None:
     app = importlib.import_module("linktools.ai.app")
     assert "LocalRuntimeServices" not in app.__all__
     with pytest.raises(ImportError):
-        exec("from linktools.ai.app import LocalRuntimeServices", {})
+        imported = __import__("linktools.ai.app", fromlist=("LocalRuntimeServices",))
+        try:
+            imported.LocalRuntimeServices
+        except AttributeError as error:
+            raise ImportError("LocalRuntimeServices is not public") from error
 
 
 def test_skill_aggregates_and_mcp_materializes_only_with_runtime_context() -> None:

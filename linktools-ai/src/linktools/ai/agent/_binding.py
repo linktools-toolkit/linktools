@@ -271,7 +271,6 @@ def _prompt_fingerprint(prompt: PromptSpec) -> str:
             "revision": prompt.revision,
             "system": prompt.system,
             "instructions": list(prompt.instructions),
-            "variables": list(prompt.variables),
         }
     )
 
