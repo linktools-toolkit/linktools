@@ -10,6 +10,7 @@ from typing import Literal, Protocol, runtime_checkable
 from ..storage import (
     ReadableStorageBackend,
     StorageEntryRevision,
+    StorageEntryStatus,
     StorageRevision,
     StorageWriter,
 )
@@ -61,7 +62,7 @@ class AssetInfo:
     store_revision: StorageRevision
     etag: str
     size: int
-    deleted: bool
+    status: StorageEntryStatus
     root_id: str
     root_digest: str
     modified_at: datetime
@@ -71,14 +72,17 @@ class AssetInfo:
             self.size < 0
             or not self.root_id
             or not self.root_digest
+            or not isinstance(self.status, StorageEntryStatus)
             or len(self.etag) != 64
             or any(character not in "0123456789abcdef" for character in self.etag)
         ):
             raise ValueError("asset metadata is invalid")
         if self.modified_at.tzinfo is None:
             raise ValueError("asset metadata requires a timezone-aware timestamp")
-        if self.deleted and (self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()):
-            raise ValueError("asset tombstone metadata is invalid")
+        if self.status is not StorageEntryStatus.NORMAL and (
+            self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()
+        ):
+            raise ValueError("non-normal asset metadata must not contain file content")
 
 
 @runtime_checkable

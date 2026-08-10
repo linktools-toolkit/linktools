@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Raw file AssetStore backed by StorageComposition."""
+"""Raw file AssetStore backed by StorageOverlay."""
 
 import base64
 import binascii
@@ -15,11 +15,12 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     StorageBatchResult,
     StorageChange,
-    StorageComposition,
     StorageDeleteResult,
     StorageEntryRevision,
+    StorageEntryStatus,
     StorageResetResult,
     StorageRevision,
+    StorageOverlay,
     VersionSummary,
 )
 from ._domain import AssetInfo, AssetKey
@@ -49,9 +50,9 @@ class AssetStore:
 
     def __init__(
         self,
-        storage: "StorageComposition[AssetKey, bytes, AssetInfo]",
+        storage: "StorageOverlay[AssetKey, bytes, AssetInfo]",
     ) -> None:
-        """Create a raw Asset file store from one storage composition."""
+        """Create a raw Asset file store from one storage overlay."""
         self._storage = storage
         self._ready = False
 
@@ -69,12 +70,12 @@ class AssetStore:
         _logger.info("asset store initialized")
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
-        """Return current file metadata, including tombstone metadata when present."""
+        """Return current effective file metadata and status."""
         self._ensure_ready()
         return await self._storage.stat(key)
 
     async def get(self, key: AssetKey) -> "bytes | None":
-        """Return current file bytes, or None when the file is absent or deleted."""
+        """Return current effective file bytes, or None when no file is visible."""
         self._ensure_ready()
         return await self._storage.get(key)
 
@@ -118,10 +119,17 @@ class AssetStore:
         _logger.info("asset file delete: kind=%s id=%s deleted=%s", key.kind, key.id, result.deleted)
         return result
 
-    async def reset(self) -> StorageResetResult:
-        """Clear the writer overlay so lower read layers become effective."""
+    async def reset(
+        self,
+        key: AssetKey,
+        *,
+        expected_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]":
+        """Reset one file so a lower read layer becomes effective."""
         self._ensure_ready()
-        return await self._storage.reset()
+        result = await self._storage.reset(key, expected_entry_revision=expected_revision)
+        _logger.info("asset file reset: kind=%s id=%s reset=%s", key.kind, key.id, result.reset)
+        return result
 
     async def apply_batch(
         self,
@@ -150,7 +158,7 @@ class AssetStore:
         values = [
             info
             for info in await self._storage.list_info()
-            if not info.deleted
+            if info.status is StorageEntryStatus.NORMAL
             and (kind is None or info.key.kind == kind)
             and (prefix is None or info.key.id.startswith(prefix))
         ]

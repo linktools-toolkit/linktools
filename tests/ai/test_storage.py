@@ -24,11 +24,11 @@ from linktools.ai.storage import (
     MetadataLoad,
     MetadataLoadMode,
     SqlSchemaRegistry,
-    StorageComposition,
     StorageDeleteResult,
     StorageEntryRevision,
     StorageLayer,
     StorageOwnedInfo,
+    StorageOverlay,
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
@@ -106,11 +106,22 @@ class WritableBackend(Backend):
             self.revision,
         )
 
-    async def reset(self) -> StorageResetResult:
-        deleted_count = len(self.values)
-        self.values.clear()
+    async def reset(
+        self,
+        key: str,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[str]":
+        value = self.values.get(key)
+        if expected_entry_revision is not None and (
+            value is None or value.revision != expected_entry_revision.value
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if value is None:
+            return StorageResetResult(key, False, self.revision)
+        self.values.pop(key)
         self.revision = StorageRevision(str(int(self.revision.value) + 1))
-        return StorageResetResult(self.revision, deleted_count)
+        return StorageResetResult(key, True, self.revision)
 
 
 class Validator(StorageValueValidator[str, Value, Info]):
@@ -145,7 +156,7 @@ async def test_cache_contains_does_not_touch_lru_and_files_are_hashed(tmp_path: 
 
 
 def test_composition_exposes_only_domain_generics() -> None:
-    assert tuple(parameter.__name__ for parameter in StorageComposition.__parameters__) == (
+    assert tuple(parameter.__name__ for parameter in StorageOverlay.__parameters__) == (
         "KeyT",
         "ValueT",
         "InfoT",
@@ -161,7 +172,7 @@ def test_composition_exposes_only_domain_generics() -> None:
 @pytest.mark.asyncio
 async def test_composition_writer_must_be_readable() -> None:
     primary = WritableBackend(())
-    primary_storage = StorageComposition(primary, writer=primary, validator=Validator())
+    primary_storage = StorageOverlay(primary, writer=primary, validator=Validator())
     assert primary_storage.writer_is_primary is True
     await primary_storage.list_info()
     await primary_storage.put("primary", Value("primary", 2, b"primary"))
@@ -172,7 +183,7 @@ async def test_composition_writer_must_be_readable() -> None:
     assert primary.metadata_calls == 1
 
     layer = WritableBackend(())
-    layer_storage = StorageComposition(
+    layer_storage = StorageOverlay(
         Backend(()),
         writer=layer,
         layers=(StorageLayer("writer", layer),),
@@ -188,7 +199,7 @@ async def test_composition_writer_must_be_readable() -> None:
     assert layer.metadata_calls == 1
 
     with pytest.raises(ValueError, match="writer must be one of the read backends"):
-        StorageComposition(primary, writer=WritableBackend(()))
+        StorageOverlay(primary, writer=WritableBackend(()))
 
 
 def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
@@ -335,7 +346,7 @@ def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
 async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() -> None:
     primary = Backend((Value("primary", 1, b"p"),))
     fallback = Backend((Value("fallback", 1, b"f"),))
-    storage = StorageComposition(
+    storage = StorageOverlay(
         primary,
         layers=(StorageLayer("fallback", fallback),),
         validator=Validator(),
@@ -363,7 +374,7 @@ async def test_refresh_single_flight_and_cancelled_waiter() -> None:
             return await super().load_metadata(after_revision)
 
     backend = SlowBackend((Value("one", 1, b"1"),))
-    storage = StorageComposition(backend, validator=Validator())
+    storage = StorageOverlay(backend, validator=Validator())
     first = asyncio.create_task(storage.refresh())
     second = asyncio.create_task(storage.refresh())
     second.cancel()
@@ -375,7 +386,7 @@ async def test_refresh_single_flight_and_cancelled_waiter() -> None:
 
 @pytest.mark.asyncio
 async def test_read_only_write_is_fail_closed() -> None:
-    storage = StorageComposition(Backend(()), validator=Validator())
+    storage = StorageOverlay(Backend(()), validator=Validator())
     with pytest.raises(AIError) as error:
         await storage.put("key", Value("key", 1, b"value"))
     assert error.value.code == ErrorCode.STORAGE_READ_ONLY

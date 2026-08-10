@@ -20,9 +20,16 @@ from ..storage import (
     StorageChange,
     StorageDeleteResult,
     StorageEntryRevision,
+    StorageEntryStatus,
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
+    sql_blob,
+    sql_digest,
+    sql_index,
+    sql_integer_id,
+    sql_table_options,
+    sql_text_key,
     VersionSummary,
     storage_name,
     validate_schema,
@@ -31,7 +38,7 @@ from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 if TYPE_CHECKING:
-    from sqlalchemy import Index, Table
+    from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -47,11 +54,6 @@ class SqlAssetTables:
     revision: "Table"
 
 
-def _mysql_index(index: "Index") -> "Index":
-    index.info["ddl_dialect"] = "mysql"
-    return index.ddl_if(dialect="mysql")
-
-
 class SqlAssetBackend(InMemoryAssetBackend):
     """Persist current files, history, content blobs, and revisions separately."""
 
@@ -61,26 +63,21 @@ class SqlAssetBackend(InMemoryAssetBackend):
     def register_schema(cls, registry: SqlSchemaRegistry) -> SqlAssetTables:
         from sqlalchemy import (
             BigInteger,
-            Boolean,
-            CHAR,
             Column,
             DateTime,
             Index,
-            Integer,
-            LargeBinary,
             String,
             Table,
             UniqueConstraint,
         )
-        from sqlalchemy.dialects import mysql
         from sqlalchemy.sql import func
 
         metadata = registry.metadata
-        integer_id = BigInteger().with_variant(Integer, "sqlite")
-        key_hash = CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-        namespace = String(128).with_variant(mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-        asset_kind = String(128).with_variant(mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-        asset_id = String(512).with_variant(mysql.VARCHAR(512, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+        integer_id = sql_integer_id()
+        key_hash = sql_digest()
+        namespace = sql_text_key(128)
+        asset_kind = sql_text_key(128)
+        asset_id = sql_text_key(512)
 
         def timestamps() -> tuple[Column, Column]:
             return (
@@ -109,9 +106,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
             Column("store_revision", BigInteger, nullable=False, comment="Asset store revision"),
             *timestamps(),
             UniqueConstraint("namespace", name="uk_namespace"),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
             comment="Asset store revision counters",
         )
         entry = Table(
@@ -126,15 +121,13 @@ class SqlAssetBackend(InMemoryAssetBackend):
             Column("store_revision", BigInteger, nullable=False, comment="Store revision at file update"),
             Column("etag", key_hash, nullable=False, comment="File content digest"),
             Column("size", BigInteger, nullable=False, comment="File content size"),
-            Column("deleted", Boolean, nullable=False, comment="Whether the current file is deleted"),
+            Column("status", String(16), nullable=False, comment="Current file status"),
             Column("blob_digest", key_hash, nullable=True, comment="Content blob digest"),
             Column("modified_at", DateTime(timezone=True), nullable=False, comment="File modification timestamp"),
             *timestamps(),
             UniqueConstraint("namespace", "asset_key_hash", name="uk_namespace_asset_key_hash"),
-            _mysql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            sql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
+            **sql_table_options(),
             comment="Current Asset file entries",
         )
         change = Table(
@@ -149,16 +142,14 @@ class SqlAssetBackend(InMemoryAssetBackend):
             Column("store_revision", BigInteger, nullable=False, comment="Store revision at file update"),
             Column("etag", key_hash, nullable=False, comment="File content digest"),
             Column("size", BigInteger, nullable=False, comment="File content size"),
-            Column("deleted", Boolean, nullable=False, comment="Whether this history row is a tombstone"),
+            Column("status", String(16), nullable=False, comment="File status at this history revision"),
             Column("blob_digest", key_hash, nullable=True, comment="Content blob digest"),
             Column("modified_at", DateTime(timezone=True), nullable=False, comment="File modification timestamp"),
             *timestamps(),
-            _mysql_index(Index("ix_namespace_asset_key_hash_entry_revision", "namespace", "asset_key_hash", "entry_revision")),
-            _mysql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
-            _mysql_index(Index("ix_blob_digest", "blob_digest")),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            sql_index(Index("ix_namespace_asset_key_hash_entry_revision", "namespace", "asset_key_hash", "entry_revision")),
+            sql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
+            sql_index(Index("ix_blob_digest", "blob_digest")),
+            **sql_table_options(),
             comment="Asset file change history",
         )
         blob = Table(
@@ -166,18 +157,16 @@ class SqlAssetBackend(InMemoryAssetBackend):
             metadata,
             Column("id", integer_id, primary_key=True, autoincrement=True, comment="Surrogate primary key"),
             Column("digest", key_hash, nullable=False, comment="Content digest"),
-            Column("content", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False, comment="File content"),
+            Column("content", sql_blob(), nullable=False, comment="File content"),
             *timestamps(),
             UniqueConstraint("digest", name="uk_digest"),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
             comment="Content-addressed Asset file blobs",
         )
         tables = SqlAssetTables(entry, change, blob, revision)
         for table in (entry, change, blob, revision):
-            _mysql_index(Index("ix_updated_at", table.c.updated_at))
-            _mysql_index(Index("ix_created_at", table.c.created_at))
+            sql_index(Index("ix_updated_at", table.c.updated_at))
+            sql_index(Index("ix_created_at", table.c.created_at))
             registry.add_table(table, owner="asset.sql")
         cls._registered_tables = tables
         return tables
@@ -284,8 +273,18 @@ class SqlAssetBackend(InMemoryAssetBackend):
             )
         )
 
-    async def reset(self) -> StorageResetResult:
-        return await self._mutate(lambda backend: backend.reset())
+    async def reset(
+        self,
+        key: AssetKey,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]":
+        return await self._mutate(
+            lambda backend: backend.reset(
+                key,
+                expected_entry_revision=expected_entry_revision,
+            )
+        )
 
     async def apply_batch(
         self,
@@ -413,7 +412,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
                         table.c.store_revision,
                         table.c.etag,
                         table.c.size,
-                        table.c.deleted,
+                        table.c.status,
                         table.c.modified_at,
                         self._tables.blob.c.content.label("content"),
                     )
@@ -509,8 +508,11 @@ class SqlAssetBackend(InMemoryAssetBackend):
 def _version_state(row: object) -> dict[str, object]:
     values = row
     content = values["content"]
-    deleted = bool(values["deleted"])
-    if deleted:
+    try:
+        status = StorageEntryStatus(str(values["status"]))
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset status is invalid") from error
+    if status is not StorageEntryStatus.NORMAL:
         content_bytes = b""
     elif content is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset content blob is missing")
@@ -531,7 +533,7 @@ def _version_state(row: object) -> dict[str, object]:
         "store_revision": str(values["store_revision"]),
         "etag": etag,
         "size": int(values["size"]),
-        "deleted": deleted,
+        "status": status.value,
         "modified_at": modified_at.astimezone(timezone.utc).isoformat(),
         "content": base64.b64encode(content_bytes).decode("ascii"),
     }
@@ -546,7 +548,7 @@ def _change_values(raw: object, namespace: str) -> tuple[dict[str, object], byte
         content = base64.b64decode(str(raw["content"]), validate=True)
         etag = str(raw["etag"])
         size = int(raw["size"])
-        deleted = bool(raw["deleted"])
+        status = StorageEntryStatus(str(raw["status"]))
         modified_at = datetime.fromisoformat(str(raw["modified_at"]))
         entry_revision = int(raw["revision"])
         store_revision = int(str(raw["store_revision"]))
@@ -554,11 +556,11 @@ def _change_values(raw: object, namespace: str) -> tuple[dict[str, object], byte
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     if modified_at.tzinfo is None:
         modified_at = modified_at.replace(tzinfo=timezone.utc)
-    if deleted:
+    if status is not StorageEntryStatus.NORMAL:
         content = b""
     if size != len(content) or hashlib.sha256(content).hexdigest() != etag:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if deleted and (size != 0 or etag != hashlib.sha256(b"").hexdigest()):
+    if status is not StorageEntryStatus.NORMAL and (size != 0 or etag != hashlib.sha256(b"").hexdigest()):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     key_hash = _asset_key_hash(AssetKey(kind, asset_id))
     values = {
@@ -570,8 +572,8 @@ def _change_values(raw: object, namespace: str) -> tuple[dict[str, object], byte
         "store_revision": store_revision,
         "etag": etag,
         "size": size,
-        "deleted": deleted,
-        "blob_digest": None if deleted else etag,
+        "status": status.value,
+        "blob_digest": None if status is not StorageEntryStatus.NORMAL else etag,
         "modified_at": modified_at.astimezone(timezone.utc),
     }
     return values, content

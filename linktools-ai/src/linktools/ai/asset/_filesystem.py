@@ -79,8 +79,18 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
             )
         )
 
-    async def reset(self) -> StorageResetResult:
-        return await self._mutate(lambda: super(FilesystemAssetBackend, self).reset())
+    async def reset(
+        self,
+        key: AssetKey,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]":
+        return await self._mutate(
+            lambda: super(FilesystemAssetBackend, self).reset(
+                key,
+                expected_entry_revision=expected_entry_revision,
+            )
+        )
 
     async def apply_batch(
         self,

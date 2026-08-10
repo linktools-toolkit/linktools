@@ -54,7 +54,7 @@ from ..runtime import (
     WorkflowTaskGraphLauncher,
     new_runtime_service_identity,
 )
-from ..storage import StorageComposition
+from ..storage import StorageOverlay
 from ..task import (
     LocalTaskGraphLauncher,
     RuntimeTaskNodeResultVerifier,
@@ -269,7 +269,7 @@ class _WorkflowExecutionLauncher:
 
 
 def build_asset_store(
-    storage: "StorageComposition[AssetKey, bytes, AssetInfo]",
+    storage: "StorageOverlay[AssetKey, bytes, AssetInfo]",
 ) -> AssetStore:
     return AssetStore(storage)
 

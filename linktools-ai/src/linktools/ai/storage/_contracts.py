@@ -39,9 +39,16 @@ class StorageRevision:
         return self.value
 
 
+class StorageEntryStatus(StrEnum):
+    NORMAL = "NORMAL"
+    DELETED = "DELETED"
+    RESET = "RESET"
+
+
 class StorageOperation(StrEnum):
     PUT = "PUT"
     DELETE = "DELETE"
+    RESET = "RESET"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +61,8 @@ class StorageChange(Generic[KeyT, ValueT]):
     def __post_init__(self) -> None:
         if self.operation is StorageOperation.PUT and self.value is None:
             raise ValueError("PUT changes require a value")
-        if self.operation is StorageOperation.DELETE and self.value is not None:
-            raise ValueError("DELETE changes cannot contain a value")
+        if self.operation in {StorageOperation.DELETE, StorageOperation.RESET} and self.value is not None:
+            raise ValueError(f"{self.operation.value} changes cannot contain a value")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,9 +82,10 @@ class StorageDeleteResult(Generic[KeyT]):
 
 
 @dataclass(frozen=True, slots=True)
-class StorageResetResult:
+class StorageResetResult(Generic[KeyT]):
+    key: KeyT
+    reset: bool
     store_revision: StorageRevision
-    deleted_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +93,7 @@ class StorageBatchFailure(Generic[InfoT, KeyT]):
     failed_index: int
     error_code: str
     store_revision: StorageRevision
-    completed: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT], ...]"
+    completed: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT], ...]"
 
 
 class StorageBatchPartialError(
@@ -104,7 +112,7 @@ class StorageBatchPartialError(
 class StorageBatchResult(Generic[InfoT, KeyT]):
     store_revision: StorageRevision
     atomic: bool
-    results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT], ...]"
+    results: "tuple[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT], ...]"
 
 
 class MetadataLoadMode(StrEnum):
@@ -131,7 +139,7 @@ class VersionSummary:
     digest: str
     size: int
     created_at: datetime
-    deleted: bool = False
+    status: StorageEntryStatus = StorageEntryStatus.NORMAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,8 +185,13 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         expected_entry_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StorageDeleteResult[KeyT]': ...
 
-    async def reset(self) -> StorageResetResult:
-        """Clear current writer entries while retaining backend history when supported."""
+    async def reset(
+        self,
+        key: KeyT,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[KeyT]":
+        """Mark one writer entry RESET so a lower read layer can become effective."""
         ...
 
 
@@ -239,9 +252,9 @@ class StorageStatReader(Protocol[KeyT, InfoT]):
 
 
 @runtime_checkable
-class StorageDeletionInfo(Protocol):
+class StorageEntryStatusInfo(Protocol):
     @property
-    def deleted(self) -> bool: ...
+    def status(self) -> StorageEntryStatus: ...
 
 
 __all__ = [
@@ -258,8 +271,9 @@ __all__ = [
     "StorageBatchResult",
     "StorageChange",
     "StorageDeleteResult",
-    "StorageDeletionInfo",
     "StorageEntryRevision",
+    "StorageEntryStatus",
+    "StorageEntryStatusInfo",
     "StorageMetadataReader",
     "StorageOperation",
     "StorageOwnedInfo",

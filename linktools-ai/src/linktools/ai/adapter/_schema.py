@@ -5,13 +5,22 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..storage import SqlSchemaRegistry, storage_name
+from ..storage import (
+    SqlSchemaRegistry,
+    sql_blob,
+    sql_digest,
+    sql_index,
+    sql_integer_id,
+    sql_table_options,
+    sql_text_key,
+    storage_name,
+)
 
 runtime_metadata: object | None = None
 step_metadata: object | None = None
 
 if TYPE_CHECKING:
-    from sqlalchemy import CHAR, Index, MetaData, String, Table
+    from sqlalchemy import MetaData, Table
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,16 +43,12 @@ class SqlRuntimeSchema:
             Column,
             DateTime,
             Index,
-            Integer,
-            LargeBinary,
             String,
             Table,
             UniqueConstraint,
         )
-        from sqlalchemy.dialects import mysql
-
         runtime_metadata = registry.metadata
-        integer_id = BigInteger().with_variant(Integer, "sqlite")
+        integer_id = sql_integer_id()
         names = (
             "sessions", "executions", "results", "idempotency", "execution_events",
             "task_graphs", "task_nodes", "evaluations", "memories", "artifacts", "approvals",
@@ -72,32 +77,32 @@ class SqlRuntimeSchema:
         for name in names:
             columns = [
                 Column("id", integer_id, primary_key=True, autoincrement=True),
-                Column("namespace_key", _hex64(), nullable=False),
-                Column("tenant_id", _text_key(128), nullable=False),
-                Column("record_id", _text_key(256), nullable=False),
-                Column("session_id", _text_key(256), nullable=name != "sessions"),
-                Column("parent_execution_id", _text_key(256), nullable=True),
-                Column("source_execution_id", _text_key(256), nullable=True),
-                Column("base_execution_id", _text_key(256), nullable=True),
-                Column("lineage_kind", _text_key(64), nullable=False, default="RUN"),
+                Column("namespace_key", sql_digest(), nullable=False),
+                Column("tenant_id", sql_text_key(128), nullable=False),
+                Column("record_id", sql_text_key(256), nullable=False),
+                Column("session_id", sql_text_key(256), nullable=name != "sessions"),
+                Column("parent_execution_id", sql_text_key(256), nullable=True),
+                Column("source_execution_id", sql_text_key(256), nullable=True),
+                Column("base_execution_id", sql_text_key(256), nullable=True),
+                Column("lineage_kind", sql_text_key(64), nullable=False, default="RUN"),
                 Column("sequence", BigInteger, nullable=False, default=0),
                 Column("revision", BigInteger, nullable=False, default=0),
-                Column("status", _text_key(64), nullable=False, default=""),
+                Column("status", sql_text_key(64), nullable=False, default=""),
                 Column("payload", JSON, nullable=False),
             ]
             if name == "sessions":
                 columns.extend((
-                    Column("profile", _text_key(64), nullable=False, default=""),
-                    Column("head_execution_id", _text_key(256), nullable=True),
+                    Column("profile", sql_text_key(64), nullable=False, default=""),
+                    Column("head_execution_id", sql_text_key(256), nullable=True),
                 ))
             if name == "executions":
                 columns.append(Column("agent_run_sequence", BigInteger, nullable=False, default=0))
             if name == "tool_operations":
                 columns.extend((
-                    Column("run_id", _text_key(256), nullable=False),
-                    Column("tool_call_id", _text_key(256), nullable=False),
-                    Column("call_key", _hex64(), nullable=False, default=""),
-                    Column("owner", _text_key(256), nullable=True),
+                    Column("run_id", sql_text_key(256), nullable=False),
+                    Column("tool_call_id", sql_text_key(256), nullable=False),
+                    Column("call_key", sql_digest(), nullable=False, default=""),
+                    Column("owner", sql_text_key(256), nullable=True),
                     Column("fence", BigInteger, nullable=True),
                     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
                 ))
@@ -109,32 +114,32 @@ class SqlRuntimeSchema:
                 ))
             if name == "operation_counters":
                 columns.extend((
-                    Column("resource_kind", _text_key(64), nullable=False, default=""),
-                    Column("resource_id", _text_key(256), nullable=False, default=""),
-                    Column("partition_key", _hex64(), nullable=False, default=""),
+                    Column("resource_kind", sql_text_key(64), nullable=False, default=""),
+                    Column("resource_id", sql_text_key(256), nullable=False, default=""),
+                    Column("partition_key", sql_digest(), nullable=False, default=""),
                 ))
             if name == "idempotency":
                 columns.extend((
-                    Column("scope", _text_key(64), nullable=False, default=""),
-                    Column("key_hash", _hex64(), nullable=False, default=""),
-                    Column("identity_key", _hex64(), nullable=False, default=""),
+                    Column("scope", sql_text_key(64), nullable=False, default=""),
+                    Column("key_hash", sql_digest(), nullable=False, default=""),
+                    Column("identity_key", sql_digest(), nullable=False, default=""),
                 ))
             if name == "operation_ledger":
                 columns.extend((
-                    Column("resource_kind", _text_key(64), nullable=False, default=""),
-                    Column("resource_id", _text_key(256), nullable=False, default=""),
+                    Column("resource_kind", sql_text_key(64), nullable=False, default=""),
+                    Column("resource_id", sql_text_key(256), nullable=False, default=""),
                 ))
             if name == "blobs":
                 columns.extend((
-                    Column("digest", _hex64(), nullable=False, default=""),
+                    Column("digest", sql_digest(), nullable=False, default=""),
                     Column("size", BigInteger, nullable=False, default=0),
                 ))
             if name == "blob_chunks":
                 columns.extend((
-                    Column("digest", _hex64(), nullable=False, default=""),
+                    Column("digest", sql_digest(), nullable=False, default=""),
                     Column("chunk_index", BigInteger, nullable=False, default=0),
-                    Column("chunk_key", _hex64(), nullable=False, default=""),
-                    Column("content", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False, default=b""),
+                    Column("chunk_key", sql_digest(), nullable=False, default=""),
+                    Column("content", sql_blob(), nullable=False, default=b""),
                 ))
             columns.extend((
                 Column("updated_at", DateTime(timezone=True), nullable=False),
@@ -144,21 +149,19 @@ class SqlRuntimeSchema:
                 storage_name(physical_names[name]),
                 registry.metadata,
                 *columns,
-                mysql_engine="InnoDB",
-                mysql_charset="utf8mb4",
-                mysql_collate="utf8mb4_bin",
+                **sql_table_options(),
                 extend_existing=True,
             )
             if name == "sessions":
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "session_id", name="uk_namespace_key_tenant_id_session_id"))
             if name == "executions":
-                _mysql_index(Index("ix_namespace_key_tenant_id_session_id", table.c.namespace_key, table.c.tenant_id, table.c.session_id))
-                _mysql_index(Index("ix_namespace_key_tenant_id_source_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.source_execution_id))
-                _mysql_index(Index("ix_namespace_key_tenant_id_base_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.base_execution_id))
-                _mysql_index(Index("ix_namespace_key_tenant_id_parent_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.parent_execution_id))
+                sql_index(Index("ix_namespace_key_tenant_id_session_id", table.c.namespace_key, table.c.tenant_id, table.c.session_id))
+                sql_index(Index("ix_namespace_key_tenant_id_source_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.source_execution_id))
+                sql_index(Index("ix_namespace_key_tenant_id_base_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.base_execution_id))
+                sql_index(Index("ix_namespace_key_tenant_id_parent_execution_id", table.c.namespace_key, table.c.tenant_id, table.c.parent_execution_id))
             table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "record_id", name="uk_namespace_key_tenant_id_record_id"))
-            _mysql_index(Index("ix_updated_at", table.c.updated_at))
-            _mysql_index(Index("ix_created_at", table.c.created_at))
+            sql_index(Index("ix_updated_at", table.c.updated_at))
+            sql_index(Index("ix_created_at", table.c.created_at))
             if name == "tool_operations":
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "call_key", name="uk_namespace_key_tenant_id_call_key"))
             if name == "operation_counters":
@@ -172,23 +175,6 @@ class SqlRuntimeSchema:
             registry.add_table(table, owner="adapter.sql")
             tables[name] = table
         return SqlRuntimeTables(tables)
-
-
-def _text_key(length: int) -> "String":
-    from sqlalchemy import String
-    from sqlalchemy.dialects import mysql
-    return String(length).with_variant(mysql.VARCHAR(length, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-
-
-def _hex64() -> "CHAR":
-    from sqlalchemy import CHAR
-    from sqlalchemy.dialects import mysql
-    return CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-
-
-def _mysql_index(index: "Index") -> "Index":
-    index.info["ddl_dialect"] = "mysql"
-    return index.ddl_if(dialect="mysql")
 
 
 def ensure_step_metadata() -> "MetaData":

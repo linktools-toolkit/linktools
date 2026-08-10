@@ -21,6 +21,7 @@ from ..storage import (
     StorageChange,
     StorageDeleteResult,
     StorageEntryRevision,
+    StorageEntryStatus,
     StorageOperation,
     StoragePutResult,
     StorageResetResult,
@@ -210,15 +211,24 @@ class LocalDirectoryAssetBackend:
             _logger.info("local asset file deleted: kind=%s id=%s", key.kind, key.id)
             return StorageDeleteResult(key, True, current_revision, revision)
 
-    async def reset(self) -> StorageResetResult:
+    async def reset(
+        self,
+        key: AssetKey,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]":
         async with self._lock:
             self._require_writable()
-            entries = await asyncio.to_thread(self._scan)
-            for key, _content, _modified in entries:
-                path = self._file_path(key)
-                await asyncio.to_thread(path.unlink)
-                self._remove_empty_parents(path.parent)
-            return StorageResetResult(_store_revision(()), len(entries))
+            path = self._file_path(key)
+            content = await asyncio.to_thread(read_bytes, path) if path.is_file() else None
+            current_revision = None if content is None else _entry_revision(content)
+            self._check_revision(current_revision, expected_entry_revision)
+            if content is None:
+                return StorageResetResult(key, False, _store_revision(await asyncio.to_thread(self._scan)))
+            await asyncio.to_thread(path.unlink)
+            self._remove_empty_parents(path.parent)
+            _logger.info("local asset file reset: kind=%s id=%s", key.kind, key.id)
+            return StorageResetResult(key, True, _store_revision(await asyncio.to_thread(self._scan)))
 
     async def apply_batch(
         self,
@@ -231,7 +241,7 @@ class LocalDirectoryAssetBackend:
         current = await self.head_revision()
         if expected_store_revision is not None and expected_store_revision != current:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey]] = []
+        results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]] = []
         for change in changes:
             if change.operation is StorageOperation.PUT:
                 results.append(
@@ -241,9 +251,16 @@ class LocalDirectoryAssetBackend:
                         expected_entry_revision=change.expected_entry_revision,
                     )
                 )
-            else:
+            elif change.operation is StorageOperation.DELETE:
                 results.append(
                     await self.delete(
+                        change.key,
+                        expected_entry_revision=change.expected_entry_revision,
+                    )
+                )
+            else:
+                results.append(
+                    await self.reset(
                         change.key,
                         expected_entry_revision=change.expected_entry_revision,
                     )
@@ -306,7 +323,7 @@ class LocalDirectoryAssetBackend:
             store_revision,
             _etag(content),
             len(content),
-            False,
+            StorageEntryStatus.NORMAL,
             self._root.root_id,
             self._root.digest,
             modified_at,

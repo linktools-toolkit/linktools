@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING, Protocol
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
-from ._database import StorageDatabase, sql_constraint_signature
+from ._database import StorageDatabase, _resolve_engine, sql_constraint_signature
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.engine import Connection
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class _SqlTypeValue(Protocol):
@@ -42,16 +42,6 @@ async def validate_schema(
         _logger.exception("SQL schema validation failed: table_count=%s", len(metadata.tables))
         raise
     _logger.info("SQL schema validated: table_count=%s", len(metadata.tables))
-
-
-async def _resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
-    from sqlalchemy.ext.asyncio import AsyncEngine
-
-    async with session_factory() as session:
-        bound = session.bind
-    if not isinstance(bound, AsyncEngine):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    return bound
 
 
 def _validate_schema(connection: "Connection", metadata: "MetaData") -> None:

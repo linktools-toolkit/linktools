@@ -23,8 +23,8 @@ from linktools.ai.storage import (
     PostgreSQLDialect,
     SQLiteDialect,
     SqlSchemaRegistry,
-    StorageComposition,
     StorageLayer,
+    StorageOverlay,
     resolve_dialect,
 )
 
@@ -90,7 +90,7 @@ async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: P
         path_adapter=_MappedPathAdapter(),
     )
     store = AssetStore(
-        StorageComposition(
+        StorageOverlay(
             primary,
             writer=primary,
             layers=(StorageLayer("builtin", builtin),),
@@ -160,22 +160,22 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
         key = AssetKey("mcp", "history.yaml")
         first = await backend.put(key, b"one")
         second = await backend.put(key, b"two", expected_entry_revision=first.entry_revision)
-        await backend.delete(key, expected_entry_revision=second.entry_revision)
+        deleted = await backend.delete(key, expected_entry_revision=second.entry_revision)
         assert await backend.get_at_version(key, 1) == b"one"
         assert await backend.get_at_version(key, 2) == b"two"
         assert await backend.get(key) is None
         assert len(await backend.list_versions(key)) == 3
-        reset = await backend.reset()
-        assert reset.deleted_count == 1
+        reset = await backend.reset(key, expected_entry_revision=deleted.entry_revision)
+        assert reset.reset is True
         assert await backend.get(key) is None
-        assert len(await backend.list_versions(key)) == 3
+        assert len(await backend.list_versions(key)) == 4
         await backend.initialize()
         assert await backend.get(key) is None
         async with session_factory() as session:
             counts = []
             for table in (tables.entry, tables.change, tables.blob, tables.revision):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
-        assert counts == [0, 3, 2, 1]
+        assert counts == [1, 4, 2, 1]
         assert not hasattr(tables.revision.c, "payload")
     finally:
         await engine.dispose()

@@ -3,6 +3,7 @@
 """Borrowed SQLAlchemy database metadata and frozen schema registration."""
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
@@ -11,7 +12,7 @@ from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
-    from sqlalchemy import Constraint, Index, MetaData, Table
+    from sqlalchemy import BigInteger, CHAR, Constraint, Index, LargeBinary, MetaData, String, Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 class CoordinationScope(StrEnum):
@@ -125,6 +126,52 @@ def sql_constraint_signature(constraint: "Constraint") -> str:
     return f"{type(constraint).__name__}:{name}:{columns}:{expression}"
 
 
+def sql_integer_id() -> "BigInteger":
+    from sqlalchemy import BigInteger, Integer
+
+    return BigInteger().with_variant(Integer, "sqlite")
+
+
+def sql_text_key(length: int) -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(length).with_variant(
+        mysql.VARCHAR(length, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_digest() -> "CHAR":
+    from sqlalchemy import CHAR
+    from sqlalchemy.dialects import mysql
+
+    return CHAR(64).with_variant(
+        mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_blob() -> "LargeBinary":
+    from sqlalchemy import LargeBinary
+    from sqlalchemy.dialects import mysql
+
+    return LargeBinary().with_variant(mysql.LONGBLOB(), "mysql")
+
+
+def sql_table_options() -> "Mapping[str, str]":
+    return {
+        "mysql_engine": "InnoDB",
+        "mysql_charset": "utf8mb4",
+        "mysql_collate": "utf8mb4_bin",
+    }
+
+
+def sql_index(index: "Index") -> "Index":
+    index.info["ddl_dialect"] = "mysql"
+    return index.ddl_if(dialect="mysql")
+
+
 def _index_signature(index: "Index") -> str:
     name = index.name or ""
     columns = ",".join(column.name for column in index.columns)
@@ -203,5 +250,11 @@ __all__ = [
     "StorageDatabase",
     "build_sqlite_storage",
     "build_storage",
+    "sql_blob",
     "sql_constraint_signature",
+    "sql_digest",
+    "sql_index",
+    "sql_integer_id",
+    "sql_table_options",
+    "sql_text_key",
 ]

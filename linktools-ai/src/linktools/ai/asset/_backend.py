@@ -20,6 +20,7 @@ from ..storage import (
     StorageChange,
     StorageDeleteResult,
     StorageEntryRevision,
+    StorageEntryStatus,
     StorageOperation,
     StoragePutResult,
     StorageResetResult,
@@ -86,14 +87,15 @@ class InMemoryAssetBackend:
     async def get(self, key: AssetKey) -> "bytes | None":
         async with self._lock:
             current = self._entries.get(key)
-            return None if current is None or current[0].deleted else current[1]
+            return None if current is None or current[0].status is not StorageEntryStatus.NORMAL else current[1]
 
     async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
         async with self._lock:
             return {
                 key: current[1]
                 for key in keys
-                if (current := self._entries.get(key)) is not None and not current[0].deleted
+                if (current := self._entries.get(key)) is not None
+                and current[0].status is StorageEntryStatus.NORMAL
             }
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
@@ -112,10 +114,10 @@ class InMemoryAssetBackend:
             self._require_writable()
             previous = self._entries.get(key)
             self._check_revision(previous, expected_entry_revision)
-            if previous is not None and not previous[0].deleted and previous[0].etag == _etag(value):
+            if previous is not None and previous[0].status is StorageEntryStatus.NORMAL and previous[0].etag == _etag(value):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
-            info = self._next_info(key, value, previous, deleted=False)
+            info = self._next_info(key, value, previous, status=StorageEntryStatus.NORMAL)
             self._record(info, value)
             _logger.info("asset file stored: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StoragePutResult(info, info.revision, info.store_revision, True)
@@ -130,24 +132,31 @@ class InMemoryAssetBackend:
             self._require_writable()
             previous = self._entries.get(key)
             self._check_revision(previous, expected_entry_revision)
-            if previous is None or previous[0].deleted:
+            if previous is None or previous[0].status is StorageEntryStatus.DELETED:
                 return StorageDeleteResult(key, False, None, self._store_revision())
             self._revision += 1
-            info = self._next_info(key, b"", previous, deleted=True)
+            info = self._next_info(key, b"", previous, status=StorageEntryStatus.DELETED)
             self._record(info, b"")
             _logger.info("asset file deleted: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StorageDeleteResult(key, True, info.revision, info.store_revision)
 
-    async def reset(self) -> StorageResetResult:
+    async def reset(
+        self,
+        key: AssetKey,
+        *,
+        expected_entry_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]":
         async with self._lock:
             self._require_writable()
-            cleared_count = len(self._entries)
-            if not cleared_count:
-                return StorageResetResult(self._store_revision(), 0)
+            previous = self._entries.get(key)
+            self._check_revision(previous, expected_entry_revision)
+            if previous is None or previous[0].status is StorageEntryStatus.RESET:
+                return StorageResetResult(key, False, self._store_revision())
             self._revision += 1
-            self._entries.clear()
-            _logger.info("asset backend reset: cleared=%s revision=%s", cleared_count, self._revision)
-            return StorageResetResult(self._store_revision(), cleared_count)
+            info = self._next_info(key, b"", previous, status=StorageEntryStatus.RESET)
+            self._record(info, b"")
+            _logger.info("asset file reset: kind=%s id=%s revision=%s", key.kind, key.id, self._revision)
+            return StorageResetResult(key, True, self._store_revision())
 
     async def apply_batch(
         self,
@@ -168,7 +177,7 @@ class InMemoryAssetBackend:
             if mutates:
                 self._revision += 1
             store_revision = self._store_revision()
-            results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey]] = []
+            results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]] = []
             for change in changes:
                 current = previous[change.key]
                 if change.operation is StorageOperation.PUT:
@@ -176,15 +185,23 @@ class InMemoryAssetBackend:
                     if not _change_mutates(change, current) and current is not None:
                         results.append(StoragePutResult(current[0], current[0].revision, store_revision, False))
                         continue
-                    info = self._next_info(change.key, value, current, deleted=False)
+                    info = self._next_info(change.key, value, current, status=StorageEntryStatus.NORMAL)
                     self._record(info, value)
                     results.append(StoragePutResult(info, info.revision, store_revision, True))
-                elif current is None or current[0].deleted:
+                elif change.operation is StorageOperation.DELETE and (
+                    current is None or current[0].status is StorageEntryStatus.DELETED
+                ):
                     results.append(StorageDeleteResult(change.key, False, None, store_revision))
-                else:
-                    info = self._next_info(change.key, b"", current, deleted=True)
+                elif change.operation is StorageOperation.DELETE:
+                    info = self._next_info(change.key, b"", current, status=StorageEntryStatus.DELETED)
                     self._record(info, b"")
                     results.append(StorageDeleteResult(change.key, True, info.revision, store_revision))
+                elif current is None or current[0].status is StorageEntryStatus.RESET:
+                    results.append(StorageResetResult(change.key, False, store_revision))
+                else:
+                    info = self._next_info(change.key, b"", current, status=StorageEntryStatus.RESET)
+                    self._record(info, b"")
+                    results.append(StorageResetResult(change.key, True, store_revision))
             if mutates:
                 _logger.info("asset batch committed: changes=%s revision=%s", len(changes), self._revision)
             return StorageBatchResult(store_revision, True, tuple(results))
@@ -192,7 +209,7 @@ class InMemoryAssetBackend:
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         async with self._lock:
             return tuple(
-                VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.deleted)
+                VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status)
                 for info, _ in self._versions.get(key, ())
             )
 
@@ -204,7 +221,7 @@ class InMemoryAssetBackend:
         async with self._lock:
             for info, value in self._versions.get(key, ()):
                 if info.revision == entry_revision:
-                    return None if info.deleted else value
+                    return None if info.status is not StorageEntryStatus.NORMAL else value
             return None
 
     async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
@@ -259,7 +276,7 @@ class InMemoryAssetBackend:
         value: bytes,
         previous: "tuple[AssetInfo, bytes] | None",
         *,
-        deleted: bool,
+        status: StorageEntryStatus,
     ) -> AssetInfo:
         history = self._versions.get(key, ())
         if previous is not None:
@@ -275,7 +292,7 @@ class InMemoryAssetBackend:
             self._store_revision(),
             _etag(value),
             len(value),
-            deleted,
+            status,
             self._root.root_id,
             self._root.digest,
             datetime.now(timezone.utc),
@@ -306,9 +323,11 @@ def _change_mutates(
     previous: "tuple[AssetInfo, bytes] | None",
 ) -> bool:
     if change.operation is StorageOperation.DELETE:
-        return previous is not None and not previous[0].deleted
+        return previous is not None and previous[0].status is not StorageEntryStatus.DELETED
+    if change.operation is StorageOperation.RESET:
+        return previous is not None and previous[0].status is not StorageEntryStatus.RESET
     value = bytes(change.value or b"")
-    return previous is None or previous[0].deleted or previous[0].etag != _etag(value)
+    return previous is None or previous[0].status is not StorageEntryStatus.NORMAL or previous[0].etag != _etag(value)
 
 
 def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":
@@ -319,7 +338,7 @@ def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":
         "store_revision": info.store_revision.value,
         "etag": info.etag,
         "size": info.size,
-        "deleted": info.deleted,
+        "status": info.status.value,
         "modified_at": info.modified_at.isoformat(),
         "content": base64.b64encode(value).decode("ascii"),
     }
@@ -336,7 +355,7 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             StorageRevision(str(raw["store_revision"])),
             str(raw["etag"]),
             int(raw["size"]),
-            bool(raw["deleted"]),
+            StorageEntryStatus(str(raw["status"])),
             root.root_id,
             root.digest,
             datetime.fromisoformat(str(raw["modified_at"])),

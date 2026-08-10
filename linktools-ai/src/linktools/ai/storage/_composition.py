@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ordered, revision-aware storage composition."""
+"""Ordered, revision-aware storage overlay."""
 
 import asyncio
 from collections.abc import Hashable, Mapping, Sequence
@@ -23,8 +23,9 @@ from ._contracts import (
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
-    StorageDeletionInfo,
     StorageEntryRevision,
+    StorageEntryStatus,
+    StorageEntryStatusInfo,
     StorageOperation,
     StorageOwnedInfo,
     StoragePutResult,
@@ -42,11 +43,15 @@ KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
 InfoT = TypeVar("InfoT")
 
-_logger = environ.get_logger("ai.storage.composition")
+_logger = environ.get_logger("ai.storage.overlay")
 
 
 def _is_deleted(info: InfoT) -> bool:
-    return isinstance(info, StorageDeletionInfo) and info.deleted
+    return isinstance(info, StorageEntryStatusInfo) and info.status is StorageEntryStatus.DELETED
+
+
+def _is_reset(info: InfoT) -> bool:
+    return isinstance(info, StorageEntryStatusInfo) and info.status is StorageEntryStatus.RESET
 
 
 class StorageValueValidator(Protocol[KeyT, ValueT, InfoT]):
@@ -75,7 +80,7 @@ class StorageLocation(Generic[KeyT, ValueT, InfoT]):
     writable: bool
 
 
-class StorageComposition(Generic[KeyT, ValueT, InfoT]):
+class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
     """Own layer merge, cache, refresh, preload, write and version semantics."""
 
     def __init__(
@@ -134,7 +139,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         return self.writer is not None
 
     def is_writable_backend(self, backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]") -> bool:
-        """Return whether a backend is the composition's writable backend."""
+        """Return whether a backend is the overlay's writable backend."""
         return self.writer is backend
 
     @property
@@ -159,7 +164,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
                 if isinstance(backend, InitializableStorage):
                     await backend.initialize()
             self._initialized = True
-        _logger.info("storage composition initialized: layers=%s", len(self._views))
+        _logger.info("storage overlay initialized: layers=%s", len(self._views))
 
     async def refresh(self) -> StorageRevision:
         states = await asyncio.gather(*(view.refresh() for view in self._views))
@@ -169,6 +174,8 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         for index, state in enumerate(states):
             revisions.append(str(state.revision))
             for key, info in state.entries.items():
+                if _is_reset(info):
+                    continue
                 if key not in entries:
                     entries[key] = info
                     owners[key] = index
@@ -182,6 +189,8 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
         for index, state in enumerate(states):
             revisions.append(str(state.revision))
             for key, info in state.entries.items():
+                if _is_reset(info):
+                    continue
                 if key not in entries:
                     entries[key] = info
                     owners[key] = index
@@ -591,11 +600,16 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             await self._notify_revision(result.store_revision)
         return result
 
-    async def reset(self) -> StorageResetResult:
+    async def reset(
+        self,
+        key: KeyT,
+        *,
+        expected_entry_revision: 'StorageEntryRevision | None' = None,
+    ) -> 'StorageResetResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.reset()
-        self._preloaded.clear()
-        if result.deleted_count:
+        result = await writer.reset(key, expected_entry_revision=expected_entry_revision)
+        self._preloaded.pop(key, None)
+        if result.reset:
             self._invalidate_writer_view()
             await self._notify_revision(result.store_revision)
         return result
@@ -617,13 +631,19 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             for change, item in zip(changes, result.results):
                 if isinstance(item, StoragePutResult):
                     self._after_put(change.key, item.info, item.store_revision)
-                elif item.deleted:
+                elif (
+                    isinstance(item, StorageDeleteResult)
+                    and item.deleted
+                    or isinstance(item, StorageResetResult)
+                    and item.reset
+                ):
                     invalidate = True
             if invalidate:
                 self._invalidate_writer_view()
             if any(
                 isinstance(item, StoragePutResult) and item.changed
                 or isinstance(item, StorageDeleteResult) and item.deleted
+                or isinstance(item, StorageResetResult) and item.reset
                 for item in result.results
             ):
                 await self._notify_revision(result.store_revision)
@@ -632,7 +652,7 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
             current = await self.current_revision()
             if current != expected_store_revision:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-        results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT]] = []
+        results: list[StoragePutResult[InfoT] | StorageDeleteResult[KeyT] | StorageResetResult[KeyT]] = []
         revision = expected_store_revision
         for index, change in enumerate(changes):
             try:
@@ -643,8 +663,13 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
                         value,
                         expected_entry_revision=change.expected_entry_revision,
                     )
-                else:
+                elif change.operation is StorageOperation.DELETE:
                     item = await self.delete(
+                        change.key,
+                        expected_entry_revision=change.expected_entry_revision,
+                    )
+                else:
+                    item = await self.reset(
                         change.key,
                         expected_entry_revision=change.expected_entry_revision,
                     )
@@ -680,21 +705,27 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
                 if not isinstance(item, StoragePutResult):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch put result mismatch")
                 self._validate_value(change.key, cast(ValueT, change.value), item.info)
-            elif not isinstance(item, StorageDeleteResult) or item.key != change.key:
+            elif change.operation is StorageOperation.DELETE and (
+                not isinstance(item, StorageDeleteResult) or item.key != change.key
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch delete result mismatch")
+            elif change.operation is StorageOperation.RESET and (
+                not isinstance(item, StorageResetResult) or item.key != change.key
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "storage batch reset result mismatch")
 
     def _validate_batch(self, changes: 'Sequence[StorageChange[KeyT, ValueT]]') -> None:
         seen: set[KeyT] = set()
         for change in changes:
-            if change.operation not in {StorageOperation.PUT, StorageOperation.DELETE}:
+            if change.operation not in {StorageOperation.PUT, StorageOperation.DELETE, StorageOperation.RESET}:
                 raise ValueError(f"unsupported storage operation: {change.operation}")
             if change.key in seen:
                 raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
             seen.add(change.key)
             if change.operation is StorageOperation.PUT and change.value is None:
                 raise ValueError("PUT changes require a value")
-            if change.operation is StorageOperation.DELETE and change.value is not None:
-                raise ValueError("DELETE changes cannot contain a value")
+            if change.operation in {StorageOperation.DELETE, StorageOperation.RESET} and change.value is not None:
+                raise ValueError(f"{change.operation.value} changes cannot contain a value")
 
     def _after_put(
         self,
@@ -732,14 +763,14 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
     async def list_versions(self, key: KeyT) -> 'tuple[VersionSummary, ...]':
         state = await self._state()
         owners = tuple(range(len(self._views)))
-        collected: dict[tuple[int, str, bool], VersionSummary] = {}
+        collected: dict[tuple[int, str, StorageEntryStatus], VersionSummary] = {}
         for owner in owners:
             backend = self._views[owner].backend
             if not isinstance(backend, VersionedStorage):
                 continue
             versions = tuple(await backend.list_versions(key))
             for version in versions:
-                collected[(version.entry_revision.value, version.digest, version.deleted)] = version
+                collected[(version.entry_revision.value, version.digest, version.status)] = version
         if collected:
             return tuple(sorted(collected.values(), key=lambda version: version.entry_revision.value, reverse=True))
         if key not in state.owners:
@@ -774,8 +805,8 @@ class StorageComposition(Generic[KeyT, ValueT, InfoT]):
 __all__ = [
     "CacheAdapter",
     "EffectiveMetadataState",
-    "StorageComposition",
     "StorageLayer",
     "StorageLocation",
+    "StorageOverlay",
     "StorageValueValidator",
 ]

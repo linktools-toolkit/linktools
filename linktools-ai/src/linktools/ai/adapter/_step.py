@@ -28,6 +28,11 @@ from ..storage import (
     FilesystemWriterLock,
     StorageDatabase,
     read_json,
+    sql_blob,
+    sql_digest,
+    sql_index,
+    sql_integer_id,
+    sql_table_options,
     storage_name,
     validate_schema,
     write_json_atomic,
@@ -35,7 +40,7 @@ from ..storage import (
 from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
-    from sqlalchemy import Index, MetaData
+    from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -462,25 +467,22 @@ class SqlMediaStore:
 
 def _build_tables() -> tuple[object, dict[str, object]]:
     from sqlalchemy import (
-        CHAR,
         JSON,
         BigInteger,
         Column,
         DateTime,
         Index,
         Integer,
-        LargeBinary,
         String,
         Table,
         Text,
         UniqueConstraint,
     )
-    from sqlalchemy.dialects import mysql
     from sqlalchemy.sql import func
 
     metadata = new_step_metadata()
-    key = CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
-    integer_id = BigInteger().with_variant(Integer, "sqlite")
+    key = sql_digest()
+    integer_id = sql_integer_id()
     tables = {
         "runs": Table(
             storage_name("step_runs"),
@@ -498,9 +500,7 @@ def _build_tables() -> tuple[object, dict[str, object]]:
             Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
             UniqueConstraint("namespace_key", "run_id", name="uk_namespace_key_run_id"),
             UniqueConstraint("namespace_key", "run_key", name="uk_namespace_key_run_key"),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
         ),
         "events": Table(
             storage_name("step_events"),
@@ -518,12 +518,10 @@ def _build_tables() -> tuple[object, dict[str, object]]:
             Column("tool_name", String(256)),
             Column("error", Text),
             Column("metadata_json", JSON, nullable=False),
-            _mysql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
+            sql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
             Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
             Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
         ),
         "snapshots": Table(
             storage_name("step_snapshots"),
@@ -538,12 +536,10 @@ def _build_tables() -> tuple[object, dict[str, object]]:
             Column("timestamp", DateTime(timezone=True), nullable=False),
             Column("state", String(16), nullable=False, server_default="complete"),
             Column("messages_json", JSON, nullable=False),
-            _mysql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
+            sql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
             Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
             Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
         ),
         "effects": Table(
             storage_name("step_effects"),
@@ -561,9 +557,7 @@ def _build_tables() -> tuple[object, dict[str, object]]:
             Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
             Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
             UniqueConstraint("namespace_key", "run_id", "tool_call_id", name="uk_namespace_key_run_id_tool_call_id"),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
         ),
         "media": Table(
             storage_name("step_media"),
@@ -572,20 +566,18 @@ def _build_tables() -> tuple[object, dict[str, object]]:
             Column("namespace_key", key, nullable=False),
             Column("sha256", key, nullable=False),
             Column("media_type", String(256)),
-            Column("bytes", LargeBinary().with_variant(mysql.LONGBLOB(), "mysql"), nullable=False),
+            Column("bytes", sql_blob(), nullable=False),
             Column("size_bytes", BigInteger, nullable=False),
             Column("metadata_json", JSON, nullable=False),
             Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
             Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
             UniqueConstraint("namespace_key", "sha256", name="uk_namespace_key_sha256"),
-            mysql_engine="InnoDB",
-            mysql_charset="utf8mb4",
-            mysql_collate="utf8mb4_bin",
+            **sql_table_options(),
         ),
     }
     for name, table in tables.items():
-        _mysql_index(Index("ix_updated_at", table.c.updated_at))
-        _mysql_index(Index("ix_created_at", table.c.created_at))
+        sql_index(Index("ix_updated_at", table.c.updated_at))
+        sql_index(Index("ix_created_at", table.c.created_at))
     return metadata, tables
 
 
@@ -600,11 +592,6 @@ def _run_values(namespace_key: str, record: RunRecord) -> dict[str, object]:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     started_at = _utc(record.started_at)
     return {"namespace_key": namespace_key, "run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata_json": dict(record.metadata), "started_at": started_at, "run_key": _file_digest(f"{record.conversation_id}\x00{started_at.isoformat()}\x00{record.run_id}")}
-
-
-def _mysql_index(index: "Index") -> "Index":
-    index.info["ddl_dialect"] = "mysql"
-    return index.ddl_if(dialect="mysql")
 
 
 def _event_values(namespace_key: str, event: StepEvent) -> dict[str, object]:

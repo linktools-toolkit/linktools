@@ -23,8 +23,12 @@ from linktools.ai.asset import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
     InMemoryContentCache,
-    StorageComposition,
+    StorageChange,
+    StorageEntryStatus,
     StorageLayer,
+    StorageOperation,
+    StorageOverlay,
+    StorageResetResult,
 )
 
 
@@ -44,8 +48,8 @@ class CountingAssetBackend(InMemoryAssetBackend):
 
 def make_store(
     backend: "InMemoryAssetBackend | FilesystemAssetBackend | LocalDirectoryAssetBackend",
-) -> "tuple[AssetStore, StorageComposition[AssetKey, bytes, AssetInfo]]":
-    storage = StorageComposition(backend, writer=backend)
+) -> "tuple[AssetStore, StorageOverlay[AssetKey, bytes, AssetInfo]]":
+    storage = StorageOverlay(backend, writer=backend)
     return AssetStore(storage), storage
 
 
@@ -63,7 +67,7 @@ def test_in_memory_asset_store_cas_tombstone_and_history() -> None:
         deleted = await store.delete(key, expected_revision=second.revision)
         assert deleted.deleted is True
         tombstone = await store.stat(key)
-        assert tombstone is not None and tombstone.deleted is True
+        assert tombstone is not None and tombstone.status is StorageEntryStatus.DELETED
         assert await store.get(key) is None
         assert await store.get_many((key,)) == (None,)
         assert (await store.list_info()).items == ()
@@ -98,7 +102,7 @@ def test_asset_storage_uses_file_cache() -> None:
     async def run() -> None:
         backend = CountingAssetBackend(AssetRoot("memory:cache", "memory", "cache", "digest"))
         cache = InMemoryContentCache(max_bytes=1024 * 1024)
-        storage = StorageComposition(
+        storage = StorageOverlay(
             backend,
             writer=backend,
             cache=cache,
@@ -132,7 +136,7 @@ def test_read_only_asset_storage_can_cold_start() -> None:
             writable=False,
         )
         backend.import_state(source.export_state())
-        store = AssetStore(StorageComposition(backend))
+        store = AssetStore(StorageOverlay(backend))
         await store.initialize()
         assert await store.get(key) == b"value"
         with pytest.raises(AIError) as error:
@@ -166,7 +170,7 @@ def test_asset_store_reads_effective_layer_owner() -> None:
         fallback = InMemoryAssetBackend(AssetRoot("memory:fallback", "memory", "fallback", "fallback"))
         key = AssetKey("sample", "fallback")
         await fallback.put(key, b"value")
-        storage = StorageComposition(primary, layers=(StorageLayer("fallback", fallback),))
+        storage = StorageOverlay(primary, layers=(StorageLayer("fallback", fallback),))
         store = AssetStore(storage)
         await store.initialize()
         assert await primary.get(key) is None
@@ -181,20 +185,32 @@ def test_asset_store_reset_clears_writer_overlay_and_reveals_layer() -> None:
         fallback = InMemoryAssetBackend(AssetRoot("memory:fallback", "memory", "fallback", "fallback"))
         key = AssetKey("sample", "reset")
         await fallback.put(key, b"builtin")
-        storage = StorageComposition(
+        storage = StorageOverlay(
             primary,
             writer=primary,
             layers=(StorageLayer("fallback", fallback),),
         )
         store = AssetStore(storage)
         await store.initialize()
-        await store.put(key, b"override")
+        override = await store.put(key, b"override")
         assert await store.get(key) == b"override"
-        await store.reset()
+        reset = await store.reset(key, expected_revision=override.revision)
+        assert reset.reset is True
+        primary_info = await primary.stat(key)
+        assert primary_info is not None and primary_info.status is StorageEntryStatus.RESET
         assert await store.get(key) == b"builtin"
         location = await storage.locate(key)
         assert location is not None and location.layer == "fallback"
-        await store.put(key, b"override-again")
+        override_again = await store.put(key, b"override-again")
+        batch = await store.apply_batch(
+            (StorageChange(StorageOperation.RESET, key, None, override_again.revision),)
+        )
+        assert isinstance(batch.results[0], StorageResetResult)
+        assert batch.results[0].reset is True
+        primary_info = await primary.stat(key)
+        assert primary_info is not None and primary_info.status is StorageEntryStatus.RESET
+        assert await store.get(key) == b"builtin"
+        await store.put(key, b"override-final")
         await store.delete(key)
         assert await store.get(key) is None
 
