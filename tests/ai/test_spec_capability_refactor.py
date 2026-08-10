@@ -3,11 +3,11 @@
 """Conformance tests for declaration, capability and binding ownership."""
 
 import asyncio
+import importlib
 from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import AgentBinder, AgentBindingRegistry, OutputTypeRegistry
-from linktools.ai.app import LocalRuntimeServices, RuntimeDependencies, build_runtime
 from linktools.ai.capability import (
     CapabilityInjection,
     CapabilityRefResolution,
@@ -28,7 +28,6 @@ from linktools.ai.model import (
     SnapshotModelResolver,
     StaticModelCredentialProvider,
 )
-from linktools.ai.runtime import RuntimeBackend, RuntimeServiceIdentity, RuntimeServices
 from linktools.ai.spec import (
     AgentCapabilityRef,
     AgentSpec,
@@ -242,34 +241,11 @@ def test_openai_model_materializer_applies_connection_configuration() -> None:
     assert unavailable.value.safe_details == {"credential_id": "unknown"}
 
 
-def test_runtime_dependencies_keep_one_local_service_and_binding_registry() -> None:
-    routes = ModelRegistry()
-    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
-    output_types = OutputTypeRegistry()
-    output_types.register("output", 1, _Output)
-    identity = RuntimeServiceIdentity("service", canonical_sha256("persistence"), RuntimeBackend.IN_MEMORY)
-    services = RuntimeServices(identity, object(), object(), object(), object(), object(), object(), object())
-    local = LocalRuntimeServices(services, AgentBindingRegistry())
-    dependencies = RuntimeDependencies(
-        model_resolver=SnapshotModelResolver(snapshot),
-        capability_resolvers=(_Resolver(),),
-        model_connections=ModelConnectionRegistry(),
-        middleware=type("Middleware", (), {"fingerprint": "middleware"})(),
-        sandbox=type("Sandbox", (), {"fingerprint": "sandbox"})(),
-        tool_policy=type("ToolPolicy", (), {"fingerprint": "tool-policy"})(),
-        output_types=output_types,
-        local=local,
-    )
-    runtime = build_runtime(
-        AgentSpec("agent", 1, "route", (AgentCapabilityRef("custom", "capability"),), "output", 1),
-        PromptSpec("prompt", 1, "system", (), ()),
-        dependencies=dependencies,
-    )
-    assert runtime.service_identity is services.identity
-    assert local.binding_registry.resolve(runtime.binding.manifest.digest) is runtime.binding
-    assert not hasattr(dependencies, "services")
-    assert not hasattr(dependencies, "binding_registry")
-    assert not hasattr(dependencies, "agent_catalog")
+def test_local_runtime_services_is_not_a_public_constructor() -> None:
+    app = importlib.import_module("linktools.ai.app")
+    assert "LocalRuntimeServices" not in app.__all__
+    with pytest.raises(ImportError):
+        exec("from linktools.ai.app import LocalRuntimeServices", {})
 
 
 def test_skill_aggregates_and_mcp_materializes_only_with_runtime_context() -> None:

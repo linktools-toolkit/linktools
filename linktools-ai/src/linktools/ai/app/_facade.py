@@ -116,14 +116,31 @@ class RuntimeAccess:
     artifact: ArtifactApi
 
 
-@dataclass(frozen=True, slots=True)
+_LOCAL_RUNTIME_SERVICES_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class LocalRuntimeServices:
     services: RuntimeServices
     binding_registry: "AgentBindingRegistry"
 
-    def __post_init__(self) -> None:
-        if self.services is None or self.binding_registry is None:
+    def __init__(
+        self,
+        services: RuntimeServices,
+        binding_registry: AgentBindingRegistry,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _LOCAL_RUNTIME_SERVICES_TOKEN:
+            raise TypeError("local runtime services are factory-issued")
+        if services is None or binding_registry is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        object.__setattr__(self, "services", services)
+        object.__setattr__(self, "binding_registry", binding_registry)
+
+    @classmethod
+    def compose(cls, services: RuntimeServices, binding_registry: AgentBindingRegistry) -> "LocalRuntimeServices":
+        return cls(services, binding_registry, _token=_LOCAL_RUNTIME_SERVICES_TOKEN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +154,10 @@ class RuntimeDependencies:
     output_types: OutputTypeRegistry
     local: LocalRuntimeServices
     platform_capability_profile_fingerprint: str = canonical_sha256("linktools-ai-platform-v1")
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.local, LocalRuntimeServices):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
     @property
     def execution_profile_fingerprint(self) -> str:
@@ -439,4 +460,4 @@ class _ArtifactApi:
         return await self._service.get(artifact_id, principal=principal)
 
 
-__all__ = ["LocalRuntimeServices", "RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]
+__all__ = ["RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]

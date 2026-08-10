@@ -406,7 +406,7 @@ def build_local_runtime_services(
         id(registry),
         type(launcher).__name__,
     )
-    return LocalRuntimeServices(services, registry)
+    return LocalRuntimeServices.compose(services, registry)
 
 
-__all__ = ["AppServices", "LocalRuntimeServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]
+__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]
