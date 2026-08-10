@@ -36,10 +36,9 @@ config = RuntimePersistenceConfig.postgresql(
     deployment_id="runtime-prod",
 )
 
-# engine and session_factory are injected by the application composition.
+# session_factory is injected by the application composition.
 async with open_runtime_resources(
     config,
-    engine=engine,
     session_factory=session_factory,
 ) as resources:
     # Pass resources.domain into the application service composition.
@@ -47,9 +46,9 @@ async with open_runtime_resources(
 ```
 
 Use `RuntimePersistenceConfig.sqlite(path, namespace=..., deployment_id=...)` for a
-single-node database. MySQL and PostgreSQL receive their injected engine and session
-factory when `open_runtime_resources()` is called. SQL drivers are loaded only when
-the corresponding backend is opened.
+single-node database. MySQL and PostgreSQL receive their injected session factory when
+`open_runtime_resources()` is called. SQL drivers are loaded only when the
+corresponding backend is opened.
 
 The checked-in architecture and release contract is maintained under
 `scripts/build/matrix`. For profile-removal upgrades, drain unfinished affected

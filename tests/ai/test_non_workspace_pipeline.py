@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Conformance tests for explicit non-workspace pipeline composition."""
 
+import inspect
 import json
 import re
 import sys
@@ -312,3 +313,9 @@ def test_binding_registry_reuses_the_same_manifest() -> None:
     registry.register(binding)
     registry.register(binding)
     assert registry.resolve(binding.manifest.digest) is binding
+
+
+def test_runtime_resource_entrypoint_accepts_only_the_external_session_factory() -> None:
+    parameters = inspect.signature(open_runtime_resources).parameters
+    assert "session_factory" in parameters
+    assert "engine" not in parameters

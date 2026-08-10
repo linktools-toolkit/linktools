@@ -69,7 +69,7 @@ from ._facade import LocalRuntimeServices, RuntimeAccess, build_runtime_access
 _logger = environ.get_logger("ai.app.assembly")
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from ..storage import StorageDatabase
 
@@ -159,7 +159,6 @@ def _validate_persistence_config(config: RuntimePersistenceConfig) -> None:
 async def open_runtime_resources(
     config: RuntimePersistenceConfig,
     *,
-    engine: "AsyncEngine | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[RuntimeResources]:
     _validate_persistence_config(config)
@@ -189,8 +188,14 @@ async def open_runtime_resources(
         build_storage,
         initialize_storage,
     )
-    if engine is None or session_factory is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires an injected session factory and engine")
+    if session_factory is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires an injected session factory")
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    async with session_factory() as session:
+        engine = session.bind
+    if not isinstance(engine, AsyncEngine):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "session factory must be bound to an AsyncEngine")
     _logger.debug("SQL runtime dependencies injected: backend=%s engine=%s session_factory=%s", config.backend, type(engine).__name__, type(session_factory).__name__)
     registry = SqlSchemaRegistry()
     tables = SqlRuntimeSchema.register_schema(registry)
@@ -223,10 +228,9 @@ async def open_runtime_services(
     workflow_gateway: "WorkflowGateway | None" = None,
     execution_launcher: "ExecutionLauncher | None" = None,
     task_launcher: "TaskGraphLauncher | None" = None,
-    engine: "AsyncEngine | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[RuntimeServices]:
-    async with open_runtime_resources(config, engine=engine, session_factory=session_factory) as resources:
+    async with open_runtime_resources(config, session_factory=session_factory) as resources:
         history_reader = StepExecutionHistoryReader(config.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", grant_key))
         yield build_runtime_services(
             resources.domain,

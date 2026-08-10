@@ -1215,7 +1215,7 @@ async def test_workbench_owns_sqlite_lock_and_generic_services_do_not(tmp_path: 
     assert error.value.code is ErrorCode.STORAGE_CONFLICT
     service_engine = create_async_engine(f"sqlite+aiosqlite:///{config.location}")
     service_factory = async_sessionmaker(service_engine, expire_on_commit=False)
-    services_context = open_runtime_services(config, TenantAuthorizationPolicy(), grant_key=b"v5-lock-key", execution_launcher=_Launcher(), engine=service_engine, session_factory=service_factory)
+    services_context = open_runtime_services(config, TenantAuthorizationPolicy(), grant_key=b"v5-lock-key", execution_launcher=_Launcher(), session_factory=service_factory)
     await services_context.__aenter__()
     await services_context.__aexit__(None, None, None)
     await service_engine.dispose()

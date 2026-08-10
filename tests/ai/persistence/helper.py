@@ -30,7 +30,7 @@ async def open_sql_resources(config: RuntimePersistenceConfig, *, connection_url
     engine: AsyncEngine = create_async_engine(url)
     session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        async with open_runtime_resources(config, engine=engine, session_factory=session_factory) as resources:
+        async with open_runtime_resources(config, session_factory=session_factory) as resources:
             yield resources
     finally:
         await engine.dispose()
@@ -51,7 +51,6 @@ async def _open_sql_workspace(
             workspace,
             config=config,
             runner=runner,
-            engine=engine,
             session_factory=session_factory,
         ) as runtime:
             yield runtime

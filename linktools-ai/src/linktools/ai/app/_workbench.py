@@ -73,7 +73,7 @@ from ._binding_launcher import BindingExecutionLauncher
 _logger = environ.get_logger("ai.app.workbench")
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class TextHandler(Protocol):
@@ -593,7 +593,6 @@ async def open_workspace_runtime(
     skill_catalog: SkillCatalogView | None = None,
     agent_catalog: AgentCatalogView | None = None,
     grant_key: bytes | None = None,
-    engine: "AsyncEngine | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
 ) -> AsyncIterator[WorkspaceAgentRuntime]:
     persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.storage_root), workspace_id=workspace.workspace_id)
@@ -615,7 +614,7 @@ async def open_workspace_runtime(
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
-        async with open_runtime_resources(persistence_config, engine=engine, session_factory=session_factory) as resources:
+        async with open_runtime_resources(persistence_config, session_factory=session_factory) as resources:
             launcher = WorkspaceExecutionLauncher(workspace, workspace_runner, resources)
             await launcher.reconcile()
             history_reader = StepExecutionHistoryReader(persistence_config.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", key))
