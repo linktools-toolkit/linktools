@@ -17,8 +17,8 @@ class _ImmutableJsonMapping(Mapping[str, JsonValue]):
 
     __slots__ = ("_payload",)
 
-    def __init__(self, value: Mapping[str, JsonValue], *, reject_secrets: bool = False) -> None:
-        normalized = _normalize_mapping(value, reject_secrets=reject_secrets)
+    def __init__(self, value: Mapping[str, JsonValue]) -> None:
+        normalized = _normalize_mapping(value)
         self._payload = canonical_json_bytes(normalized)
 
     def __getitem__(self, key: str) -> JsonValue:
@@ -34,19 +34,17 @@ class _ImmutableJsonMapping(Mapping[str, JsonValue]):
         return cast("dict[str, JsonValue]", json.loads(self._payload.decode("utf-8")))
 
 
-def _normalize_mapping(value: Mapping[str, JsonValue], *, reject_secrets: bool) -> "dict[str, JsonValue]":
+def _normalize_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
     normalized: dict[str, JsonValue] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key:
             raise ValueError("JSON object keys must be non-empty strings")
-        if reject_secrets and _looks_secret(key):
-            raise ValueError("declaration metadata cannot contain secret fields")
-        normalized[key] = _normalize_value(item, reject_secrets=reject_secrets)
+        normalized[key] = _normalize_value(item)
     return normalized
 
 
-def _normalize_value(value: object, *, reject_secrets: bool) -> JsonValue:
-    if value is None or isinstance(value, str) or isinstance(value, bool):
+def _normalize_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, bool)):
         return value
     if isinstance(value, int):
         return value
@@ -55,19 +53,14 @@ def _normalize_value(value: object, *, reject_secrets: bool) -> JsonValue:
             raise ValueError("JSON numbers must be finite")
         return value
     if isinstance(value, list):
-        return [_normalize_value(item, reject_secrets=reject_secrets) for item in value]
+        return [_normalize_value(item) for item in value]
     if isinstance(value, Mapping):
-        return _normalize_mapping(cast("Mapping[str, JsonValue]", value), reject_secrets=reject_secrets)
+        return _normalize_mapping(cast("Mapping[str, JsonValue]", value))
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
-def _looks_secret(key: str) -> bool:
-    normalized = key.lower().replace("-", "_")
-    return any(marker in normalized for marker in ("secret", "credential", "token", "password", "api_key", "apikey"))
-
-
 def _mapping_json(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    return _normalize_mapping(value, reject_secrets=False)
+    return _normalize_mapping(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +93,7 @@ class AgentSpec:
             raise ValueError("agent spec is incomplete")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "instructions", tuple(self.instructions))
-        object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata, reject_secrets=True))
+        object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
         unique: dict[tuple[str, str], AgentCapabilityRef] = {}
         for capability in self.capabilities:
             key = capability.provider, capability.id

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import AgentBinder, AgentBindingRegistry, OutputTypeRegistry
+from linktools.ai.app import LocalRuntimeServices, RuntimeDependencies, build_runtime
 from linktools.ai.capability import (
     CapabilityInjection,
     CapabilityRefResolution,
@@ -23,8 +24,11 @@ from linktools.ai.model import (
     ModelConnectionRegistry,
     ModelRegistry,
     ModelRoute,
+    OpenAIModelMaterializer,
     SnapshotModelResolver,
+    StaticModelCredentialProvider,
 )
+from linktools.ai.runtime import RuntimeBackend, RuntimeServiceIdentity, RuntimeServices
 from linktools.ai.spec import (
     AgentCapabilityRef,
     AgentSpec,
@@ -83,6 +87,13 @@ def _binder(*, connections: tuple[ModelConnectionConfig, ...] = ()) -> AgentBind
 
 
 def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
+    metadata = {
+        "depends_on": ["base-agent"],
+        "token_budget": 4096,
+        "credential_status": "verified",
+        "password_policy": "nist",
+        "api_tokenization_mode": "strict",
+    }
     spec = AgentSpec(
         "agent",
         1,
@@ -90,13 +101,17 @@ def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
         (AgentCapabilityRef("custom", "one", config={"nested": {"values": [1]}}),),
         "output",
         1,
-        metadata={"ui": {"label": "Agent"}},
+        metadata=metadata,
     )
     nested = spec.capabilities[0].config["nested"]
     assert nested == {"values": [1]}
     assert spec.capabilities[0].config["nested"] is not nested
-    with pytest.raises(ValueError):
-        AgentSpec("agent", 1, "route", (), "output", 1, metadata={"api_token": "secret"})
+    assert dict(spec.metadata) == metadata
+    binding = _binder().bind(spec, PromptSpec("prompt", 1, "system", (), ()))
+    binding_digest = binding.manifest.digest
+    metadata["depends_on"].append("other-agent")
+    assert spec.metadata["depends_on"] == ["base-agent"]
+    assert binding.manifest.digest == binding_digest
     with pytest.raises(AIError) as error:
         AgentSpec(
             "agent",
@@ -205,6 +220,56 @@ def test_model_connection_is_stable_and_secret_free() -> None:
     with pytest.raises(AIError) as error:
         ModelConnectionRegistry((connection, ModelConnectionConfig("primary", "https://other.test")))
     assert error.value.code is ErrorCode.MODEL_CONNECTION_CONFLICT
+
+
+def test_openai_model_materializer_applies_connection_configuration() -> None:
+    materializer = OpenAIModelMaterializer(StaticModelCredentialProvider({"credential": "secret"}))
+    route = ModelRoute("primary", "openai", "openai:gpt-test")
+    connection = ModelConnectionConfig("primary-connection", "https://example.test/v1", 12.5, "credential")
+    model = materializer.materialize(route, connection)
+    assert model.model_name == "gpt-test"
+    assert str(model.provider.client.base_url) == "https://example.test/v1/"
+    assert model.settings["timeout"] == 12.5
+
+    with pytest.raises(AIError) as unsupported:
+        materializer.materialize(ModelRoute("custom", "custom", "custom-model"), None)
+    assert unsupported.value.code is ErrorCode.MODEL_CONNECTION_UNSUPPORTED
+
+    missing = OpenAIModelMaterializer(StaticModelCredentialProvider())
+    with pytest.raises(AIError) as unavailable:
+        missing.materialize(route, ModelConnectionConfig("missing", credential_id="unknown"))
+    assert unavailable.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    assert unavailable.value.safe_details == {"credential_id": "unknown"}
+
+
+def test_runtime_dependencies_keep_one_local_service_and_binding_registry() -> None:
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    identity = RuntimeServiceIdentity("service", canonical_sha256("persistence"), RuntimeBackend.IN_MEMORY)
+    services = RuntimeServices(identity, object(), object(), object(), object(), object(), object(), object())
+    local = LocalRuntimeServices(services, AgentBindingRegistry())
+    dependencies = RuntimeDependencies(
+        model_resolver=SnapshotModelResolver(snapshot),
+        capability_resolvers=(_Resolver(),),
+        model_connections=ModelConnectionRegistry(),
+        middleware=type("Middleware", (), {"fingerprint": "middleware"})(),
+        sandbox=type("Sandbox", (), {"fingerprint": "sandbox"})(),
+        tool_policy=type("ToolPolicy", (), {"fingerprint": "tool-policy"})(),
+        output_types=output_types,
+        local=local,
+    )
+    runtime = build_runtime(
+        AgentSpec("agent", 1, "route", (AgentCapabilityRef("custom", "capability"),), "output", 1),
+        PromptSpec("prompt", 1, "system", (), ()),
+        dependencies=dependencies,
+    )
+    assert runtime.service_identity is services.identity
+    assert local.binding_registry.resolve(runtime.binding.manifest.digest) is runtime.binding
+    assert not hasattr(dependencies, "services")
+    assert not hasattr(dependencies, "binding_registry")
+    assert not hasattr(dependencies, "agent_catalog")
 
 
 def test_skill_aggregates_and_mcp_materializes_only_with_runtime_context() -> None:

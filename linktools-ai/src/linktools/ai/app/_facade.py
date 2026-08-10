@@ -11,7 +11,6 @@ from ..agent import (
     AgentBinder,
     AgentBinding,
     AgentBindingRegistry,
-    AgentCatalogView,
     OutputTypeRegistry,
 )
 from ..capability import (
@@ -19,9 +18,9 @@ from ..capability import (
     CapabilityResolver,
     CapabilityResolverRegistry,
 )
-from ..core import Page, Principal, PrincipalProvider, canonical_sha256
+from ..core import Page, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelConnectionRegistry, ModelCredentialProvider, ModelResolver
+from ..model import ModelConnectionRegistry, ModelResolver
 from ..observe import MiddlewarePipeline, RunSnapshot
 from ..runtime import (
     ApprovalApi,
@@ -118,19 +117,25 @@ class RuntimeAccess:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalRuntimeServices:
+    services: RuntimeServices
+    binding_registry: "AgentBindingRegistry"
+
+    def __post_init__(self) -> None:
+        if self.services is None or self.binding_registry is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeDependencies:
     model_resolver: ModelResolver
     capability_resolvers: "tuple[CapabilityResolver, ...]"
     model_connections: ModelConnectionRegistry
-    model_credentials: ModelCredentialProvider
-    agent_catalog: AgentCatalogView
-    binding_registry: AgentBindingRegistry
     middleware: MiddlewarePipeline
     sandbox: Sandbox
     tool_policy: ToolPolicy
     output_types: OutputTypeRegistry
-    principal_provider: PrincipalProvider
-    services: RuntimeServices
+    local: LocalRuntimeServices
     platform_capability_profile_fingerprint: str = canonical_sha256("linktools-ai-platform-v1")
 
     @property
@@ -143,6 +148,20 @@ class RuntimeDependencies:
                 "platform_capabilities": self.platform_capability_profile_fingerprint,
             }
         )
+
+
+def _build_bound_runtime(binding: AgentBinding, local: LocalRuntimeServices) -> Runtime:
+    return Runtime(
+        local.services.identity,
+        binding,
+        _ExecutionApi(local.services.execution, binding),
+        _SessionApi(local.services.session, binding),
+        _TaskApi(local.services.task),
+        _EvaluationApi(local.services.evaluation, binding),
+        _ApprovalApi(local.services.approval),
+        _EventApi(local.services.event),
+        _ArtifactApi(local.services.artifact),
+    )
 
 
 def build_runtime(
@@ -159,16 +178,12 @@ def build_runtime(
             dependencies.model_resolver,
             dependencies.capability_resolvers,
             dependencies.model_connections,
-            dependencies.model_credentials,
-            dependencies.agent_catalog,
-            dependencies.binding_registry,
             dependencies.middleware,
             dependencies.sandbox,
             dependencies.tool_policy,
             dependencies.output_types,
+            dependencies.local,
             dependencies.execution_profile_fingerprint,
-            dependencies.principal_provider,
-            dependencies.services,
         )
     ):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -183,31 +198,11 @@ def build_runtime(
         execution_profile_fingerprint=dependencies.execution_profile_fingerprint,
     )
     binding = binder.bind(spec, prompt, injections=tuple(capability_injections))
-    dependencies.binding_registry.register(binding)
-    binding = dependencies.binding_registry.resolve(binding.manifest.digest)
+    dependencies.local.binding_registry.register(binding)
+    binding = dependencies.local.binding_registry.resolve(binding.manifest.digest)
     logger = environ.get_logger("ai.app.facade")
     logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, binding.model_route.route_id)
-    return Runtime(
-        dependencies.services.identity,
-        binding,
-        _ExecutionApi(dependencies.services.execution, binding),
-        _SessionApi(dependencies.services.session, binding),
-        _TaskApi(dependencies.services.task),
-        _EvaluationApi(dependencies.services.evaluation, binding),
-        _ApprovalApi(dependencies.services.approval),
-        _EventApi(dependencies.services.event),
-        _ArtifactApi(dependencies.services.artifact),
-    )
-
-
-@dataclass(frozen=True, slots=True)
-class LocalRuntimeServices:
-    services: RuntimeServices
-    binding_registry: AgentBindingRegistry
-
-    def __post_init__(self) -> None:
-        if self.services is None or self.binding_registry is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    return _build_bound_runtime(binding, dependencies.local)
 
 
 def build_local_runtime(
@@ -222,17 +217,7 @@ def build_local_runtime(
     binding = local.binding_registry.resolve(binding.manifest.digest)
     _logger = environ.get_logger("ai.app.facade")
     _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.manifest.digest)
-    return Runtime(
-        local.services.identity,
-        binding,
-        _ExecutionApi(local.services.execution, binding),
-        _SessionApi(local.services.session, binding),
-        _TaskApi(local.services.task),
-        _EvaluationApi(local.services.evaluation, binding),
-        _ApprovalApi(local.services.approval),
-        _EventApi(local.services.event),
-        _ArtifactApi(local.services.artifact),
-    )
+    return _build_bound_runtime(binding, local)
 
 
 def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:

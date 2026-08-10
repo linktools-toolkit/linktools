@@ -1,5 +1,5 @@
 {
-  "validated_source_commit": "working-tree",
+  "validated_source_commit": "589523800ca3881b9614d2931da44661836e7b85",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
@@ -8,15 +8,15 @@
     "Unrelated Asset and Storage migration or compatibility work is excluded; Runtime memory and Harness Step adapters required by this spec are in scope."
   ],
   "verification": {
-    "memory_file_sqlite": "passed: exact S 106 AI tests and persistence checks",
+    "memory_file_sqlite": "passed: exact S 111 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
-    "source_commit": "passed: working-tree exact source validation; commit topology is not a correctness condition",
+    "source_commit": "passed: exact source validation at 589523800ca3881b9614d2931da44661836e7b85",
     "full_spec_review": {
       "Critical": 0,
       "Important": 0,
       "Minor": 0,
-      "Notes": 0,
+      "Notes": 1,
       "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 0\nVerdict: CLEAN"
     }
   },

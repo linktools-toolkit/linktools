@@ -125,7 +125,7 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
 
-    async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run", allow_legacy_memory_namespace: bool = False) -> ExecutionHandle:
+    async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._launcher is None:
@@ -134,7 +134,8 @@ class DefaultExecutionService:
             self._launcher.validate_binding(binding_digest)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        if not allow_legacy_memory_namespace and (not isinstance(request.memory_namespace, str) or request.memory_namespace == ""):
+        memory_namespace = request.memory_namespace
+        if memory_namespace is not None and (not isinstance(memory_namespace, str) or not memory_namespace.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if session_id is not None and source_execution_id is None:
             session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
@@ -312,7 +313,7 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_namespace=previous.memory_namespace,
         )
-        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id, allow_legacy_memory_namespace=True)
+        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
@@ -324,7 +325,7 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_namespace=previous.memory_namespace,
         )
-        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id, allow_legacy_memory_namespace=True)
+        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         execution = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL)
