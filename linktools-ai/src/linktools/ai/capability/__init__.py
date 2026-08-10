@@ -1,22 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability contracts and provider boundaries."""
+"""Capability resolver and Pydantic AI execution boundaries."""
 
-from ._codec import CapabilityCodec, MCPServerSpecCodec, SkillSpecCodec
-from ._extension import ExtensionProvider
-from ._mcp import MCPCallRequest, MCPConnectionPool, MCPServerSpec, MCPToolProvider, validate_mcp_response
-from ._manifest import CapabilityManifest, CapabilityRef
+from ._contract import (
+    CapabilityBinding,
+    CapabilityInjection,
+    CapabilityRefResolution,
+    CapabilityResolver,
+    CapabilityRuntimeContext,
+    UnresolvedCapabilityBinding,
+    unresolved_binding,
+    validate_fingerprint,
+)
+from ._mcp import (
+    MCPCallRequest,
+    MCPConnectionPool,
+    MCPServerCapabilityBinding,
+    MCPServerCapabilityResolver,
+    MCPToolProvider,
+    validate_mcp_response,
+)
+from ._registry import CapabilityResolverRegistry
 from ._retrieval import RetrievalProvider
-from ._sandbox import Sandbox
-from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
-from ._skill import SkillCatalogSnapshot, SkillCatalogView, SkillCapability, SkillDescriptor, SkillProvider, SkillSpec
-from ._tool import ToolOperationRecord, ToolPolicy, ToolStateStore
+from ._skill import (
+    SkillCapability,
+    SkillCapabilityBinding,
+    SkillCapabilityResolver,
+    SkillCatalogSnapshot,
+    SkillCatalogView,
+    SkillDescriptor,
+    SkillProvider,
+    snapshot_skill_catalog,
+)
 
 __all__ = [
-    "CapabilityCodec", "CapabilityManifest", "CapabilityRef",
-    "ExtensionProvider", "MCPCallRequest", "MCPConnectionPool", "MCPServerSpec", "MCPToolProvider", "validate_mcp_response",
-    "AgentCatalogItem", "AgentCatalogSnapshot", "AgentCatalogView",
-    "MCPServerSpecCodec", "RetrievalProvider", "Sandbox", "SkillCatalogSnapshot", "SkillCatalogView", "SkillCapability",
-    "SkillDescriptor", "SkillProvider", "SkillSpec", "SkillSpecCodec", "ToolOperationRecord", "ToolPolicy",
-    "ToolStateStore",
+    "CapabilityBinding", "CapabilityInjection", "CapabilityRefResolution", "CapabilityResolver",
+    "CapabilityResolverRegistry", "CapabilityRuntimeContext", "MCPCallRequest", "MCPConnectionPool",
+    "MCPServerCapabilityBinding", "MCPServerCapabilityResolver", "MCPToolProvider", "RetrievalProvider",
+    "SkillCapability", "SkillCapabilityBinding", "SkillCapabilityResolver", "SkillCatalogSnapshot",
+    "SkillCatalogView", "SkillDescriptor", "SkillProvider", "UnresolvedCapabilityBinding",
+    "snapshot_skill_catalog", "unresolved_binding", "validate_fingerprint", "validate_mcp_response",
 ]

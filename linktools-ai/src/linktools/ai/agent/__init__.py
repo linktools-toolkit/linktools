@@ -1,24 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Agent declaration binding and execution boundaries."""
 
-"""Static Agent runtime support API."""
-
-from ._binding import AgentBinding, BindingDependencies, BindingExecutionPlan, BindingExecutionRegistry, build_binding_plan
+from ._binding import (
+    AgentBinder,
+    AgentBinding,
+    AgentBindingManifest,
+    AgentBindingRegistry,
+)
 from ._capabilities import (
-    AgentCapabilityScope,
-    AgentCatalogItem,
-    AgentCatalogSnapshot,
-    AgentCatalogView,
+    AgentRunScope,
     EmptyAgentCatalog,
     EmptySkillCatalog,
-    compose_parent_capabilities,
+    compose_platform_capabilities,
 )
+from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
 from ._deps import AgentDeps
-from ._runner import AgentRunner, BindingAgentRunner, ModelMaterializer, WorkspaceAgentResult, WorkspaceAgentRunner
-from ..capability import SkillCatalogView
+from ._output import OutputSchemaManifest, OutputSchemaManifestEntry, OutputTypeRegistry
+from ._runner import (
+    AgentRunner,
+    BoundAgentRunner,
+    WorkspaceAgentResult,
+    WorkspaceAgentRunner,
+)
 
 __all__ = [
-    "AgentBinding", "AgentCapabilityScope", "AgentCatalogItem", "AgentCatalogSnapshot", "AgentCatalogView", "AgentDeps",
-    "AgentRunner", "BindingAgentRunner", "BindingDependencies", "BindingExecutionPlan", "BindingExecutionRegistry", "EmptyAgentCatalog", "EmptySkillCatalog", "ModelMaterializer", "SkillCatalogView", "WorkspaceAgentResult", "WorkspaceAgentRunner", "build_binding_plan",
-    "compose_parent_capabilities",
+    "AgentBinder", "AgentBinding", "AgentBindingManifest", "AgentBindingRegistry", "AgentCatalogItem",
+    "AgentCatalogSnapshot", "AgentCatalogView", "AgentDeps", "AgentRunScope", "AgentRunner", "BoundAgentRunner",
+    "EmptyAgentCatalog", "EmptySkillCatalog", "OutputSchemaManifest", "OutputSchemaManifestEntry",
+    "OutputTypeRegistry", "WorkspaceAgentResult", "WorkspaceAgentRunner", "compose_platform_capabilities",
 ]

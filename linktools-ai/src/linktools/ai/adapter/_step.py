@@ -6,24 +6,32 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
 from collections.abc import Mapping
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from linktools.core import environ
 from pydantic_ai import ModelMessagesTypeAdapter
 from pydantic_ai_harness.media import MediaContext, media_uri_for, parse_media_uri
-from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent, ToolEffectRecord
+from pydantic_ai_harness.step_persistence import (
+    ContinuableSnapshot,
+    RunRecord,
+    StepEvent,
+    ToolEffectRecord,
+)
 
-from linktools.core import environ
-
-from ..errors import ErrorCode, AIError
 from ..core import canonical_json_bytes
-from ..storage import StorageDatabase, initialize_schema
-from ..storage import read_json, write_json_atomic
-from ..storage import FilesystemWriterLock
-from ..storage import storage_name
+from ..errors import AIError, ErrorCode
+from ..storage import (
+    FilesystemWriterLock,
+    StorageDatabase,
+    initialize_schema,
+    read_json,
+    storage_name,
+    write_json_atomic,
+)
 from ._schema import new_step_metadata
 
 if TYPE_CHECKING:
@@ -467,7 +475,20 @@ class SqlMediaStore:
 
 
 def _build_tables() -> tuple[object, dict[str, object]]:
-    from sqlalchemy import BigInteger, CHAR, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, Text, UniqueConstraint
+    from sqlalchemy import (
+        CHAR,
+        JSON,
+        BigInteger,
+        Column,
+        DateTime,
+        Index,
+        Integer,
+        LargeBinary,
+        String,
+        Table,
+        Text,
+        UniqueConstraint,
+    )
     from sqlalchemy.dialects import mysql
     from sqlalchemy.sql import func
 

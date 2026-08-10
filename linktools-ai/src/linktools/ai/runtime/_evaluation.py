@@ -9,11 +9,18 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import Principal
-from ..errors import ErrorCode, AIError
-from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core import canonical_sha256, idempotency_key_hash
-from ..core import EvaluationStatus, IdempotencyStatus, ResourceKind
+from ..core import (
+    AuthorizationAction,
+    AuthorizationPolicy,
+    EvaluationStatus,
+    IdempotencyStatus,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+    canonical_sha256,
+    idempotency_key_hash,
+)
+from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
 from ._persistence import EvaluationRecord, IdempotencyRecord, RuntimePersistence
 from ._services import (
@@ -21,12 +28,12 @@ from ._services import (
     EvaluationComparison,
     EvaluationHandle,
     EvaluationView,
-    ReplayEvaluationRequest,
-    RunEvaluationRequest,
     ExecutionHandle,
     ExecutionRequest,
+    ExecutionService,
+    ReplayEvaluationRequest,
+    RunEvaluationRequest,
 )
-from ._services import ExecutionService
 
 _logger = environ.get_logger("ai.runtime.evaluation")
 

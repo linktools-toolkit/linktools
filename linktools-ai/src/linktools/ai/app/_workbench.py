@@ -19,10 +19,10 @@ from pydantic_ai_harness.step_persistence import continue_run, fork_run
 from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
 from ..agent import (
     AgentCatalogView,
-    SkillCatalogView,
     WorkspaceAgentResult,
     WorkspaceAgentRunner,
 )
+from ..capability import SkillCatalogView
 from ..core import (
     ExecutionEventType,
     ExecutionLineageKind,

@@ -2,10 +2,22 @@
 # -*- coding: utf-8 -*-
 """Spec DTOs, codecs and output schemas; no storage owner."""
 
-from ._contract import AgentFeatureRef, AgentSpec, AgentSpecCodec, PromptSpec, PromptSpecCodec
-from ._output import OutputSchemaManifest, OutputSchemaManifestEntry, OutputTypeRegistry
+from ._codec import (
+    AgentSpecCodec,
+    MCPServerSpecCodec,
+    PromptSpecCodec,
+    SkillSpecCodec,
+    SpecCodec,
+)
+from ._contract import (
+    AgentCapabilityRef,
+    AgentSpec,
+    MCPServerSpec,
+    PromptSpec,
+    SkillSpec,
+)
 
 __all__ = [
-    "AgentFeatureRef", "AgentSpec", "AgentSpecCodec", "OutputSchemaManifest",
-    "OutputSchemaManifestEntry", "OutputTypeRegistry", "PromptSpec", "PromptSpecCodec",
+    "AgentCapabilityRef", "AgentSpec", "AgentSpecCodec", "MCPServerSpec", "MCPServerSpecCodec",
+    "PromptSpec", "PromptSpecCodec", "SkillSpec", "SkillSpecCodec", "SpecCodec",
 ]

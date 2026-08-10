@@ -1,30 +1,87 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable Agent and Prompt contracts and serializers."""
+"""Immutable declaration contracts for Agents, Prompts, and capabilities."""
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import Literal
+from typing import cast
 
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256
-from ..core import JsonValue
+from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..errors import AIError, ErrorCode
+
+
+class _ImmutableJsonMapping(Mapping[str, JsonValue]):
+    """Store a JSON object as canonical bytes and decode fresh values on read."""
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, value: Mapping[str, JsonValue], *, reject_secrets: bool = False) -> None:
+        normalized = _normalize_mapping(value, reject_secrets=reject_secrets)
+        self._payload = canonical_json_bytes(normalized)
+
+    def __getitem__(self, key: str) -> JsonValue:
+        return self._decode()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._decode())
+
+    def __len__(self) -> int:
+        return len(self._decode())
+
+    def _decode(self) -> "dict[str, JsonValue]":
+        return cast("dict[str, JsonValue]", json.loads(self._payload.decode("utf-8")))
+
+
+def _normalize_mapping(value: Mapping[str, JsonValue], *, reject_secrets: bool) -> "dict[str, JsonValue]":
+    normalized: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError("JSON object keys must be non-empty strings")
+        if reject_secrets and _looks_secret(key):
+            raise ValueError("declaration metadata cannot contain secret fields")
+        normalized[key] = _normalize_value(item, reject_secrets=reject_secrets)
+    return normalized
+
+
+def _normalize_value(value: object, *, reject_secrets: bool) -> JsonValue:
+    if value is None or isinstance(value, str) or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("JSON numbers must be finite")
+        return value
+    if isinstance(value, list):
+        return [_normalize_value(item, reject_secrets=reject_secrets) for item in value]
+    if isinstance(value, Mapping):
+        return _normalize_mapping(cast("Mapping[str, JsonValue]", value), reject_secrets=reject_secrets)
+    raise TypeError(f"unsupported JSON value: {type(value).__name__}")
+
+
+def _looks_secret(key: str) -> bool:
+    normalized = key.lower().replace("-", "_")
+    return any(marker in normalized for marker in ("secret", "credential", "token", "password", "api_key", "apikey"))
+
+
+def _mapping_json(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
+    return _normalize_mapping(value, reject_secrets=False)
 
 
 @dataclass(frozen=True, slots=True)
-class AgentFeatureRef:
-    kind: "Literal['tool', 'skill', 'mcp', 'subagent', 'sandbox', 'middleware']"
+class AgentCapabilityRef:
+    provider: str
     id: str
     revision: "int | None" = None
     required: bool = True
-    config: "Mapping[str, JsonValue]" = field(default_factory=lambda: MappingProxyType({}))
+    config: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or (self.revision is not None and self.revision < 1):
-            raise ValueError("agent feature reference is invalid")
-        object.__setattr__(self, "config", MappingProxyType(dict(self.config)))
+        if not self.provider.strip() or not self.id.strip() or (self.revision is not None and self.revision < 1):
+            raise ValueError("agent capability reference is invalid")
+        object.__setattr__(self, "config", _ImmutableJsonMapping(self.config))
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,26 +89,28 @@ class AgentSpec:
     id: str
     revision: int
     model: str
-    features: "tuple[AgentFeatureRef, ...]"
+    capabilities: "tuple[AgentCapabilityRef, ...]"
     output_schema: str
     output_schema_revision: int
     instructions: "tuple[str, ...]" = ()
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
             raise ValueError("agent spec is incomplete")
-        object.__setattr__(self, "features", tuple(self.features))
+        object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "instructions", tuple(self.instructions))
-        unique: dict[tuple[str, str], AgentFeatureRef] = {}
-        for feature in self.features:
-            key = (feature.kind, feature.id)
+        object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata, reject_secrets=True))
+        unique: dict[tuple[str, str], AgentCapabilityRef] = {}
+        for capability in self.capabilities:
+            key = capability.provider, capability.id
             previous = unique.get(key)
             if previous is not None:
-                if _feature_digest(previous) != _feature_digest(feature):
-                    raise AIError(ErrorCode.FEATURE_CONFLICT)
+                if _capability_digest(previous) != _capability_digest(capability):
+                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
                 continue
-            unique[key] = feature
-        object.__setattr__(self, "features", tuple(unique.values()))
+            unique[key] = capability
+        object.__setattr__(self, "capabilities", tuple(unique.values()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,28 +128,40 @@ class PromptSpec:
         object.__setattr__(self, "variables", tuple(self.variables))
 
 
-def _feature_digest(feature: AgentFeatureRef) -> str:
-    return canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)})
+@dataclass(frozen=True, slots=True)
+class SkillSpec:
+    id: str
+    revision: int
+    content: str
+
+    def __post_init__(self) -> None:
+        if not self.id.strip() or self.revision < 1:
+            raise ValueError("skill spec is incomplete")
 
 
-class AgentSpecCodec:
-    def encode(self, value: AgentSpec) -> bytes:
-        return json.dumps({"id": value.id, "revision": value.revision, "model": value.model, "features": [{"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)} for feature in value.features], "output_schema": value.output_schema, "output_schema_revision": value.output_schema_revision, "instructions": list(value.instructions)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+@dataclass(frozen=True, slots=True)
+class MCPServerSpec:
+    id: str
+    revision: int
+    command: str
+    args: "tuple[str, ...]" = ()
 
-    def decode(self, data: bytes) -> AgentSpec:
-        raw = json.loads(data.decode("utf-8"))
-        if "output_schema_revision" not in raw:
-            raise AIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
-        return AgentSpec(raw["id"], raw["revision"], raw["model"], tuple(AgentFeatureRef(item["kind"], item["id"], item.get("revision"), item.get("required", True), item.get("config", {})) for item in raw["features"]), raw["output_schema"], int(raw["output_schema_revision"]), tuple(raw.get("instructions", ())))
-
-
-class PromptSpecCodec:
-    def encode(self, value: PromptSpec) -> bytes:
-        return json.dumps({"id": value.id, "revision": value.revision, "system": value.system, "instructions": list(value.instructions), "variables": list(value.variables)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-    def decode(self, data: bytes) -> PromptSpec:
-        raw = json.loads(data.decode("utf-8"))
-        return PromptSpec(raw["id"], raw["revision"], raw["system"], tuple(raw["instructions"]), tuple(raw["variables"]))
+    def __post_init__(self) -> None:
+        if not self.id.strip() or self.revision < 1 or not self.command.strip():
+            raise ValueError("MCP server spec is incomplete")
+        object.__setattr__(self, "args", tuple(self.args))
 
 
-__all__ = ["AgentFeatureRef", "AgentSpec", "AgentSpecCodec", "PromptSpec", "PromptSpecCodec"]
+def _capability_digest(capability: AgentCapabilityRef) -> str:
+    return canonical_sha256(
+        {
+            "provider": capability.provider,
+            "id": capability.id,
+            "revision": capability.revision,
+            "required": capability.required,
+            "config": _mapping_json(capability.config),
+        }
+    )
+
+
+__all__ = ["AgentCapabilityRef", "AgentSpec", "MCPServerSpec", "PromptSpec", "SkillSpec"]

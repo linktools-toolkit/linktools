@@ -16,11 +16,10 @@ import asyncio
 import hashlib
 import os
 import tempfile
-from collections.abc import Sequence
 from collections import OrderedDict
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, TypeAlias
-
 
 ContentCacheKey: TypeAlias = str
 

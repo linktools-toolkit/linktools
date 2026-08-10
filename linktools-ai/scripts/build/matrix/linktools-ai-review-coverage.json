@@ -8,7 +8,7 @@
     "Unrelated Asset and Storage migration or compatibility work is excluded; Runtime memory and Harness Step adapters required by this spec are in scope."
   ],
   "verification": {
-    "memory_file_sqlite": "passed: exact S 93 AI tests and persistence checks",
+    "memory_file_sqlite": "passed: exact S 106 AI tests and persistence checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
     "source_commit": "passed: working-tree exact source validation; commit topology is not a correctness condition",
@@ -20,7 +20,7 @@
       "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 0\nVerdict: CLEAN"
     }
   },
-  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
-  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
+  "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
+  "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor",
   "review_mode": "cold-start self-review from the full specification, current repository, and fresh exact-S verification; no reviewer subagent was available"
 }

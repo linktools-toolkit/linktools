@@ -3,6 +3,7 @@
 """Build entry point for deterministic Agent bundles."""
 
 from linktools.ai.spec import AgentSpec, PromptSpec
+
 from .agent_bundle import AgentBundle, build_bundle
 
 

@@ -3,12 +3,20 @@
 
 """V23 checks for the public Harness persistence boundary."""
 
-from importlib.metadata import version
 import asyncio
+from importlib.metadata import version
 from inspect import signature
 from pathlib import Path
 
 import pytest
+from linktools.ai.adapter import DurableFilesystemStepStore
+from linktools.ai.agent import (
+    AgentCatalogItem,
+    AgentCatalogSnapshot,
+    AgentRunScope,
+    compose_platform_capabilities,
+)
+from linktools.ai.core import step_conversation_id, step_run_id
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai.models.test import TestModel
@@ -17,12 +25,14 @@ from pydantic_ai_harness.conversation_search import ConversationSearch
 from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 from pydantic_ai_harness.memory import InMemoryStore, Memory
 from pydantic_ai_harness.planning import Planning
-from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence, StepStore, continue_run, fork_run
+from pydantic_ai_harness.step_persistence import (
+    InMemoryStepStore,
+    StepPersistence,
+    StepStore,
+    continue_run,
+    fork_run,
+)
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
-
-from linktools.ai.agent import AgentCapabilityScope, AgentCatalogItem, AgentCatalogSnapshot, EmptySkillCatalog, compose_parent_capabilities
-from linktools.ai.core import step_conversation_id, step_run_id
-from linktools.ai.adapter import DurableFilesystemStepStore
 
 
 def test_harness_versions_and_public_step_store() -> None:
@@ -62,8 +72,8 @@ async def test_workspace_composition_uses_harness_capabilities_directly() -> Non
             AgentCatalogItem("agent-a", "agent_a", "a", "execute a", None),
         )
     )
-    capabilities = await compose_parent_capabilities(
-        AgentCapabilityScope(
+    capabilities = await compose_platform_capabilities(
+        AgentRunScope(
             root=Path("."),
             agent_name="parent",
             conversation_id="conversation",
@@ -71,8 +81,7 @@ async def test_workspace_composition_uses_harness_capabilities_directly() -> Non
             segment_sequence=1,
             memory_namespace="namespace",
             step_store=InMemoryStepStore(),
-            workspace_capabilities=(),
-            skill_catalog=EmptySkillCatalog(),
+            inherited_capabilities=(),
             agent_catalog=catalog,
             memory_store=InMemoryStore(),
         ),

@@ -1,13 +1,10 @@
 {
   "registration_order": ["AgentSpec", "PromptSpec", "SkillSpec", "MCPServerSpec"],
-  "capabilities": [
-    "mcp",
-    "skill",
-    "subagent",
-    "tool",
-    "sandbox",
-    "retrieval",
-    "extension"
-  ],
-  "production_rules": ["provider manifest is read-only", "required feature resolution is fail-closed", "no local fallback for production"]
+  "capabilities": ["mcp", "skill", "retrieval"],
+  "production_rules": [
+    "resolver registry is immutable after composition",
+    "required capability resolution is fail-closed",
+    "no local fallback for production",
+    "MCP toolsets enter Pydantic AI through Toolset capabilities"
+  ]
 }

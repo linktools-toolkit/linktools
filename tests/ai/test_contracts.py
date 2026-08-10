@@ -6,29 +6,50 @@
 from datetime import datetime, timezone
 
 import pytest
-
 from linktools.ai.agent import AgentDeps
-from scripts.build.agent_bundle import build_bundle
-from linktools.ai.errors import ErrorCode, AIError
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry, ModelRoute
-from linktools.ai.observe import RunContext
-from linktools.ai.observe import MiddlewarePipeline
-from linktools.ai.observe import RunSnapshot, snapshot_digest
-from linktools.ai.observe import InMemoryTraceRecorder, TraceItem
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.observe import (
+    InMemoryTraceRecorder,
+    MiddlewarePipeline,
+    RunContext,
+    RunSnapshot,
+    TraceItem,
+    snapshot_digest,
+)
 from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.spec import AgentFeatureRef, AgentSpec, PromptSpec
+from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
 from linktools.ai.task import TaskGraph, TaskNode
-from linktools.ai.temporal import WorkerActivities, WorkerRegistration, production_registration
-from linktools.ai.temporal import WorkflowGateway
-from linktools.ai.temporal import ActivityType, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, WorkflowType
-from linktools.ai.temporal.workflow import EvaluationWorkflowInput, EvaluationWorkflowResult, ExecutionWorkflowInput, ExecutionWorkflowResult, SessionWorkflowInput, SessionWorkflowResult, TaskWorkflowInput, TaskWorkflowResult
+from linktools.ai.temporal import (
+    ActivityType,
+    EvaluationActivity,
+    ExecuteActivity,
+    SessionActivity,
+    TaskActivity,
+    WorkerActivities,
+    WorkerRegistration,
+    WorkflowGateway,
+    WorkflowType,
+    production_registration,
+)
+from linktools.ai.temporal.workflow import (
+    EvaluationWorkflowInput,
+    EvaluationWorkflowResult,
+    ExecutionWorkflowInput,
+    ExecutionWorkflowResult,
+    SessionWorkflowInput,
+    SessionWorkflowResult,
+    TaskWorkflowInput,
+    TaskWorkflowResult,
+)
+from linktools.ai.workspace import trusted_workspace_principal
+from scripts.build.agent_bundle import build_bundle
 
 
 def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
     with pytest.raises(ValueError):
         TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
-    spec = AgentSpec("agent", 1, "route", (AgentFeatureRef("tool", "bash"),), "text", 1, ("answer",))
+    spec = AgentSpec("agent", 1, "route", (AgentCapabilityRef("tool", "bash"),), "text", 1, ("answer",))
     prompt = PromptSpec("prompt", 1, "system", ("answer",), ())
     assert build_bundle(spec, prompt, "capabilities").digest == build_bundle(spec, prompt, "capabilities").digest
 

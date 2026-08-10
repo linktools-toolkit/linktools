@@ -14,15 +14,16 @@ import pytest
 from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.adapter import SqlRuntimeSchema
 from linktools.ai.asset import SqlAssetBackend
-from linktools.ai.capability import ToolOperationRecord
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import ToolOperationRecord
 from linktools.ai.storage import (
     FilesystemContentCache,
     InMemoryContentCache,
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
+    SqlSchemaRegistry,
     StorageComposition,
     StorageDeleteResult,
     StorageEntryRevision,
@@ -31,7 +32,6 @@ from linktools.ai.storage import (
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
-    SqlSchemaRegistry,
     StorageValueValidator,
 )
 

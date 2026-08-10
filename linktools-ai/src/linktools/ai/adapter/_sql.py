@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..capability import ToolOperationRecord, ToolStateStore
 from ..core import (
     ApprovalDecision,
     ApprovalStatus,
@@ -67,6 +66,8 @@ from ..runtime import (
     SessionRecord,
     TaskLease,
     TaskNodeView,
+    ToolOperationRecord,
+    ToolStateStore,
 )
 from ..storage import StorageDatabase
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord

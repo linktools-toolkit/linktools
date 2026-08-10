@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
 
-from ..errors import ErrorCode, AIError
 from ..core import canonical_json_bytes
+from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from sqlalchemy import Constraint, Index, MetaData, Table

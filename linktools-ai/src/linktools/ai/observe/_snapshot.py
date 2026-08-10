@@ -4,8 +4,7 @@
 
 from dataclasses import dataclass
 
-from ..core import canonical_sha256
-from ..core import JsonValue
+from ..core import JsonValue, canonical_sha256
 
 
 @dataclass(frozen=True, slots=True)

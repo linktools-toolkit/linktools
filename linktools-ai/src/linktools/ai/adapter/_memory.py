@@ -20,9 +20,8 @@ from pydantic_ai_harness.memory import (
 )
 
 from ..core import OperationKind, OperationStatus, ResourceKind, canonical_sha256
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ..runtime import BlobRef, MemoryRecord, OperationLedgerInput, RuntimePersistence
-
 
 _logger = environ.get_logger("ai.adapter.memory")
 

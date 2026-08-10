@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from linktools.core import environ
 
-
 _logger = environ.get_logger("ai.app.sql")
 
 

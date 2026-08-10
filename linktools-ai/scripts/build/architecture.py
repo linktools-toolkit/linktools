@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from linktools.ai.core import JsonValue
+
 from .cohesion import check_files
 from .names import check_names
 

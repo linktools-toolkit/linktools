@@ -1,192 +1,290 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Resolved Agent definition binding and stable behavior digest."""
+"""Stable Agent binding and process-local executable binding registry."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
+from ..capability import (
+    CapabilityBinding,
+    CapabilityInjection,
+    CapabilityRefResolution,
+    CapabilityResolver,
+    CapabilityResolverRegistry,
+    unresolved_binding,
+    validate_fingerprint,
+)
 from ..core import canonical_sha256
-from ..capability import MCPServerSpec, MCPToolProvider, Sandbox, SkillProvider, SkillSpec, ToolPolicy
-from ..errors import ErrorCode, AIError
-from ..model import ModelResolver, ModelRoute
-from ..observe import MiddlewarePipeline
-from ..spec import AgentSpec, PromptSpec
-from ..spec import OutputTypeRegistry
+from ..errors import AIError, ErrorCode
+from ..model import (
+    ModelConnectionConfig,
+    ModelConnectionRegistry,
+    ModelResolver,
+    ModelRoute,
+)
+from ..spec import AgentCapabilityRef, AgentSpec, PromptSpec
+from ._output import OutputTypeRegistry
 
 
 @dataclass(frozen=True, slots=True)
-class AgentBinding:
-    spec: AgentSpec
-    prompt: PromptSpec
+class AgentBindingManifest:
+    agent_id: str
+    agent_revision: int
+    prompt_id: str
+    prompt_revision: int
     spec_fingerprint: str
     prompt_fingerprint: str
-    model_registry_revision: int
+    model_route_fingerprint: str
+    model_connection_fingerprint: str
     output_schema_fingerprint: str
-    capability_manifest_digest: str
-    tool_policy_fingerprint: str
-    sandbox_fingerprint: str
-    middleware_fingerprint: str
+    capabilities_fingerprint: str
+    execution_profile_fingerprint: str
 
     def __post_init__(self) -> None:
-        if (
-            self.model_registry_revision < 0
-            or not self.spec_fingerprint
-            or not self.prompt_fingerprint
-            or not self.output_schema_fingerprint
-            or not self.capability_manifest_digest
-            or not self.tool_policy_fingerprint
-            or not self.sandbox_fingerprint
-            or not self.middleware_fingerprint
+        if not self.agent_id.strip() or self.agent_revision < 1 or not self.prompt_id.strip() or self.prompt_revision < 1:
+            raise ValueError("agent binding identity is incomplete")
+        for fingerprint in (
+            self.spec_fingerprint,
+            self.prompt_fingerprint,
+            self.model_route_fingerprint,
+            self.model_connection_fingerprint,
+            self.output_schema_fingerprint,
+            self.capabilities_fingerprint,
+            self.execution_profile_fingerprint,
         ):
-            raise ValueError("Agent binding is incomplete")
+            validate_fingerprint(fingerprint)
 
     @property
     def digest(self) -> str:
         return canonical_sha256(
             {
-                "agent_id": self.spec.id,
-                "agent_revision": self.spec.revision,
-                "prompt_id": self.prompt.id,
-                "prompt_revision": self.prompt.revision,
+                "agent_id": self.agent_id,
+                "agent_revision": self.agent_revision,
+                "prompt_id": self.prompt_id,
+                "prompt_revision": self.prompt_revision,
                 "spec_fingerprint": self.spec_fingerprint,
                 "prompt_fingerprint": self.prompt_fingerprint,
-                "model_registry_revision": self.model_registry_revision,
+                "model_route_fingerprint": self.model_route_fingerprint,
+                "model_connection_fingerprint": self.model_connection_fingerprint,
                 "output_schema_fingerprint": self.output_schema_fingerprint,
-                "output_schema_id": self.spec.output_schema,
-                "output_schema_revision": self.spec.output_schema_revision,
-                "capability_manifest_digest": self.capability_manifest_digest,
-                "tool_policy_fingerprint": self.tool_policy_fingerprint,
-                "sandbox_fingerprint": self.sandbox_fingerprint,
-                "middleware_fingerprint": self.middleware_fingerprint,
+                "capabilities_fingerprint": self.capabilities_fingerprint,
+                "execution_profile_fingerprint": self.execution_profile_fingerprint,
             }
         )
 
 
 @dataclass(frozen=True, slots=True)
-class BindingDependencies:
-    model_resolver: ModelResolver
-    skill_provider: SkillProvider
-    mcp_provider: MCPToolProvider
-    middleware: MiddlewarePipeline
-    sandbox: Sandbox
-    tool_policy: ToolPolicy
-    output_types: OutputTypeRegistry
-
-
-@dataclass(frozen=True, slots=True)
-class BindingExecutionPlan:
-    binding: AgentBinding
+class AgentBinding:
+    manifest: AgentBindingManifest
+    spec: AgentSpec
+    prompt: PromptSpec
     model_route: ModelRoute
+    model_connection: "ModelConnectionConfig | None"
     output_type: "type[BaseModel]"
-    skills: "tuple[SkillSpec, ...]"
-    mcp_servers: "tuple[MCPServerSpec, ...]"
-
-    def __post_init__(self) -> None:
-        if self.model_route.route_id != self.binding.spec.model:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if canonical_sha256(self.output_type.model_json_schema()) != self.binding.output_schema_fingerprint:
-            raise AIError(ErrorCode.OUTPUT_SCHEMA_DRIFT)
-        skill_revisions = {(item.id, item.revision) for item in self.skills}
-        mcp_revisions = {(item.id, item.revision) for item in self.mcp_servers}
-        for feature in self.binding.spec.features:
-            if not feature.required:
-                continue
-            if feature.kind == "skill" and not any(item[0] == feature.id and (feature.revision is None or item[1] == feature.revision) for item in skill_revisions):
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING)
-            if feature.kind == "mcp" and not any(item[0] == feature.id and (feature.revision is None or item[1] == feature.revision) for item in mcp_revisions):
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING)
+    capability_bindings: "tuple[CapabilityBinding, ...]"
+    injections: "tuple[CapabilityInjection, ...]"
 
 
-class BindingExecutionRegistry:
-    """Process-local immutable plan registry keyed by binding digest."""
-
+class AgentBindingRegistry:
     def __init__(self) -> None:
-        self._plans: dict[str, BindingExecutionPlan] = {}
+        self._bindings: dict[str, AgentBinding] = {}
 
-    def register(self, plan: BindingExecutionPlan) -> None:
-        digest = plan.binding.digest
-        previous = self._plans.get(digest)
-        if previous is not None and previous != plan:
-            raise AIError(ErrorCode.BINDING_CONFLICT)
-        self._plans[digest] = plan
+    def register(self, binding: AgentBinding) -> None:
+        digest = binding.manifest.digest
+        previous = self._bindings.get(digest)
+        if previous is not None:
+            if previous.manifest != binding.manifest:
+                raise AIError(ErrorCode.BINDING_CONFLICT)
+            return
+        self._bindings[digest] = binding
 
-    def resolve(self, digest: str) -> BindingExecutionPlan:
+    def resolve(self, digest: str) -> AgentBinding:
         try:
-            return self._plans[digest]
+            return self._bindings[digest]
         except KeyError as error:
             raise AIError(ErrorCode.BINDING_NOT_REGISTERED) from error
 
 
-def build_binding_plan(spec: AgentSpec, prompt: PromptSpec, *, dependencies: BindingDependencies) -> BindingExecutionPlan:
-    route = dependencies.model_resolver.resolve(spec.model)
-    spec_fingerprint = canonical_sha256(
+class AgentBinder:
+    def __init__(
+        self,
+        *,
+        model_resolver: ModelResolver,
+        model_connections: ModelConnectionRegistry,
+        output_types: OutputTypeRegistry,
+        capability_resolvers: CapabilityResolverRegistry,
+        execution_profile_fingerprint: str,
+    ) -> None:
+        validate_fingerprint(execution_profile_fingerprint)
+        self._model_resolver = model_resolver
+        self._model_connections = model_connections
+        self._output_types = output_types
+        self._capability_resolvers = capability_resolvers
+        self._execution_profile_fingerprint = execution_profile_fingerprint
+
+    def bind(
+        self,
+        spec: AgentSpec,
+        prompt: PromptSpec,
+        *,
+        injections: tuple[CapabilityInjection, ...] = (),
+    ) -> AgentBinding:
+        route = self._model_resolver.resolve(spec.model)
+        connection = self._model_connections.resolve_optional(route.connection_id)
+        output_type = self._output_types.resolve(spec.output_schema, spec.output_schema_revision)
+        groups = _group_capabilities(spec.capabilities)
+        bindings: list[CapabilityBinding] = []
+        capability_groups: list[dict[str, object]] = []
+        for provider, refs in groups:
+            resolver = self._capability_resolvers.get(provider)
+            if resolver is None:
+                if any(ref.required for ref in refs):
+                    raise AIError(ErrorCode.CAPABILITY_PROVIDER_UNKNOWN)
+                binding = unresolved_binding(provider, refs)
+                resolver_fingerprint = None
+            else:
+                binding = _resolve_binding(resolver, refs)
+                resolver_fingerprint = resolver.fingerprint
+            bindings.append(binding)
+            capability_groups.append(
+                {
+                    "provider": provider,
+                    "resolver_fingerprint": resolver_fingerprint,
+                    "binding_fingerprint": binding.fingerprint,
+                    "inherit_to_subagents": binding.inherit_to_subagents,
+                    "resolutions": [_resolution_payload(item) for item in binding.resolutions],
+                }
+            )
+        _validate_injections(injections)
+        capabilities_fingerprint = canonical_sha256(
+            {
+                "declarative": capability_groups,
+                "injections": [
+                    {
+                        "id": injection.id,
+                        "fingerprint": injection.fingerprint,
+                        "inherit_to_subagents": injection.inherit_to_subagents,
+                    }
+                    for injection in injections
+                ],
+            }
+        )
+        manifest = AgentBindingManifest(
+            spec.id,
+            spec.revision,
+            prompt.id,
+            prompt.revision,
+            _spec_fingerprint(spec),
+            _prompt_fingerprint(prompt),
+            canonical_sha256(
+                {
+                    "route_id": route.route_id,
+                    "provider": route.provider,
+                    "model": route.model,
+                    "connection_id": route.connection_id,
+                }
+            ),
+            canonical_sha256({"connection_id": None} if connection is None else {
+                "connection_id": connection.connection_id,
+                "base_url": connection.base_url,
+                "timeout_seconds": connection.timeout_seconds,
+                "credential_id": connection.credential_id,
+            }),
+            self._output_types.fingerprint(spec.output_schema, spec.output_schema_revision),
+            capabilities_fingerprint,
+            self._execution_profile_fingerprint,
+        )
+        binding = AgentBinding(manifest, spec, prompt, route, connection, output_type, tuple(bindings), tuple(injections))
+        return binding
+
+
+def _group_capabilities(refs: Sequence[AgentCapabilityRef]) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
+    grouped: dict[str, list[AgentCapabilityRef]] = {}
+    order: list[str] = []
+    for ref in refs:
+        if ref.provider not in grouped:
+            grouped[ref.provider] = []
+            order.append(ref.provider)
+        grouped[ref.provider].append(ref)
+    return tuple((provider, tuple(grouped[provider])) for provider in order)
+
+
+def _resolve_binding(resolver: CapabilityResolver, refs: tuple[AgentCapabilityRef, ...]) -> CapabilityBinding:
+    try:
+        binding = resolver.resolve(refs)
+        provider = binding.provider
+        resolutions = binding.resolutions
+        fingerprint = binding.fingerprint
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if provider != resolver.provider or len(resolutions) != len(refs):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    validate_fingerprint(fingerprint)
+    for ref, resolution in zip(refs, resolutions):
+        if not isinstance(resolution, CapabilityRefResolution) or resolution.id != ref.id or resolution.requested_revision != ref.revision:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        if resolution.required != ref.required:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    return binding
+
+
+def _validate_injections(injections: Sequence[CapabilityInjection]) -> None:
+    ids = [injection.id for injection in injections]
+    if len(set(ids)) != len(ids):
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+    for injection in injections:
+        validate_fingerprint(injection.fingerprint)
+
+
+def _spec_fingerprint(spec: AgentSpec) -> str:
+    return canonical_sha256(
         {
             "id": spec.id,
             "revision": spec.revision,
             "model": spec.model,
-            "features": [
-                {"kind": feature.kind, "id": feature.id, "revision": feature.revision, "required": feature.required, "config": dict(feature.config)}
-                for feature in spec.features
+            "capabilities": [
+                {
+                    "provider": ref.provider,
+                    "id": ref.id,
+                    "revision": ref.revision,
+                    "required": ref.required,
+                    "config": dict(ref.config),
+                }
+                for ref in spec.capabilities
             ],
             "output_schema": spec.output_schema,
             "output_schema_revision": spec.output_schema_revision,
             "instructions": list(spec.instructions),
+            "metadata": dict(spec.metadata),
         }
     )
-    prompt_fingerprint = canonical_sha256(
-        {"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions), "variables": list(prompt.variables)}
-    )
-    output_schema_fingerprint = dependencies.output_types.fingerprint(spec.output_schema, spec.output_schema_revision)
-    capabilities: list[dict[str, object]] = []
-    skills: list[SkillSpec] = []
-    mcp_servers: list[MCPServerSpec] = []
-    for feature in spec.features:
-        try:
-            if feature.kind == "skill":
-                resolved = dependencies.skill_provider.resolve_ref(feature.id, feature.revision)
-                if feature.revision is not None and resolved.revision != feature.revision:
-                    raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING)
-                skills.append(resolved)
-                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "content": resolved.content})
-                provider_digest = dependencies.skill_provider.manifest()
-                resolved_revision = resolved.revision
-            elif feature.kind == "mcp":
-                resolved = dependencies.mcp_provider.resolve_ref(feature.id, feature.revision)
-                if feature.revision is not None and resolved.revision != feature.revision:
-                    raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING)
-                mcp_servers.append(resolved)
-                fingerprint = canonical_sha256({"id": resolved.id, "revision": resolved.revision, "command": resolved.command, "args": list(resolved.args)})
-                provider_digest = dependencies.mcp_provider.manifest()
-                resolved_revision = resolved.revision
-            elif feature.kind not in {"tool", "subagent", "sandbox", "middleware"}:
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING)
-            else:
-                resolved_revision = feature.revision or 1
-                fingerprint = canonical_sha256({"kind": feature.kind, "id": feature.id, "revision": resolved_revision, "config": dict(feature.config)})
-                provider_digest = ""
-        except AIError as error:
-            if feature.required:
-                raise AIError(ErrorCode.FEATURE_REQUIRED_MISSING) from error
-            resolved_revision = 0
-            fingerprint = "UNRESOLVED"
-            provider_digest = "UNRESOLVED"
-        capabilities.append({"kind": feature.kind, "id": feature.id, "requested_revision": feature.revision or 0, "resolved_revision": resolved_revision, "config_digest": canonical_sha256(dict(feature.config)), "fingerprint": fingerprint, "provider_manifest_digest": provider_digest, "required": feature.required})
-    capability_manifest_digest = canonical_sha256({"features": sorted(capabilities, key=lambda value: (str(value["kind"]), str(value["id"]), int(value["resolved_revision"])))})
-    binding = AgentBinding(
-        spec,
-        prompt,
-        spec_fingerprint,
-        prompt_fingerprint,
-        dependencies.model_resolver.snapshot().revision,
-        output_schema_fingerprint,
-        capability_manifest_digest,
-        dependencies.tool_policy.fingerprint,
-        dependencies.sandbox.fingerprint,
-        dependencies.middleware.fingerprint,
-    )
-    plan = BindingExecutionPlan(binding, route, dependencies.output_types.resolve(spec.output_schema, spec.output_schema_revision), tuple(skills), tuple(mcp_servers))
-    return plan
 
 
-__all__ = ["AgentBinding", "BindingDependencies", "BindingExecutionPlan", "BindingExecutionRegistry", "build_binding_plan"]
+def _prompt_fingerprint(prompt: PromptSpec) -> str:
+    return canonical_sha256(
+        {
+            "id": prompt.id,
+            "revision": prompt.revision,
+            "system": prompt.system,
+            "instructions": list(prompt.instructions),
+            "variables": list(prompt.variables),
+        }
+    )
+
+
+def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, object]":
+    return {
+        "id": resolution.id,
+        "requested_revision": resolution.requested_revision,
+        "resolved_revision": resolution.resolved_revision,
+        "required": resolution.required,
+        "status": resolution.status,
+        "fingerprint": resolution.fingerprint,
+    }
+
+
+__all__ = ["AgentBinder", "AgentBinding", "AgentBindingManifest", "AgentBindingRegistry"]

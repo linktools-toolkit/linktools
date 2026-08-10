@@ -7,12 +7,15 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import Principal
-from ..errors import ErrorCode, AIError
-from ..core import AuthorizationAction, AuthorizationPolicy
-from ..core import ApprovalStatus
+from ..core import ApprovalStatus, AuthorizationAction, AuthorizationPolicy, Principal
+from ..errors import AIError, ErrorCode
 from ._persistence import RuntimePersistence
-from ._services import ApprovalDecisionRequest, ApprovalDecisionResult, ApprovalView, WorkflowGateway
+from ._services import (
+    ApprovalDecisionRequest,
+    ApprovalDecisionResult,
+    ApprovalView,
+    WorkflowGateway,
+)
 
 _logger = environ.get_logger("ai.runtime.approval")
 

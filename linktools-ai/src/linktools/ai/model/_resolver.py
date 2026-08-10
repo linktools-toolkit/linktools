@@ -4,7 +4,7 @@
 
 from typing import Protocol
 
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ._registry import ModelRegistrySnapshot, ModelRoute
 
 

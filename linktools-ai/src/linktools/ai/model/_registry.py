@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """Instance-owned immutable model route registry."""
 
-from dataclasses import dataclass
-from types import MappingProxyType
 from collections.abc import Mapping
+from dataclasses import dataclass
 from threading import Lock
+from types import MappingProxyType
 
 from linktools.core import environ
 
-from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
+from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.model.registry")
 
@@ -20,9 +20,10 @@ class ModelRoute:
     route_id: str
     provider: str
     model: str
+    connection_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if not self.route_id.strip() or not self.provider.strip() or not self.model.strip():
+        if not self.route_id.strip() or not self.provider.strip() or not self.model.strip() or (self.connection_id is not None and not self.connection_id.strip()):
             raise ValueError("model route is incomplete")
 
 
@@ -75,7 +76,7 @@ class ModelRegistry:
         if any(not key.strip() or value.route_id != key for key, value in routes.items()):
             raise ValueError("model registry route keys must match route ids")
         normalized = dict(sorted(routes.items()))
-        digest = canonical_sha256({"routes": {key: {"route_id": value.route_id, "provider": value.provider, "model": value.model} for key, value in normalized.items()}})
+        digest = canonical_sha256({"routes": {key: {"route_id": value.route_id, "provider": value.provider, "model": value.model, "connection_id": value.connection_id} for key, value in normalized.items()}})
         if normalized == dict(self._snapshot.routes):
             return self._snapshot
         self._snapshot = ModelRegistrySnapshot(self._snapshot.revision + 1, MappingProxyType(normalized), digest)

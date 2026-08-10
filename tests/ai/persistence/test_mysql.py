@@ -6,8 +6,8 @@
 import os
 
 import pytest
-
 from linktools.ai import RuntimePersistenceConfig
+
 from tests.ai.persistence.helper import open_sql_resources
 
 

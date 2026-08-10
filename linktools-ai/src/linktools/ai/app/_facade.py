@@ -2,27 +2,26 @@
 # -*- coding: utf-8 -*-
 """Runtime containers with explicit query/mutation separation."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 
 from linktools.core import environ
 
 from ..agent import (
+    AgentBinder,
     AgentBinding,
-    BindingDependencies,
-    BindingExecutionRegistry,
-    build_binding_plan,
+    AgentBindingRegistry,
+    AgentCatalogView,
+    OutputTypeRegistry,
 )
 from ..capability import (
-    MCPToolProvider,
-    Sandbox,
-    SkillProvider,
-    ToolPolicy,
-    ToolStateStore,
+    CapabilityInjection,
+    CapabilityResolver,
+    CapabilityResolverRegistry,
 )
-from ..core import Page, Principal, PrincipalProvider
+from ..core import Page, Principal, PrincipalProvider, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelResolver
+from ..model import ModelConnectionRegistry, ModelCredentialProvider, ModelResolver
 from ..observe import MiddlewarePipeline, RunSnapshot
 from ..runtime import (
     ApprovalApi,
@@ -73,20 +72,21 @@ from ..runtime import (
     SessionService,
     SessionView,
     TaskService,
+    ToolPolicy,
     TraceItem,
     TranscriptItem,
     UpdateSessionRequest,
     validate_compare_request,
 )
-from ..spec import AgentSpec, OutputTypeRegistry, PromptSpec
+from ..spec import AgentSpec, PromptSpec
 from ..task import (
     CancelGraphRequest,
     TaskApi,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
-    TaskQueryApi,
 )
+from ..workspace import Sandbox
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,13 +101,16 @@ class Runtime:
     event: EventApi
     artifact: ArtifactApi
 
+    async def run(self, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
+        return await self.execution.run_and_wait(request, timeout_seconds=timeout_seconds)
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeAccess:
     service_identity: RuntimeServiceIdentity
     execution: ExecutionQueryApi
     session: SessionQueryApi
-    task: TaskQueryApi
+    task: TaskApi
     evaluation: EvaluationQueryApi
     approval: ApprovalQueryApi
     event: EventApi
@@ -117,27 +120,28 @@ class RuntimeAccess:
 @dataclass(frozen=True, slots=True)
 class RuntimeDependencies:
     model_resolver: ModelResolver
-    skill_provider: SkillProvider
-    mcp_provider: MCPToolProvider
+    capability_resolvers: "tuple[CapabilityResolver, ...]"
+    model_connections: ModelConnectionRegistry
+    model_credentials: ModelCredentialProvider
+    agent_catalog: AgentCatalogView
+    binding_registry: AgentBindingRegistry
     middleware: MiddlewarePipeline
     sandbox: Sandbox
     tool_policy: ToolPolicy
     output_types: OutputTypeRegistry
-    tool_state: ToolStateStore
     principal_provider: PrincipalProvider
     services: RuntimeServices
-    binding_registry: "BindingExecutionRegistry | None" = None
+    platform_capability_profile_fingerprint: str = canonical_sha256("linktools-ai-platform-v1")
 
     @property
-    def binding(self) -> BindingDependencies:
-        return BindingDependencies(
-            self.model_resolver,
-            self.skill_provider,
-            self.mcp_provider,
-            self.middleware,
-            self.sandbox,
-            self.tool_policy,
-            self.output_types,
+    def execution_profile_fingerprint(self) -> str:
+        return canonical_sha256(
+            {
+                "tool_policy": self.tool_policy.fingerprint,
+                "sandbox": self.sandbox.fingerprint,
+                "middleware": self.middleware.fingerprint,
+                "platform_capabilities": self.platform_capability_profile_fingerprint,
+            }
         )
 
 
@@ -146,18 +150,23 @@ def build_runtime(
     prompt: PromptSpec,
     *,
     dependencies: RuntimeDependencies,
+    additional_capability_resolvers: "Sequence[CapabilityResolver]" = (),
+    capability_injections: "Sequence[CapabilityInjection]" = (),
 ) -> Runtime:
     if any(
         value is None
         for value in (
             dependencies.model_resolver,
-            dependencies.skill_provider,
-            dependencies.mcp_provider,
+            dependencies.capability_resolvers,
+            dependencies.model_connections,
+            dependencies.model_credentials,
+            dependencies.agent_catalog,
+            dependencies.binding_registry,
             dependencies.middleware,
             dependencies.sandbox,
             dependencies.tool_policy,
             dependencies.output_types,
-            dependencies.tool_state,
+            dependencies.execution_profile_fingerprint,
             dependencies.principal_provider,
             dependencies.services,
         )
@@ -165,18 +174,25 @@ def build_runtime(
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     if not spec.id or not prompt.id or spec.revision < 1 or prompt.revision < 1:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "invalid Agent or Prompt revision")
-    plan = build_binding_plan(spec, prompt, dependencies=dependencies.binding)
-    if dependencies.binding_registry is not None:
-        dependencies.binding_registry.register(plan)
-    binding = plan.binding
+    resolver_registry = CapabilityResolverRegistry((*dependencies.capability_resolvers, *additional_capability_resolvers))
+    binder = AgentBinder(
+        model_resolver=dependencies.model_resolver,
+        model_connections=dependencies.model_connections,
+        output_types=dependencies.output_types,
+        capability_resolvers=resolver_registry,
+        execution_profile_fingerprint=dependencies.execution_profile_fingerprint,
+    )
+    binding = binder.bind(spec, prompt, injections=tuple(capability_injections))
+    dependencies.binding_registry.register(binding)
+    binding = dependencies.binding_registry.resolve(binding.manifest.digest)
     logger = environ.get_logger("ai.app.facade")
-    logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, plan.model_route.route_id)
+    logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, binding.model_route.route_id)
     return Runtime(
         dependencies.services.identity,
         binding,
         _ExecutionApi(dependencies.services.execution, binding),
         _SessionApi(dependencies.services.session, binding),
-        _TaskApi(dependencies.services.task, binding),
+        _TaskApi(dependencies.services.task),
         _EvaluationApi(dependencies.services.evaluation, binding),
         _ApprovalApi(dependencies.services.approval),
         _EventApi(dependencies.services.event),
@@ -187,7 +203,7 @@ def build_runtime(
 @dataclass(frozen=True, slots=True)
 class LocalRuntimeServices:
     services: RuntimeServices
-    binding_registry: BindingExecutionRegistry
+    binding_registry: AgentBindingRegistry
 
     def __post_init__(self) -> None:
         if self.services is None or self.binding_registry is None:
@@ -198,20 +214,20 @@ def build_local_runtime(
     spec: AgentSpec,
     prompt: PromptSpec,
     *,
-    binding: BindingDependencies,
+    binder: AgentBinder,
     local: LocalRuntimeServices,
 ) -> Runtime:
-    plan = build_binding_plan(spec, prompt, dependencies=binding)
-    local.binding_registry.register(plan)
-    binding = plan.binding
+    binding = binder.bind(spec, prompt)
+    local.binding_registry.register(binding)
+    binding = local.binding_registry.resolve(binding.manifest.digest)
     _logger = environ.get_logger("ai.app.facade")
-    _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.digest)
+    _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.manifest.digest)
     return Runtime(
         local.services.identity,
         binding,
         _ExecutionApi(local.services.execution, binding),
         _SessionApi(local.services.session, binding),
-        _TaskApi(local.services.task, binding),
+        _TaskApi(local.services.task),
         _EvaluationApi(local.services.evaluation, binding),
         _ApprovalApi(local.services.approval),
         _EventApi(local.services.event),
@@ -226,7 +242,7 @@ def build_runtime_access(services: RuntimeServices) -> RuntimeAccess:
         services.identity,
         _ExecutionAccess(services.execution),
         _SessionAccess(services.session),
-        _TaskAccess(services.task),
+        _TaskApi(services.task),
         _EvaluationAccess(services.evaluation),
         _ApprovalAccess(services.approval),
         _EventApi(services.event),
@@ -240,7 +256,7 @@ class _ExecutionApi(ExecutionApi):
         self._binding = binding
 
     async def run(self, request: ExecutionRequest) -> ExecutionHandle:
-        return await self._service.run(self._binding.digest, request)
+        return await self._service.run(self._binding.manifest.digest, request)
 
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         return await self._service.inspect(execution_id, principal=principal)
@@ -261,13 +277,13 @@ class _ExecutionApi(ExecutionApi):
         return await self._service.history(execution_id, principal=principal, cursor=cursor, limit=limit)
 
     async def run_and_wait(self, request: ExecutionRequest, *, timeout_seconds: "float | None" = None) -> ExecutionResult:
-        return await self._service.run_and_wait(self._binding.digest, request, timeout_seconds=timeout_seconds)
+        return await self._service.run_and_wait(self._binding.manifest.digest, request, timeout_seconds=timeout_seconds)
 
     async def retry(self, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle:
-        return await self._service.retry(self._binding.digest, execution_id, request)
+        return await self._service.retry(self._binding.manifest.digest, execution_id, request)
 
     async def fork(self, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
-        return await self._service.fork(self._binding.digest, execution_id, request)
+        return await self._service.fork(self._binding.manifest.digest, execution_id, request)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         return await self._service.cancel(execution_id, request)
@@ -302,7 +318,7 @@ class _SessionApi(SessionApi):
         self._binding = binding
 
     async def create(self, request: CreateSessionRequest) -> SessionView:
-        return await self._service.create(self._binding.digest, request)
+        return await self._service.create(self._binding.manifest.digest, request)
 
     async def get(self, session_id: str, *, principal: Principal) -> SessionView:
         return await self._service.get(session_id, principal=principal)
@@ -314,13 +330,13 @@ class _SessionApi(SessionApi):
         return await self._service.load(session_id, principal=principal)
 
     async def resume(self, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
-        return await self._service.resume(self._binding.digest, session_id, request)
+        return await self._service.resume(self._binding.manifest.digest, session_id, request)
 
     async def fork(self, session_id: str, request: ForkSessionRequest) -> SessionView:
-        return await self._service.fork(self._binding.digest, session_id, request)
+        return await self._service.fork(self._binding.manifest.digest, session_id, request)
 
     async def update(self, session_id: str, request: UpdateSessionRequest) -> SessionView:
-        return await self._service.update(self._binding.digest, session_id, request)
+        return await self._service.update(self._binding.manifest.digest, session_id, request)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         return await self._service.close(session_id, request)
@@ -341,15 +357,14 @@ class _SessionAccess(SessionQueryApi):
 
 
 class _TaskApi:
-    def __init__(self, service: TaskService, binding: AgentBinding) -> None:
+    def __init__(self, service: TaskService) -> None:
         self._service = service
-        self._binding = binding
 
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
-        return await self._service.run_graph(self._binding.digest, request)
+        return await self._service.run_graph(request)
 
     async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult:
-        return await self._service.run_graph_and_wait(self._binding.digest, request, timeout_seconds=timeout_seconds)
+        return await self._service.run_graph_and_wait(request, timeout_seconds=timeout_seconds)
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         return await self._service.inspect_graph(graph_id, principal=principal)
@@ -361,24 +376,13 @@ class _TaskApi:
         return await self._service.cancel_graph(graph_id, request)
 
 
-class _TaskAccess(TaskQueryApi):
-    def __init__(self, service: TaskService) -> None:
-        self._service = service
-
-    async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
-        return await self._service.inspect_graph(graph_id, principal=principal)
-
-    async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult:
-        return await self._service.wait_graph(graph_id, principal=principal, timeout_seconds=timeout_seconds)
-
-
 class _EvaluationApi(EvaluationApi):
     def __init__(self, service: EvaluationService, binding: AgentBinding) -> None:
         self._service = service
         self._binding = binding
 
     async def run(self, request: RunEvaluationRequest) -> EvaluationHandle:
-        return await self._service.run(self._binding.digest, self._binding.output_schema_fingerprint, request)
+        return await self._service.run(self._binding.manifest.digest, self._binding.manifest.output_schema_fingerprint, request)
 
     async def inspect(self, evaluation_id: str, *, principal: Principal) -> EvaluationView:
         return await self._service.inspect(evaluation_id, principal=principal)
@@ -391,7 +395,7 @@ class _EvaluationApi(EvaluationApi):
         return await self._service.snapshot(evaluation_id, principal=principal)
 
     async def replay(self, snapshot_id: str, request: ReplayEvaluationRequest) -> ExecutionHandle:
-        return await self._service.replay(self._binding.digest, snapshot_id, request)
+        return await self._service.replay(self._binding.manifest.digest, snapshot_id, request)
 
 
 class _EvaluationAccess(EvaluationQueryApi):

@@ -52,23 +52,25 @@ def build_bundle(
             "id": spec.id,
             "revision": spec.revision,
             "model": spec.model,
-            "features": [
+            "capabilities": [
                 {
-                    "kind": feature.kind,
-                    "id": feature.id,
-                    "revision": feature.revision,
-                    "required": feature.required,
-                    "config": dict(feature.config),
+                    "provider": capability.provider,
+                    "id": capability.id,
+                    "revision": capability.revision,
+                    "required": capability.required,
+                    "config": dict(capability.config),
                 }
-                for feature in spec.features
+                for capability in spec.capabilities
             ],
             "output_schema": spec.output_schema,
+            "output_schema_revision": spec.output_schema_revision,
+            "metadata": dict(spec.metadata),
             "instructions": list(spec.instructions),
         }
     )
     prompt_fingerprint = canonical_sha256({"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions), "variables": list(prompt.variables)})
-    capability_ids = tuple(f"{feature.kind}:{feature.id}" for feature in spec.features)
-    toolset_ids = tuple(feature_id for feature_id in capability_ids if feature_id.startswith("tool:"))
+    capability_ids = tuple(f"{capability.provider}:{capability.id}" for capability in spec.capabilities)
+    toolset_ids: tuple[str, ...] = ()
     bundle_digest = canonical_sha256(
         {
             "agent_id": spec.id,
@@ -77,7 +79,7 @@ def build_bundle(
             "toolset_ids": list(toolset_ids),
             "capability_ids": list(capability_ids),
             "output_schema_id": spec.output_schema,
-            "output_schema_revision": spec.revision,
+            "output_schema_revision": spec.output_schema_revision,
             "output_schema_fingerprint": output_schema_fingerprint,
             "codec_manifest_digest": codec_manifest_digest,
             "harness_version": harness_version,
@@ -96,7 +98,7 @@ def build_bundle(
         toolset_ids,
         capability_ids,
         spec.output_schema,
-        spec.revision,
+        spec.output_schema_revision,
         output_schema_fingerprint,
         codec_manifest_digest,
         harness_version,

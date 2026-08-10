@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Sandbox protocol."""
+"""Workspace filesystem and process execution boundary."""
 
 from typing import Protocol
 

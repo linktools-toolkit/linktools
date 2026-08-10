@@ -17,9 +17,8 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...errors import ErrorCode, AIError
-from ...core import JsonValue
-from ...core import ApprovalDecision, ExecutionStatus
+from ...core import ApprovalDecision, ExecutionStatus, JsonValue
+from ...errors import AIError, ErrorCode
 
 CONTINUE_EVENT_THRESHOLD = 10000
 

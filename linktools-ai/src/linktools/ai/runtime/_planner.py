@@ -48,11 +48,30 @@ class DefaultTaskService:
         self._authorization = authorization
         self._launcher = launcher
 
-    async def run_graph(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphResult:
+    async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         await self._authorization.authorize(request.principal, AuthorizationAction.TASK_RUN, ResourceRef(ResourceKind.TASK_GRAPH, request.graph.graph_id, request.principal.tenant_id))
-        digest = canonical_sha256({"graph_id": request.graph.graph_id, "nodes": [node.task_id for node in request.graph.nodes], "binding": binding_digest, "limits": {"max_nodes": request.limits.max_nodes, "max_depth": request.limits.max_depth, "max_budget": request.limits.max_budget, "max_concurrency": request.limits.max_concurrency}})
+        digest = canonical_sha256(
+            {
+                "graph_id": request.graph.graph_id,
+                "nodes": [
+                    {
+                        "task_id": node.task_id,
+                        "dependencies": sorted(node.dependencies),
+                        "binding_digest": node.binding_digest,
+                        "budget_cost": node.budget_cost,
+                    }
+                    for node in sorted(request.graph.nodes, key=lambda item: item.task_id)
+                ],
+                "limits": {
+                    "max_nodes": request.limits.max_nodes,
+                    "max_depth": request.limits.max_depth,
+                    "max_budget": request.limits.max_budget,
+                    "max_concurrency": request.limits.max_concurrency,
+                },
+            }
+        )
         operation_id = idempotency_key_hash(request.idempotency_key)
         claimed, operation = await self._claim_operation(
             operation_id=operation_id,
@@ -71,7 +90,7 @@ class DefaultTaskService:
         try:
             view = await self._persistence.tasks.create_plan(request.graph, tenant_id=request.principal.tenant_id)
             created = True
-            await self._launcher.start(binding_digest, request)
+            await self._launcher.start(request)
         except asyncio.CancelledError:
             raise
         except AIError as error:
@@ -105,8 +124,8 @@ class DefaultTaskService:
             if error.code is not ErrorCode.STORAGE_NOT_FOUND:
                 _logger.exception("failed to close unlaunched task graph: graph=%s", request.graph.graph_id)
 
-    async def run_graph_and_wait(self, binding_digest: str, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult:
-        handle = await self.run_graph(binding_digest, request)
+    async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult:
+        handle = await self.run_graph(request)
         return await self.wait_graph(handle.graph_id, principal=request.principal, timeout_seconds=timeout_seconds)
 
     async def _claim_operation(
@@ -312,7 +331,7 @@ class DefaultTaskService:
 
     async def _result(self, view: TaskGraphView, tenant_id: str) -> TaskGraphResult:
         nodes = await self._persistence.tasks.list_nodes(view.graph_id, tenant_id=tenant_id)
-        results = tuple(TaskNodeResult(node.task_id, node.status, node.execution_id, node.result_digest, node.error_code, node.error_digest) for node in nodes)
+        results = tuple(TaskNodeResult(node.task_id, node.status, node.result_digest, node.execution_id, node.error_code, node.error_digest) for node in nodes)
         execution_ids = tuple(item.execution_id for item in results if item.status is TaskStatus.SUCCEEDED and item.execution_id is not None)
         return TaskGraphResult(view.graph_id, view.status, execution_ids, results)
 
@@ -321,8 +340,7 @@ class WorkflowTaskGraphLauncher:
     def __init__(self, gateway: WorkflowGateway) -> None:
         self._gateway = gateway
 
-    async def start(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphHandle:
-        del binding_digest
+    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
         return await self._gateway.start_task_graph(request.graph.graph_id, request)
 
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:

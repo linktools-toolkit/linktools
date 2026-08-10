@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 """Temporal durable production boundary."""
 
-from ._gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
-from ._context import RunContext, TemporalRunContext
 from ._activity import (
     ActivityOptions,
     EvaluationActivity,
@@ -16,6 +14,8 @@ from ._activity import (
     TaskActivity,
     TaskOperation,
 )
+from ._context import RunContext, TemporalRunContext
+from ._gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
 from ._worker import (
     ActivityType,
     AssetPayloadCodec,
@@ -30,8 +30,8 @@ from ._worker import (
     WorkerActivities,
     WorkerRegistration,
     WorkflowType,
-    build_temporal_components,
     build_production_worker,
+    build_temporal_components,
     build_temporal_worker,
     production_registration,
 )

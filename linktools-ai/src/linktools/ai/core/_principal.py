@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ._value import Principal, PrincipalKind, ResourceKind
 
 

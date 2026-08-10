@@ -6,17 +6,14 @@ import hashlib
 import keyword
 from dataclasses import dataclass
 
+from ..agent import AgentCatalogItem, AgentCatalogView
 from ..asset import AssetInfo, AssetKey, AssetStore
 from ..capability import (
-    AgentCatalogItem,
-    AgentCatalogView,
     SkillCatalogView,
     SkillDescriptor,
-    SkillSpec,
-    SkillSpecCodec,
 )
 from ..errors import AIError, ErrorCode
-from ..spec import AgentSpec, AgentSpecCodec
+from ..spec import AgentSpec, AgentSpecCodec, SkillSpec, SkillSpecCodec
 
 _AGENT_CODEC = AgentSpecCodec()
 _SKILL_CODEC = SkillSpecCodec()

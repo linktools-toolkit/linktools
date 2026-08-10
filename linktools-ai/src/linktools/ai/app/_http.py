@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from ..core import Principal
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ._assembly import AppServices
 
 REQUIRED_ROUTE_NAMES = frozenset({

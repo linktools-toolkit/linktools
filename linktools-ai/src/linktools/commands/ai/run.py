@@ -15,7 +15,12 @@ from linktools.cli.argparse import ConfigAction
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.agent import WorkspaceAgentRunner
-from ...ai.app import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, open_workspace_runtime
+from ...ai.app import (
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    open_workspace_runtime,
+)
 from ...ai.core import JsonValue
 from ...ai.workspace import Workspace, build_workspace_capabilities
 

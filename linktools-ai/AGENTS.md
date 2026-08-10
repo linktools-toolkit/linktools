@@ -9,12 +9,12 @@ The package is deliberately small and has one owner per concern:
 | `core` | Pure values, errors, IDs, JSON, paging and principals |
 | `storage` | Generic layers, cache, revision, versioning, files, locks and SQL setup |
 | `asset` | Raw Asset file keys, metadata, `AssetStore` and file backends |
-| `spec` | Agent/Prompt/Feature DTOs, output registry and codecs |
+| `spec` | Agent/Prompt/Capability declaration DTOs and bytes codecs |
 | `model` | Model registry, configuration and resolver |
 | `observe` | Run context, middleware, trace and snapshots |
-| `capability` | MCP, Skill, Tool, Sandbox, Retrieval and Extension contracts |
+| `capability` | Capability resolver, binding and Pydantic AI materialization contracts |
 | `task` | Task, Job, Swarm and DAG contracts |
-| `agent` | Pydantic AI boundary, dependencies, context and runner |
+| `agent` | Agent catalog, binding, output schemas and Pydantic AI runner |
 | `runtime` | Runtime persistence contracts, services and the seven runtime APIs |
 | `workspace` | Workspace identity, discovery and local coding tools |
 | `adapter` | Non-Asset external adapters and runtime/task ports |
@@ -26,7 +26,7 @@ Normal library modules are directly under `linktools/ai/<package>/`. A
 cross-package public boundary module may live directly under `linktools/ai/`
 only when listed in `public_modules`. Build-time gates live under `scripts/build/`. Only Temporal
 may use `workflow/` and `activity/` subpackages. `AssetStore` stores raw files;
-the spec and capability packages own their DTO serialization.
+`spec` owns declaration codecs, `capability` owns resolution/materialization, and `agent` owns executable binding.
 
 ## Boundaries and style
 

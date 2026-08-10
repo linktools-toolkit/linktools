@@ -15,6 +15,7 @@ from ..core import Principal, TaskStatus, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._graph import (
     CancelGraphRequest,
+    TaskDependencyResult,
     TaskGraphHandle,
     TaskGraphRequest,
     TaskGraphView,
@@ -26,11 +27,11 @@ _LEASE_SECONDS = 60
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeRunResult:
-    execution_id: str
     result_digest: str
+    execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if not self.execution_id.strip() or re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
             raise ValueError("task node result identity is invalid")
 
 
@@ -41,12 +42,12 @@ class TaskNodeRunner(Protocol):
         *,
         graph_id: str,
         principal: Principal,
-        dependency_execution_ids: "Mapping[str, str]",
+        dependency_results: "Mapping[str, TaskDependencyResult]",
     ) -> TaskNodeRunResult: ...
 
 
-class TaskExecutionVerifier(Protocol):
-    async def verify(self, execution_id: str, *, tenant_id: str, result_digest: str) -> None: ...
+class TaskNodeResultVerifier(Protocol):
+    async def verify(self, result: TaskNodeRunResult, *, tenant_id: str) -> None: ...
 
 
 class _ExecutionStatus(Protocol):
@@ -63,16 +64,18 @@ class _ExecutionRepository(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeTaskExecutionVerifier:
+class RuntimeTaskNodeResultVerifier:
     executions: _ExecutionRepository
 
-    async def verify(self, execution_id: str, *, tenant_id: str, result_digest: str) -> None:
-        record = await self.executions.get(execution_id, tenant_id=tenant_id)
+    async def verify(self, result: TaskNodeRunResult, *, tenant_id: str) -> None:
+        if result.execution_id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "runtime task result requires an execution id")
+        record = await self.executions.get(result.execution_id, tenant_id=tenant_id)
         if (
             record is None
             or record.status.value != "SUCCEEDED"
             or record.result_digest is None
-            or record.result_digest != result_digest
+            or record.result_digest != result.result_digest
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "task node execution result could not be verified")
 
@@ -81,6 +84,7 @@ class _TaskNodeState(Protocol):
     task_id: str
     status: TaskStatus
     execution_id: "str | None"
+    result_digest: "str | None"
     lease_expires_at: "datetime | None"
 
 
@@ -105,7 +109,7 @@ class _TaskRepository(Protocol):
 class LocalTaskGraphLauncher:
     """Schedule DAG nodes while keeping durable truth in TaskRepository."""
 
-    def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner, verifier: TaskExecutionVerifier, *, owner: str) -> None:
+    def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner, verifier: TaskNodeResultVerifier, *, owner: str) -> None:
         if not owner.strip():
             raise ValueError("task launcher owner is required")
         self._repository = repository
@@ -115,8 +119,7 @@ class LocalTaskGraphLauncher:
         self._graphs: dict[str, asyncio.Task[None]] = {}
         self._accepting = True
 
-    async def start(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphHandle:
-        del binding_digest
+    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         existing = self._graphs.get(request.graph.graph_id)
@@ -190,14 +193,18 @@ class LocalTaskGraphLauncher:
             heartbeat = asyncio.create_task(self._heartbeat(lease, request.principal.tenant_id))
             try:
                 nodes = await self._repository.list_nodes(request.graph.graph_id, tenant_id=request.principal.tenant_id)
-                dependency_execution_ids: dict[str, str] = {}
+                dependency_results: dict[str, TaskDependencyResult] = {}
                 for dependency in node.dependencies:
                     dependency_node = _node_by_id(nodes, dependency)
-                    if dependency_node is None or dependency_node.execution_id is None:
+                    if (
+                        dependency_node is None
+                        or dependency_node.status is not TaskStatus.SUCCEEDED
+                        or dependency_node.result_digest is None
+                    ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    dependency_execution_ids[dependency] = dependency_node.execution_id
-                result = await self._runner.run(node, graph_id=request.graph.graph_id, principal=request.principal, dependency_execution_ids=dependency_execution_ids)
-                await self._verifier.verify(result.execution_id, tenant_id=request.principal.tenant_id, result_digest=result.result_digest)
+                    dependency_results[dependency] = TaskDependencyResult(dependency_node.result_digest, dependency_node.execution_id)
+                result = await self._runner.run(node, graph_id=request.graph.graph_id, principal=request.principal, dependency_results=dependency_results)
+                await self._verifier.verify(result, tenant_id=request.principal.tenant_id)
                 await self._repository.complete(lease, tenant_id=request.principal.tenant_id, execution_id=result.execution_id, result_digest=result.result_digest)
                 _logger.info("local task node completed: graph=%s task=%s execution=%s", request.graph.graph_id, node.task_id, result.execution_id)
             except asyncio.CancelledError:
@@ -225,4 +232,4 @@ def _node_by_id(nodes: "tuple[_TaskNodeState, ...]", task_id: str) -> "_TaskNode
     return next((node for node in nodes if node.task_id == task_id), None)
 
 
-__all__ = ["LocalTaskGraphLauncher", "RuntimeTaskExecutionVerifier", "TaskExecutionVerifier", "TaskNodeRunResult", "TaskNodeRunner"]
+__all__ = ["LocalTaskGraphLauncher", "RuntimeTaskNodeResultVerifier", "TaskNodeResultVerifier", "TaskNodeRunResult", "TaskNodeRunner"]

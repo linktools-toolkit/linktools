@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run-scoped Harness capability composition for workspace agents."""
+"""Run-scoped Harness and platform capability composition."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from linktools.core import environ
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai_harness.compaction import (
@@ -27,72 +27,61 @@ from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
-from ..capability import (
-    AgentCatalogItem,
-    AgentCatalogSnapshot,
-    AgentCatalogView,
-    SkillCapability,
-    SkillCatalogSnapshot,
-    SkillCatalogView,
-    SkillDescriptor,
-    SkillSpec,
-)
+from ..capability import SkillCatalogView, SkillDescriptor
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..spec import SkillSpec
+from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
 
 _logger = environ.get_logger("ai.agent.capabilities")
 
 
 @dataclass(frozen=True, slots=True)
-class AgentCapabilityScope:
+class AgentRunScope:
     root: Path
     agent_name: str
     conversation_id: "str | None"
     step_run_id: str
-    segment_sequence: int | None
+    segment_sequence: "int | None"
     memory_namespace: "str | None"
     step_store: StepStore
-    workspace_capabilities: "tuple[AgentCapability[None], ...]"
-    skill_catalog: SkillCatalogView
+    inherited_capabilities: "tuple[PydanticAgentCapability[None], ...]"
     agent_catalog: AgentCatalogView
     memory_store: "SearchableMemoryStore | None"
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
 
 
-async def compose_parent_capabilities(
-    scope: AgentCapabilityScope,
+async def compose_platform_capabilities(
+    scope: AgentRunScope,
     *,
     model_factory: Callable[["str | Model | None"], "str | Model"],
     parent_model: "str | Model",
-) -> "tuple[AgentCapability[None], ...]":
+) -> "tuple[PydanticAgentCapability[None], ...]":
     _validate_compaction_target(scope.context_target_tokens)
-    capabilities: "list[AgentCapability[None]]" = list(scope.workspace_capabilities)
-    step_persistence = StepPersistence(
-        store=scope.step_store,
-        agent_name=scope.agent_name,
-        run_id=scope.step_run_id,
-        parent_run_id=scope.parent_step_run_id,
-        metadata={
-            "capability_scope": "parent",
-            "agent_name": scope.agent_name,
-            **({} if scope.segment_sequence is None else {"segment_sequence": str(scope.segment_sequence)}),
-        },
-    )
-    capabilities.append(step_persistence)
+    capabilities: "list[PydanticAgentCapability[None]]" = [
+        StepPersistence(
+            store=scope.step_store,
+            agent_name=scope.agent_name,
+            run_id=scope.step_run_id,
+            parent_run_id=scope.parent_step_run_id,
+            metadata={
+                "capability_scope": "parent",
+                "agent_name": scope.agent_name,
+                **({} if scope.segment_sequence is None else {"segment_sequence": str(scope.segment_sequence)}),
+            },
+        )
+    ]
     if scope.memory_namespace is not None:
         if scope.memory_store is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
     capabilities.append(Planning())
-    skill_catalog = await _snapshot_skills(scope.skill_catalog)
-    if skill_catalog.descriptors:
-        capabilities.append(SkillCapability(skill_catalog))
     if scope.conversation_id:
         capabilities.append(ConversationSearch(SnapshotHistorySource(scope.step_store), scope="conversation"))
     agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents())
     if agent_catalog.items:
-        child_agents = _build_child_agents(scope, agent_catalog.items, skill_catalog=skill_catalog, model_factory=model_factory, parent_model=parent_model)
+        child_agents = _build_child_agents(scope, agent_catalog.items, model_factory=model_factory, parent_model=parent_model)
         capabilities.append(
             SubAgents(
                 agents=[SubAgent(child) for child in child_agents],
@@ -104,41 +93,29 @@ async def compose_parent_capabilities(
         capabilities.append(DynamicWorkflow(agents=child_agents))
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.info(
-        "Harness parent capabilities composed: agent=%s conversation=%s step=%s capability_count=%s skill_count=%s agent_count=%s namespace_digest=%s",
+        "Harness platform capabilities composed: agent=%s conversation=%s step=%s capability_count=%s inherited_count=%s agent_count=%s namespace_digest=%s",
         scope.agent_name,
         bool(scope.conversation_id),
         scope.step_run_id,
         len(capabilities),
-        len(skill_catalog.descriptors),
+        len(scope.inherited_capabilities),
         len(agent_catalog.items),
         None if scope.memory_namespace is None else _namespace_digest(scope.memory_namespace),
     )
     return tuple(capabilities)
 
 
-async def _snapshot_skills(catalog: SkillCatalogView) -> SkillCatalogSnapshot:
-    descriptors = await catalog.list_skills()
-    specifications: list[SkillSpec] = []
-    for descriptor in descriptors:
-        specification = await catalog.load_skill(descriptor.id)
-        if specification is None or specification.revision != descriptor.revision:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        specifications.append(specification)
-    return SkillCatalogSnapshot(tuple(descriptors), tuple(specifications))
-
-
 def _build_child_agents(
-    scope: AgentCapabilityScope,
+    scope: AgentRunScope,
     items: tuple[AgentCatalogItem, ...],
     *,
-    skill_catalog: SkillCatalogView,
     model_factory: Callable[["str | Model | None"], "str | Model"],
     parent_model: "str | Model",
 ) -> "list[Agent[None, str]]":
     children: "list[Agent[None, str]]" = []
     for item in items:
         model = model_factory(item.model if item.model is not None else parent_model)
-        child_scope = AgentCapabilityScope(
+        child_scope = AgentRunScope(
             root=scope.root,
             agent_name=item.name,
             conversation_id=None,
@@ -146,8 +123,7 @@ def _build_child_agents(
             segment_sequence=None,
             memory_namespace=scope.memory_namespace,
             step_store=scope.step_store,
-            workspace_capabilities=scope.workspace_capabilities,
-            skill_catalog=skill_catalog,
+            inherited_capabilities=scope.inherited_capabilities,
             agent_catalog=AgentCatalogSnapshot(()),
             memory_store=scope.memory_store,
             context_target_tokens=scope.context_target_tokens,
@@ -162,13 +138,13 @@ def _build_child_agents(
                 capabilities=child_capabilities,
             )
         )
-        _logger.info("Harness child agent composed: agent=%s capability_count=%s namespace_digest=%s", item.name, len(child_capabilities), None if scope.memory_namespace is None else _namespace_digest(scope.memory_namespace))
+        _logger.info("Harness child agent composed: agent=%s capability_count=%s", item.name, len(child_capabilities))
     return children
 
 
-def _compose_child_capabilities(scope: AgentCapabilityScope, agent_name: str) -> "tuple[AgentCapability[None], ...]":
+def _compose_child_capabilities(scope: AgentRunScope, agent_name: str) -> "tuple[PydanticAgentCapability[None], ...]":
     _validate_compaction_target(scope.context_target_tokens)
-    capabilities: "list[AgentCapability[None]]" = list(scope.workspace_capabilities)
+    capabilities: "list[PydanticAgentCapability[None]]" = list(scope.inherited_capabilities)
     capabilities.append(
         StepPersistence(
             store=scope.step_store,
@@ -182,32 +158,26 @@ def _compose_child_capabilities(scope: AgentCapabilityScope, agent_name: str) ->
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
     capabilities.append(Planning())
-    if scope.skill_catalog.descriptors:
-        capabilities.append(SkillCapability(scope.skill_catalog))
     capabilities.append(_build_compaction(scope.context_target_tokens))
     return tuple(capabilities)
 
 
-def _build_compaction(context_target_tokens: int | None) -> "AgentCapability[None]":
+def _build_compaction(context_target_tokens: "int | None") -> PydanticAgentCapability[None]:
     deduplicate = DeduplicateFileReads(file_key=_workspace_file_key)
     if context_target_tokens is None:
         return deduplicate
     return TieredCompaction(
-        tiers=[
-            deduplicate,
-            ClearToolResults(max_tokens=1, keep_pairs=3),
-            SummarizingCompaction(max_messages=1, keep_messages=20),
-        ],
+        tiers=[deduplicate, ClearToolResults(max_tokens=1, keep_pairs=3), SummarizingCompaction(max_messages=1, keep_messages=20)],
         target_tokens=context_target_tokens,
     )
 
 
-def _validate_compaction_target(context_target_tokens: int | None) -> None:
+def _validate_compaction_target(context_target_tokens: "int | None") -> None:
     if context_target_tokens is not None and (not isinstance(context_target_tokens, int) or isinstance(context_target_tokens, bool) or context_target_tokens <= 0):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
-def _workspace_file_key(part: ToolCallPart) -> str | None:
+def _workspace_file_key(part: ToolCallPart) -> "str | None":
     if part.tool_name != "read_file":
         return None
     try:
@@ -238,7 +208,4 @@ class EmptyAgentCatalog(AgentCatalogView):
         return ()
 
 
-__all__ = [
-    "AgentCapabilityScope", "AgentCatalogItem", "AgentCatalogSnapshot", "AgentCatalogView",
-    "EmptyAgentCatalog", "EmptySkillCatalog", "compose_parent_capabilities",
-]
+__all__ = ["AgentRunScope", "EmptyAgentCatalog", "EmptySkillCatalog", "compose_platform_capabilities"]

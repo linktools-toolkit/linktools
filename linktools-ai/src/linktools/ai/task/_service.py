@@ -5,7 +5,14 @@
 from typing import Protocol
 
 from ..core import Principal
-from ._graph import CancelGraphRequest, TaskGraphHandle, TaskGraphRequest, TaskGraphResult, TaskGraphView
+from ._graph import (
+    CancelGraphRequest,
+    TaskGraphHandle,
+    TaskGraphRequest,
+    TaskGraphResult,
+    TaskGraphView,
+)
+
 
 class TaskQueryApi(Protocol):
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView: ...
@@ -19,7 +26,7 @@ class TaskApi(TaskQueryApi, Protocol):
 
 
 class TaskGraphLauncher(Protocol):
-    async def start(self, binding_digest: str, request: TaskGraphRequest) -> TaskGraphHandle: ...
+    async def start(self, request: TaskGraphRequest) -> TaskGraphHandle: ...
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView: ...
 
 

@@ -3,9 +3,8 @@
 
 """Dialect-independent SQL StepStore checks."""
 
-from pydantic_ai_harness.step_persistence import StepStore
-
 from linktools.ai.adapter import SqlMediaStore, SqlStepStore
+from pydantic_ai_harness.step_persistence import StepStore
 
 
 def test_one_sql_step_store_implements_the_public_harness_protocol() -> None:

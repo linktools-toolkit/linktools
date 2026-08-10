@@ -212,7 +212,7 @@ def test_private_conversion_tree_is_exact() -> None:
         "asset/domain.py": "asset/_domain.py",
         "asset/store.py": "asset/_store.py",
         "asset/sql.py": "asset/_sql.py",
-        "capability/tool.py": "capability/_tool.py",
+            "runtime/tool.py": "runtime/_tool.py",
         "core/ids.py": "core/_ids.py",
         "core/json.py": "core/_json.py",
         "core/paging.py": "core/_paging.py",
@@ -227,7 +227,7 @@ def test_private_conversion_tree_is_exact() -> None:
         "runtime/persistence.py": "runtime/_persistence.py",
         "runtime/services.py": "runtime/_services.py",
         "spec/contract.py": "spec/_contract.py",
-        "spec/output.py": "spec/_output.py",
+            "agent/output.py": "agent/_output.py",
         "storage/cache.py": "storage/_cache.py",
         "storage/composition.py": "storage/_composition.py",
         "storage/contracts.py": "storage/_contracts.py",
@@ -252,15 +252,37 @@ def test_private_conversion_tree_is_exact() -> None:
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:
     from linktools.ai import adapter, app, asset, capability, storage, temporal
-    from linktools.ai.adapter import DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime
+    from linktools.ai.adapter import (
+        DurableFilesystemStepStore,
+        SqlRuntimeSchema,
+        SqlStepStore,
+        build_in_memory_runtime,
+        open_sql_runtime,
+    )
     from linktools.ai.agent import AgentDeps, WorkspaceAgentRunner
     from linktools.ai.app import ACPApplication
-    from linktools.ai.asset import AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend
-    from linktools.ai.asset import SqlAssetBackend
-    from linktools.ai.capability import MCPServerSpecCodec, SkillSpecCodec
+    from linktools.ai.asset import (
+        AssetCacheAdapter,
+        AssetStore,
+        FilesystemAssetBackend,
+        InMemoryAssetBackend,
+        LocalDirectoryAssetBackend,
+        SqlAssetBackend,
+    )
+    from linktools.ai.spec import MCPServerSpecCodec, SkillSpecCodec
     from linktools.ai.storage import StorageBatchResult, StorageReader, StorageWriter
-    from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
-    from linktools.ai.temporal.workflow import EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow
+    from linktools.ai.temporal import (
+        EvaluationActivity,
+        ExecuteActivity,
+        SessionActivity,
+        TaskActivity,
+    )
+    from linktools.ai.temporal.workflow import (
+        EvaluationWorkflow,
+        ExecutionWorkflow,
+        SessionWorkflow,
+        TaskWorkflow,
+    )
 
     command_modules = tuple(
         importlib.import_module(f"linktools.commands.ai.{name}")

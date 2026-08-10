@@ -8,7 +8,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ._scope import RunContext
 
 

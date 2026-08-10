@@ -1,5 +1,5 @@
 {
-  "baseline_commit": "edf84056",
+  "baseline_commit": "19b2c25c8bd64d9edfd94a1f20dd0fdf757a29fc",
   "status": "COMPLETE",
   "requirements": [
     {
@@ -869,12 +869,12 @@
   "verification": {
     "status": "COMPLETE",
     "validated_source_commit": "working-tree",
-    "tests_ai": "passed: 93 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "tests_ai": "passed: 106 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
-    "ruff": "passed",
+    "ruff": "passed: targeted F/E9/I",
     "architecture": "passed: exact S visibility, private-import, SCC, dynamic import, dependency, naming and cohesion gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
-  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
+  "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
+  "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
 }

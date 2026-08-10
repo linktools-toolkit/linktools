@@ -3,21 +3,46 @@
 
 """Public RuntimeResources composition checks for in-memory, filesystem and SQLite."""
 
-import sqlite3
-import hashlib
-from datetime import datetime, timezone
 import asyncio
+import hashlib
+import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai import (
+    RuntimePersistenceConfig,
+    RuntimeResources,
+    namespace_scoped_step_db_path,
+    open_runtime_resources,
+)
+from linktools.ai.adapter import (
+    DurableFilesystemStepStore,
+    build_filesystem_runtime,
+    build_in_memory_runtime,
+)
+from linktools.ai.core import (
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    IdempotencyStatus,
+    SessionStatus,
+    StopReason,
+    idempotency_key_hash,
+)
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import (
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionTerminalCommit,
+    IdempotencyRecord,
+    IdempotencyTerminalUpdate,
+    ResultRecord,
+    SessionHeadAdvance,
+    SessionRecord,
+)
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
 
-from linktools.ai import RuntimePersistenceConfig, RuntimeResources, namespace_scoped_step_db_path, open_runtime_resources
-from linktools.ai.adapter import DurableFilesystemStepStore, build_filesystem_runtime, build_in_memory_runtime
-from linktools.ai.errors import ErrorCode, AIError
-from linktools.ai.core import idempotency_key_hash
-from linktools.ai.core import ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, SessionStatus, StopReason
-from linktools.ai.runtime import ExecutionRecord, ExecutionStartClaim, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, ResultRecord, SessionHeadAdvance, SessionRecord
 from tests.ai.persistence.helper import open_sql_resources
 
 

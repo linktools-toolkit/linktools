@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """Task, Job and Swarm value objects."""
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..errors import ErrorCode, AIError
-from ..core import validate_idempotency_key
-from ..core import Principal, TaskStatus
+from ..core import Principal, TaskStatus, validate_idempotency_key
+from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +32,7 @@ class TaskNode:
     def __post_init__(self) -> None:
         if not self.task_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies) or self.budget_cost < 1:
             raise ValueError("task node identity is invalid")
-        if self.binding_digest is not None and not self.binding_digest.strip():
+        if self.binding_digest is not None and re.fullmatch(r"[0-9a-f]{64}", self.binding_digest) is None:
             raise ValueError("task node binding digest is invalid")
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
 
@@ -185,10 +185,20 @@ class TaskGraphResult:
 class TaskNodeResult:
     task_id: str
     status: TaskStatus
-    execution_id: "str | None"
     result_digest: "str | None"
+    execution_id: "str | None"
     error_code: "str | None"
     error_digest: "str | None"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDependencyResult:
+    result_digest: str
+    execution_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[0-9a-f]{64}", self.result_digest) is None:
+            raise ValueError("task dependency result digest is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +247,6 @@ def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNod
 __all__ = [
     "CancelGraphRequest", "Job", "Swarm", "SwarmLimits", "TaskCompletionLedger", "TaskGraph",
     "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode",
-    "TaskGraphValidationError", "TaskStatus", "TaskTerminalRecord",
+    "TaskDependencyResult", "TaskGraphValidationError", "TaskStatus", "TaskTerminalRecord",
     "ready_nodes",
 ]

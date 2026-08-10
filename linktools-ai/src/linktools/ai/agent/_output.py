@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Frozen output schema registry."""
+"""Frozen output schema registry for executable Agent bindings."""
 
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ..errors import ErrorCode, AIError
 from ..core import canonical_sha256
+from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,12 +30,12 @@ class OutputTypeRegistry:
         self._fingerprints: dict[tuple[str, int], str] = {}
         self._manifest: OutputSchemaManifest | None = None
 
-    def register(self, schema_id: str, revision: int, output_type: 'type[BaseModel]') -> None:
+    def register(self, schema_id: str, revision: int, output_type: "type[BaseModel]") -> None:
         if self._manifest is not None:
             raise AIError(ErrorCode.OUTPUT_SCHEMA_DRIFT, "output registry is frozen")
         if not schema_id.strip() or revision < 1:
             raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
-        key = (schema_id, revision)
+        key = schema_id, revision
         fingerprint = canonical_sha256(output_type.model_json_schema())
         previous = self._fingerprints.get(key)
         previous_type = self._types.get(key)
@@ -58,11 +58,23 @@ class OutputTypeRegistry:
             )
             for key, value in sorted(self._types.items())
         )
-        digest = canonical_sha256({"entries": [{"schema_id": entry.schema_id, "revision": entry.revision, "value_type": entry.value_type, "fingerprint": entry.fingerprint} for entry in entries]})
+        digest = canonical_sha256(
+            {
+                "entries": [
+                    {
+                        "schema_id": entry.schema_id,
+                        "revision": entry.revision,
+                        "value_type": entry.value_type,
+                        "fingerprint": entry.fingerprint,
+                    }
+                    for entry in entries
+                ]
+            }
+        )
         self._manifest = OutputSchemaManifest(entries, digest)
         return self._manifest
 
-    def resolve(self, schema_id: str, revision: int) -> 'type[BaseModel]':
+    def resolve(self, schema_id: str, revision: int) -> "type[BaseModel]":
         try:
             return self._types[(schema_id, revision)]
         except KeyError as exc:

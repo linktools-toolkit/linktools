@@ -12,13 +12,13 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
-from ..core import JsonValue
-from ..core import canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
     from pydantic_ai.capabilities import AgentCapability
 
 _logger = environ.get_logger("ai.workspace.tools")

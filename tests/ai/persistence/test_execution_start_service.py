@@ -6,11 +6,9 @@
 import asyncio
 
 import pytest
-
-from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.adapter import build_in_memory_runtime
-from linktools.ai.runtime import DefaultExecutionService
-from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
+from linktools.ai.runtime import DefaultExecutionService, ExecutionRequest
 
 
 class _History:

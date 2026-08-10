@@ -31,9 +31,9 @@
         "runtime/_approval.py"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_task_api_and_query_wrappers"
       ],
-      "requirement": "RuntimeAccess exposes query-only wrappers while mutation APIs remain on RuntimeServices.",
+      "requirement": "RuntimeAccess exposes full service APIs; TaskApi is available on the facade without AgentBinding coupling.",
       "constraints": "Preserve the v5 public and ownership boundary.",
       "status": "PASS"
     },
@@ -142,11 +142,11 @@
         "app/_workbench.py",
         "workspace/_root.py",
         "workspace/_tools.py",
-        "capability/_tool.py",
+        "runtime/_tool.py",
         "temporal/_gateway.py"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers",
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_task_api_and_query_wrappers",
         "tests/ai/test_local_commands.py::test_workspace_runtime_uses_database_storage"
       ],
       "requirement": "Runtime topology is selected by injected launcher/gateway/storage dependencies without profile categories.",
@@ -230,9 +230,9 @@
         "tests/ai/test_v5_conformance.py"
       ],
       "tests": [
-        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_query_only_wrappers"
+        "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_task_api_and_query_wrappers"
       ],
-      "requirement": "RuntimeAccess wrappers are query-only.",
+      "requirement": "RuntimeAccess retains query-only wrappers for non-Task services while TaskApi remains complete.",
       "constraints": "Preserve the v5 public and ownership boundary.",
       "status": "PASS"
     },
@@ -694,10 +694,10 @@
   "verification": {
     "status": "COMPLETE",
     "validated_source_commit": "working-tree",
-    "tests_ai": "passed: 93 passed, 2 skipped (MySQL/PostgreSQL live not available)",
-    "architecture": "passed: exact S compileall, Ruff, import-all, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates",
+    "tests_ai": "passed: 106 passed, 2 skipped (MySQL/PostgreSQL live not available)",
+    "architecture": "passed: compileall, targeted Ruff F/E9/I, import-all, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates",
     "open_findings": []
   },
-  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
-  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
+  "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
+  "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
 }

@@ -12,19 +12,36 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import Page, Principal
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256, idempotency_key_hash
-from ..core import CursorPayload, CursorSigner
-from ..core import AuthorizationAction, AuthorizationPolicy, ResourceRef
-from ..core import ExecutionStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus
-from ._persistence import OperationLedgerInput, OperationLedgerRecord, RuntimePersistence, SessionRecord
+from ..core import (
+    AuthorizationAction,
+    AuthorizationPolicy,
+    CursorPayload,
+    CursorSigner,
+    ExecutionStatus,
+    OperationKind,
+    OperationStatus,
+    Page,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+    SessionStatus,
+    canonical_sha256,
+    idempotency_key_hash,
+)
+from ..errors import AIError, ErrorCode
+from ._persistence import (
+    OperationLedgerInput,
+    OperationLedgerRecord,
+    RuntimePersistence,
+    SessionRecord,
+)
 from ._services import (
-    CloseSessionRequest,
     CancelExecutionRequest,
+    CloseSessionRequest,
     CreateSessionRequest,
     ExecutionHandle,
     ExecutionRequest,
+    ExecutionService,
     ForkSessionRequest,
     ListSessionRequest,
     LoadedSession,
@@ -32,7 +49,6 @@ from ._services import (
     SessionView,
     UpdateSessionRequest,
 )
-from ._services import ExecutionService
 
 _logger = environ.get_logger("ai.runtime.session")
 

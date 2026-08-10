@@ -43,6 +43,6 @@
   ],
   "live_mysql": "not_run_no_environment_accepted",
   "live_postgresql": "not_run_no_environment_accepted",
-  "spec_revision": "linktools-ai-pydantic-ai-harness-0.13-executable-spec",
-  "review_scope": "linktools-ai-pydantic-ai-harness-0.13-executable-spec"
+  "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
+  "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
 }

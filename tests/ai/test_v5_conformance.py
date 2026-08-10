@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Focused regression coverage for the v5 Runtime convergence contract."""
 
-import asyncio
 import ast
+import asyncio
 import contextlib
 import inspect
 import json
@@ -13,22 +13,75 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.adapter import (
+    StepExecutionHistoryReader,
+    build_filesystem_runtime,
+    build_in_memory_runtime,
+)
+from linktools.ai.agent import WorkspaceAgentResult, WorkspaceAgentRunner
+from linktools.ai.app import (
+    RuntimePersistenceConfig,
+    build_runtime_access,
+    build_runtime_services,
+    open_runtime_services,
+    open_workspace_runtime,
+)
+from linktools.ai.core import (
+    ApprovalDecision,
+    ApprovalStatus,
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    IdempotencyStatus,
+    OperationKind,
+    OperationStatus,
+    Page,
+    Principal,
+    ResourceKind,
+    SessionStatus,
+    StopReason,
+    TaskStatus,
+    TenantAuthorizationPolicy,
+    canonical_sha256,
+    idempotency_key_hash,
+)
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import (
+    ApprovalDecisionRequest,
+    ApprovalRecord,
+    CancelEffectOutcome,
+    CancelExecutionRequest,
+    CreateSessionRequest,
+    ExecutionCancelRequestCommit,
+    ExecutionHandle,
+    ExecutionRecord,
+    ExecutionRequest,
+    ExecutionTerminalCommit,
+    ExecutionView,
+    ForkExecutionRequest,
+    IdempotencyRecord,
+    IdempotencyTerminalUpdate,
+    OperationLedgerInput,
+    ResultRecord,
+    RetryExecutionRequest,
+    RuntimePersistence,
+    RuntimeServiceIdentity,
+    SessionHeadAdvance,
+    SessionRecord,
+    WorkflowQueryResult,
+    WorkflowUpdateResult,
+)
+from linktools.ai.task import (
+    CancelGraphRequest,
+    TaskGraph,
+    TaskGraphHandle,
+    TaskGraphRequest,
+    TaskNode,
+)
+from linktools.ai.workspace import Workspace, trusted_workspace_principal
 from pydantic_ai.models.test import TestModel
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai.adapter import StepExecutionHistoryReader, build_filesystem_runtime, build_in_memory_runtime
-from linktools.ai.app import RuntimePersistenceConfig, build_runtime_access, build_runtime_services, open_runtime_services
-from linktools.ai.app import open_workspace_runtime
-from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
-from linktools.ai.errors import ErrorCode, AIError
-from linktools.ai.core import canonical_sha256, idempotency_key_hash
-from linktools.ai.core import ApprovalDecision, ApprovalStatus, ExecutionEventType, ExecutionLineageKind, ExecutionStatus, IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus, StopReason, TaskStatus
-from linktools.ai.runtime import ApprovalRecord, ExecutionCancelRequestCommit, ExecutionRecord, ExecutionTerminalCommit, IdempotencyRecord, IdempotencyTerminalUpdate, OperationLedgerInput, ResultRecord, RuntimePersistence, SessionHeadAdvance, SessionRecord
-from linktools.ai.runtime import ApprovalDecisionRequest, CancelExecutionRequest, CreateSessionRequest, ExecutionHandle, ExecutionRequest, ExecutionView, ForkExecutionRequest, RetryExecutionRequest, RuntimeServiceIdentity, WorkflowQueryResult, WorkflowUpdateResult
-from linktools.ai.runtime import CancelEffectOutcome
-from linktools.ai.task import CancelGraphRequest, TaskGraph, TaskGraphHandle, TaskGraphRequest, TaskNode
-from linktools.ai.agent import WorkspaceAgentResult, WorkspaceAgentRunner
-from linktools.ai.workspace import Workspace, trusted_workspace_principal
 from tests.ai.persistence.helper import _open_sql_workspace, open_sql_resources
 
 
@@ -549,7 +602,7 @@ async def test_memory_and_sqlite_request_cancel_operation_preconditions_match(tm
 
 
 @pytest.mark.asyncio
-async def test_runtime_access_exposes_query_only_wrappers() -> None:
+async def test_runtime_access_exposes_task_api_and_query_wrappers() -> None:
     runtime = build_in_memory_runtime(namespace="v5-access")
     await runtime.initialize()
     try:
@@ -567,8 +620,8 @@ async def test_runtime_access_exposes_query_only_wrappers() -> None:
         assert hasattr(access.task, "inspect_graph")
         assert hasattr(access.approval, "list")
         assert not hasattr(access.approval, "decide")
-        assert not hasattr(access.task, "run_graph")
-        assert not hasattr(access.task, "cancel_graph")
+        assert hasattr(access.task, "run_graph")
+        assert hasattr(access.task, "cancel_graph")
         assert not hasattr(access.session, "create")
         assert not hasattr(access.session, "resume")
         assert not hasattr(access.session, "fork")
@@ -624,7 +677,7 @@ async def test_runtime_composition_is_driven_by_injected_dependencies() -> None:
         )
         combined_handle = await combined_services.execution.run("b" * 64, ExecutionRequest("combined", principal, "combined-key", memory_namespace="test"))
         graph = TaskGraph("combined-graph", (TaskNode("node"),))
-        await combined_services.task.run_graph("b" * 64, TaskGraphRequest(graph, principal, "graph-key"))
+        await combined_services.task.run_graph(TaskGraphRequest(graph, principal, "graph-key"))
         assert combined_launcher.started == [combined_handle.execution_id]
         assert combined_gateway.execution_starts == []
         assert combined_gateway.task_starts == [graph.graph_id]
@@ -665,7 +718,6 @@ async def test_runtime_composition_is_driven_by_injected_dependencies() -> None:
 
 def test_public_runtime_contract_has_no_profile_or_replacement_category() -> None:
     import linktools.ai.core as core
-
     from linktools.ai.core import ExecutionEventType
     from linktools.ai.runtime import ExecutionRecord
     from linktools.ai.task import TaskGraphRequest
@@ -870,10 +922,10 @@ async def test_profile_removal_preserves_idempotency_conflicts_and_digest_scope(
         assert create_operation.request_digest == canonical_sha256({"action": "session.create", "tenant_id": "tenant", "principal_id": "owner", "session_id": "fresh-session", "binding": binding_digest})
 
         graph_request = TaskGraphRequest(TaskGraph("profile-graph", (TaskNode("node"),)), principal, "fresh-graph")
-        await services.task.run_graph(binding_digest, graph_request)
+        await services.task.run_graph(graph_request)
         graph_operation = await runtime.persistence.operations.get(idempotency_key_hash("fresh-graph"), tenant_id="tenant")
         assert graph_operation is not None
-        expected_graph_digest = canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
+        expected_graph_digest = canonical_sha256({"graph_id": "profile-graph", "nodes": [{"task_id": "node", "dependencies": [], "binding_digest": None, "budget_cost": 1}], "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
         assert graph_operation.request_digest == expected_graph_digest
         assert graph_operation.request_digest != canonical_sha256({"graph_id": "profile-graph", "nodes": ["node"], "binding": binding_digest, "profile": "local-coding", "limits": {"max_nodes": graph_request.limits.max_nodes, "max_depth": graph_request.limits.max_depth, "max_budget": graph_request.limits.max_budget, "max_concurrency": graph_request.limits.max_concurrency}})
     finally:
@@ -907,9 +959,9 @@ async def test_task_run_same_key_has_single_effect_owner() -> None:
 
         runtime.persistence.tasks.create_plan = counted_create_plan
         request = TaskGraphRequest(TaskGraph("owner-graph", (TaskNode("node"),)), principal, "owner-key")
-        winner = asyncio.create_task(services.task.run_graph("b" * 64, request))
+        winner = asyncio.create_task(services.task.run_graph(request))
         await gateway.start_entered.wait()
-        loser = asyncio.create_task(services.task.run_graph("b" * 64, request))
+        loser = asyncio.create_task(services.task.run_graph(request))
         with pytest.raises(AIError) as conflict:
             await loser
         assert conflict.value.code is ErrorCode.STORAGE_CONFLICT
@@ -921,7 +973,7 @@ async def test_task_run_same_key_has_single_effect_owner() -> None:
         assert operation is not None and operation.status is OperationStatus.SUCCEEDED
         assert plan is not None
         assert create_count == 1
-        replay = await services.task.run_graph("b" * 64, request)
+        replay = await services.task.run_graph(request)
         assert replay == result
         assert gateway.task_starts == ["owner-graph"]
     finally:
@@ -946,9 +998,9 @@ async def test_task_failed_operation_replays_stable_error() -> None:
         )
         request = TaskGraphRequest(TaskGraph("failed-graph", (TaskNode("node"),)), principal, "failed-key")
         with pytest.raises(AIError) as first_error:
-            await services.task.run_graph("b" * 64, request)
+                await services.task.run_graph(request)
         with pytest.raises(AIError) as replay_error:
-            await services.task.run_graph("b" * 64, request)
+                await services.task.run_graph(request)
         operation = await runtime.persistence.operations.get(idempotency_key_hash("failed-key"), tenant_id="tenant")
         assert first_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
         assert replay_error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
@@ -959,27 +1011,27 @@ async def test_task_failed_operation_replays_stable_error() -> None:
         gateway.start_error = RuntimeError("gateway unavailable")
         ordinary = TaskGraphRequest(TaskGraph("ordinary-failed-graph", (TaskNode("node"),)), principal, "ordinary-failed-key")
         with pytest.raises(RuntimeError):
-            await services.task.run_graph("b" * 64, ordinary)
+            await services.task.run_graph(ordinary)
         with pytest.raises(AIError) as ordinary_replay:
-            await services.task.run_graph("b" * 64, ordinary)
+            await services.task.run_graph(ordinary)
         ordinary_operation = await runtime.persistence.operations.get(idempotency_key_hash("ordinary-failed-key"), tenant_id="tenant")
         assert ordinary_replay.value.code is ErrorCode.STORAGE_UNAVAILABLE
         assert ordinary_operation is not None and ordinary_operation.error_code == ErrorCode.STORAGE_UNAVAILABLE.value
         assert gateway.task_starts == ["failed-graph", "ordinary-failed-graph"]
 
         missing_plan = TaskGraphRequest(TaskGraph("missing-plan", (TaskNode("node"),)), principal, "missing-plan-key")
-        missing_digest = canonical_sha256({"graph_id": "missing-plan", "nodes": ["node"], "binding": "b" * 64, "limits": {"max_nodes": missing_plan.limits.max_nodes, "max_depth": missing_plan.limits.max_depth, "max_budget": missing_plan.limits.max_budget, "max_concurrency": missing_plan.limits.max_concurrency}})
+        missing_digest = canonical_sha256({"graph_id": "missing-plan", "nodes": [{"task_id": "node", "dependencies": [], "binding_digest": None, "budget_cost": 1}], "limits": {"max_nodes": missing_plan.limits.max_nodes, "max_depth": missing_plan.limits.max_depth, "max_budget": missing_plan.limits.max_budget, "max_concurrency": missing_plan.limits.max_concurrency}})
         now = datetime.now(timezone.utc)
         await runtime.persistence.operations.append(OperationLedgerInput(idempotency_key_hash("missing-plan-key"), "tenant", ResourceKind.TASK_GRAPH, "missing-plan", None, OperationKind.TASK_NODE, OperationStatus.SUCCEEDED, missing_digest, "missing-plan", "missing-digest", None, True, now, now))
         with pytest.raises(AIError) as missing_error:
-            await services.task.run_graph("b" * 64, missing_plan)
+            await services.task.run_graph(missing_plan)
         assert missing_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
 
         corrupt_plan = TaskGraphRequest(TaskGraph("corrupt-plan", (TaskNode("node"),)), principal, "corrupt-plan-key")
-        corrupt_digest = canonical_sha256({"graph_id": "corrupt-plan", "nodes": ["node"], "binding": "b" * 64, "limits": {"max_nodes": corrupt_plan.limits.max_nodes, "max_depth": corrupt_plan.limits.max_depth, "max_budget": corrupt_plan.limits.max_budget, "max_concurrency": corrupt_plan.limits.max_concurrency}})
+        corrupt_digest = canonical_sha256({"graph_id": "corrupt-plan", "nodes": [{"task_id": "node", "dependencies": [], "binding_digest": None, "budget_cost": 1}], "limits": {"max_nodes": corrupt_plan.limits.max_nodes, "max_depth": corrupt_plan.limits.max_depth, "max_budget": corrupt_plan.limits.max_budget, "max_concurrency": corrupt_plan.limits.max_concurrency}})
         await runtime.persistence.operations.append(OperationLedgerInput(idempotency_key_hash("corrupt-plan-key"), "tenant", ResourceKind.TASK_GRAPH, "corrupt-plan", None, OperationKind.TASK_NODE, OperationStatus.FAILED, corrupt_digest, None, None, "UNKNOWN_PERSISTED_ERROR", True, now, now))
         with pytest.raises(AIError) as corrupt_error:
-            await services.task.run_graph("b" * 64, corrupt_plan)
+            await services.task.run_graph(corrupt_plan)
         assert corrupt_error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
     finally:
         await runtime.close()
@@ -1002,7 +1054,7 @@ async def test_task_cancel_same_key_has_single_effect_owner() -> None:
             execution_launcher=_Launcher(),
         )
         graph_request = TaskGraphRequest(TaskGraph("cancel-owner-graph", (TaskNode("node"),)), principal, "cancel-owner-run")
-        await services.task.run_graph("b" * 64, graph_request)
+        await services.task.run_graph(graph_request)
         cancel_plan = runtime.persistence.tasks.cancel_plan
         cancel_count = 0
 
@@ -1117,8 +1169,22 @@ async def test_execution_cancel_effect_unknown_resolves_actual_terminal(executio
 
 
 def test_temporal_contract_fields_and_registered_class_names_are_stable() -> None:
-    from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity
-    from linktools.ai.temporal.workflow import EvaluationWorkflow, ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult, ExecutionWorkflowState, SessionWorkflow, TaskWorkflow, TaskWorkflowInput
+    from linktools.ai.temporal import (
+        EvaluationActivity,
+        ExecuteActivity,
+        SessionActivity,
+        TaskActivity,
+    )
+    from linktools.ai.temporal.workflow import (
+        EvaluationWorkflow,
+        ExecutionWorkflow,
+        ExecutionWorkflowInput,
+        ExecutionWorkflowResult,
+        ExecutionWorkflowState,
+        SessionWorkflow,
+        TaskWorkflow,
+        TaskWorkflowInput,
+    )
 
     assert "profile" not in {item.name for item in fields(ExecutionWorkflowInput)}
     assert "profile" not in {item.name for item in fields(ExecutionWorkflowState)}

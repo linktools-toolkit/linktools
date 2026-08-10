@@ -2,20 +2,18 @@
 # -*- coding: utf-8 -*-
 """Workspace discovery and identity."""
 
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
-import unicodedata
 
 try:
     import yaml as _yaml
 except ImportError:
     _yaml = None
 
-from ..core import Principal
-from ..errors import ErrorCode, AIError
-from ..core import canonical_sha256
-from ..core import JsonValue
+from ..core import JsonValue, Principal, canonical_sha256
+from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)

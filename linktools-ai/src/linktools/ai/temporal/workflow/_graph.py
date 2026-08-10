@@ -15,9 +15,13 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ._execution import ExecutionWorkflow, ExecutionWorkflowInput, ExecutionWorkflowResult
-from ...errors import ErrorCode, AIError
+from ...errors import AIError, ErrorCode
 from ...task import SwarmLimits
+from ._execution import (
+    ExecutionWorkflow,
+    ExecutionWorkflowInput,
+    ExecutionWorkflowResult,
+)
 
 
 @dataclass(frozen=True, slots=True)

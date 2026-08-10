@@ -12,16 +12,29 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..core import JsonValue
-from ..core import Page
-from ..core import ResourceRef
 from ..core import (
-    ApprovalDecision, ApprovalStatus, BlobStatus, EvaluationStatus,
-    ExecutionEventType, ExecutionLineageKind, ExecutionStatus, ExternalCallStatus,
-    IdempotencyStatus, OperationKind, OperationStatus, ResourceKind, SessionStatus,
-    StopReason, TaskStatus, ToolOperationStatus,
+    ApprovalDecision,
+    ApprovalStatus,
+    BlobStatus,
+    EvaluationStatus,
+    ExecutionEventType,
+    ExecutionLineageKind,
+    ExecutionStatus,
+    ExternalCallStatus,
+    IdempotencyStatus,
+    JsonValue,
+    OperationKind,
+    OperationStatus,
+    Page,
+    ResourceKind,
+    ResourceRef,
+    SessionStatus,
+    StopReason,
+    TaskStatus,
+    ToolOperationStatus,
 )
 from ..task import TaskGraph, TaskGraphView, TaskTerminalRecord
+from ._tool import ToolStateStore
 
 
 class RuntimePersistenceMode(StrEnum):
@@ -374,15 +387,6 @@ class RuntimeRepository(Protocol):
     async def close(self) -> None: ...
 
 
-class ManagedToolStateRepository(RuntimeRepository, Protocol):
-    async def reserve(self, record: Mapping[str, JsonValue]) -> Mapping[str, JsonValue]: ...
-    async def get_operation(self, operation_id: str, *, tenant_id: str) -> "Mapping[str, JsonValue] | None": ...
-    async def claim(self, operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> Mapping[str, JsonValue]: ...
-    async def renew(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, lease_seconds: int) -> Mapping[str, JsonValue]: ...
-    async def complete(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, result_ref: "str | None", result_digest: str) -> Mapping[str, JsonValue]: ...
-    async def fail(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str) -> Mapping[str, JsonValue]: ...
-
-
 class SessionRepository(RuntimeRepository, Protocol):
     async def create(self, record: SessionRecord) -> SessionRecord: ...
     async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
@@ -519,7 +523,7 @@ class RuntimePersistence:
     approvals: ApprovalRepository
     externals: ExternalResultRepository
     operations: OperationLedgerRepository
-    tools: ManagedToolStateRepository
+    tools: ToolStateStore
     blobs: BlobStore
     local_tenant_id: "str | None" = None
 
@@ -551,6 +555,6 @@ __all__ = [
     "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate", "SessionHeadAdvance",
     "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository",
     "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeBackend", "RuntimePersistence",
-    "RuntimePersistenceMode", "RuntimeRepository", "ManagedToolStateRepository", "SessionRecord", "SessionRepository", "backend_mode",
+    "RuntimePersistenceMode", "RuntimeRepository", "SessionRecord", "SessionRepository", "backend_mode",
     "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus",
 ]

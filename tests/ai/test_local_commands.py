@@ -9,15 +9,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from pydantic_ai.models.test import TestModel
-
 from linktools.ai.agent import WorkspaceAgentRunner
-from linktools.ai.app import RuntimePersistenceConfig
-from linktools.ai.app import open_workspace_runtime
-from linktools.ai.errors import ErrorCode, AIError
+from linktools.ai.app import RuntimePersistenceConfig, open_workspace_runtime
+from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import Workspace
 from linktools.cli.argparse import ConfigAction
 from linktools.commands.ai.run import command as run_command
+from pydantic_ai.models.test import TestModel
+
 from tests.ai.persistence.helper import _open_sql_workspace
 
 

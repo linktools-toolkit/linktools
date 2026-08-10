@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Tool authorization and durable operation contracts."""
+"""Runtime-owned tool authorization and durable operation contracts."""
 
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..core import ResourceRef
-from ..core import Principal
-from ..core import ToolOperationStatus
+from ..core import Principal, ResourceRef, ToolOperationStatus
 
 
 @dataclass(frozen=True, slots=True)

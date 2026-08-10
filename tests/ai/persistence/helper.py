@@ -2,15 +2,23 @@
 # -*- coding: utf-8 -*-
 """Test-owned SQL dependency composition."""
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
-
-from linktools.ai import RuntimePersistenceConfig, RuntimeResources, open_runtime_resources
+from linktools.ai import (
+    RuntimePersistenceConfig,
+    RuntimeResources,
+    open_runtime_resources,
+)
 from linktools.ai.app import open_workspace_runtime
 from linktools.ai.runtime import RuntimeBackend
 from linktools.ai.workspace import Workspace
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 
 @asynccontextmanager

@@ -5,8 +5,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ..storage import SqlSchemaRegistry
-from ..storage import storage_name
+from ..storage import SqlSchemaRegistry, storage_name
 
 runtime_metadata: object | None = None
 step_metadata: object | None = None
@@ -29,7 +28,18 @@ class SqlRuntimeSchema:
     @classmethod
     def register_schema(cls, registry: SqlSchemaRegistry) -> SqlRuntimeTables:
         global runtime_metadata
-        from sqlalchemy import BigInteger, Column, DateTime, Index, Integer, JSON, LargeBinary, String, Table, UniqueConstraint
+        from sqlalchemy import (
+            JSON,
+            BigInteger,
+            Column,
+            DateTime,
+            Index,
+            Integer,
+            LargeBinary,
+            String,
+            Table,
+            UniqueConstraint,
+        )
         from sqlalchemy.dialects import mysql
 
         runtime_metadata = registry.metadata

@@ -6,16 +6,15 @@ import asyncio
 import os
 import re
 import unicodedata
-from collections.abc import Awaitable, Mapping, Sequence
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from linktools.core import environ
-from pydantic import BaseModel
 from pydantic_ai import Agent, AgentRunResultEvent
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -34,26 +33,25 @@ from pydantic_ai.models import Model
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
 from ..capability import (
-    MCPToolProvider,
-    SkillCatalogSnapshot,
+    CapabilityRuntimeContext,
+    SkillCapability,
     SkillCatalogView,
-    SkillDescriptor,
+    snapshot_skill_catalog,
 )
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelRoute
-from ._binding import BindingExecutionPlan
+from ..model import ModelMaterializer
+from ._binding import AgentBinding
 from ._capabilities import (
-    AgentCapabilityScope,
     AgentCatalogView,
+    AgentRunScope,
     EmptyAgentCatalog,
     EmptySkillCatalog,
-    compose_parent_capabilities,
+    compose_platform_capabilities,
 )
 
 
@@ -77,10 +75,6 @@ class AgentRunner(Protocol):
 
 class AgentTool(Protocol):
     async def __call__(self, **kwargs: JsonValue) -> "dict[str, JsonValue]": ...
-
-
-class ModelMaterializer(Protocol):
-    def materialize(self, route: ModelRoute) -> Model: ...
 
 
 class EventHandler(Protocol):
@@ -114,7 +108,7 @@ class WorkspaceAgentRunner:
         base_url: "str | None" = None,
         api_key: "str | None" = None,
         tools: "tuple[AgentTool, ...]" = (),
-        capabilities: "tuple[AgentCapability[None], ...]" = (),
+        capabilities: "tuple[PydanticAgentCapability[None], ...]" = (),
         skill_catalog: "SkillCatalogView | None" = None,
         agent_catalog: "AgentCatalogView | None" = None,
     ) -> None:
@@ -156,22 +150,26 @@ class WorkspaceAgentRunner:
             raise _SegmentAlreadyStarted(step_run_id)
         agent = await self._get_agent(definition)
         parent_model = self._materialize_model(definition.model)
-        capabilities = await compose_parent_capabilities(
-            AgentCapabilityScope(
-                root=self._root,
-                agent_name=definition.agent_name,
-                conversation_id=conversation_id,
-                step_run_id=step_run_id,
-                segment_sequence=segment_sequence,
-                memory_namespace=memory_namespace,
-                step_store=step_store,
-                workspace_capabilities=self._workspace_capabilities,
-                skill_catalog=self._skill_catalog,
-                agent_catalog=self._agent_catalog,
-                memory_store=memory_store,
-                context_target_tokens=_context_target_tokens(self._config),
-                parent_step_run_id=parent_step_run_id,
-            ),
+        external_capabilities: "list[PydanticAgentCapability[None]]" = list(self._workspace_capabilities)
+        skill_catalog = await snapshot_skill_catalog(self._skill_catalog)
+        if skill_catalog.descriptors:
+            external_capabilities.append(SkillCapability(skill_catalog))
+        scope = AgentRunScope(
+            root=self._root,
+            agent_name=definition.agent_name,
+            conversation_id=conversation_id,
+            step_run_id=step_run_id,
+            segment_sequence=segment_sequence,
+            memory_namespace=memory_namespace,
+            step_store=step_store,
+            inherited_capabilities=tuple(external_capabilities),
+            agent_catalog=self._agent_catalog,
+            memory_store=memory_store,
+            context_target_tokens=_context_target_tokens(self._config),
+            parent_step_run_id=parent_step_run_id,
+        )
+        capabilities = tuple(external_capabilities) + await compose_platform_capabilities(
+            scope,
             model_factory=lambda value: self._materialize_model(definition.model if value is None else value),
             parent_model=parent_model,
         )
@@ -316,26 +314,21 @@ class _SegmentAlreadyStarted(RuntimeError):
         self.step_run_id = step_run_id
 
 
-class BindingAgentRunner:
+class BoundAgentRunner:
     """Execute a frozen binding through the same Harness segment pipeline."""
 
     def __init__(
         self,
-        plan: BindingExecutionPlan,
-        materializer: ModelMaterializer,
         *,
-        materialized_model: "Model | None" = None,
+        binding: AgentBinding,
+        materializer: ModelMaterializer,
         agent_catalog: "AgentCatalogView | None" = None,
-        mcp_provider: "MCPToolProvider | None" = None,
-        capabilities: "tuple[AgentCapability[None], ...]" = (),
         memory_store: "SearchableMemoryStore | None" = None,
     ) -> None:
-        self._plan = plan
+        self._binding = binding
         self._materializer = materializer
-        self._model = materialized_model
+        self._model: "Model | None" = None
         self._agent_catalog = agent_catalog if agent_catalog is not None else EmptyAgentCatalog()
-        self._mcp_provider = mcp_provider
-        self._capabilities = capabilities
         self._memory_store = memory_store
         self._agent: "Agent[None, object] | None" = None
         self._lock = asyncio.Lock()
@@ -354,38 +347,40 @@ class BindingAgentRunner:
         memory_namespace: "str | None" = None,
         memory_store: "SearchableMemoryStore | None" = None,
         on_event: "EventHandler | None" = None,
-        toolsets: "Sequence[AbstractToolset[None]]" = (),
+        capability_context: CapabilityRuntimeContext,
     ) -> WorkspaceAgentResult:
         existing = await step_store.get_run(run_id=step_run_id)
         if existing is not None:
             raise _SegmentAlreadyStarted(step_run_id)
-        if self._plan.mcp_servers and self._mcp_provider is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        _validate_toolsets(toolsets, required=bool(self._plan.mcp_servers))
+        materialized: list[PydanticAgentCapability[None]] = []
+        inherited: list[PydanticAgentCapability[None]] = []
+        for binding in self._binding.capability_bindings:
+            values = await binding.materialize(capability_context)
+            materialized.extend(values)
+            if binding.inherit_to_subagents:
+                inherited.extend(values)
+        injections = [injection.capability for injection in self._binding.injections]
+        materialized.extend(injections)
+        inherited.extend(injection.capability for injection in self._binding.injections if injection.inherit_to_subagents)
         agent = await self._get_agent()
         model = self._model
         if model is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        skill_catalog = SkillCatalogSnapshot(
-            tuple(SkillDescriptor(item.id, item.revision, "") for item in self._plan.skills),
-            self._plan.skills,
-        )
-        scope = AgentCapabilityScope(
+        scope = AgentRunScope(
             root=Path.cwd(),
-            agent_name=self._plan.binding.spec.id,
+            agent_name=self._binding.spec.id,
             conversation_id=conversation_id,
             step_run_id=step_run_id,
             segment_sequence=segment_sequence,
             memory_namespace=memory_namespace,
             step_store=step_store,
-            workspace_capabilities=self._capabilities,
-            skill_catalog=skill_catalog,
+            inherited_capabilities=tuple(inherited),
             agent_catalog=self._agent_catalog,
             memory_store=memory_store if memory_store is not None else self._memory_store,
             parent_step_run_id=parent_step_run_id,
         )
-        composed = await compose_parent_capabilities(scope, model_factory=lambda _value: model, parent_model=model)
-        self._logger.info("binding agent segment started: agent=%s execution_step=%s binding=%s", self._plan.binding.spec.id, step_run_id, self._plan.binding.digest)
+        composed = tuple(materialized) + await compose_platform_capabilities(scope, model_factory=lambda _value: model, parent_model=model)
+        self._logger.info("bound agent segment started: agent=%s execution_step=%s binding=%s", self._binding.spec.id, step_run_id, self._binding.manifest.digest)
         final_result = None
         output_parts: list[str] = []
         async with agent.run_stream_events(
@@ -394,7 +389,6 @@ class BindingAgentRunner:
             conversation_id=conversation_id,
             run_id=step_run_id,
             capabilities=composed,
-            toolsets=tuple(toolsets),
         ) as events:
             async for event in events:
                 if isinstance(event, AgentRunResultEvent):
@@ -417,24 +411,24 @@ class BindingAgentRunner:
         if record is None or snapshot is None or unresolved_effects or record.conversation_id != conversation_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         output = final_result.output
-        if not isinstance(output, BaseModel):
+        if not isinstance(output, self._binding.output_type):
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         encoded = canonical_json_bytes(output.model_dump(mode="json")).decode("utf-8")
-        self._logger.info("binding agent segment completed: agent=%s run=%s", self._plan.binding.spec.id, final_result.run_id)
+        self._logger.info("bound agent segment completed: agent=%s run=%s", self._binding.spec.id, final_result.run_id)
         return WorkspaceAgentResult(final_result.run_id, encoded or "null", final_result.all_messages())
 
     async def _get_agent(self) -> "Agent[None, object]":
         async with self._lock:
             if self._agent is not None:
                 return self._agent
-            model = self._model or self._materializer.materialize(self._plan.model_route)
+            model = self._materializer.materialize(self._binding.model_route, self._binding.model_connection)
             self._model = model
             agent = Agent(
                 model,
-                name=self._plan.binding.spec.id,
-                system_prompt=self._plan.binding.prompt.system,
-                instructions="\n".join((*self._plan.binding.spec.instructions, *self._plan.binding.prompt.instructions)),
-                output_type=self._plan.output_type,
+                name=self._binding.spec.id,
+                system_prompt=self._binding.prompt.system,
+                instructions="\n".join((*self._binding.spec.instructions, *self._binding.prompt.instructions)),
+                output_type=self._binding.output_type,
             )
             self._agent = cast("Agent[None, object]", agent)
             return self._agent
@@ -508,14 +502,4 @@ def _map_event(
     return None
 
 
-def _validate_toolsets(toolsets: Sequence[AbstractToolset[None]], *, required: bool) -> None:
-    if required and not toolsets:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "MCP provider returned no run-scoped toolsets")
-    ids = [toolset.id for toolset in toolsets]
-    if any(not isinstance(toolset_id, str) or not toolset_id.strip() for toolset_id in ids):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "MCP toolset id is required")
-    if len(set(ids)) != len(ids):
-        raise AIError(ErrorCode.STORAGE_CONFLICT, "MCP toolset ids must be unique per run")
-
-
-__all__ = ["AgentRunner", "AgentTool", "BindingAgentRunner", "EventHandler", "ModelMaterializer", "WorkspaceAgentResult", "WorkspaceAgentRunner"]
+__all__ = ["AgentRunner", "AgentTool", "BoundAgentRunner", "EventHandler", "WorkspaceAgentResult", "WorkspaceAgentRunner"]

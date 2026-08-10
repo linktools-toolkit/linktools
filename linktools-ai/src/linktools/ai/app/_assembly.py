@@ -25,18 +25,12 @@ from ..adapter import (
     build_in_memory_runtime,
     open_sql_runtime,
 )
-from ..agent import AgentCatalogView, BindingExecutionRegistry, ModelMaterializer
+from ..agent import AgentBindingRegistry, AgentCatalogView, OutputTypeRegistry
 from ..asset import AssetInfo, AssetKey, AssetStore
-from ..capability import (
-    MCPToolProvider,
-    Sandbox,
-    SkillProvider,
-    ToolPolicy,
-    ToolStateStore,
-)
+from ..capability import MCPToolProvider, SkillProvider
 from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
 from ..errors import AIError, ErrorCode
-from ..model import ModelRegistry, ModelResolver
+from ..model import ModelMaterializer, ModelRegistry, ModelResolver
 from ..observe import MiddlewarePipeline
 from ..runtime import (
     CancelEffectOutcome,
@@ -54,18 +48,21 @@ from ..runtime import (
     RuntimeBackend,
     RuntimePersistence,
     RuntimeServices,
+    ToolPolicy,
+    ToolStateStore,
     WorkflowGateway,
     WorkflowTaskGraphLauncher,
     new_runtime_service_identity,
 )
-from ..spec import OutputTypeRegistry
 from ..storage import StorageComposition
 from ..task import (
     LocalTaskGraphLauncher,
-    RuntimeTaskExecutionVerifier,
+    RuntimeTaskNodeResultVerifier,
     TaskGraphLauncher,
+    TaskNodeResultVerifier,
     TaskNodeRunner,
 )
+from ..workspace import Sandbox
 from ._binding_launcher import BindingExecutionLauncher
 from ._facade import LocalRuntimeServices, RuntimeAccess, build_runtime_access
 
@@ -365,20 +362,19 @@ def build_local_runtime_services(
     *,
     grant_key: bytes,
     materializer: ModelMaterializer,
-    mcp_provider: MCPToolProvider,
     agent_catalog: "AgentCatalogView | None" = None,
     task_launcher: "TaskGraphLauncher | None" = None,
     task_runner: "TaskNodeRunner | None" = None,
+    task_result_verifier: "TaskNodeResultVerifier | None" = None,
     task_owner: str = "local",
 ) -> LocalRuntimeServices:
     """Create local services and their one shared binding registry."""
-    registry = BindingExecutionRegistry()
+    registry = AgentBindingRegistry()
     launcher = BindingExecutionLauncher(
         registry,
         materializer,
         resources,
         agent_catalog=agent_catalog,
-        mcp_provider=mcp_provider,
     )
     history_reader = StepExecutionHistoryReader(
         resources.namespace,
@@ -386,11 +382,13 @@ def build_local_runtime_services(
         resources.steps,
         HmacCursorSigner("execution-history", grant_key),
     )
+    if task_launcher is None and task_runner is None and task_result_verifier is not None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "task result verifier requires a task runner")
     if task_launcher is None and task_runner is not None:
         task_launcher = LocalTaskGraphLauncher(
             resources.domain.tasks,
             task_runner,
-            RuntimeTaskExecutionVerifier(resources.domain.executions),
+            task_result_verifier or RuntimeTaskNodeResultVerifier(resources.domain.executions),
             owner=task_owner,
         )
     services = build_runtime_services(

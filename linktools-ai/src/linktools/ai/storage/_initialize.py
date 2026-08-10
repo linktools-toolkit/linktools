@@ -4,13 +4,13 @@
 
 from typing import TYPE_CHECKING, Protocol
 
-from ..errors import ErrorCode, AIError
+from ..errors import AIError, ErrorCode
 from ._database import StorageDatabase, sql_constraint_signature
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
-    from sqlalchemy.ext.asyncio import AsyncEngine
     from sqlalchemy.engine import Connection
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class _SqlTypeValue(Protocol):
