@@ -5,12 +5,16 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from linktools.core import environ
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
+from pydantic_ai.capabilities import WrapToolExecuteHandler
+from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
@@ -34,6 +38,29 @@ from ..spec import SkillSpec
 from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
 
 _logger = environ.get_logger("ai.agent.capabilities")
+
+
+class _RetryAwareStepPersistence(StepPersistence[None]):
+    async def wrap_tool_execute(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        handler: WrapToolExecuteHandler,
+    ) -> Any:
+        try:
+            return await super().wrap_tool_execute(ctx, call=call, tool_def=tool_def, args=args, handler=handler)
+        except (ModelRetry, ToolFailed, ToolFailedError, ToolRetryError) as error:
+            _logger.info(
+                "workspace tool failure closed effect: run=%s tool=%s call=%s",
+                self.run_id or ctx.run_id,
+                tool_def.name,
+                call.tool_call_id,
+            )
+            await super().on_tool_execute_error(ctx, call=call, tool_def=tool_def, args=args, error=error)
+            raise
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +87,7 @@ async def compose_platform_capabilities(
 ) -> "tuple[PydanticAgentCapability[None], ...]":
     _validate_compaction_target(scope.context_target_tokens)
     capabilities: "list[PydanticAgentCapability[None]]" = [
-        StepPersistence(
+        _RetryAwareStepPersistence(
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -80,17 +107,21 @@ async def compose_platform_capabilities(
     if scope.conversation_id:
         capabilities.append(ConversationSearch(SnapshotHistorySource(scope.step_store), scope="conversation"))
     agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents())
-    if agent_catalog.items:
+    agent_folders = _local_agent_folders(scope.root)
+    if agent_folders:
+        _logger.info("local sub-agent folders loaded: %s", ",".join(str(folder) for folder in agent_folders))
+    if agent_catalog.items or agent_folders:
         child_agents = _build_child_agents(scope, agent_catalog.items, model_factory=model_factory, parent_model=parent_model)
         capabilities.append(
             SubAgents(
                 agents=[SubAgent(child) for child in child_agents],
-                agent_folders=None,
+                agent_folders=agent_folders or None,
                 inherit_tools=False,
                 forward_usage=True,
             )
         )
-        capabilities.append(DynamicWorkflow(agents=child_agents))
+        if child_agents:
+            capabilities.append(DynamicWorkflow(agents=child_agents))
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.info(
         "Harness platform capabilities composed: agent=%s conversation=%s step=%s capability_count=%s inherited_count=%s agent_count=%s namespace_digest=%s",
@@ -146,7 +177,7 @@ def _compose_child_capabilities(scope: AgentRunScope, agent_name: str) -> "tuple
     _validate_compaction_target(scope.context_target_tokens)
     capabilities: "list[PydanticAgentCapability[None]]" = list(scope.inherited_capabilities)
     capabilities.append(
-        StepPersistence(
+        _RetryAwareStepPersistence(
             store=scope.step_store,
             agent_name=agent_name,
             run_id=None,
@@ -175,6 +206,11 @@ def _build_compaction(context_target_tokens: "int | None") -> PydanticAgentCapab
 def _validate_compaction_target(context_target_tokens: "int | None") -> None:
     if context_target_tokens is not None and (not isinstance(context_target_tokens, int) or isinstance(context_target_tokens, bool) or context_target_tokens <= 0):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def _local_agent_folders(root: Path) -> "tuple[Path, ...]":
+    folders = (root / ".linktools" / "agents", root / ".linktools" / "subagents")
+    return tuple(folder for folder in folders if folder.is_dir())
 
 
 def _workspace_file_key(part: ToolCallPart) -> "str | None":

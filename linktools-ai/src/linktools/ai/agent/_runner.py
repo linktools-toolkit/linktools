@@ -25,6 +25,8 @@ from pydantic_ai.messages import (
     PartEndEvent,
     PartStartEvent,
     RetryPromptPart,
+    ThinkingPart,
+    ThinkingPartDelta,
     TextPart,
     TextPartDelta,
     ToolReturnPart,
@@ -40,7 +42,7 @@ from ..capability import (
     CapabilityRuntimeContext,
     SkillCapability,
     SkillCatalogView,
-    snapshot_skill_catalog,
+    merge_skill_catalogs,
 )
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -150,8 +152,14 @@ class WorkspaceAgentRunner:
             raise _SegmentAlreadyStarted(step_run_id)
         agent = await self._get_agent(definition)
         parent_model = self._materialize_model(definition.model)
-        external_capabilities: "list[PydanticAgentCapability[None]]" = list(self._workspace_capabilities)
-        skill_catalog = await snapshot_skill_catalog(self._skill_catalog)
+        external_capabilities: list[PydanticAgentCapability[None]] = []
+        skill_catalogs: list[SkillCatalogView] = [self._skill_catalog]
+        for capability in self._workspace_capabilities:
+            if isinstance(capability, SkillCapability):
+                skill_catalogs.append(capability.catalog)
+            else:
+                external_capabilities.append(capability)
+        skill_catalog = await merge_skill_catalogs(tuple(skill_catalogs))
         if skill_catalog.descriptors:
             external_capabilities.append(SkillCapability(skill_catalog))
         scope = AgentRunScope(
@@ -485,8 +493,12 @@ def _map_event(
 ) -> "dict[str, JsonValue] | None":
     if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart) and event.part.content:
         return {"type": "text", "text": event.part.content}
+    if isinstance(event, PartStartEvent) and isinstance(event.part, ThinkingPart) and event.part.content:
+        return {"type": "thinking", "text": event.part.content}
     if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta) and event.delta.content_delta:
         return {"type": "text", "text": event.delta.content_delta}
+    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, ThinkingPartDelta) and event.delta.content_delta:
+        return {"type": "thinking", "text": event.delta.content_delta}
     if isinstance(event, PartEndEvent) and isinstance(event.part, TextPart) and event.part.content:
         return {"type": "text_end"}
     if isinstance(event, FunctionToolCallEvent):

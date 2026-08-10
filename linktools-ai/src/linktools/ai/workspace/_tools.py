@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace-local tools and capability boundaries."""
+"""Workspace-local tools and skill boundaries."""
 
 import asyncio
 import os
@@ -12,9 +12,11 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
+from ..capability import SkillCapability
 from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
+from ._skills import load_local_skill_catalog
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -135,11 +137,18 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
 
 def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[None], ...]':
     project_root = Path(root).expanduser().resolve()
-    _logger.info("local Harness capabilities configured root=%s", project_root)
-    return (
+    _logger.info("local workspace tools configured root=%s", project_root)
+    capabilities: list[AgentCapability[None]] = [
         FileSystem(root_dir=project_root),
         Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS),
-    )
+    ]
+    skill_library = project_root / ".linktools" / "skills"
+    if skill_library.is_dir():
+        skill_catalog = load_local_skill_catalog(skill_library)
+        if skill_catalog.descriptors:
+            capabilities.append(SkillCapability(skill_catalog))
+            _logger.info("local skills loaded root=%s count=%s", skill_library, len(skill_catalog.descriptors))
+    return tuple(capabilities)
 
 
 def build_workspace_tool_map(root: 'str | Path') -> 'Mapping[str, WorkspaceTool]':

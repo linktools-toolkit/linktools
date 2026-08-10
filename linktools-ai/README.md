@@ -9,10 +9,15 @@ Its public storage abstraction is `AssetStore`; specification DTOs and codecs
 live in `linktools.ai.spec`, while the concrete SQL asset backend is available
 as `linktools.ai.asset.SqlAssetBackend`.
 
-Storage builders are lazy. Callers explicitly initialize the SQL schema and
-then construct the storage composition and asset store. The `ai run` command
+Storage builders are lazy. SQL runtime startup validates the pre-provisioned
+schema and never creates or alters tables. Deployment platforms must provision
+the Runtime, StepStore and Asset tables before starting a SQL runtime. The `ai run` command
 streams model text, thinking and tool activity; `ai acp` serves the local ACP
 transport when its optional dependency is installed.
+
+For an explicit deployment provisioning step, call
+`linktools.ai.migrate.provision_database(engine)`. This creates the
+current Runtime, StepStore and Asset tables and does not perform versioned migrations.
 
 For local execution, `--project` selects the working directory and `--storage`
 selects the Runtime state directory:

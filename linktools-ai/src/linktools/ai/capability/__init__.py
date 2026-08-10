@@ -30,6 +30,7 @@ from ._skill import (
     SkillCatalogView,
     SkillDescriptor,
     SkillProvider,
+    merge_skill_catalogs,
     snapshot_skill_catalog,
 )
 
@@ -39,5 +40,5 @@ __all__ = [
     "MCPServerCapabilityBinding", "MCPServerCapabilityResolver", "MCPToolProvider", "RetrievalProvider",
     "SkillCapability", "SkillCapabilityBinding", "SkillCapabilityResolver", "SkillCatalogSnapshot",
     "SkillCatalogView", "SkillDescriptor", "SkillProvider", "UnresolvedCapabilityBinding",
-    "snapshot_skill_catalog", "unresolved_binding", "validate_fingerprint", "validate_mcp_response",
+    "merge_skill_catalogs", "snapshot_skill_catalog", "unresolved_binding", "validate_fingerprint", "validate_mcp_response",
 ]

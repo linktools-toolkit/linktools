@@ -25,13 +25,14 @@ from ..storage import (
     StorageRevision,
     VersionSummary,
     storage_name,
+    validate_schema,
 )
 from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 if TYPE_CHECKING:
     from sqlalchemy import Index, Table
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 _logger = environ.get_logger("ai.asset.sql")
@@ -202,6 +203,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
         self._namespace = namespace
 
     async def initialize(self) -> None:
+        await self._validate_schema()
         await self._refresh_state()
         _logger.info(
             "SQL asset backend initialized: namespace=%s revision=%s",
@@ -209,11 +211,11 @@ class SqlAssetBackend(InMemoryAssetBackend):
             self._revision,
         )
 
-    async def initialize_storage(self, engine: "AsyncEngine | None" = None) -> None:
-        if engine is not None:
-            async with engine.begin() as connection:
-                await connection.run_sync(self._tables.revision.metadata.create_all)
+    async def initialize_storage(self) -> None:
         await self.initialize()
+
+    async def _validate_schema(self) -> None:
+        await validate_schema(self._session_factory, self._tables.revision.metadata)
 
     async def head_revision(self) -> StorageRevision:
         await self._refresh_state()

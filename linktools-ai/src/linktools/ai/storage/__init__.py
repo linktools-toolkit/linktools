@@ -49,7 +49,6 @@ from ._database import (
     StorageDatabase,
     build_sqlite_storage,
     build_storage,
-    close_storage,
 )
 from ._dialects import (
     InsertResult,
@@ -76,7 +75,7 @@ from ._files import (
     write_bytes_atomic,
     write_json_atomic,
 )
-from ._initialize import initialize_schema, initialize_storage
+from ._initialize import initialize_storage, validate_schema
 from ._layer import LayerRefreshPolicy
 from ._lock import (
     FilesystemLeaseCoordinator,
@@ -153,8 +152,6 @@ __all__ = [
     "build_sqlite_storage",
     "build_storage",
     "classify_integrity_error_by_message",
-    "close_storage",
-    "initialize_schema",
     "initialize_storage",
     "primary_key_column",
     "read_bytes",
@@ -162,6 +159,7 @@ __all__ = [
     "resolve_dialect",
     "safe_child",
     "storage_name",
+    "validate_schema",
     "write_bytes_atomic",
     "write_json_atomic",
 ]

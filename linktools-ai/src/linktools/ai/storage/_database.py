@@ -12,7 +12,7 @@ from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
     from sqlalchemy import Constraint, Index, MetaData, Table
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 class CoordinationScope(StrEnum):
     PROCESS = "process"
@@ -110,7 +110,7 @@ class SqlSchemaRegistry:
 
 @dataclass(frozen=True, slots=True)
 class StorageDatabase:
-    engine: "AsyncEngine"
+    session_factory: "async_sessionmaker[AsyncSession]"
     coordination_scope: CoordinationScope
     metadata: "MetaData"
     schema_manifest_digest: str
@@ -133,36 +133,42 @@ def _index_signature(index: "Index") -> str:
 
 def build_storage(
     *,
-    engine: "AsyncEngine",
+    session_factory: "async_sessionmaker[AsyncSession]",
     metadata: "MetaData",
     schema_manifest_digest: str,
     coordination_scope: CoordinationScope = CoordinationScope.SHARED_DATABASE,
 ) -> StorageDatabase:
     return StorageDatabase(
-        engine,
+        session_factory,
         coordination_scope,
         metadata,
         schema_manifest_digest,
     )
 
 
-def build_sqlite_storage(
+async def build_sqlite_storage(
     *,
-    engine: "AsyncEngine",
+    session_factory: "async_sessionmaker[AsyncSession]",
     metadata: "MetaData",
     schema_manifest_digest: str,
 ) -> StorageDatabase:
-    _configure_sqlite_engine(engine)
+    await _configure_sqlite_engine(session_factory)
     return build_storage(
-        engine=engine,
+        session_factory=session_factory,
         coordination_scope=CoordinationScope.PROCESS,
         metadata=metadata,
         schema_manifest_digest=schema_manifest_digest,
     )
 
 
-async def close_storage(database: StorageDatabase) -> None:
-    await database.engine.dispose()
+async def _resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    async with session_factory() as session:
+        bound = session.bind
+    if not isinstance(bound, AsyncEngine):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    return bound
 
 
 def _new_metadata() -> "MetaData":
@@ -170,10 +176,12 @@ def _new_metadata() -> "MetaData":
     return MetaData()
 
 
-def _configure_sqlite_engine(engine: "AsyncEngine") -> None:
+async def _configure_sqlite_engine(session_factory: "async_sessionmaker[AsyncSession]") -> None:
     from sqlalchemy import event
 
-    @event.listens_for(engine.sync_engine, "connect")
+    bound = await _resolve_engine(session_factory)
+
+    @event.listens_for(bound.sync_engine, "connect")
     def _configure_sqlite(connection: object, _: object) -> None:
         cursor: Any = connection.cursor()
         try:
@@ -195,6 +203,5 @@ __all__ = [
     "StorageDatabase",
     "build_sqlite_storage",
     "build_storage",
-    "close_storage",
     "sql_constraint_signature",
 ]

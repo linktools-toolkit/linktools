@@ -190,17 +190,23 @@ async def open_runtime_resources(
     )
     if session_factory is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires an injected session factory")
-    from sqlalchemy.ext.asyncio import AsyncEngine
-
-    async with session_factory() as session:
-        engine = session.bind
-    if not isinstance(engine, AsyncEngine):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "session factory must be bound to an AsyncEngine")
-    _logger.debug("SQL runtime dependencies injected: backend=%s engine=%s session_factory=%s", config.backend, type(engine).__name__, type(session_factory).__name__)
+    _logger.debug("SQL runtime dependencies injected: backend=%s session_factory=%s", config.backend, type(session_factory).__name__)
     registry = SqlSchemaRegistry()
     tables = SqlRuntimeSchema.register_schema(registry)
     manifest = registry.freeze()
-    database = build_sqlite_storage(engine=engine, metadata=registry.metadata, schema_manifest_digest=manifest.digest) if config.backend is RuntimeBackend.SQLITE else build_storage(engine=engine, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
+    database = (
+        await build_sqlite_storage(
+            session_factory=session_factory,
+            metadata=registry.metadata,
+            schema_manifest_digest=manifest.digest,
+        )
+        if config.backend is RuntimeBackend.SQLITE
+        else build_storage(
+            session_factory=session_factory,
+            metadata=registry.metadata,
+            schema_manifest_digest=manifest.digest,
+        )
+    )
     try:
         await initialize_storage(database)
         persistence = await open_sql_runtime(database, session_factory=session_factory, backend=config.backend, namespace=config.namespace, deployment_id=config.deployment_id, tables=tables)

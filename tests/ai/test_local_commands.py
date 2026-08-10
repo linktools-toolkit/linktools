@@ -14,6 +14,7 @@ from linktools.ai.app import RuntimePersistenceConfig, open_workspace_runtime
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.workspace import Workspace
 from linktools.cli.argparse import ConfigAction
+from linktools.commands.ai.acp import command as acp_command
 from linktools.commands.ai.run import command as run_command
 from pydantic_ai.models.test import TestModel
 
@@ -24,13 +25,23 @@ def test_ai_run_executes_the_workspace_test_model(tmp_path: Path, capsys, monkey
     parser = run_command.create_parser()
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-    args = parser.parse_args(["--model", "test", "--memory-namespace", "test", "hello"])
+    args = parser.parse_args(["--model", "test", "hello"])
     actions = {action.dest: action for action in parser._actions}
     assert all(isinstance(actions[name], ConfigAction) for name in ("api_key", "base_url", "model"))
     assert args.model == "test"
+    assert args.memory is None
+    explicit = parser.parse_args(["--model", "test", "--memory", "custom", "hello"])
+    assert explicit.memory == "custom"
     monkeypatch.chdir(tmp_path)
     assert run_command.run(args) == 0
     assert "success (no tool calls)" in capsys.readouterr().out
+
+
+def test_ai_acp_memory_namespace_defaults_to_workspace() -> None:
+    args = acp_command.create_parser().parse_args([])
+    assert args.memory is None
+    explicit = acp_command.create_parser().parse_args(["--memory", "custom"])
+    assert explicit.memory == "custom"
 
 
 def test_workspace_runtime_uses_database_storage(tmp_path: Path) -> None:

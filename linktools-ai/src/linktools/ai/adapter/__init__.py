@@ -18,10 +18,15 @@ from ._persistence import (
 from ._provider import ProviderClient
 from ._schema import SqlRuntimeSchema, SqlRuntimeTables
 from ._sql import open_sql_runtime
-from ._step import DurableFilesystemStepStore, SqlMediaStore, SqlStepStore
+from ._step import (
+    DurableFilesystemStepStore,
+    SqlMediaStore,
+    SqlStepStore,
+    build_step_schema,
+)
 
 __all__ = [
     "DurableFilesystemStepStore", "FilesystemBlobStore", "FilesystemRuntime", "LogfireSink", "InMemoryBlobStore", "InMemoryRuntime",
     "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlMediaStore", "SqlRuntimeSchema", "SqlRuntimeTables", "SqlStepStore",
-    "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "open_sql_runtime",
+    "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "open_sql_runtime",
 ]

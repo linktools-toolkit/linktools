@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Explicit SQL schema initialization and validation."""
+"""Explicit SQL schema provisioning and runtime validation."""
 
 from typing import TYPE_CHECKING, Protocol
+
+from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._database import StorageDatabase, sql_constraint_signature
@@ -10,33 +12,56 @@ from ._database import StorageDatabase, sql_constraint_signature
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.engine import Connection
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
 class _SqlTypeValue(Protocol):
     def __str__(self) -> str: ...
 
+
+_logger = environ.get_logger("ai.storage.initialize")
+
+
 async def initialize_storage(database: StorageDatabase) -> None:
+    """Validate an existing storage schema before runtime access."""
     if not database.schema_manifest_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    await initialize_schema(database.engine, database.metadata)
-    async with database.engine.begin() as connection:
-        await connection.run_sync(_validate_schema, database)
+    await validate_schema(database.session_factory, database.metadata)
 
 
-async def initialize_schema(engine: "AsyncEngine", metadata: "MetaData") -> None:
-    async with engine.begin() as connection:
-        await connection.run_sync(metadata.create_all)
+async def validate_schema(
+    session_factory: "async_sessionmaker[AsyncSession]",
+    metadata: "MetaData",
+) -> None:
+    """Validate owned tables without issuing schema-changing statements."""
+    engine = await _resolve_engine(session_factory)
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(_validate_schema, metadata)
+    except AIError:
+        _logger.exception("SQL schema validation failed: table_count=%s", len(metadata.tables))
+        raise
+    _logger.info("SQL schema validated: table_count=%s", len(metadata.tables))
 
 
-def _validate_schema(connection: "Connection", database: StorageDatabase) -> None:
+async def _resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    async with session_factory() as session:
+        bound = session.bind
+    if not isinstance(bound, AsyncEngine):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    return bound
+
+
+def _validate_schema(connection: "Connection", metadata: "MetaData") -> None:
     from sqlalchemy import inspect
     inspector = inspect(connection)
     actual_tables = set(inspector.get_table_names())
-    expected_tables = set(database.metadata.tables)
-    if actual_tables != expected_tables:
+    expected_tables = set(metadata.tables)
+    if not expected_tables.issubset(actual_tables):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    for table_name, table in database.metadata.tables.items():
+    for table_name, table in metadata.tables.items():
         primary_key = set(inspector.get_pk_constraint(table_name).get("constrained_columns", ()))
         actual_columns = {
             f"{column['name']}:{_type_name(column['type'], column['name'])}:{int(bool(column['nullable']))}:{int(column['name'] in primary_key)}"
@@ -93,4 +118,4 @@ def _type_name(value: _SqlTypeValue, column_name: "str | None" = None) -> str:
     return name
 
 
-__all__ = ["initialize_schema", "initialize_storage"]
+__all__ = ["initialize_storage", "validate_schema"]

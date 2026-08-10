@@ -10,8 +10,11 @@ from linktools.ai import (
     RuntimeResources,
     open_runtime_resources,
 )
+from linktools.ai.adapter import SqlRuntimeSchema
 from linktools.ai.app import open_workspace_runtime
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeBackend
+from linktools.ai.storage import SqlSchemaRegistry
 from linktools.ai.workspace import Workspace
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -30,6 +33,7 @@ async def open_sql_resources(config: RuntimePersistenceConfig, *, connection_url
     engine: AsyncEngine = create_async_engine(url)
     session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        await _provision_sql_schema(engine, config)
         async with open_runtime_resources(config, session_factory=session_factory) as resources:
             yield resources
     finally:
@@ -47,6 +51,7 @@ async def _open_sql_workspace(
     engine = create_async_engine(url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
+        await _provision_sql_schema(engine, config)
         async with open_workspace_runtime(
             workspace,
             config=config,
@@ -56,3 +61,13 @@ async def _open_sql_workspace(
             yield runtime
     finally:
         await engine.dispose()
+
+
+async def _provision_sql_schema(engine: AsyncEngine, config: RuntimePersistenceConfig) -> None:
+    if config.backend is RuntimeBackend.SQLITE:
+        registry = SqlSchemaRegistry()
+        SqlRuntimeSchema.register_schema(registry)
+        async with engine.begin() as connection:
+            await connection.run_sync(registry.metadata.create_all)
+        return
+    await provision_database(engine)

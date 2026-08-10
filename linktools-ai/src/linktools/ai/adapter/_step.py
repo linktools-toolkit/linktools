@@ -27,9 +27,9 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemWriterLock,
     StorageDatabase,
-    initialize_schema,
     read_json,
     storage_name,
+    validate_schema,
     write_json_atomic,
 )
 from ._schema import new_step_metadata
@@ -296,8 +296,7 @@ class SqlStepStore:
         return self._schema_digest
 
     async def initialize(self) -> None:
-        await initialize_schema(self._database.engine, self._metadata)
-        await self._ensure_snapshot_state_column()
+        await validate_schema(self._sessions, self._metadata)
 
     async def close(self) -> None:
         return None
@@ -372,19 +371,6 @@ class SqlStepStore:
             rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id))).mappings().all()
         snapshots = [_snapshot_from_row(row) for row in rows]
         return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
-
-    async def _ensure_snapshot_state_column(self) -> None:
-        from sqlalchemy import inspect, text
-
-        table = self._tables["snapshots"]
-
-        async with self._database.engine.begin() as connection:
-            columns = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_columns(table.name))
-            if not any(str(column["name"]) == "state" for column in columns):
-                await connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN state VARCHAR(16) NOT NULL DEFAULT 'complete'"))
-            columns = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_columns(table.name))
-            if not any(str(column["name"]) == "state" for column in columns):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         from sqlalchemy import delete, insert
@@ -603,6 +589,12 @@ def _build_tables() -> tuple[object, dict[str, object]]:
     return metadata, tables
 
 
+def build_step_schema() -> "MetaData":
+    """Build StepStore metadata for explicit deployment schema provisioning."""
+    metadata, _ = _build_tables()
+    return metadata
+
+
 def _run_values(namespace_key: str, record: RunRecord) -> dict[str, object]:
     if record.conversation_id is None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -680,4 +672,4 @@ def _schema_digest(metadata: "MetaData") -> str:
     return hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
 
 
-__all__ = ["DurableFilesystemStepStore", "SqlMediaStore", "SqlStepStore"]
+__all__ = ["DurableFilesystemStepStore", "SqlMediaStore", "SqlStepStore", "build_step_schema"]

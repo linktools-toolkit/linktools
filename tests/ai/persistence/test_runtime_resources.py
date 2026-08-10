@@ -18,6 +18,7 @@ from linktools.ai import (
 )
 from linktools.ai.adapter import (
     DurableFilesystemStepStore,
+    SqlRuntimeSchema,
     build_filesystem_runtime,
     build_in_memory_runtime,
 )
@@ -31,6 +32,7 @@ from linktools.ai.core import (
     idempotency_key_hash,
 )
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import (
     ExecutionRecord,
     ExecutionStartClaim,
@@ -41,7 +43,9 @@ from linktools.ai.runtime import (
     SessionHeadAdvance,
     SessionRecord,
 )
+from linktools.ai.storage import SqlSchemaRegistry, validate_schema
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from tests.ai.persistence.helper import open_sql_resources
 
@@ -83,6 +87,37 @@ async def test_sql_resources_require_downstream_session_factory(tmp_path: Path) 
         async with open_runtime_resources(config):
             pass
     assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+
+
+@pytest.mark.asyncio
+async def test_sql_resources_validate_preprovisioned_schema_without_creating_tables(tmp_path: Path) -> None:
+    path = tmp_path / "runtime.db"
+    config = RuntimePersistenceConfig.sqlite(str(path), namespace="namespace", deployment_id="deployment")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    try:
+        with pytest.raises(AIError) as error:
+            async with open_runtime_resources(config, session_factory=session_factory):
+                pass
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        with sqlite3.connect(path) as connection:
+            tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
+        assert tables == set()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_schema_validation_allows_other_owner_tables(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    registry = SqlSchemaRegistry()
+    SqlRuntimeSchema.register_schema(registry)
+    try:
+        await provision_database(engine)
+        await validate_schema(session_factory, registry.metadata)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

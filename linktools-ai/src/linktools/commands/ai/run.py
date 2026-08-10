@@ -40,7 +40,7 @@ class Command(BaseCommand):
         parser.add_argument("--project", type=Path, default=None, help="working directory")
         parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--agent", default=None, help="agent id (default: project default)")
-        parser.add_argument("--memory-namespace", required=True, help="durable memory namespace")
+        parser.add_argument("--memory", default=None, help="durable memory namespace (default: workspace id)")
         parser.add_argument("--session", default="main", help="session id (default main)")
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
@@ -49,6 +49,7 @@ class Command(BaseCommand):
 
     def run(self, args: Namespace) -> int:
         workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+        memory_namespace = args.memory if args.memory is not None else workspace.workspace_id
         capabilities = build_workspace_capabilities(workspace.root)
         runner = WorkspaceAgentRunner(workspace.root, workspace.config, model=args.model, base_url=args.base_url, api_key=args.api_key, capabilities=capabilities)
         output_terminated = False
@@ -75,7 +76,7 @@ class Command(BaseCommand):
         async def execute() -> None:
             nonlocal output_terminated
             async with open_workspace_runtime(workspace, runner=runner) as runtime:
-                result = await runtime.run(args.session, args.prompt, agent_id=args.agent, memory_namespace=args.memory_namespace, on_event=on_event)
+                result = await runtime.run(args.session, args.prompt, agent_id=args.agent, memory_namespace=memory_namespace, on_event=on_event)
                 if args.json:
                     print(json.dumps({"type": "completed", "run_id": result.run_id}, ensure_ascii=False), flush=True)
                 elif not output_terminated:

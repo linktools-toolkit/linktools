@@ -4,6 +4,7 @@
 
 from ._root import Workspace, WorkspacePolicy, trusted_workspace_principal
 from ._sandbox import DisabledSandbox, Sandbox
+from ._skills import load_local_skill_catalog
 from ._tools import (
     WorkspaceTool,
     build_workspace_capabilities,
@@ -13,5 +14,5 @@ from ._tools import (
 
 __all__ = [
     "DisabledSandbox", "Sandbox", "Workspace", "WorkspacePolicy", "WorkspaceTool", "build_workspace_capabilities", "build_workspace_tool_map",
-    "build_workspace_tools", "trusted_workspace_principal",
+    "build_workspace_tools", "load_local_skill_catalog", "trusted_workspace_principal",
 ]

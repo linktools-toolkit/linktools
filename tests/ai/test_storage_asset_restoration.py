@@ -15,6 +15,8 @@ from linktools.ai.asset import (
     SqlAssetBackend,
     StrictConfigReader,
 )
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.storage import (
     TABLE_PREFIX,
     MySQLDialect,
@@ -153,7 +155,8 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
     tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
     backend = SqlAssetBackend(session_factory, namespace="history")
     try:
-        await backend.initialize_storage(engine)
+        await provision_database(engine)
+        await backend.initialize_storage()
         key = AssetKey("mcp", "history.yaml")
         first = await backend.put(key, b"one")
         second = await backend.put(key, b"two", expected_entry_revision=first.entry_revision)
@@ -174,6 +177,26 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert counts == [0, 3, 2, 1]
         assert not hasattr(tables.revision.c, "payload")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_backend_requires_preprovisioned_schema() -> None:
+    from sqlalchemy import inspect
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    SqlAssetBackend.register_schema(SqlSchemaRegistry())
+    backend = SqlAssetBackend(session_factory, namespace="missing")
+    try:
+        with pytest.raises(AIError) as error:
+            await backend.initialize_storage()
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
+        assert tables == []
     finally:
         await engine.dispose()
 

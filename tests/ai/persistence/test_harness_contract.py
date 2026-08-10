@@ -18,6 +18,7 @@ from linktools.ai.agent import (
 )
 from linktools.ai.core import step_conversation_id, step_run_id
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.compaction import DeduplicateFileReads
@@ -89,13 +90,48 @@ async def test_workspace_composition_uses_harness_capabilities_directly() -> Non
         parent_model=TestModel(call_tools=[]),
     )
 
-    assert tuple(type(item) for item in capabilities[:3]) == (StepPersistence, Memory, Planning)
+    assert isinstance(capabilities[0], StepPersistence)
+    assert isinstance(capabilities[1], Memory)
+    assert isinstance(capabilities[2], Planning)
     assert capabilities[3].__class__ is ConversationSearch
     assert capabilities[4].__class__ is SubAgents
     assert capabilities[5].__class__ is DynamicWorkflow
     assert capabilities[6].__class__ is DeduplicateFileReads
     assert all(isinstance(item, SubAgent) for item in capabilities[4].agents)
     assert all(isinstance(item, Agent) for item in capabilities[5].agents)
+
+
+@pytest.mark.asyncio
+async def test_tool_retry_closes_step_effect() -> None:
+    store = InMemoryStepStore()
+    capabilities = await compose_platform_capabilities(
+        AgentRunScope(
+            root=Path("."),
+            agent_name="agent",
+            conversation_id=None,
+            step_run_id="run",
+            segment_sequence=1,
+            memory_namespace=None,
+            step_store=store,
+            inherited_capabilities=(),
+            agent_catalog=AgentCatalogSnapshot(()),
+            memory_store=None,
+        ),
+        model_factory=lambda value: TestModel(call_tools=[]),
+        parent_model=TestModel(call_tools=[]),
+    )
+    agent = Agent(TestModel(call_tools=["fail_tool"]), capabilities=capabilities)
+
+    @agent.tool_plain
+    async def fail_tool() -> str:
+        raise ModelRetry("retry")
+
+    with pytest.raises(UnexpectedModelBehavior):
+        await agent.run("run", run_id="run", conversation_id="conversation")
+
+    assert await store.list_unresolved_tool_effects(run_id="run") == []
+    effect = await store.get_tool_effect(run_id="run", tool_call_id="pyd_ai_tool_call_id__fail_tool")
+    assert effect is not None and effect.status == "failed"
 
 
 def test_step_ids_are_scoped_and_fixed_width() -> None:

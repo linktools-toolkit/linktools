@@ -3,8 +3,13 @@
 
 """Dialect-independent SQL StepStore checks."""
 
+import pytest
 from linktools.ai.adapter import SqlMediaStore, SqlStepStore
+from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.storage import build_storage
 from pydantic_ai_harness.step_persistence import StepStore
+from sqlalchemy import MetaData, inspect
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
 def test_one_sql_step_store_implements_the_public_harness_protocol() -> None:
@@ -18,3 +23,20 @@ def test_sql_table_names_and_namespace_columns_are_separate() -> None:
     assert 'storage_name("step_events")' in source
     assert "namespace_key" in source
     assert "namespace=self._namespace" not in source
+
+
+@pytest.mark.asyncio
+async def test_sql_step_store_requires_preprovisioned_schema() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    database = build_storage(session_factory=session_factory, metadata=MetaData(), schema_manifest_digest="step-test")
+    store = SqlStepStore(database, session_factory, "namespace")
+    try:
+        with pytest.raises(AIError) as error:
+            await store.initialize()
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        async with engine.connect() as connection:
+            tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
+        assert tables == []
+    finally:
+        await engine.dispose()

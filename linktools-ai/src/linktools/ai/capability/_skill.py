@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill capability contracts, resolution, and Harness integration."""
+"""Skill catalog contracts, resolution, and Pydantic AI integration."""
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -153,23 +154,38 @@ async def snapshot_skill_catalog(catalog: SkillCatalogView) -> SkillCatalogSnaps
 class SkillCapability(AbstractCapability[None]):
     catalog: SkillCatalogView
 
+    def get_instructions(self) -> "Callable[[RunContext[None]], Awaitable[str | None]]":
+        async def render(ctx: RunContext[None]) -> "str | None":
+            del ctx
+            descriptors = await self.catalog.list_skills()
+            if not descriptors:
+                return None
+            lines = [
+                "The following skills are available for this agent run.",
+                "Use the `load_skill` tool to load the full instructions for a skill when it is relevant.",
+            ]
+            lines.extend(f"- {item.id}: {item.description}" for item in descriptors)
+            return "\n".join(lines)
+
+        return render
+
     def get_toolset(self) -> "FunctionToolset[None]":
         toolset = FunctionToolset[None](id="linktools-skill")
 
         @toolset.tool
         async def list_skills(ctx: RunContext[None]) -> "list[dict[str, str]]":
-            """List skills authorized for this agent run."""
+            """List skills available for this agent run."""
             del ctx
             descriptors = await self.catalog.list_skills()
             return [{"id": item.id, "description": item.description} for item in descriptors]
 
         @toolset.tool
         async def load_skill(ctx: RunContext[None], skill_id: str) -> "dict[str, str]":
-            """Load the selected authorized skill by id."""
+            """Load the full instructions for a selected skill."""
             del ctx
             specification = await self.catalog.load_skill(skill_id)
             if specification is None:
-                raise ValueError("skill unavailable")
+                raise ValueError("skill not found")
             return {"id": specification.id, "content": specification.content}
 
         return toolset
@@ -177,6 +193,16 @@ class SkillCapability(AbstractCapability[None]):
     @classmethod
     def get_serialization_name(cls) -> "str | None":
         return None
+
+
+async def merge_skill_catalogs(catalogs: "tuple[SkillCatalogView, ...]") -> SkillCatalogSnapshot:
+    descriptors: list[SkillDescriptor] = []
+    specifications: list[SkillSpec] = []
+    for catalog in catalogs:
+        snapshot = await snapshot_skill_catalog(catalog)
+        descriptors.extend(snapshot.descriptors)
+        specifications.extend(snapshot.specifications)
+    return SkillCatalogSnapshot(tuple(descriptors), tuple(specifications))
 
 
 def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, object]":
@@ -192,5 +218,5 @@ def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, objec
 
 __all__ = [
     "SkillCapability", "SkillCapabilityBinding", "SkillCapabilityResolver", "SkillCatalogSnapshot",
-    "SkillCatalogView", "SkillDescriptor", "SkillProvider", "snapshot_skill_catalog",
+    "SkillCatalogView", "SkillDescriptor", "SkillProvider", "merge_skill_catalogs", "snapshot_skill_catalog",
 ]

@@ -1,5 +1,5 @@
 {
-  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal", "app"],
+  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal", "app", "migrate"],
   "dependencies": {
     "core": [],
     "storage": ["core"],
@@ -14,7 +14,8 @@
     "workspace": ["core", "storage", "spec", "model", "capability"],
     "adapter": ["core", "storage", "spec", "model", "observe", "capability", "task", "runtime"],
     "temporal": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
-    "app": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal"]
+    "app": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal"],
+    "migrate": ["core", "storage", "asset", "adapter"]
   },
   "module_dependencies": {
     "adapter._sql": ["core", "storage", "runtime", "capability", "task"],
