@@ -104,7 +104,7 @@ class LayerMetadataView(Generic[KeyT, ValueT, InfoT]):
                     except Exception:
                         _logger.warning(
                             "storage revision source correction failed",
-                            exc_info=environ.debug,
+                            exc_info=True,
                         )
                     return self._state
         async with self._lock:

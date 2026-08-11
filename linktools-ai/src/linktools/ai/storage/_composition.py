@@ -757,7 +757,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 _logger.warning(
                     "storage revision notification failed",
                     extra={"error_code": ErrorCode.STORAGE_REVISION_NOTIFY_FAILED.value},
-                    exc_info=environ.debug,
+                    exc_info=True,
                 )
 
     async def list_versions(self, key: KeyT) -> 'tuple[VersionSummary, ...]':

@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 
-from ...ai.app import ACPApplication
+from ...ai.acp import ACPApplication
 from ...ai.workspace import Workspace
 
 if TYPE_CHECKING:

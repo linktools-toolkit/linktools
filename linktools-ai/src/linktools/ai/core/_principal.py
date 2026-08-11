@@ -83,6 +83,10 @@ class TenantAuthorizationPolicy:
             AuthorizationAction.SESSION_READ,
             AuthorizationAction.SESSION_UPDATE,
             AuthorizationAction.SESSION_CLOSE,
+            AuthorizationAction.EVENT_READ,
+            AuthorizationAction.TASK_RUN,
+            AuthorizationAction.TASK_READ,
+            AuthorizationAction.TASK_CANCEL,
             AuthorizationAction.TOOL_EXECUTE,
         }:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)

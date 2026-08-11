@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Agent declaration binding and execution boundaries."""
+"""Agent definition compilation and execution."""
 
-from ._binding import (
-    AgentBinder,
-    AgentBinding,
-    AgentBindingManifest,
-    AgentBindingRegistry,
-)
-from ._capabilities import (
-    AgentRunScope,
-    EmptyAgentCatalog,
-    EmptySkillCatalog,
-    compose_platform_capabilities,
-)
-from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
-from ._deps import AgentDeps
+from ._compiler import AgentCompiler
+from ._definition import AgentDefinition
+from ._executor import AgentExecutionResult, AgentExecutor, EventSink
+from ._providers import AssetMCPProvider, AssetSkillProvider, build_asset_capability_providers
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -24,18 +14,20 @@ from ._output import (
     OutputSchemaManifestEntry,
     OutputTypeRegistry,
 )
-from ._runner import (
-    AgentRunner,
-    BoundAgentRunner,
-    EventHandler,
-    WorkspaceAgentResult,
-    WorkspaceAgentRunner,
-)
 
 __all__ = [
-    "AgentBinder", "AgentBinding", "AgentBindingManifest", "AgentBindingRegistry", "AgentCatalogItem",
-    "AgentCatalogSnapshot", "AgentCatalogView", "AgentDeps", "AgentRunScope", "AgentRunner", "BoundAgentRunner", "EventHandler",
-    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID", "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION", "AssistantTextOutput", "EmptyAgentCatalog",
-    "EmptySkillCatalog", "OutputSchemaManifest", "OutputSchemaManifestEntry", "OutputTypeRegistry", "WorkspaceAgentResult",
-    "WorkspaceAgentRunner", "compose_platform_capabilities",
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID",
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION",
+    "AgentCompiler",
+    "AgentDefinition",
+    "AgentExecutionResult",
+    "AgentExecutor",
+    "AssetMCPProvider",
+    "AssetSkillProvider",
+    "AssistantTextOutput",
+    "EventSink",
+    "OutputSchemaManifest",
+    "OutputSchemaManifestEntry",
+    "OutputTypeRegistry",
+    "build_asset_capability_providers",
 ]

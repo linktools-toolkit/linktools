@@ -6,7 +6,7 @@ import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from ..core import (
@@ -203,6 +203,7 @@ class CreateSessionRequest:
     session_id: str
     create_request_id: str
     cwd: "str | None" = None
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.create_request_id)
@@ -225,7 +226,7 @@ class ResumeSessionRequest:
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
-        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
+        if self.memory_namespace is not None and (not isinstance(self.memory_namespace, str) or not self.memory_namespace.strip()):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
@@ -274,6 +275,7 @@ class SessionView:
     resource_generation: int = 0
     cwd: "str | None" = None
     active_execution_ids: "tuple[str, ...]" = ()
+    metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,12 +425,6 @@ class ExecutionEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionStreamItem:
-    event: ExecutionEvent
-    live: bool
-
-
-@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -558,39 +554,12 @@ class ExternalService(Protocol):
 
 class EventService(Protocol):
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
-    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionStreamItem]': ...
+    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionEvent]': ...
 
 
 class ArtifactService(Protocol):
     async def list(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ArtifactView]': ...
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload: ...
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeServices:
-    identity: RuntimeServiceIdentity
-    execution: ExecutionService
-    session: SessionService
-    task: TaskService
-    evaluation: EvaluationService
-    approval: ApprovalService
-    event: EventService
-    artifact: ArtifactService
-
-    def __post_init__(self) -> None:
-        if any(
-            service is None
-            for service in (
-                self.execution,
-                self.session,
-                self.task,
-                self.evaluation,
-                self.approval,
-                self.event,
-                self.artifact,
-            )
-        ):
-            raise ValueError("RuntimeServices requires all seven services")
 
 
 class PayloadService(Protocol):
@@ -635,11 +604,11 @@ __all__ = [
     "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
     "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
-    "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStreamItem", "ExecutionView",
+    "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
     "ExecutionHistoryItem", "ExecutionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
     "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
-    "RetryExecutionRequest", "RunEvaluationRequest", "RuntimeServices", "SessionService", "SessionView",
+    "RetryExecutionRequest", "RunEvaluationRequest", "SessionService", "SessionView",
     "TaskService", "TraceItem", "TranscriptItem", "UpdateSessionRequest",
     "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult", "RuntimeServiceIdentity", "new_runtime_service_identity",
 ]

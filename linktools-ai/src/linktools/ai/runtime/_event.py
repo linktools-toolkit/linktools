@@ -18,14 +18,14 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ._persistence import RuntimePersistence
-from ._services import ExecutionEvent, ExecutionStreamItem
+from ._services import ExecutionEvent
 
 _logger = environ.get_logger("ai.runtime.event")
 
 
 class EventApi(Protocol):
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
-    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionStreamItem]': ...
+    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionEvent]': ...
 
 
 class DefaultEventService:
@@ -44,7 +44,7 @@ class DefaultEventService:
         page = await self._persistence.events.list(execution_id, tenant_id=principal.tenant_id, after_sequence=after_sequence, limit=limit)
         return Page(tuple(ExecutionEvent(item.execution_id, item.sequence, item.event_type, item.payload) for item in page.items), page.next_cursor)
 
-    async def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> AsyncIterator[ExecutionStreamItem]:
+    async def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> AsyncIterator[ExecutionEvent]:
         cursor = after_sequence
         while True:
             page = await self.list(execution_id, principal=principal, after_sequence=cursor, limit=200)
@@ -56,7 +56,7 @@ class DefaultEventService:
                 continue
             for event in page.items:
                 cursor = event.sequence
-                yield ExecutionStreamItem(event, False)
+                yield event
                 if event.event_type in {
                     ExecutionEventType.EXECUTION_SUCCEEDED,
                     ExecutionEventType.EXECUTION_FAILED,

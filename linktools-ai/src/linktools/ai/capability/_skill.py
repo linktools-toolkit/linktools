@@ -13,7 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef, SkillSpec
-from ._contract import CapabilityRefResolution, CapabilityRuntimeContext
+from ._contract import CapabilityFeature, CapabilityRefResolution, CapabilityRuntimeContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +66,16 @@ class SkillCapabilityBinding:
     inherit_to_subagents: bool = True
 
     @property
+    def id(self) -> str:
+        return "skill"
+
+    @property
     def provider(self) -> str:
         return "skill"
+
+    @property
+    def features(self) -> "frozenset[CapabilityFeature]":
+        return frozenset({CapabilityFeature.TOOLS, CapabilityFeature.SKILLS})
 
     async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[AbstractCapability[None], ...]":
         del context

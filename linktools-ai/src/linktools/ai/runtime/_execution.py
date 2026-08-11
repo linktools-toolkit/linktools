@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -84,14 +84,9 @@ class ExecutionApi(ExecutionQueryApi, Protocol):
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
 
 
-class ExecutionLauncher(Protocol):
+class ExecutionBackend(Protocol):
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
-
-
-@runtime_checkable
-class BindingDigestValidator(Protocol):
-    def validate_binding(self, binding_digest: str) -> None: ...
 
 
 class CancelEffectOutcome(StrEnum):
@@ -107,15 +102,17 @@ class DefaultExecutionService:
         persistence: RuntimePersistence,
         authorization: AuthorizationPolicy,
         *,
-        launcher: "ExecutionLauncher | None" = None,
+        backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
         history_reader: ExecutionHistoryReader,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
-        self._launcher = launcher
+        self._backend = backend
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
         self._history_reader = history_reader
+        self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._session_locks_guard = asyncio.Lock()
 
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
         return await self._start(binding_digest, request, scope="execution.run")
@@ -126,12 +123,17 @@ class DefaultExecutionService:
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
 
     async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
+        if session_id is None:
+            return await self._start_unlocked(binding_digest, request, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind, scope=scope)
+        lock = await self._session_lock(request.principal.tenant_id, session_id)
+        async with lock:
+            return await self._start_unlocked(binding_digest, request, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind, scope=scope)
+
+    async def _start_unlocked(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        if self._launcher is None:
+        if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if isinstance(self._launcher, BindingDigestValidator):
-            self._launcher.validate_binding(binding_digest)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         memory_namespace = request.memory_namespace
@@ -174,6 +176,10 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.CANCELLED:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_CANCELLED)
             return ExecutionHandle(existing.execution_id)
+        if session_id is not None:
+            active = await self._persistence.executions.list_by_session(session_id, tenant_id=request.principal.tenant_id)
+            if any(item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} for item in active):
+                raise AIError(ErrorCode.SESSION_BUSY)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -235,14 +241,23 @@ class DefaultExecutionService:
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
 
+    async def _session_lock(self, tenant_id: str, session_id: str) -> asyncio.Lock:
+        key = tenant_id, session_id
+        async with self._session_locks_guard:
+            lock = self._session_locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._session_locks[key] = lock
+            return lock
+
     async def _launch_claim(self, request: ExecutionRequest, execution_id: str, tenant_id: str, scope: str, key_hash: str) -> None:
-        if self._launcher is None:
+        if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
             launch_record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
             if launch_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._launcher.start(request, launch_record)
+            await self._backend.start(request, launch_record)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
@@ -397,9 +412,9 @@ class DefaultExecutionService:
                 if resolved is not None:
                     return resolved
                 raise
-            if self._launcher is None:
+            if self._backend is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            outcome = await self._launcher.cancel(cancelling)
+            outcome = await self._backend.cancel(cancelling)
             if outcome is CancelEffectOutcome.UNKNOWN:
                 resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
                 if resolved is not None:
@@ -508,7 +523,7 @@ class DefaultExecutionService:
                     "execution cancellation ledger update failed: execution=%s operation=%s",
                     execution_id,
                     operation.operation_id,
-                    exc_info=environ.debug,
+                    exc_info=True,
                 )
             raise
         return CancelExecutionResult(execution_id, True)
@@ -715,4 +730,4 @@ def _stable_operation_error(error_code: "str | None") -> AIError:
         return AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-__all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionApi", "ExecutionLauncher", "ExecutionQueryApi"]
+__all__ = ["CancelEffectOutcome", "DefaultExecutionService", "ExecutionApi", "ExecutionBackend", "ExecutionQueryApi"]

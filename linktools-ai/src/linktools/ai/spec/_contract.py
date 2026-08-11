@@ -72,7 +72,7 @@ class AgentCapabilityRef:
     config: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.provider.strip() or not self.id.strip() or (self.revision is not None and self.revision < 1):
+        if not self.provider.strip() or not self.id.strip() or not isinstance(self.required, bool) or (self.revision is not None and self.revision < 1):
             raise ValueError("agent capability reference is invalid")
         object.__setattr__(self, "config", _ImmutableJsonMapping(self.config))
 
@@ -86,12 +86,17 @@ class AgentSpec:
     output_schema: str
     output_schema_revision: int
     instructions: "tuple[str, ...]" = ()
+    allow_tools: bool = True
+    allow_skills: bool = True
+    allow_subagents: bool = False
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
             raise ValueError("agent spec is incomplete")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
+        if not isinstance(self.allow_tools, bool) or not isinstance(self.allow_skills, bool) or not isinstance(self.allow_subagents, bool):
+            raise ValueError("agent capability policy is invalid")
         object.__setattr__(self, "instructions", tuple(self.instructions))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
         unique: dict[tuple[str, str], AgentCapabilityRef] = {}

@@ -79,7 +79,7 @@ class DefaultSessionService:
     async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
         resource = ResourceRef(ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
-        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest})
+        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest, "metadata": dict(request.metadata)})
         operation = await self._begin_operation(request.create_request_id, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
         if operation.result_ref:
             current = await self._persistence.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
@@ -95,7 +95,7 @@ class DefaultSessionService:
             revision=0,
             resource_generation=0,
             cwd=request.cwd,
-            metadata={},
+            metadata=dict(request.metadata),
             created_at=now,
             updated_at=now,
             closed_at=None,
@@ -172,7 +172,7 @@ class DefaultSessionService:
             revision=0,
             resource_generation=0,
             cwd=source.cwd if request.cwd is None else request.cwd,
-            metadata={},
+            metadata=dict(source.metadata),
             created_at=now,
             updated_at=now,
             closed_at=None,
@@ -203,6 +203,10 @@ class DefaultSessionService:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_UPDATE)
         if current.binding_digest != binding_digest:
             raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+        if any(key.startswith("linktools.ai.") and current.metadata.get(key) != value for key, value in request.metadata.items()):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if any(key.startswith("linktools.ai.") for key in current.metadata if key not in request.metadata):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
         operation = await self._begin_operation(request.mutation_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
         if operation.result_ref:
@@ -314,7 +318,7 @@ class DefaultSessionService:
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
         executions = await self._persistence.executions.list_by_session(record.session_id, tenant_id=principal.tenant_id)
         active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
-        return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active)
+        return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active, record.metadata)
 
     async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
         operation_id = idempotency_key_hash(operation_id)

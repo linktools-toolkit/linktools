@@ -175,7 +175,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 if isinstance(record, SessionRecord):
                     values.update(session_id=record.session_id, profile="", head_execution_id=record.head_execution_id)
                 if isinstance(record, ExecutionRecord):
-                    values.update(session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
+                    values.update(sequence=record.event_sequence, session_id=record.session_id, parent_execution_id=record.parent_execution_id, source_execution_id=record.source_execution_id, base_execution_id=record.base_execution_id, lineage_kind=record.lineage_kind, agent_run_sequence=record.agent_run_sequence)
                 if isinstance(record, ToolOperationRecord):
                     values.update(run_id=record.run_id, tool_call_id=record.tool_call_id, call_key=_composite_key(record.run_id, record.tool_call_id), owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at)
                 if isinstance(record, TaskNodeView):
@@ -976,7 +976,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 next_value = expected_sequence + 1
                 updated_execution = replace(current, **{field: next_value, "revision": current.revision + 1, "updated_at": datetime.now(timezone.utc)})
-                outcome = await session.execute(update(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == tenant_id, execution_table.c.record_id == execution_id, execution_table.c.revision == current.revision).values(payload=_encode_payload(updated_execution), revision=updated_execution.revision, updated_at=updated_execution.updated_at))
+                outcome = await session.execute(update(execution_table).where(execution_table.c.namespace_key == self.namespace_key, execution_table.c.tenant_id == tenant_id, execution_table.c.record_id == execution_id, execution_table.c.revision == current.revision).values(payload=_encode_payload(updated_execution), revision=updated_execution.revision, sequence=updated_execution.event_sequence, updated_at=updated_execution.updated_at))
                 if outcome.rowcount != 1:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 item = ExecutionEventRecord(execution_id, tenant_id, next_value, event_type, payload)

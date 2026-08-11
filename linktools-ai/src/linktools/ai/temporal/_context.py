@@ -2,16 +2,17 @@
 # -*- coding: utf-8 -*-
 """Versioned Temporal workflow run context."""
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..agent import AgentDeps
 from ..core import canonical_json_bytes
 
 
 class TemporalRunContext(BaseModel):
     model_config = ConfigDict(frozen=True)
     version: int = Field(default=1, ge=1)
-    deps: "AgentDeps | None" = None
+    deps: "dict[str, Any] | None" = None
     execution_id: str
     run_id: str
     conversation_id: "str | None" = None

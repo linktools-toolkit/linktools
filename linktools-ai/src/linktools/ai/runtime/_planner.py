@@ -3,6 +3,7 @@
 """Persistence-backed task service used by the runtime composition root."""
 
 import asyncio
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -16,10 +17,12 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    ExecutionStatus,
     TaskStatus,
     canonical_sha256,
     idempotency_key_hash,
 )
+from ..agent import AgentDefinition
 from ..errors import AIError, ErrorCode
 from ..task import (
     CancelGraphRequest,
@@ -28,6 +31,9 @@ from ..task import (
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
+    TaskDependencyResult,
+    TaskNode,
+    TaskNodeRunResult,
     TaskNodeResult,
 )
 from ._persistence import (
@@ -36,8 +42,51 @@ from ._persistence import (
     RuntimePersistence,
 )
 from ._services import WorkflowGateway
+from ._services import ExecutionRequest, ExecutionService
 
 _logger = environ.get_logger("ai.runtime.planner")
+
+
+class RuntimeTaskNodeRunner:
+    """Run task nodes through the canonical ExecutionService boundary."""
+
+    def __init__(
+        self,
+        execution: ExecutionService,
+        definitions: "Mapping[str, AgentDefinition]",
+        *,
+        prompt_factory: "Callable[[TaskNode, Mapping[str, TaskDependencyResult]], str] | None" = None,
+    ) -> None:
+        self._execution = execution
+        self._definitions = definitions
+        self._prompt_factory = prompt_factory or _default_task_prompt
+
+    async def run(
+        self,
+        node: TaskNode,
+        *,
+        graph_id: str,
+        principal: Principal,
+        dependency_results: "Mapping[str, TaskDependencyResult]",
+    ) -> "TaskNodeRunResult":
+        if node.binding_digest is None or node.binding_digest not in self._definitions:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
+        prompt = self._prompt_factory(node, dependency_results)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        request = ExecutionRequest(
+            prompt=prompt,
+            principal=principal,
+            idempotency_key=canonical_sha256({"graph_id": graph_id, "task_id": node.task_id, "definition": node.binding_digest}),
+            memory_namespace=None,
+        )
+        handle = await self._execution.run(node.binding_digest, request)
+        result = await self._execution.wait(handle.execution_id, principal=principal)
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            raise AIError(ErrorCode.EXECUTION_FAILED)
+        if result.output is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return TaskNodeRunResult(canonical_sha256(result.output), result.execution_id)
 
 
 class DefaultTaskService:
@@ -347,7 +396,12 @@ class WorkflowTaskGraphLauncher:
         return await self._gateway.cancel_task_graph(graph_id, request.cancel_request_id)
 
 
-__all__ = ["DefaultTaskService", "WorkflowTaskGraphLauncher"]
+def _default_task_prompt(node: TaskNode, dependency_results: Mapping[str, TaskDependencyResult]) -> str:
+    del dependency_results
+    return node.task_id
+
+
+__all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]
 
 
 def _operation_conflict(operation: OperationLedgerRecord) -> AIError:

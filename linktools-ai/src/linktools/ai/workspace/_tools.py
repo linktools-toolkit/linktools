@@ -12,16 +12,14 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
-from ..capability import SkillCapability
+from ..capability import CapabilityFeature, StaticCapabilityBinding
 from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
-from ._skills import load_local_skill_catalog
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from pydantic_ai.capabilities import AgentCapability
 
 _logger = environ.get_logger("ai.workspace.tools")
 
@@ -135,20 +133,25 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     return cast(tuple[WorkspaceTool, ...], (list_dir, read_file, write_file, bash))
 
 
-def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[None], ...]':
+def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[StaticCapabilityBinding, ...]':
     project_root = Path(root).expanduser().resolve()
     _logger.debug("local workspace tools configured root=%s", project_root)
-    capabilities: list[AgentCapability[None]] = [
-        FileSystem(root_dir=project_root),
-        Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS),
-    ]
-    skill_library = project_root / ".linktools" / "skills"
-    if skill_library.is_dir():
-        skill_catalog = load_local_skill_catalog(skill_library)
-        if skill_catalog.descriptors:
-            capabilities.append(SkillCapability(skill_catalog))
-            _logger.debug("local skills loaded root=%s count=%s", skill_library, len(skill_catalog.descriptors))
-    return tuple(capabilities)
+    filesystem = FileSystem(root_dir=project_root)
+    shell = Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+    return (
+        StaticCapabilityBinding(
+            "workspace-filesystem",
+            frozenset({CapabilityFeature.TOOLS}),
+            canonical_sha256({"kind": "filesystem", "root": project_root.as_posix(), "version": 1}),
+            filesystem,
+        ),
+        StaticCapabilityBinding(
+            "workspace-shell",
+            frozenset({CapabilityFeature.TOOLS}),
+            canonical_sha256({"kind": "shell", "root": project_root.as_posix(), "version": 1}),
+            shell,
+        ),
+    )
 
 
 def build_workspace_tool_map(root: 'str | Path') -> 'Mapping[str, WorkspaceTool]':
@@ -214,4 +217,4 @@ def _kill_process_group(pid: int) -> None:
         return
 
 
-__all__ = ["WorkspaceTool", "build_workspace_capabilities", "build_workspace_tool_map", "build_workspace_tools"]
+__all__ = ["WorkspaceTool", "build_workspace_capability_grants", "build_workspace_tool_map", "build_workspace_tools"]

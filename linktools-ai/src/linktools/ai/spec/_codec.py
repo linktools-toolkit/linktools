@@ -46,6 +46,9 @@ class AgentSpecCodec:
                 "output_schema": value.output_schema,
                 "output_schema_revision": value.output_schema_revision,
                 "instructions": list(value.instructions),
+                "allow_tools": value.allow_tools,
+                "allow_skills": value.allow_skills,
+                "allow_subagents": value.allow_subagents,
                 "metadata": dict(value.metadata),
             }
         )
@@ -59,7 +62,7 @@ class AgentSpecCodec:
                 str(item["provider"]),
                 str(item["id"]),
                 item.get("revision"),
-                bool(item.get("required", True)),
+                _strict_bool(item, "required", True),
                 cast("dict[str, object]", item.get("config", {})),
             )
             for item in cast("list[dict[str, object]]", raw["capabilities"])
@@ -72,6 +75,9 @@ class AgentSpecCodec:
             str(raw["output_schema"]),
             int(raw["output_schema_revision"]),
             tuple(str(item) for item in cast("list[object]", raw.get("instructions", []))),
+            _strict_bool(raw, "allow_tools", True),
+            _strict_bool(raw, "allow_skills", True),
+            _strict_bool(raw, "allow_subagents", False),
             cast("dict[str, object]", raw.get("metadata", {})),
         )
 
@@ -180,6 +186,13 @@ def _decode(data: bytes) -> "dict[str, object]":
     value = json.loads(data.decode("utf-8"))
     if not isinstance(value, dict):
         raise ValueError("spec payload must be a JSON object")
+    return value
+
+
+def _strict_bool(raw: Mapping[str, object], name: str, default: bool) -> bool:
+    value = raw.get(name, default)
+    if not isinstance(value, bool):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a boolean")
     return value
 
 

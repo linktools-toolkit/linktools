@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run-scoped Harness and platform capability composition."""
+"""Execution-scoped Pydantic AI infrastructure capabilities."""
 
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,15 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from linktools.core import environ
-from pydantic_ai import Agent
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.capabilities import WrapToolExecuteHandler
-from pydantic_ai.exceptions import (
-    ModelRetry,
-    ToolFailed,
-    ToolFailedError,
-    ToolRetryError,
-)
+from pydantic_ai.exceptions import ModelRetry, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -26,21 +20,12 @@ from pydantic_ai_harness.compaction import (
     SummarizingCompaction,
     TieredCompaction,
 )
-from pydantic_ai_harness.conversation_search import (
-    ConversationSearch,
-    SnapshotHistorySource,
-)
-from pydantic_ai_harness.dynamic_workflow import DynamicWorkflow
 from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
-from pydantic_ai_harness.subagents import SubAgent, SubAgents
 
-from ..capability import SkillCatalogView, SkillDescriptor
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..spec import SkillSpec
-from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
 
 _logger = environ.get_logger("ai.agent.capabilities")
 
@@ -57,9 +42,9 @@ class _RetryAwareStepPersistence(StepPersistence[None]):
     ) -> Any:
         try:
             return await super().wrap_tool_execute(ctx, call=call, tool_def=tool_def, args=args, handler=handler)
-        except (ModelRetry, ToolFailed, ToolFailedError, ToolRetryError) as error:
+        except (ModelRetry, ToolRetryError) as error:
             _logger.debug(
-                "workspace tool failure closed effect: run=%s tool=%s call=%s",
+                "tool effect marked failed: run=%s tool=%s call=%s",
                 self.run_id or ctx.run_id,
                 tool_def.name,
                 call.tool_call_id,
@@ -77,10 +62,8 @@ class AgentRunScope:
     segment_sequence: "int | None"
     memory_namespace: "str | None"
     step_store: StepStore
-    inherited_capabilities: "tuple[PydanticAgentCapability[None], ...]"
-    agent_catalog: AgentCatalogView
     memory_store: "SearchableMemoryStore | None"
-    enable_subagents: bool = True
+    allow_tools: bool = True
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
 
@@ -91,8 +74,9 @@ async def compose_platform_capabilities(
     model_factory: Callable[["str | Model | None"], "str | Model"],
     parent_model: "str | Model",
 ) -> "tuple[PydanticAgentCapability[None], ...]":
+    del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
-    capabilities: "list[PydanticAgentCapability[None]]" = [
+    capabilities: list[PydanticAgentCapability[None]] = [
         _RetryAwareStepPersistence(
             store=scope.step_store,
             agent_name=scope.agent_name,
@@ -105,98 +89,21 @@ async def compose_platform_capabilities(
             },
         )
     ]
-    if scope.memory_namespace is not None:
-        if scope.memory_store is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
-    capabilities.append(Planning())
-    if scope.conversation_id:
-        capabilities.append(ConversationSearch(SnapshotHistorySource(scope.step_store), scope="conversation"))
-    agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents()) if scope.enable_subagents else AgentCatalogSnapshot(())
-    agent_folders = _local_agent_folders(scope.root) if scope.enable_subagents else ()
-    if agent_folders:
-        _logger.debug("local sub-agent folders loaded: %s", ",".join(str(folder) for folder in agent_folders))
-    if agent_catalog.items or agent_folders:
-        child_agents = _build_child_agents(scope, agent_catalog.items, model_factory=model_factory, parent_model=parent_model)
-        capabilities.append(
-            SubAgents(
-                agents=[SubAgent(child) for child in child_agents],
-                agent_folders=agent_folders or None,
-                inherit_tools=False,
-                forward_usage=True,
-            )
-        )
-        if child_agents:
-            capabilities.append(DynamicWorkflow(agents=child_agents))
+    if scope.allow_tools:
+        if scope.memory_namespace is not None:
+            if scope.memory_store is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            capabilities.append(Memory(store=scope.memory_store, namespace=scope.memory_namespace, agent_name="memory", inject_memory=False))
+        capabilities.append(Planning())
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.debug(
-        "Harness platform capabilities composed: agent=%s conversation=%s step=%s capability_count=%s inherited_count=%s agent_count=%s namespace_digest=%s",
+        "platform capabilities composed: agent=%s step=%s tools=%s count=%s namespace_digest=%s",
         scope.agent_name,
-        bool(scope.conversation_id),
         scope.step_run_id,
+        scope.allow_tools,
         len(capabilities),
-        len(scope.inherited_capabilities),
-        len(agent_catalog.items),
-        None if scope.memory_namespace is None else _namespace_digest(scope.memory_namespace),
+        None if scope.memory_namespace is None else canonical_sha256(scope.memory_namespace),
     )
-    return tuple(capabilities)
-
-
-def _build_child_agents(
-    scope: AgentRunScope,
-    items: tuple[AgentCatalogItem, ...],
-    *,
-    model_factory: Callable[["str | Model | None"], "str | Model"],
-    parent_model: "str | Model",
-) -> "list[Agent[None, str]]":
-    children: "list[Agent[None, str]]" = []
-    for item in items:
-        model = model_factory(item.model if item.model is not None else parent_model)
-        child_scope = AgentRunScope(
-            root=scope.root,
-            agent_name=item.name,
-            conversation_id=None,
-            step_run_id="",
-            segment_sequence=None,
-            memory_namespace=scope.memory_namespace,
-            step_store=scope.step_store,
-            inherited_capabilities=scope.inherited_capabilities,
-            agent_catalog=AgentCatalogSnapshot(()),
-            memory_store=scope.memory_store,
-            enable_subagents=False,
-            context_target_tokens=scope.context_target_tokens,
-        )
-        child_capabilities = _compose_child_capabilities(child_scope, item.name)
-        children.append(
-            Agent(
-                model,
-                name=item.name,
-                description=item.description,
-                instructions=item.instructions,
-                capabilities=child_capabilities,
-            )
-        )
-        _logger.debug("Harness child agent composed: agent=%s capability_count=%s", item.name, len(child_capabilities))
-    return children
-
-
-def _compose_child_capabilities(scope: AgentRunScope, agent_name: str) -> "tuple[PydanticAgentCapability[None], ...]":
-    _validate_compaction_target(scope.context_target_tokens)
-    capabilities: "list[PydanticAgentCapability[None]]" = list(scope.inherited_capabilities)
-    capabilities.append(
-        _RetryAwareStepPersistence(
-            store=scope.step_store,
-            agent_name=agent_name,
-            run_id=None,
-            metadata={"capability_scope": "child", "agent_name": agent_name},
-        )
-    )
-    if scope.memory_namespace is not None:
-        if scope.memory_store is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        capabilities.append(Memory(store=scope.memory_store, namespace="", agent_name="memory", inject_memory=False))
-    capabilities.append(Planning())
-    capabilities.append(_build_compaction(scope.context_target_tokens))
     return tuple(capabilities)
 
 
@@ -211,13 +118,12 @@ def _build_compaction(context_target_tokens: "int | None") -> PydanticAgentCapab
 
 
 def _validate_compaction_target(context_target_tokens: "int | None") -> None:
-    if context_target_tokens is not None and (not isinstance(context_target_tokens, int) or isinstance(context_target_tokens, bool) or context_target_tokens <= 0):
+    if context_target_tokens is not None and (
+        not isinstance(context_target_tokens, int)
+        or isinstance(context_target_tokens, bool)
+        or context_target_tokens <= 0
+    ):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-
-def _local_agent_folders(root: Path) -> "tuple[Path, ...]":
-    folders = (root / ".linktools" / "agents", root / ".linktools" / "subagents")
-    return tuple(folder for folder in folders if folder.is_dir())
 
 
 def _workspace_file_key(part: ToolCallPart) -> "str | None":
@@ -231,24 +137,4 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
     return path if isinstance(path, str) else None
 
 
-def _namespace_digest(namespace: str) -> str:
-    return canonical_sha256(namespace)
-
-
-@dataclass(frozen=True, slots=True)
-class EmptySkillCatalog(SkillCatalogView):
-    async def list_skills(self) -> "tuple[SkillDescriptor, ...]":
-        return ()
-
-    async def load_skill(self, skill_id: str) -> "SkillSpec | None":
-        del skill_id
-        return None
-
-
-@dataclass(frozen=True, slots=True)
-class EmptyAgentCatalog(AgentCatalogView):
-    async def list_agents(self) -> "tuple[AgentCatalogItem, ...]":
-        return ()
-
-
-__all__ = ["AgentRunScope", "EmptyAgentCatalog", "EmptySkillCatalog", "compose_platform_capabilities"]
+__all__ = ["AgentRunScope", "compose_platform_capabilities"]

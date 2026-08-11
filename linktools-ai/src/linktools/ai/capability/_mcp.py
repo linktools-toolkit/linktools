@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from pydantic_ai.capabilities import Toolset as PydanticToolset
+from pydantic_ai.capabilities.mcp import MCP
 from pydantic_ai.toolsets import AbstractToolset
 
 from ..core import (
@@ -19,6 +19,7 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef, MCPServerSpec
 from ._contract import (
+    CapabilityFeature,
     CapabilityRefResolution,
     CapabilityRuntimeContext,
     validate_fingerprint,
@@ -76,10 +77,18 @@ class MCPServerCapabilityBinding:
     inherit_to_subagents: bool = False
 
     @property
+    def id(self) -> str:
+        return "mcp"
+
+    @property
     def provider(self) -> str:
         return "mcp"
 
-    async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[PydanticToolset[None], ...]":
+    @property
+    def features(self) -> "frozenset[CapabilityFeature]":
+        return frozenset({CapabilityFeature.TOOLS})
+
+    async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[MCP[None], ...]":
         if not self.servers:
             return ()
         toolsets = await self.runtime.toolsets(
@@ -88,7 +97,7 @@ class MCPServerCapabilityBinding:
             execution=context.execution,
         )
         _validate_mcp_toolsets(toolsets)
-        return tuple(PydanticToolset(toolset) for toolset in toolsets)
+        return tuple(MCP(local=toolset, id=toolset.id) for toolset in toolsets)
 
 
 def bind_mcp_capability(

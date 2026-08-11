@@ -5,6 +5,7 @@
 import asyncio
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -24,6 +25,7 @@ from ..errors import AIError, ErrorCode
 from ..runtime import BlobRef, MemoryRecord, OperationLedgerInput, RuntimePersistence
 
 _logger = environ.get_logger("ai.adapter.memory")
+_MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 
 class RuntimeMemoryStore(SearchableMemoryStore):
@@ -155,7 +157,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         normalized_prefix = self._prefix(prefix)
         records = await self._list_records()
         result = sorted(
-            (f"memory/{item.metadata['path']}" for item in records if isinstance(item.metadata.get("path"), str)),
+            (item.metadata["path"] for item in records if isinstance(item.metadata.get("path"), str)),
         )
         return [path for path in result if path.startswith(normalized_prefix)][:limit]
 
@@ -177,7 +179,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             record
             for record in records
             if isinstance(record.metadata.get("path"), str)
-            and f"memory/{record.metadata['path']}".startswith(normalized_prefix)
+            and record.metadata["path"].startswith(normalized_prefix)
         ]
         matching_records.sort(key=lambda record: str(record.metadata["path"]))
         files_truncated = len(matching_records) > max_files
@@ -190,7 +192,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             logical_path = record.metadata.get("path")
             if not isinstance(logical_path, str):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            path = f"memory/{logical_path}"
+            path = logical_path
             scanned += 1
             full_content = await self._content(record)
             content_truncated = content_truncated or len(full_content) > max_file_chars
@@ -262,17 +264,20 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return MemoryConflictError("memory version conflict")
 
     def _path(self, path: str) -> str:
-        if not path.startswith("memory/"):
-            raise ValueError("memory path is outside the memory namespace")
-        logical_path = path.removeprefix("memory/")
-        if not logical_path or logical_path.startswith("/") or ".." in logical_path.split("/") or "\x00" in logical_path:
+        if not isinstance(path, str) or not path or any(
+            not _MEMORY_PATH_SEGMENT.fullmatch(segment) for segment in path.split("/")
+        ):
             raise ValueError("memory path is invalid")
-        return logical_path
+        return path
 
     def _prefix(self, prefix: str) -> str:
-        if prefix in {"", "memory", "memory/"}:
-            return "memory/"
-        return f"memory/{self._path(prefix.rstrip('/'))}/"
+        if prefix == "":
+            return ""
+        normalized = prefix.rstrip("/")
+        if not normalized:
+            raise ValueError("memory prefix is invalid")
+        self._path(normalized)
+        return f"{normalized}/"
 
 
 def _operation_input(operation: MemoryOperation | None, namespace_digest: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> OperationLedgerInput | None:

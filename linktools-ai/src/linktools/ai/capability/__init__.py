@@ -4,9 +4,11 @@
 
 from ._contract import (
     CapabilityBinding,
-    CapabilityInjection,
+    CapabilityFeature,
+    CapabilityProvider,
     CapabilityRefResolution,
     CapabilityRuntimeContext,
+    StaticCapabilityBinding,
     UnresolvedCapabilityBinding,
     group_capability_refs,
     unresolved_binding,
@@ -20,6 +22,7 @@ from ._mcp import (
     bind_mcp_capability,
     validate_mcp_response,
 )
+from ._mcp_runtime import PydanticMCPRuntimeProvider
 from ._retrieval import RetrievalProvider
 from ._skill import (
     SkillCapability,
@@ -33,10 +36,10 @@ from ._skill import (
 )
 
 __all__ = [
-    "CapabilityBinding", "CapabilityInjection", "CapabilityRefResolution", "CapabilityRuntimeContext",
-    "MCPCallRequest", "MCPConnectionPool", "MCPRuntimeProvider", "MCPServerCapabilityBinding",
+    "CapabilityBinding", "CapabilityFeature", "CapabilityProvider", "CapabilityRefResolution", "CapabilityRuntimeContext",
+    "MCPCallRequest", "MCPConnectionPool", "MCPRuntimeProvider", "MCPServerCapabilityBinding", "PydanticMCPRuntimeProvider",
     "RetrievalProvider", "SkillCapability", "SkillCapabilityBinding", "SkillCatalogSnapshot", "SkillCatalogView",
     "SkillDescriptor", "UnresolvedCapabilityBinding", "bind_mcp_capability", "bind_skill_capability",
-    "group_capability_refs", "merge_skill_catalogs", "snapshot_skill_catalog", "unresolved_binding",
+    "group_capability_refs", "merge_skill_catalogs", "snapshot_skill_catalog", "unresolved_binding", "StaticCapabilityBinding",
     "validate_fingerprint", "validate_mcp_response",
 ]

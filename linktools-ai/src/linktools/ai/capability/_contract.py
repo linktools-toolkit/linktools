@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability binding and runtime materialization contracts."""
+"""Capability provider, binding, and execution-context contracts."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
@@ -13,6 +14,12 @@ from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
 
 _FINGERPRINT_LENGTH = 64
+
+
+class CapabilityFeature(StrEnum):
+    TOOLS = "tools"
+    SKILLS = "skills"
+    SUBAGENTS = "subagents"
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +62,13 @@ class CapabilityRuntimeContext:
 
 class CapabilityBinding(Protocol):
     @property
+    def id(self) -> str: ...
+
+    @property
     def provider(self) -> str: ...
+
+    @property
+    def features(self) -> "frozenset[CapabilityFeature]": ...
 
     @property
     def resolutions(self) -> "tuple[CapabilityRefResolution, ...]": ...
@@ -72,18 +85,37 @@ class CapabilityBinding(Protocol):
     ) -> "tuple[PydanticAgentCapability[None], ...]": ...
 
 
+class CapabilityProvider(Protocol):
+    @property
+    def provider(self) -> str: ...
+
+    async def bind(
+        self,
+        refs: "tuple[AgentCapabilityRef, ...]",
+    ) -> CapabilityBinding: ...
+
+
 @dataclass(frozen=True, slots=True)
-class CapabilityInjection:
+class StaticCapabilityBinding:
+    """Wrap one application-authorized capability as an immutable grant."""
+
     id: str
+    features: "frozenset[CapabilityFeature]"
     fingerprint: str
     capability: "PydanticAgentCapability[None]"
     inherit_to_subagents: bool = True
+    provider: str = "application"
+    resolutions: "tuple[CapabilityRefResolution, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not self.id.strip():
-            raise ValueError("capability injection id is required")
-        if not _is_fingerprint(self.fingerprint):
-            raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+        if not self.id.strip() or not self.provider.strip() or self.capability is None:
+            raise ValueError("static capability binding is incomplete")
+        _validate_features(self.features)
+        validate_fingerprint(self.fingerprint)
+
+    async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[PydanticAgentCapability[None], ...]":
+        del context
+        return (self.capability,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,12 +124,18 @@ class UnresolvedCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]"
     fingerprint: str
     inherit_to_subagents: bool = False
+    features: "frozenset[CapabilityFeature]" = frozenset()
+
+    @property
+    def id(self) -> str:
+        return f"unresolved:{self.provider}"
 
     def __post_init__(self) -> None:
         if not self.provider.strip() or not _is_fingerprint(self.fingerprint):
-            raise ValueError("unresolved capability binding is invalid")
+            raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
         if not self.resolutions or any(item.status != "unresolved" for item in self.resolutions):
             raise ValueError("unresolved capability binding requires unresolved resolutions")
+        _validate_features(self.features)
 
     async def materialize(
         self,
@@ -116,8 +154,10 @@ def unresolved_binding(provider: str, refs: Sequence[AgentCapabilityRef]) -> Unr
             {
                 "provider": provider,
                 "status": "UNRESOLVED_PROVIDER",
+                "features": [],
                 "refs": [
                     {
+                        "provider": ref.provider,
                         "id": ref.id,
                         "requested_revision": ref.revision,
                         "required": ref.required,
@@ -144,16 +184,21 @@ def group_capability_refs(
     return tuple((provider, tuple(grouped[provider])) for provider in order)
 
 
-def _is_fingerprint(value: "str | None") -> bool:
-    return isinstance(value, str) and len(value) == _FINGERPRINT_LENGTH and all(character in "0123456789abcdef" for character in value)
-
-
 def validate_fingerprint(value: str) -> None:
     if not _is_fingerprint(value):
         raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
 
 
+def _validate_features(features: frozenset[CapabilityFeature]) -> None:
+    if not isinstance(features, frozenset) or any(not isinstance(feature, CapabilityFeature) for feature in features):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+
+
+def _is_fingerprint(value: "str | None") -> bool:
+    return isinstance(value, str) and len(value) == _FINGERPRINT_LENGTH and all(character in "0123456789abcdef" for character in value)
+
+
 __all__ = [
-    "CapabilityBinding", "CapabilityInjection", "CapabilityRefResolution", "CapabilityRuntimeContext",
-    "UnresolvedCapabilityBinding", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
+    "CapabilityBinding", "CapabilityFeature", "CapabilityProvider", "CapabilityRefResolution", "CapabilityRuntimeContext",
+    "StaticCapabilityBinding", "UnresolvedCapabilityBinding", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
 ]

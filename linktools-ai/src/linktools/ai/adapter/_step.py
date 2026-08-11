@@ -136,7 +136,7 @@ class DurableFilesystemStepStore:
                 "parent_run_id": snapshot.parent_run_id,
                 "agent_name": snapshot.agent_name,
                 "timestamp": _file_time_json(snapshot.timestamp),
-                "state": snapshot.state,
+                "state": "complete",
                 "messages": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages)),
             }
             write_json_atomic(directory / f"snapshot-{index:020d}.json", payload, fsync=True)
@@ -147,17 +147,21 @@ class DurableFilesystemStepStore:
             self._ensure_open()
             paths = sorted((self._run_path(run_id).parent / "snapshots").glob("snapshot-*.json"))
             for path in reversed(paths):
-                snapshot = _file_snapshot_from_json(_file_read(path))
-                if include_interrupted or snapshot.state == "complete":
-                    return snapshot
+                value = _file_read(path)
+                if include_interrupted or value.get("state", "complete") == "complete":
+                    return _file_snapshot_from_json(value)
             return None
 
     async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
         async with self._lock:
             self._ensure_open()
             directory = self._run_path(run_id).parent / "snapshots"
-            snapshots = [_file_snapshot_from_json(_file_read(path)) for path in sorted(directory.glob("snapshot-*.json"))]
-            return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
+            snapshots = [
+                _file_snapshot_from_json(value)
+                for path in sorted(directory.glob("snapshot-*.json"))
+                if (value := _file_read(path)).get("state", "complete") == "complete"
+            ]
+            return snapshots
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         async with self._lock:
@@ -253,7 +257,7 @@ def _file_snapshot_from_json(value: dict[str, object]) -> ContinuableSnapshot:
     state = str(value.get("state", "complete"))
     if state not in {"complete", "interrupted"}:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(value.get("messages", [])), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), timestamp=_file_datetime(value["timestamp"]), state=state)
+    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(value.get("messages", [])), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), timestamp=_file_datetime(value["timestamp"]))
 
 
 def _file_effect_json(record: ToolEffectRecord) -> dict[str, object]:
@@ -375,7 +379,7 @@ class SqlStepStore:
         async with self._sessions() as session:
             rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.state == "complete").order_by(table.c.id))).mappings().all()
         snapshots = [_snapshot_from_row(row) for row in rows]
-        return [snapshot for snapshot in snapshots if snapshot.state == "complete"]
+        return snapshots
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         values = _effect_values(self._namespace_key, record)
@@ -622,7 +626,7 @@ def _event_values(namespace_key: str, event: StepEvent) -> dict[str, object]:
 
 
 def _snapshot_values(namespace_key: str, snapshot: ContinuableSnapshot) -> dict[str, object]:
-    return {"namespace_key": namespace_key, "run_id": snapshot.run_id, "step_index": snapshot.step_index, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": _utc(snapshot.timestamp), "state": snapshot.state, "messages_json": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))}
+    return {"namespace_key": namespace_key, "run_id": snapshot.run_id, "step_index": snapshot.step_index, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": _utc(snapshot.timestamp), "state": "complete", "messages_json": json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))}
 
 
 def _effect_values(namespace_key: str, record: ToolEffectRecord) -> dict[str, object]:
@@ -641,7 +645,7 @@ def _snapshot_from_row(row: Mapping[str, object]) -> ContinuableSnapshot:
     state = str(row.get("state", "complete"))
     if state not in {"complete", "interrupted"}:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return ContinuableSnapshot(run_id=str(row["run_id"]), step_index=int(row["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(row["messages_json"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), timestamp=_utc(row["timestamp"]), state=state)
+    return ContinuableSnapshot(run_id=str(row["run_id"]), step_index=int(row["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(row["messages_json"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), timestamp=_utc(row["timestamp"]))
 
 
 def _effect_from_row(row: Mapping[str, object]) -> ToolEffectRecord:
