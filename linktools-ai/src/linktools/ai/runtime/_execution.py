@@ -549,7 +549,7 @@ class DefaultExecutionService:
                 current_operation = reloaded
                 if attempt == 1 and current_operation.status in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.info(
+        _logger.debug(
             "execution cancellation race resolved: execution=%s status=%s operation=%s",
             execution_id,
             current.status.value,

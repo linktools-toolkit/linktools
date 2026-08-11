@@ -28,12 +28,12 @@ from ..storage import (
     FilesystemWriterLock,
     StorageDatabase,
     read_json,
+    resolve_dialect,
     sql_blob,
     sql_digest,
     sql_index,
     sql_integer_id,
     sql_table_options,
-    resolve_dialect,
     storage_name,
     validate_schema,
     write_json_atomic,
@@ -70,7 +70,7 @@ class DurableFilesystemStepStore:
             if self._owns_writer_lock:
                 await self._writer_lock.acquire()
             self._closed = False
-            _logger.info("filesystem step store initialized: root=%s namespace=%s", self._root, self._namespace)
+            _logger.debug("filesystem step store initialized: root=%s namespace=%s", self._root, self._namespace)
 
     async def close(self) -> None:
         if self._owns_writer_lock:

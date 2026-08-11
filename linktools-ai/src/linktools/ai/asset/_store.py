@@ -68,7 +68,7 @@ class AssetStore:
             return
         await self._storage.initialize()
         self._ready = True
-        _logger.info("asset store initialized")
+        _logger.debug("asset store initialized")
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
         """Return current effective file metadata and status."""
@@ -99,7 +99,7 @@ class AssetStore:
             bytes(value),
             expected_entry_revision=expected_revision,
         )
-        _logger.info(
+        _logger.debug(
             "asset file put: kind=%s id=%s revision=%s changed=%s",
             key.kind,
             key.id,
@@ -117,7 +117,7 @@ class AssetStore:
         """Delete one file with an optional current-revision check."""
         self._ensure_ready()
         result = await self._storage.delete(key, expected_entry_revision=expected_revision)
-        _logger.info("asset file delete: kind=%s id=%s deleted=%s", key.kind, key.id, result.deleted)
+        _logger.debug("asset file delete: kind=%s id=%s deleted=%s", key.kind, key.id, result.deleted)
         return result
 
     async def reset(
@@ -129,7 +129,7 @@ class AssetStore:
         """Reset one file so a lower read layer becomes effective."""
         self._ensure_ready()
         result = await self._storage.reset(key, expected_entry_revision=expected_revision)
-        _logger.info("asset file reset: kind=%s id=%s reset=%s", key.kind, key.id, result.reset)
+        _logger.debug("asset file reset: kind=%s id=%s reset=%s", key.kind, key.id, result.reset)
         return result
 
     async def apply_batch(

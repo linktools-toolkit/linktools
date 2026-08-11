@@ -26,7 +26,7 @@ from ..adapter import (
     build_in_memory_runtime,
     open_sql_runtime,
 )
-from ..agent import AgentBindingRegistry, AgentCatalogView, OutputTypeRegistry
+from ..agent import AgentBinder, AgentBindingRegistry, EventHandler, OutputTypeRegistry
 from ..asset import (
     AssetInfo,
     AssetKey,
@@ -39,7 +39,7 @@ from ..asset import (
     DirectoryLayout,
     SingleFileLayout,
 )
-from ..capability import MCPToolProvider, SkillProvider
+from ..capability import MCPRuntimeProvider, validate_fingerprint
 from ..core import (
     AuthorizationPolicy,
     HmacCursorSigner,
@@ -47,8 +47,7 @@ from ..core import (
     canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
-from ..model import ModelMaterializer, ModelRegistry, ModelResolver
-from ..observe import MiddlewarePipeline
+from ..model import ModelConnectionRegistry, ModelMaterializer, ModelResolver
 from ..runtime import (
     CancelEffectOutcome,
     DefaultApprovalService,
@@ -65,8 +64,6 @@ from ..runtime import (
     RuntimeBackend,
     RuntimePersistence,
     RuntimeServices,
-    ToolPolicy,
-    ToolStateStore,
     WorkflowGateway,
     WorkflowTaskGraphLauncher,
     new_runtime_service_identity,
@@ -91,8 +88,12 @@ from ..task import (
     TaskNodeResultVerifier,
     TaskNodeRunner,
 )
-from ..workspace import Sandbox
 from ._binding_launcher import BindingExecutionLauncher
+from ._composition import (
+    AgentBindingComposer,
+    CapabilityPreparer,
+    build_builtin_capability_preparers,
+)
 from ._facade import LocalRuntimeServices, RuntimeAccess, build_runtime_access
 
 _logger = environ.get_logger("ai.app.assembly")
@@ -251,7 +252,7 @@ async def open_runtime_resources(
                 await steps.close()
             await persistence.sessions.close()
     finally:
-        _logger.info("runtime resources released: backend=%s namespace=%s external SQL engine retained", config.backend, config.namespace)
+        _logger.debug("runtime resources released: backend=%s namespace=%s external SQL engine retained", config.backend, config.namespace)
 
 
 @asynccontextmanager
@@ -317,13 +318,48 @@ def build_asset_repository(
     for binding in extra_bindings:
         registry.register(binding)
     snapshot = registry.freeze()
-    _logger.info(
+    _logger.debug(
         "asset repository composed: builtins=%s extras=%s binding_digest=%s",
         len(builtins),
         len(extra_bindings),
         snapshot.binding_digest,
     )
     return AssetRepository(asset_store, snapshot)
+
+
+BOUND_RUNTIME_PROFILE_FINGERPRINT = canonical_sha256("linktools-ai-bound-runtime-v1")
+
+
+def build_agent_binding_composer(
+    assets: AssetRepository,
+    *,
+    model_resolver: ModelResolver,
+    model_connections: ModelConnectionRegistry,
+    output_types: OutputTypeRegistry,
+    execution_profile_fingerprint: str,
+    mcp_runtime: "MCPRuntimeProvider | None" = None,
+    extra_preparers: "Sequence[CapabilityPreparer]" = (),
+) -> AgentBindingComposer:
+    """Build the canonical declaration-to-binding composition boundary."""
+    if assets is None or not assets.ready or model_resolver is None or model_connections is None or output_types is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if not output_types.frozen:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    if not isinstance(execution_profile_fingerprint, str) or not execution_profile_fingerprint:
+        raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
+    validate_fingerprint(execution_profile_fingerprint)
+    if mcp_runtime is not None:
+        validate_fingerprint(mcp_runtime.fingerprint)
+    binder = AgentBinder(
+        model_resolver=model_resolver,
+        model_connections=model_connections,
+        output_types=output_types,
+        execution_profile_fingerprint=execution_profile_fingerprint,
+    )
+    preparers = (*build_builtin_capability_preparers(assets, mcp_runtime), *extra_preparers)
+    composer = AgentBindingComposer(assets, binder, preparers)
+    _logger.debug("agent binding composer ready: preparers=%s profile=%s", tuple(item.provider for item in preparers), execution_profile_fingerprint)
+    return composer
 
 
 def _builtin_asset_bindings() -> tuple[AssetTypeBinding[object], ...]:
@@ -419,52 +455,14 @@ def _validate_asset_binding_manifest(entries: tuple[dict[str, object], ...]) -> 
 
 
 def build_app_services(
-    asset_store: AssetStore,
-    model_registry: ModelRegistry,
-    model_resolver: ModelResolver,
-    skill_provider: SkillProvider,
-    mcp_provider: MCPToolProvider,
-    middleware: MiddlewarePipeline,
-    sandbox: Sandbox,
-    tool_policy: ToolPolicy,
-    output_types: OutputTypeRegistry,
-    tool_state: ToolStateStore,
-    principal_provider: PrincipalProvider,
     runtime_services: RuntimeServices,
+    *,
+    principal_provider: "PrincipalProvider | None" = None,
 ) -> AppServices:
-    if any(
-        value is None
-        for value in (
-            asset_store,
-            model_registry,
-            model_resolver,
-            skill_provider,
-            mcp_provider,
-            middleware,
-            sandbox,
-            tool_policy,
-            output_types,
-            tool_state,
-            principal_provider,
-            runtime_services,
-        )
-    ):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    registry_snapshot = model_registry.snapshot()
-    resolver_snapshot = model_resolver.snapshot()
-    if (
-        resolver_snapshot.revision != registry_snapshot.revision
-        or resolver_snapshot.digest != registry_snapshot.digest
-    ):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not output_types.frozen:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not asset_store.ready:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not skill_provider.manifest() or not mcp_provider.manifest():
+    if runtime_services is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     services = AppServices(runtime_services, build_runtime_access(runtime_services), principal_provider)
-    _logger.info("agent services composed: model_revision=%s", model_registry.snapshot().revision)
+    _logger.debug("app services composed: runtime_service=%s", runtime_services.identity.service_id)
     return services
 
 
@@ -506,7 +504,7 @@ def build_runtime_services(
         DefaultEventService(persistence, authorization),
         DefaultArtifactService(persistence, authorization, grant_key=grant_key, cursor_signer=HmacCursorSigner("artifact", grant_key)),
     )
-    _logger.info("runtime services composed: backend=%s namespace=%s launcher=%s gateway=%s", persistence.backend, persistence.namespace, type(launcher).__name__, workflow_gateway is not None)
+    _logger.debug("runtime services composed: backend=%s namespace=%s launcher=%s gateway=%s", persistence.backend, persistence.namespace, type(launcher).__name__, workflow_gateway is not None)
     return services
 
 
@@ -516,19 +514,24 @@ def build_local_runtime_services(
     *,
     grant_key: bytes,
     materializer: ModelMaterializer,
-    agent_catalog: "AgentCatalogView | None" = None,
+    execution_root: "str | Path",
     task_launcher: "TaskGraphLauncher | None" = None,
     task_runner: "TaskNodeRunner | None" = None,
     task_result_verifier: "TaskNodeResultVerifier | None" = None,
     task_owner: str = "local",
+    event_handler: "EventHandler | None" = None,
 ) -> LocalRuntimeServices:
     """Create local services and their one shared binding registry."""
+    root = Path(execution_root).expanduser().resolve()
+    if not root.is_dir():
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     registry = AgentBindingRegistry()
     launcher = BindingExecutionLauncher(
         registry,
         materializer,
         resources,
-        agent_catalog=agent_catalog,
+        execution_root=root,
+        event_handler=event_handler,
     )
     history_reader = StepExecutionHistoryReader(
         resources.namespace,
@@ -554,7 +557,7 @@ def build_local_runtime_services(
         execution_launcher=launcher,
         task_launcher=task_launcher,
     )
-    _logger.info(
+    _logger.debug(
         "local runtime composition ready: namespace=%s registry=%s launcher=%s",
         resources.namespace,
         id(registry),
@@ -563,4 +566,8 @@ def build_local_runtime_services(
     return LocalRuntimeServices.compose(services, registry)
 
 
-__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_repository", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]
+__all__ = [
+    "AppServices", "BOUND_RUNTIME_PROFILE_FINGERPRINT", "RuntimePersistenceConfig", "RuntimeResources", "build_agent_binding_composer",
+    "build_app_services", "build_asset_repository", "build_asset_store", "build_local_runtime_services", "build_runtime_services",
+    "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services",
+]

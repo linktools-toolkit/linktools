@@ -119,7 +119,7 @@ class InMemoryAssetBackend:
             self._revision += 1
             info = self._next_info(key, value, previous, status=StorageEntryStatus.NORMAL)
             self._record(info, value)
-            _logger.info("asset file stored: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
+            _logger.debug("asset file stored: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StoragePutResult(info, info.revision, info.store_revision, True)
 
     async def delete(
@@ -137,7 +137,7 @@ class InMemoryAssetBackend:
             self._revision += 1
             info = self._next_info(key, b"", previous, status=StorageEntryStatus.DELETED)
             self._record(info, b"")
-            _logger.info("asset file deleted: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
+            _logger.debug("asset file deleted: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StorageDeleteResult(key, True, info.revision, info.store_revision)
 
     async def reset(
@@ -155,7 +155,7 @@ class InMemoryAssetBackend:
             self._revision += 1
             info = self._next_info(key, b"", previous, status=StorageEntryStatus.RESET)
             self._record(info, b"")
-            _logger.info("asset file reset: kind=%s id=%s revision=%s", key.kind, key.id, self._revision)
+            _logger.debug("asset file reset: kind=%s id=%s revision=%s", key.kind, key.id, self._revision)
             return StorageResetResult(key, True, self._store_revision())
 
     async def apply_batch(
@@ -203,7 +203,7 @@ class InMemoryAssetBackend:
                     self._record(info, b"")
                     results.append(StorageResetResult(change.key, True, store_revision))
             if mutates:
-                _logger.info("asset batch committed: changes=%s revision=%s", len(changes), self._revision)
+                _logger.debug("asset batch committed: changes=%s revision=%s", len(changes), self._revision)
             return StorageBatchResult(store_revision, True, tuple(results))
 
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":

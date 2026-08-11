@@ -22,7 +22,7 @@ class SqlSchemaPlan:
 
 def build_sql_plan(*, asset_digest: str, runtime_digest: str, step_digest: "str | None" = None) -> SqlSchemaPlan:
     plan = SqlSchemaPlan(asset_digest, runtime_digest, step_digest)
-    _logger.info("SQL schema plan prepared: runtime=%s step=%s", plan.runtime_digest, plan.step_digest)
+    _logger.debug("SQL schema plan prepared: runtime=%s step=%s", plan.runtime_digest, plan.step_digest)
     return plan
 
 

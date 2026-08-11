@@ -84,7 +84,7 @@ class DefaultTaskService:
             view = await self._persistence.tasks.get_plan(request.graph.graph_id, tenant_id=request.principal.tenant_id)
             if view is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _logger.info("task graph replayed: graph=%s operation=%s status=%s", view.graph_id, operation.operation_id, operation.status.value)
+            _logger.debug("task graph replayed: graph=%s operation=%s status=%s", view.graph_id, operation.operation_id, operation.status.value)
             return await self._result(view, request.principal.tenant_id)
         created = False
         try:
@@ -114,7 +114,7 @@ class DefaultTaskService:
         current = await self._record_success(operation, request.principal.tenant_id, view)
         if current.status is not OperationStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.info("task graph submitted: graph=%s tenant=%s launcher=%s", view.graph_id, request.principal.tenant_id, type(self._launcher).__name__)
+        _logger.debug("task graph submitted: graph=%s tenant=%s launcher=%s", view.graph_id, request.principal.tenant_id, type(self._launcher).__name__)
         return await self._result(view, request.principal.tenant_id)
 
     async def _abort_unlaunched_plan(self, request: TaskGraphRequest) -> None:
@@ -178,7 +178,7 @@ class DefaultTaskService:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     operation = reloaded
                     continue
-                _logger.info("task operation claimed: operation=%s graph=%s status=%s", claimed.operation_id, graph_id, claimed.status.value)
+                _logger.debug("task operation claimed: operation=%s graph=%s status=%s", claimed.operation_id, graph_id, claimed.status.value)
                 return True, claimed
             if operation.status is OperationStatus.SUCCEEDED:
                 return False, operation
@@ -300,7 +300,7 @@ class DefaultTaskService:
         current = await self._record_success(operation, request.principal.tenant_id, view)
         if current.status is not OperationStatus.SUCCEEDED:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.info("task graph cancelled: graph=%s tenant=%s", graph_id, request.principal.tenant_id)
+        _logger.debug("task graph cancelled: graph=%s tenant=%s", graph_id, request.principal.tenant_id)
         return view
 
     async def _replay_view(self, graph_id: str, tenant_id: str) -> TaskGraphView:

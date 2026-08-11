@@ -60,7 +60,7 @@ class WorkflowGateway:
     async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
-        _logger.info("starting durable execution workflow: workflow_id=%s", workflow_id)
+        _logger.debug("starting durable execution workflow: workflow_id=%s", workflow_id)
         return await self._client.start_workflow("execution", request, workflow_id=workflow_id)
 
     async def update_execution(
@@ -94,7 +94,7 @@ class WorkflowGateway:
     async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
-        _logger.info("starting durable task workflow: workflow_id=%s", workflow_id)
+        _logger.debug("starting durable task workflow: workflow_id=%s", workflow_id)
         return await self._client.start_task_graph(request, workflow_id=workflow_id)
 
     async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView:

@@ -24,8 +24,9 @@
     "adapter._provider": ["core", "model"],
     "adapter._identity": ["core"],
     "adapter._schema": ["core", "storage"],
-    "app._facade": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace"],
-    "app._assembly": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter"],
+    "app._facade": ["core", "observe", "task", "agent", "runtime"],
+    "app._assembly": ["core", "storage", "asset", "spec", "model", "capability", "task", "agent", "runtime", "adapter"],
+    "app._composition": ["core", "asset", "spec", "capability", "agent"],
     "app._workbench": ["core", "storage", "agent", "capability", "runtime", "workspace", "adapter"],
     "agent._binding": ["core", "spec", "model", "capability"],
     "temporal._context": ["core", "agent"]

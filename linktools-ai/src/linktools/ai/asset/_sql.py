@@ -197,7 +197,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
     async def initialize(self) -> None:
         await self._validate_schema()
         await self._refresh_state()
-        _logger.info(
+        _logger.debug(
             "SQL asset backend initialized: namespace=%s revision=%s",
             self._namespace,
             self._revision,
@@ -382,7 +382,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
         self.import_state(next_state)
         self._state_loaded = True
-        _logger.info(
+        _logger.debug(
             "SQL asset mutation committed: namespace=%s revision=%s",
             self._namespace,
             next_state["store_revision"],

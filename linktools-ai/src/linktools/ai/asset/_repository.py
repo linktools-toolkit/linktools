@@ -235,6 +235,11 @@ class AssetRepository:
         self._registry = registry
         self._locks = _RepositoryKeyedLock()
 
+    @property
+    def ready(self) -> bool:
+        """Return whether the underlying raw asset store is initialized."""
+        return self._store.ready
+
     async def resolve(self, ref: AssetRef) -> "ResolvedAsset[object]":
         """Discover, stabilize, decode, and return one logical asset."""
         binding = self._binding_for(ref)
@@ -256,7 +261,7 @@ class AssetRepository:
         value = _decode_value(candidate.variant, ref, data, binding.value_type)
         scope = self._scope(ref, candidate.variant, binding)
         _validate_identity(binding, ref, value)
-        _logger.info(
+        _logger.debug(
             "asset resolved: kind=%s id_digest=%s variant=%s revision=%s",
             ref.kind,
             canonical_sha256(ref.id),
@@ -316,7 +321,7 @@ class AssetRepository:
                 selected[-1].ref.id,
             )
         conflict_count = sum(item.status is AssetDiscoveryStatus.CONFLICT for item in visible)
-        _logger.info(
+        _logger.debug(
             "asset logical list: kind=%s count=%s conflicts=%s discovery_digest=%s",
             kind,
             len(visible),
@@ -371,7 +376,7 @@ class AssetRepository:
                 )
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             scope = self._scope(ref, selected, binding)
-            _logger.info(
+            _logger.debug(
                 "asset typed put: kind=%s id_digest=%s variant=%s revision=%s existing=%s",
                 ref.kind,
                 canonical_sha256(ref.id),
@@ -506,7 +511,7 @@ class AssetRepository:
                 canonical_sha256(ref.id),
             )
             raise AIError(ErrorCode.ASSET_RECOVERY_REQUIRED) from error
-        _logger.info("asset typed write recovery completed: kind=%s id_digest=%s", ref.kind, canonical_sha256(ref.id))
+        _logger.debug("asset typed write recovery completed: kind=%s id_digest=%s", ref.kind, canonical_sha256(ref.id))
 
     def _select_write_variant(
         self,

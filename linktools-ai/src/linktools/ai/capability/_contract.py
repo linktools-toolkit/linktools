@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability resolution and runtime materialization contracts."""
+"""Capability binding and runtime materialization contracts."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,7 +25,13 @@ class CapabilityRefResolution:
     fingerprint: "str | None"
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or (self.requested_revision is not None and self.requested_revision < 1):
+        if (
+            not self.id.strip()
+            or self.requested_revision is not None
+            and (not isinstance(self.requested_revision, int) or isinstance(self.requested_revision, bool) or self.requested_revision < 1)
+            or self.resolved_revision is not None
+            and (not isinstance(self.resolved_revision, int) or isinstance(self.resolved_revision, bool) or self.resolved_revision < 1)
+        ):
             raise ValueError("capability resolution identity is invalid")
         if self.status == "resolved" and not _is_fingerprint(self.fingerprint):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
@@ -64,19 +70,6 @@ class CapabilityBinding(Protocol):
         self,
         context: CapabilityRuntimeContext,
     ) -> "tuple[PydanticAgentCapability[None], ...]": ...
-
-
-class CapabilityResolver(Protocol):
-    @property
-    def provider(self) -> str: ...
-
-    @property
-    def fingerprint(self) -> str: ...
-
-    def resolve(
-        self,
-        refs: "tuple[AgentCapabilityRef, ...]",
-    ) -> CapabilityBinding: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +130,20 @@ def unresolved_binding(provider: str, refs: Sequence[AgentCapabilityRef]) -> Unr
     )
 
 
+def group_capability_refs(
+    refs: Sequence[AgentCapabilityRef],
+) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
+    """Group refs by first-seen provider while preserving declaration order."""
+    grouped: dict[str, list[AgentCapabilityRef]] = {}
+    order: list[str] = []
+    for ref in refs:
+        if ref.provider not in grouped:
+            grouped[ref.provider] = []
+            order.append(ref.provider)
+        grouped[ref.provider].append(ref)
+    return tuple((provider, tuple(grouped[provider])) for provider in order)
+
+
 def _is_fingerprint(value: "str | None") -> bool:
     return isinstance(value, str) and len(value) == _FINGERPRINT_LENGTH and all(character in "0123456789abcdef" for character in value)
 
@@ -147,6 +154,6 @@ def validate_fingerprint(value: str) -> None:
 
 
 __all__ = [
-    "CapabilityBinding", "CapabilityInjection", "CapabilityRefResolution", "CapabilityResolver",
-    "CapabilityRuntimeContext", "UnresolvedCapabilityBinding", "unresolved_binding", "validate_fingerprint",
+    "CapabilityBinding", "CapabilityInjection", "CapabilityRefResolution", "CapabilityRuntimeContext",
+    "UnresolvedCapabilityBinding", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
 ]

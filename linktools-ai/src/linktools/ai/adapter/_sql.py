@@ -1262,7 +1262,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             if isinstance(existing, BlobRef) and existing.size == expected_size:
                 return existing
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-        _logger.info("SQL blob committed: namespace=%s tenant=%s digest=%s size=%s", self.namespace, tenant_id, expected_digest, expected_size)
+        _logger.debug("SQL blob committed: namespace=%s tenant=%s digest=%s size=%s", self.namespace, tenant_id, expected_digest, expected_size)
         return ref
 
     async def stat(self, ref: BlobRef, *, tenant_id: str) -> BlobRef | None:

@@ -16,17 +16,26 @@ from ._capabilities import (
 )
 from ._catalog import AgentCatalogItem, AgentCatalogSnapshot, AgentCatalogView
 from ._deps import AgentDeps
-from ._output import OutputSchemaManifest, OutputSchemaManifestEntry, OutputTypeRegistry
+from ._output import (
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
+    AssistantTextOutput,
+    OutputSchemaManifest,
+    OutputSchemaManifestEntry,
+    OutputTypeRegistry,
+)
 from ._runner import (
     AgentRunner,
     BoundAgentRunner,
+    EventHandler,
     WorkspaceAgentResult,
     WorkspaceAgentRunner,
 )
 
 __all__ = [
     "AgentBinder", "AgentBinding", "AgentBindingManifest", "AgentBindingRegistry", "AgentCatalogItem",
-    "AgentCatalogSnapshot", "AgentCatalogView", "AgentDeps", "AgentRunScope", "AgentRunner", "BoundAgentRunner",
-    "EmptyAgentCatalog", "EmptySkillCatalog", "OutputSchemaManifest", "OutputSchemaManifestEntry",
-    "OutputTypeRegistry", "WorkspaceAgentResult", "WorkspaceAgentRunner", "compose_platform_capabilities",
+    "AgentCatalogSnapshot", "AgentCatalogView", "AgentDeps", "AgentRunScope", "AgentRunner", "BoundAgentRunner", "EventHandler",
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID", "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION", "AssistantTextOutput", "EmptyAgentCatalog",
+    "EmptySkillCatalog", "OutputSchemaManifest", "OutputSchemaManifestEntry", "OutputTypeRegistry", "WorkspaceAgentResult",
+    "WorkspaceAgentRunner", "compose_platform_capabilities",
 ]

@@ -41,7 +41,7 @@ async def validate_schema(
     except AIError:
         _logger.exception("SQL schema validation failed: table_count=%s", len(metadata.tables))
         raise
-    _logger.info("SQL schema validated: table_count=%s", len(metadata.tables))
+    _logger.debug("SQL schema validated: table_count=%s", len(metadata.tables))
 
 
 def _validate_schema(connection: "Connection", metadata: "MetaData") -> None:

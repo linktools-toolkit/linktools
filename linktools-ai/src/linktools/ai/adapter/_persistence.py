@@ -1502,7 +1502,7 @@ class InMemoryRuntime:
                         initialized.append(component)
                 self._initialized = True
                 self._closed = False
-                _logger.info("runtime persistence initialized mode=%s backend=%s namespace=%s", self.persistence.mode, self.persistence.backend, self.persistence.namespace)
+                _logger.debug("runtime persistence initialized mode=%s backend=%s namespace=%s", self.persistence.mode, self.persistence.backend, self.persistence.namespace)
             except BaseException:
                 for component in reversed(initialized):
                     try:
@@ -1570,7 +1570,7 @@ class _DurableRuntime(InMemoryRuntime):
             await super().close()
         finally:
             await self._writer_lock.release()
-        _logger.info("runtime persistence closed mode=%s namespace=%s", self.persistence.mode, self.persistence.namespace)
+        _logger.debug("runtime persistence closed mode=%s namespace=%s", self.persistence.mode, self.persistence.namespace)
 
     def _commit(self) -> None:
         with self._commit_lock:

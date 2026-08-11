@@ -107,7 +107,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             mutation = MemoryMutation(_version(stored.revision), False, current is not None)
-            _logger.info("runtime memory written: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory written: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
             return mutation
 
     async def delete(
@@ -146,7 +146,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 return replay
             if deleted != (current is not None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _logger.info("runtime memory deleted: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory deleted: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
             return mutation
 
     async def list_paths(self, prefix: str = "", *, limit: int) -> "list[str]":

@@ -45,7 +45,7 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
             self._directory.mkdir(parents=True, exist_ok=True)
             if self._state_path.exists():
                 self.import_state(await asyncio.to_thread(read_json, self._state_path))
-        _logger.info(
+        _logger.debug(
             "filesystem asset backend initialized: root=%s revision=%s",
             self._directory,
             self._revision,

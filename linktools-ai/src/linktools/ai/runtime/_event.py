@@ -62,7 +62,7 @@ class DefaultEventService:
                     ExecutionEventType.EXECUTION_FAILED,
                     ExecutionEventType.EXECUTION_CANCELLED,
                 }:
-                    _logger.info("event stream reached terminal: execution=%s sequence=%s", execution_id, event.sequence)
+                    _logger.debug("event stream reached terminal: execution=%s sequence=%s", execution_id, event.sequence)
                     return
             await asyncio.sleep(0)
 

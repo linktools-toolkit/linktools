@@ -50,7 +50,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
             entries.append({"path": item.relative_to(project_root).as_posix(), "type": "directory" if item.is_dir() else "file"})
             if len(entries) >= 500:
                 break
-        _logger.info("local tool completed name=list_dir path=%s count=%s", path, len(entries))
+        _logger.debug("local tool completed name=list_dir path=%s count=%s", path, len(entries))
         return {"path": target.relative_to(project_root).as_posix(), "entries": entries}
 
     async def read_file(path: str, max_chars: int = 6000) -> 'dict[str, WorkspaceToolResultValue]':
@@ -62,7 +62,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
             return {"error": f"not a file: {path}"}
         content = await asyncio.to_thread(target.read_text, encoding="utf-8")
         limit = max(1, int(max_chars))
-        _logger.info("local tool completed name=read_file path=%s", path)
+        _logger.debug("local tool completed name=read_file path=%s", path)
         return {"path": target.relative_to(project_root).as_posix(), "content": content[:limit], "truncated": len(content) > limit}
 
     async def write_file(path: str, content: str) -> 'dict[str, WorkspaceToolResultValue]':
@@ -76,7 +76,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
             return {"error": "file is too large"}
         target.parent.mkdir(parents=True, exist_ok=True)
         await asyncio.to_thread(write_bytes_atomic, target, value.encode("utf-8"), fsync=True)
-        _logger.info("local tool completed name=write_file path=%s bytes=%s", path, size)
+        _logger.debug("local tool completed name=write_file path=%s bytes=%s", path, size)
         return {"path": target.relative_to(project_root).as_posix(), "bytes": size}
 
     async def bash(command: str, timeout_ms: 'int | None' = None) -> 'dict[str, WorkspaceToolResultValue]':
@@ -88,7 +88,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
             timeout_value = int(timeout_ms or 60_000)
             if timeout_value < 1_000 or timeout_value > 900_000:
                 return {"error": "timeout must be between 1 and 900 seconds"}
-            _logger.info("local tool started name=bash command_digest=%s", canonical_sha256(command))
+            _logger.debug("local tool started name=bash command_digest=%s", canonical_sha256(command))
             process = await asyncio.create_subprocess_exec(
                 "/bin/sh",
                 "-lc",
@@ -124,7 +124,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
                     _kill_process_group(process.pid)
                     await process.wait()
                 raise
-            _logger.info("local tool completed name=bash exit_code=%s", process.returncode)
+            _logger.debug("local tool completed name=bash exit_code=%s", process.returncode)
             return {
                 "exit_code": process.returncode,
                 "stdout": stdout.decode("utf-8", errors="replace"),
@@ -137,7 +137,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
 
 def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[None], ...]':
     project_root = Path(root).expanduser().resolve()
-    _logger.info("local workspace tools configured root=%s", project_root)
+    _logger.debug("local workspace tools configured root=%s", project_root)
     capabilities: list[AgentCapability[None]] = [
         FileSystem(root_dir=project_root),
         Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS),
@@ -147,7 +147,7 @@ def build_workspace_capabilities(root: 'str | Path') -> 'tuple[AgentCapability[N
         skill_catalog = load_local_skill_catalog(skill_library)
         if skill_catalog.descriptors:
             capabilities.append(SkillCapability(skill_catalog))
-            _logger.info("local skills loaded root=%s count=%s", skill_library, len(skill_catalog.descriptors))
+            _logger.debug("local skills loaded root=%s count=%s", skill_library, len(skill_catalog.descriptors))
     return tuple(capabilities)
 
 

@@ -4,10 +4,22 @@
 
 from dataclasses import dataclass
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
+
+
+class AssistantTextOutput(BaseModel):
+    """Canonical structured output containing the assistant response text."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str
+
+
+ASSISTANT_TEXT_OUTPUT_SCHEMA_ID = "assistant-text"
+ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,4 +104,7 @@ class OutputTypeRegistry:
         return self._manifest
 
 
-__all__ = ["OutputSchemaManifest", "OutputSchemaManifestEntry", "OutputTypeRegistry"]
+__all__ = [
+    "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID", "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION", "AssistantTextOutput",
+    "OutputSchemaManifest", "OutputSchemaManifestEntry", "OutputTypeRegistry",
+]

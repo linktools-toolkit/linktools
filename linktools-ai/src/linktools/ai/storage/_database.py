@@ -12,7 +12,16 @@ from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 
 if TYPE_CHECKING:
-    from sqlalchemy import BigInteger, CHAR, Constraint, Index, LargeBinary, MetaData, String, Table
+    from sqlalchemy import (
+        CHAR,
+        BigInteger,
+        Constraint,
+        Index,
+        LargeBinary,
+        MetaData,
+        String,
+        Table,
+    )
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 class CoordinationScope(StrEnum):

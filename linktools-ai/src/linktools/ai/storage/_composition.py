@@ -164,7 +164,7 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 if isinstance(backend, InitializableStorage):
                     await backend.initialize()
             self._initialized = True
-        _logger.info("storage overlay initialized: layers=%s", len(self._views))
+        _logger.debug("storage overlay initialized: layers=%s", len(self._views))
 
     async def refresh(self) -> StorageRevision:
         states = await asyncio.gather(*(view.refresh() for view in self._views))

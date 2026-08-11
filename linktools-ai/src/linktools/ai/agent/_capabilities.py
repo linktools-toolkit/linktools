@@ -11,7 +11,12 @@ from linktools.core import environ
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.capabilities import WrapToolExecuteHandler
-from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError
+from pydantic_ai.exceptions import (
+    ModelRetry,
+    ToolFailed,
+    ToolFailedError,
+    ToolRetryError,
+)
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext, ToolDefinition
@@ -53,7 +58,7 @@ class _RetryAwareStepPersistence(StepPersistence[None]):
         try:
             return await super().wrap_tool_execute(ctx, call=call, tool_def=tool_def, args=args, handler=handler)
         except (ModelRetry, ToolFailed, ToolFailedError, ToolRetryError) as error:
-            _logger.info(
+            _logger.debug(
                 "workspace tool failure closed effect: run=%s tool=%s call=%s",
                 self.run_id or ctx.run_id,
                 tool_def.name,
@@ -75,6 +80,7 @@ class AgentRunScope:
     inherited_capabilities: "tuple[PydanticAgentCapability[None], ...]"
     agent_catalog: AgentCatalogView
     memory_store: "SearchableMemoryStore | None"
+    enable_subagents: bool = True
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
 
@@ -106,10 +112,10 @@ async def compose_platform_capabilities(
     capabilities.append(Planning())
     if scope.conversation_id:
         capabilities.append(ConversationSearch(SnapshotHistorySource(scope.step_store), scope="conversation"))
-    agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents())
-    agent_folders = _local_agent_folders(scope.root)
+    agent_catalog = AgentCatalogSnapshot(await scope.agent_catalog.list_agents()) if scope.enable_subagents else AgentCatalogSnapshot(())
+    agent_folders = _local_agent_folders(scope.root) if scope.enable_subagents else ()
     if agent_folders:
-        _logger.info("local sub-agent folders loaded: %s", ",".join(str(folder) for folder in agent_folders))
+        _logger.debug("local sub-agent folders loaded: %s", ",".join(str(folder) for folder in agent_folders))
     if agent_catalog.items or agent_folders:
         child_agents = _build_child_agents(scope, agent_catalog.items, model_factory=model_factory, parent_model=parent_model)
         capabilities.append(
@@ -123,7 +129,7 @@ async def compose_platform_capabilities(
         if child_agents:
             capabilities.append(DynamicWorkflow(agents=child_agents))
     capabilities.append(_build_compaction(scope.context_target_tokens))
-    _logger.info(
+    _logger.debug(
         "Harness platform capabilities composed: agent=%s conversation=%s step=%s capability_count=%s inherited_count=%s agent_count=%s namespace_digest=%s",
         scope.agent_name,
         bool(scope.conversation_id),
@@ -157,6 +163,7 @@ def _build_child_agents(
             inherited_capabilities=scope.inherited_capabilities,
             agent_catalog=AgentCatalogSnapshot(()),
             memory_store=scope.memory_store,
+            enable_subagents=False,
             context_target_tokens=scope.context_target_tokens,
         )
         child_capabilities = _compose_child_capabilities(child_scope, item.name)
@@ -169,7 +176,7 @@ def _build_child_agents(
                 capabilities=child_capabilities,
             )
         )
-        _logger.info("Harness child agent composed: agent=%s capability_count=%s", item.name, len(child_capabilities))
+        _logger.debug("Harness child agent composed: agent=%s capability_count=%s", item.name, len(child_capabilities))
     return children
 
 

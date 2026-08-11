@@ -59,9 +59,9 @@ class ExecuteActivity:
         self._operation = operation
 
     async def run(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult:
-        _logger.info("executing durable activity: execution_id=%s", request.execution_id)
+        _logger.debug("executing durable activity: execution_id=%s", request.execution_id)
         result = await self._operation.execute(request)
-        _logger.info("durable activity completed: execution_id=%s status=%s", request.execution_id, result.status)
+        _logger.debug("durable activity completed: execution_id=%s status=%s", request.execution_id, result.status)
         return result
 
     async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
@@ -103,7 +103,7 @@ class EvaluationActivity:
         self._operation = operation
 
     async def run(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
-        _logger.info("executing evaluation activity: evaluation_id=%s", request.evaluation_id)
+        _logger.debug("executing evaluation activity: evaluation_id=%s", request.evaluation_id)
         return await self._operation.execute(request)
 
 
@@ -118,7 +118,7 @@ class SessionActivity:
         self._operation = operation
 
     async def run(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-        _logger.info("executing session activity: session_id=%s mutation_id=%s", request.session_id, request.mutation_id)
+        _logger.debug("executing session activity: session_id=%s mutation_id=%s", request.session_id, request.mutation_id)
         return await self._operation.execute(request)
 
 
@@ -133,7 +133,7 @@ class TaskActivity:
         self._operation = operation
 
     async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
-        _logger.info("executing task activity: graph_id=%s", request.graph_id)
+        _logger.debug("executing task activity: graph_id=%s", request.graph_id)
         return await self._operation.execute(request)
 
 

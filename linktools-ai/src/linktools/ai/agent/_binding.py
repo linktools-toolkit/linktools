@@ -11,9 +11,7 @@ from ..capability import (
     CapabilityBinding,
     CapabilityInjection,
     CapabilityRefResolution,
-    CapabilityResolver,
-    CapabilityResolverRegistry,
-    unresolved_binding,
+    group_capability_refs,
     validate_fingerprint,
 )
 from ..core import canonical_sha256
@@ -114,14 +112,12 @@ class AgentBinder:
         model_resolver: ModelResolver,
         model_connections: ModelConnectionRegistry,
         output_types: OutputTypeRegistry,
-        capability_resolvers: CapabilityResolverRegistry,
         execution_profile_fingerprint: str,
     ) -> None:
         validate_fingerprint(execution_profile_fingerprint)
         self._model_resolver = model_resolver
         self._model_connections = model_connections
         self._output_types = output_types
-        self._capability_resolvers = capability_resolvers
         self._execution_profile_fingerprint = execution_profile_fingerprint
 
     def bind(
@@ -129,29 +125,22 @@ class AgentBinder:
         spec: AgentSpec,
         prompt: PromptSpec,
         *,
-        injections: tuple[CapabilityInjection, ...] = (),
+        capabilities: "Sequence[CapabilityBinding]" = (),
+        injections: "Sequence[CapabilityInjection]" = (),
     ) -> AgentBinding:
         route = self._model_resolver.resolve(spec.model)
         connection = self._model_connections.resolve_optional(route.connection_id)
         output_type = self._output_types.resolve(spec.output_schema, spec.output_schema_revision)
-        groups = _group_capabilities(spec.capabilities)
-        bindings: list[CapabilityBinding] = []
+        groups = group_capability_refs(spec.capabilities)
+        bindings = tuple(capabilities)
+        if len(groups) != len(bindings):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         capability_groups: list[dict[str, object]] = []
-        for provider, refs in groups:
-            resolver = self._capability_resolvers.get(provider)
-            if resolver is None:
-                if any(ref.required for ref in refs):
-                    raise AIError(ErrorCode.CAPABILITY_PROVIDER_UNKNOWN)
-                binding = unresolved_binding(provider, refs)
-                resolver_fingerprint = None
-            else:
-                binding = _resolve_binding(resolver, refs)
-                resolver_fingerprint = resolver.fingerprint
-            bindings.append(binding)
+        for (provider, refs), binding in zip(groups, bindings):
+            _validate_prepared_binding(provider, refs, binding)
             capability_groups.append(
                 {
                     "provider": provider,
-                    "resolver_fingerprint": resolver_fingerprint,
                     "binding_fingerprint": binding.fingerprint,
                     "inherit_to_subagents": binding.inherit_to_subagents,
                     "resolutions": [_resolution_payload(item) for item in binding.resolutions],
@@ -196,42 +185,36 @@ class AgentBinder:
             capabilities_fingerprint,
             self._execution_profile_fingerprint,
         )
-        binding = AgentBinding(manifest, spec, prompt, route, connection, output_type, tuple(bindings), tuple(injections))
+        binding = AgentBinding(manifest, spec, prompt, route, connection, output_type, bindings, tuple(injections))
         return binding
 
 
-def _group_capabilities(refs: Sequence[AgentCapabilityRef]) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
-    grouped: dict[str, list[AgentCapabilityRef]] = {}
-    order: list[str] = []
-    for ref in refs:
-        if ref.provider not in grouped:
-            grouped[ref.provider] = []
-            order.append(ref.provider)
-        grouped[ref.provider].append(ref)
-    return tuple((provider, tuple(grouped[provider])) for provider in order)
-
-
-def _resolve_binding(resolver: CapabilityResolver, refs: tuple[AgentCapabilityRef, ...]) -> CapabilityBinding:
+def _validate_prepared_binding(
+    provider: str,
+    refs: tuple[AgentCapabilityRef, ...],
+    binding: CapabilityBinding,
+) -> None:
     try:
-        binding = resolver.resolve(refs)
-        provider = binding.provider
+        binding_provider = binding.provider
         resolutions = binding.resolutions
         fingerprint = binding.fingerprint
-    except AIError:
-        raise
     except Exception as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if provider != resolver.provider or len(resolutions) != len(refs):
+    if binding_provider != provider or len(resolutions) != len(refs):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     validate_fingerprint(fingerprint)
     for ref, resolution in zip(refs, resolutions):
-        if not isinstance(resolution, CapabilityRefResolution) or resolution.id != ref.id or resolution.requested_revision != ref.revision:
+        if not isinstance(resolution, CapabilityRefResolution):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        if resolution.required != ref.required:
+        if (
+            resolution.id != ref.id
+            or resolution.requested_revision != ref.revision
+            or resolution.required != ref.required
+            or resolution.status == "resolved"
+            and ref.revision is not None
+            and resolution.resolved_revision != ref.revision
+        ):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    return binding
-
-
 def _validate_injections(injections: Sequence[CapabilityInjection]) -> None:
     ids = [injection.id for injection in injections]
     if len(set(ids)) != len(ids):

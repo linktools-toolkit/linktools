@@ -117,7 +117,7 @@ class ACPAgent:
                 await self._connection.session_update(session_id, update)
 
         await self._runtime.run(session_id, text, memory_namespace=self._memory_namespace, on_event=on_event)
-        _logger.info("ACP prompt completed: session=%s", session_id)
+        _logger.debug("ACP prompt completed: session=%s", session_id)
         return schema.PromptResponse(stopReason="end_turn")
 
     async def cancel(self, session_id: str, **kwargs: JsonValue) -> None:

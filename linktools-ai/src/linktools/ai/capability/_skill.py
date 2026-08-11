@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Skill catalog contracts, resolution, and Pydantic AI integration."""
+"""Skill binding contracts and Pydantic AI integration."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -13,16 +13,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef, SkillSpec
-from ._contract import (
-    CapabilityRefResolution,
-    CapabilityRuntimeContext,
-    validate_fingerprint,
-)
-
-
-class SkillProvider(Protocol):
-    def manifest(self) -> str: ...
-    def resolve_ref(self, skill_id: str, revision: "int | None" = None) -> SkillSpec: ...
+from ._contract import CapabilityRefResolution, CapabilityRuntimeContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +61,7 @@ class SkillCatalogSnapshot(SkillCatalogView):
 @dataclass(frozen=True, slots=True)
 class SkillCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]"
-    catalog: SkillCatalogView
+    catalog: SkillCatalogSnapshot
     fingerprint: str
     inherit_to_subagents: bool = True
 
@@ -85,58 +76,42 @@ class SkillCapabilityBinding:
         return (SkillCapability(self.catalog),)
 
 
-class SkillCapabilityResolver:
-    provider = "skill"
-
-    def __init__(self, provider: SkillProvider) -> None:
-        self._source = provider
-        self._fingerprint = provider.manifest()
-        validate_fingerprint(self._fingerprint)
-
-    @property
-    def fingerprint(self) -> str:
-        return self._fingerprint
-
-    def resolve(self, refs: "tuple[AgentCapabilityRef, ...]") -> SkillCapabilityBinding:
-        resolutions: list[CapabilityRefResolution] = []
-        specifications: list[SkillSpec] = []
-        for ref in refs:
-            try:
-                specification = self._source.resolve_ref(ref.id, ref.revision)
-            except (KeyError, LookupError):
-                specification = None
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_NOT_FOUND:
-                    specification = None
-                else:
-                    raise
-            if specification is None:
-                if ref.required:
-                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-                resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
-                continue
-            if specification.id != ref.id or (ref.revision is not None and specification.revision != ref.revision):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            fingerprint = canonical_sha256(
-                {"id": specification.id, "revision": specification.revision, "content": specification.content}
-            )
-            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, specification.revision, ref.required, "resolved", fingerprint))
-            specifications.append(specification)
-        descriptors = tuple(SkillDescriptor(item.id, item.revision, f"Authorized skill {item.id}") for item in specifications)
-        binding_resolutions = tuple(resolutions)
-        return SkillCapabilityBinding(
-            binding_resolutions,
-            SkillCatalogSnapshot(descriptors, tuple(specifications)),
-            canonical_sha256(
-                {
-                    "provider": self.provider,
-                    "resolver_fingerprint": self.fingerprint,
-                    "inherit_to_subagents": True,
-                    "configs": [dict(ref.config) for ref in refs],
-                    "resolutions": [_resolution_payload(item) for item in binding_resolutions],
-                }
-            ),
+def bind_skill_capability(
+    refs: "Sequence[AgentCapabilityRef]",
+    specifications: "Sequence[SkillSpec | None]",
+) -> SkillCapabilityBinding:
+    """Compile resolved Skill declarations into one immutable capability binding."""
+    if len(refs) != len(specifications):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    resolutions: list[CapabilityRefResolution] = []
+    resolved: list[SkillSpec] = []
+    for ref, specification in zip(refs, specifications):
+        if specification is None:
+            if ref.required:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
+            continue
+        if specification.id != ref.id or (ref.revision is not None and specification.revision != ref.revision):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        fingerprint = canonical_sha256(
+            {"id": specification.id, "revision": specification.revision, "content": specification.content}
         )
+        resolutions.append(CapabilityRefResolution(ref.id, ref.revision, specification.revision, ref.required, "resolved", fingerprint))
+        resolved.append(specification)
+    binding_resolutions = tuple(resolutions)
+    descriptors = tuple(SkillDescriptor(item.id, item.revision, f"Authorized skill {item.id}") for item in resolved)
+    return SkillCapabilityBinding(
+        binding_resolutions,
+        SkillCatalogSnapshot(descriptors, tuple(resolved)),
+        canonical_sha256(
+            {
+                "provider": "skill",
+                "inherit_to_subagents": True,
+                "configs": [dict(ref.config) for ref in refs],
+                "resolutions": [_resolution_payload(item) for item in binding_resolutions],
+            }
+        ),
+    )
 
 
 async def snapshot_skill_catalog(catalog: SkillCatalogView) -> SkillCatalogSnapshot:
@@ -217,6 +192,6 @@ def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, objec
 
 
 __all__ = [
-    "SkillCapability", "SkillCapabilityBinding", "SkillCapabilityResolver", "SkillCatalogSnapshot",
-    "SkillCatalogView", "SkillDescriptor", "SkillProvider", "merge_skill_catalogs", "snapshot_skill_catalog",
+    "SkillCapability", "SkillCapabilityBinding", "SkillCatalogSnapshot", "SkillCatalogView", "SkillDescriptor",
+    "bind_skill_capability", "merge_skill_catalogs", "snapshot_skill_catalog",
 ]

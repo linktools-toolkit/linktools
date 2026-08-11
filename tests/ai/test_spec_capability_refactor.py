@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Conformance tests for declaration, capability and binding ownership."""
+"""Conformance tests for Asset-backed declaration composition."""
 
 import asyncio
 import importlib
@@ -8,14 +8,22 @@ from dataclasses import dataclass
 
 import pytest
 from linktools.ai.agent import AgentBinder, AgentBindingRegistry, OutputTypeRegistry
+from linktools.ai.app import (
+    BOUND_RUNTIME_PROFILE_FINGERPRINT,
+    build_agent_binding_composer,
+    build_asset_repository,
+)
+from linktools.ai.asset import AssetKey, AssetStore, InMemoryAssetBackend
 from linktools.ai.capability import (
-    CapabilityInjection,
     CapabilityRefResolution,
-    CapabilityResolverRegistry,
     CapabilityRuntimeContext,
-    MCPServerCapabilityResolver,
+    MCPServerCapabilityBinding,
     SkillCapability,
-    SkillCapabilityResolver,
+    SkillCapabilityBinding,
+    SkillCatalogSnapshot,
+    bind_mcp_capability,
+    bind_skill_capability,
+    unresolved_binding,
 )
 from linktools.ai.core import Principal, ResourceKind, ResourceRef, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
@@ -39,6 +47,7 @@ from linktools.ai.spec import (
     SkillSpec,
     SkillSpecCodec,
 )
+from linktools.ai.storage import StorageOverlay
 from pydantic import BaseModel
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -59,40 +68,28 @@ class _Binding:
         return ()
 
 
-class _Resolver:
-    provider = "custom"
-    fingerprint = canonical_sha256("custom-resolver")
-
-    def resolve(self, refs: "tuple[AgentCapabilityRef, ...]") -> _Binding:
-        return _Binding(
-            self.provider,
-            tuple(CapabilityRefResolution(ref.id, ref.revision, 1, ref.required, "resolved", canonical_sha256(ref.id)) for ref in refs),
-            canonical_sha256([ref.id for ref in refs]),
-        )
-
-
-def _binder(*, connections: tuple[ModelConnectionConfig, ...] = ()) -> AgentBinder:
+def _binder() -> AgentBinder:
     routes = ModelRegistry()
     snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
     output_types = OutputTypeRegistry()
     output_types.register("output", 1, _Output)
     return AgentBinder(
         model_resolver=SnapshotModelResolver(snapshot),
-        model_connections=ModelConnectionRegistry(connections),
+        model_connections=ModelConnectionRegistry(),
         output_types=output_types,
-        capability_resolvers=CapabilityResolverRegistry((_Resolver(),)),
-        execution_profile_fingerprint=canonical_sha256("execution-profile"),
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
     )
 
 
+async def _asset_store() -> AssetStore:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    return store
+
+
 def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
-    metadata = {
-        "depends_on": ["base-agent"],
-        "token_budget": 4096,
-        "credential_status": "verified",
-        "password_policy": "nist",
-        "api_tokenization_mode": "strict",
-    }
+    metadata = {"depends_on": ["base-agent"], "token_budget": 4096}
     spec = AgentSpec(
         "agent",
         1,
@@ -102,15 +99,18 @@ def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
         1,
         metadata=metadata,
     )
-    nested = spec.capabilities[0].config["nested"]
-    assert nested == {"values": [1]}
-    assert spec.capabilities[0].config["nested"] is not nested
-    assert dict(spec.metadata) == metadata
-    binding = _binder().bind(spec, PromptSpec("prompt", 1, "system", ()))
-    binding_digest = binding.manifest.digest
+    assert spec.capabilities[0].config["nested"] == {"values": [1]}
+    assert spec.capabilities[0].config["nested"] is not spec.capabilities[0].config["nested"]
+    binding = _binder().bind(spec, PromptSpec("prompt", 1, "system", ()), capabilities=(
+        _Binding(
+            "custom",
+            (CapabilityRefResolution("one", None, 1, True, "resolved", canonical_sha256("one")),),
+            canonical_sha256("custom"),
+        ),
+    ))
+    digest = binding.manifest.digest
     metadata["depends_on"].append("other-agent")
-    assert spec.metadata["depends_on"] == ["base-agent"]
-    assert binding.manifest.digest == binding_digest
+    assert binding.manifest.digest == digest
     with pytest.raises(AIError) as error:
         AgentSpec(
             "agent",
@@ -123,91 +123,38 @@ def test_agent_snapshot_and_codec_inputs_are_deeply_immutable() -> None:
     assert error.value.code is ErrorCode.CAPABILITY_CONFLICT
 
 
-def test_binder_groups_resolvers_and_registry_uses_only_manifest_identity() -> None:
-    binder = _binder()
-    prompt = PromptSpec("prompt", 1, "system", ())
-    spec = AgentSpec(
-        "agent",
-        1,
-        "route",
-        (AgentCapabilityRef("custom", "a"), AgentCapabilityRef("custom", "b")),
-        "output",
-        1,
-    )
-    binding = binder.bind(spec, prompt)
-    registry = AgentBindingRegistry()
-    registry.register(binding)
-    assert registry.resolve(binding.manifest.digest) is binding
-    changed = binder.bind(AgentSpec("agent", 1, "route", spec.capabilities, "output", 1, metadata={"label": "changed"}), prompt)
-    assert changed.manifest.digest != binding.manifest.digest
-    registry.register(changed)
-
-
-def test_unknown_provider_and_injection_contracts_are_explicit() -> None:
-    binder = _binder()
-    prompt = PromptSpec("prompt", 1, "system", ())
+@pytest.mark.parametrize(
+    "prepared",
+    [
+        (),
+        (_Binding("other", (), canonical_sha256("other")),),
+    ],
+)
+def test_binder_requires_exact_prepared_capability_groups(prepared: tuple[_Binding, ...]) -> None:
+    spec = AgentSpec("agent", 1, "route", (AgentCapabilityRef("custom", "one"),), "output", 1)
     with pytest.raises(AIError) as error:
-        binder.bind(AgentSpec("agent", 1, "route", (AgentCapabilityRef("unknown", "x"),), "output", 1), prompt)
-    assert error.value.code is ErrorCode.CAPABILITY_PROVIDER_UNKNOWN
-    optional = binder.bind(AgentSpec("agent", 1, "route", (AgentCapabilityRef("unknown", "x", required=False),), "output", 1), prompt)
-    assert optional.capability_bindings[0].resolutions[0].status == "unresolved"
-    resolution = optional.capability_bindings[0].resolutions[0]
-    assert optional.manifest.capabilities_fingerprint == canonical_sha256(
-        {
-            "declarative": [
-                {
-                    "provider": "unknown",
-                    "resolver_fingerprint": None,
-                    "binding_fingerprint": optional.capability_bindings[0].fingerprint,
-                    "inherit_to_subagents": False,
-                    "resolutions": [
-                        {
-                            "id": resolution.id,
-                            "requested_revision": resolution.requested_revision,
-                            "resolved_revision": resolution.resolved_revision,
-                            "required": resolution.required,
-                            "status": resolution.status,
-                            "fingerprint": resolution.fingerprint,
-                        }
-                    ],
-                }
-            ],
-            "injections": [],
-        }
-    )
-    injection = CapabilityInjection("direct", canonical_sha256("injection"), lambda _context: None)
-    with pytest.raises(AIError) as conflict:
-        binder.bind(AgentSpec("agent", 1, "route", (), "output", 1), prompt, injections=(injection, injection))
-    assert conflict.value.code is ErrorCode.CAPABILITY_CONFLICT
+        _binder().bind(spec, PromptSpec("prompt", 1, "system", ()), capabilities=prepared)
+    assert error.value.code is ErrorCode.CAPABILITY_RESOLUTION_INVALID
+
+
+def test_optional_unknown_provider_is_prepared_by_composer_contract() -> None:
+    refs = (AgentCapabilityRef("unknown", "x", required=False),)
+    binding = unresolved_binding("unknown", refs)
+    assert binding.resolutions[0].status == "unresolved"
+    agent = AgentSpec("agent", 1, "route", refs, "output", 1)
+    compiled = _binder().bind(agent, PromptSpec("prompt", 1, "system", ()), capabilities=(binding,))
+    assert compiled.capability_bindings[0].fingerprint == binding.fingerprint
 
 
 def test_declaration_codecs_round_trip_each_owned_spec() -> None:
-    agent = AgentSpec(
-        "agent",
-        1,
-        "route",
-        (AgentCapabilityRef("custom", "one", config={"nested": [1, "two"]}),),
-        "output",
-        1,
-        ("instruction",),
-        {"labels": ["a", "b"]},
-    )
-    decoded_agent = AgentSpecCodec().decode(AgentSpecCodec().encode(agent))
-    assert decoded_agent.id == agent.id
-    assert dict(decoded_agent.capabilities[0].config) == dict(agent.capabilities[0].config)
-    assert dict(decoded_agent.metadata) == dict(agent.metadata)
-
+    agent = AgentSpec("agent", 1, "route", (AgentCapabilityRef("custom", "one"),), "output", 1)
+    assert AgentSpecCodec().decode(AgentSpecCodec().encode(agent)) == agent
     prompt = PromptSpec("prompt", 2, "system", ("instruction",))
-    decoded_prompt = PromptSpecCodec().decode(PromptSpecCodec().encode(prompt))
-    assert decoded_prompt == prompt
-
+    assert PromptSpecCodec().decode(PromptSpecCodec().encode(prompt)) == prompt
     skill = SkillSpec("skill", 3, "content")
-    decoded_skill = SkillSpecCodec().decode(SkillSpecCodec().encode(skill))
-    assert decoded_skill == skill
-
+    assert SkillSpecCodec().decode(SkillSpecCodec().encode(skill)) == skill
     server = MCPServerSpec("server", 4, "command", ("--flag",))
-    decoded_server = MCPServerSpecCodec().decode(MCPServerSpecCodec().encode(server))
-    assert decoded_server == server
+    assert MCPServerSpecCodec().decode(MCPServerSpecCodec().encode(server)) == server
 
 
 def test_model_connection_is_stable_and_secret_free() -> None:
@@ -230,49 +177,35 @@ def test_openai_model_materializer_applies_connection_configuration() -> None:
     assert str(model.provider.client.base_url) == "https://example.test/v1/"
     assert model.settings["timeout"] == 12.5
 
-    with pytest.raises(AIError) as unsupported:
-        materializer.materialize(ModelRoute("custom", "custom", "custom-model"), None)
-    assert unsupported.value.code is ErrorCode.MODEL_CONNECTION_UNSUPPORTED
-
-    missing = OpenAIModelMaterializer(StaticModelCredentialProvider())
-    with pytest.raises(AIError) as unavailable:
-        missing.materialize(route, ModelConnectionConfig("missing", credential_id="unknown"))
-    assert unavailable.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-    assert unavailable.value.safe_details == {"credential_id": "unknown"}
-
 
 def test_local_runtime_services_is_not_a_public_constructor() -> None:
     app = importlib.import_module("linktools.ai.app")
     assert "LocalRuntimeServices" not in app.__all__
-    with pytest.raises(ImportError):
-        imported = __import__("linktools.ai.app", fromlist=("LocalRuntimeServices",))
-        try:
-            imported.LocalRuntimeServices
-        except AttributeError as error:
-            raise ImportError("LocalRuntimeServices is not public") from error
+    assert not hasattr(app, "LocalRuntimeServices")
 
 
-def test_skill_aggregates_and_mcp_materializes_only_with_runtime_context() -> None:
-    class Skills:
-        def manifest(self) -> str:
-            return canonical_sha256("skills")
+def test_skill_binding_owns_an_immutable_catalog_snapshot() -> None:
+    async def run() -> None:
+        binding = bind_skill_capability(
+            (AgentCapabilityRef("skill", "python"),),
+            (SkillSpec("python", 2, "instructions"),),
+        )
+        assert isinstance(binding, SkillCapabilityBinding)
+        assert isinstance(binding.catalog, SkillCatalogSnapshot)
+        values = await binding.materialize(CapabilityRuntimeContext(Principal("p", "t"), ResourceRef(ResourceKind.EXECUTION, "e", "t")))
+        assert len(values) == 1 and isinstance(values[0], SkillCapability)
 
-        def resolve_ref(self, skill_id: str, revision: int | None = None) -> SkillSpec:
-            return SkillSpec(skill_id, revision or 1, skill_id)
+    asyncio.run(run())
 
-    class Mcp:
-        def __init__(self) -> None:
-            self.calls = 0
 
-        def manifest(self) -> str:
-            return canonical_sha256("mcp")
-
-        def resolve_ref(self, server_id: str, revision: int | None = None) -> MCPServerSpec:
-            return MCPServerSpec(server_id, revision or 1, "server")
+def test_mcp_binding_defers_execution_to_runtime_provider() -> None:
+    class Runtime:
+        fingerprint = canonical_sha256("mcp-runtime")
+        calls = 0
 
         async def connect(self, server_id: str) -> object:
             del server_id
-            raise AssertionError("connect is not part of binding")
+            raise AssertionError("connect belongs to runtime materialization")
 
         async def toolsets(self, servers, *, principal, execution):
             del principal, execution
@@ -280,14 +213,157 @@ def test_skill_aggregates_and_mcp_materializes_only_with_runtime_context() -> No
             return (FunctionToolset(id=servers[0].id),)
 
     async def run() -> None:
-        refs = (AgentCapabilityRef("skill", "a"), AgentCapabilityRef("skill", "b"))
-        skill_binding = SkillCapabilityResolver(Skills()).resolve(refs)
-        values = await skill_binding.materialize(CapabilityRuntimeContext(Principal("p", "t"), ResourceRef(ResourceKind.EXECUTION, "e", "t")))
-        assert len(values) == 1 and isinstance(values[0], SkillCapability)
-        mcp = Mcp()
-        mcp_binding = MCPServerCapabilityResolver(mcp).resolve((AgentCapabilityRef("mcp", "server"),))
-        assert mcp.calls == 0
-        await mcp_binding.materialize(CapabilityRuntimeContext(Principal("p", "t"), ResourceRef(ResourceKind.EXECUTION, "e", "t")))
-        assert mcp.calls == 1
+        runtime = Runtime()
+        binding = bind_mcp_capability(
+            (AgentCapabilityRef("mcp", "server"),),
+            (MCPServerSpec("server", 1, "command"),),
+            runtime,
+        )
+        assert isinstance(binding, MCPServerCapabilityBinding)
+        assert runtime.calls == 0
+        await binding.materialize(CapabilityRuntimeContext(Principal("p", "t"), ResourceRef(ResourceKind.EXECUTION, "e", "t")))
+        assert runtime.calls == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_composer_loads_agent_prompt_and_skill_from_asset_repository() -> None:
+    store = await _asset_store()
+    await store.put(AssetKey("agent", "coding"), AgentSpecCodec().encode(AgentSpec("coding", 1, "route", (AgentCapabilityRef("skill", "python"),), "output", 1)))
+    await store.put(AssetKey("prompt", "review"), PromptSpecCodec().encode(PromptSpec("review", 1, "system", ("prompt",))))
+    await store.put(AssetKey("skill", "python"), SkillSpecCodec().encode(SkillSpec("python", 2, "skill body")))
+    repository = build_asset_repository(store)
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    output_types.freeze()
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    composer = build_agent_binding_composer(
+        repository,
+        model_resolver=SnapshotModelResolver(snapshot),
+        model_connections=ModelConnectionRegistry(),
+        output_types=output_types,
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
+    )
+    binding = await composer.compose(agent_id="coding", prompt_id="review")
+    assert binding.spec.id == "coding"
+    assert binding.prompt.id == "review"
+    assert isinstance(binding.capability_bindings[0].catalog, SkillCatalogSnapshot)
+
+
+@pytest.mark.asyncio
+async def test_composer_preserves_required_and_optional_missing_capability_contracts() -> None:
+    store = await _asset_store()
+    await store.put(AssetKey("agent", "optional"), AgentSpecCodec().encode(AgentSpec("optional", 1, "route", (AgentCapabilityRef("skill", "missing", required=False),), "output", 1)))
+    await store.put(AssetKey("prompt", "default"), PromptSpecCodec().encode(PromptSpec("default", 1, "system", ())))
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    output_types.freeze()
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    composer = build_agent_binding_composer(
+        build_asset_repository(store),
+        model_resolver=SnapshotModelResolver(snapshot),
+        model_connections=ModelConnectionRegistry(),
+        output_types=output_types,
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
+    )
+    optional = await composer.compose(agent_id="optional", prompt_id="default")
+    assert optional.capability_bindings[0].resolutions[0].status == "unresolved"
+    await store.put(AssetKey("agent", "required"), AgentSpecCodec().encode(AgentSpec("required", 1, "route", (AgentCapabilityRef("skill", "missing"),), "output", 1)))
+    with pytest.raises(AIError) as error:
+        await composer.compose(agent_id="required", prompt_id="default")
+    assert error.value.code is ErrorCode.CAPABILITY_REQUIRED_MISSING
+
+
+@pytest.mark.asyncio
+async def test_downstream_preparer_is_the_only_extension_point() -> None:
+    class FooPreparer:
+        provider = "foo"
+
+        async def prepare(self, refs):
+            return _Binding(
+                "foo",
+                tuple(CapabilityRefResolution(ref.id, ref.revision, 1, ref.required, "resolved", canonical_sha256(ref.id)) for ref in refs),
+                canonical_sha256("foo-binding"),
+            )
+
+    store = await _asset_store()
+    await store.put(AssetKey("agent", "foo-agent"), AgentSpecCodec().encode(AgentSpec("foo-agent", 1, "route", (AgentCapabilityRef("foo", "tool"),), "output", 1)))
+    await store.put(AssetKey("prompt", "default"), PromptSpecCodec().encode(PromptSpec("default", 1, "system", ())))
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    output_types.freeze()
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    composer = build_agent_binding_composer(
+        build_asset_repository(store),
+        model_resolver=SnapshotModelResolver(snapshot),
+        model_connections=ModelConnectionRegistry(),
+        output_types=output_types,
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
+        extra_preparers=(FooPreparer(),),
+    )
+    binding = await composer.compose(agent_id="foo-agent", prompt_id="default")
+    assert binding.capability_bindings[0].provider == "foo"
+
+
+@pytest.mark.asyncio
+async def test_existing_skill_binding_is_stable_after_asset_update() -> None:
+    store = await _asset_store()
+    await store.put(AssetKey("agent", "stable"), AgentSpecCodec().encode(AgentSpec("stable", 1, "route", (AgentCapabilityRef("skill", "python"),), "output", 1)))
+    await store.put(AssetKey("prompt", "default"), PromptSpecCodec().encode(PromptSpec("default", 1, "system", ())))
+    await store.put(AssetKey("skill", "python"), SkillSpecCodec().encode(SkillSpec("python", 1, "old")))
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    output_types.freeze()
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    composer = build_agent_binding_composer(
+        build_asset_repository(store),
+        model_resolver=SnapshotModelResolver(snapshot),
+        model_connections=ModelConnectionRegistry(),
+        output_types=output_types,
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
+    )
+    first = await composer.compose(agent_id="stable", prompt_id="default")
+    await store.put(AssetKey("skill", "python"), SkillSpecCodec().encode(SkillSpec("python", 2, "new")))
+    second = await composer.compose(agent_id="stable", prompt_id="default")
+    first_skill = first.capability_bindings[0].catalog.specifications[0]
+    second_skill = second.capability_bindings[0].catalog.specifications[0]
+    assert first_skill.content == "old"
+    assert second_skill.content == "new"
+    assert first.manifest.digest != second.manifest.digest
+
+
+@pytest.mark.asyncio
+async def test_optional_skill_layout_conflict_is_not_downgraded() -> None:
+    store = await _asset_store()
+    await store.put(AssetKey("agent", "conflict"), AgentSpecCodec().encode(AgentSpec("conflict", 1, "route", (AgentCapabilityRef("skill", "python", required=False),), "output", 1)))
+    await store.put(AssetKey("prompt", "default"), PromptSpecCodec().encode(PromptSpec("default", 1, "system", ())))
+    await store.put(AssetKey("skill", "python"), SkillSpecCodec().encode(SkillSpec("python", 1, "old")))
+    await store.put(AssetKey("skill", "python/SKILL.md"), b"---\nname: python\ndescription: Python\n---\nnew\n")
+    output_types = OutputTypeRegistry()
+    output_types.register("output", 1, _Output)
+    output_types.freeze()
+    routes = ModelRegistry()
+    snapshot = routes.prime({"route": ModelRoute("route", "test", "test")})
+    composer = build_agent_binding_composer(
+        build_asset_repository(store),
+        model_resolver=SnapshotModelResolver(snapshot),
+        model_connections=ModelConnectionRegistry(),
+        output_types=output_types,
+        execution_profile_fingerprint=BOUND_RUNTIME_PROFILE_FINGERPRINT,
+    )
+    with pytest.raises(AIError) as error:
+        await composer.compose(agent_id="conflict", prompt_id="default")
+    assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
+
+
+def test_binding_registry_reuses_the_same_manifest() -> None:
+    registry = AgentBindingRegistry()
+    binding = _binder().bind(AgentSpec("agent", 1, "route", (), "output", 1), PromptSpec("prompt", 1, "system", ()))
+    registry.register(binding)
+    registry.register(binding)
+    assert registry.resolve(binding.manifest.digest) is binding

@@ -111,7 +111,7 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             record = current
         await self._complete_operation(operation, request.principal.tenant_id, record.session_id, canonical_sha256({"session_id": record.session_id, "revision": record.revision}))
-        _logger.info("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
+        _logger.debug("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
         return await self._view(record, request.principal)
 
     async def get(self, session_id: str, *, principal: Principal) -> SessionView:
@@ -196,7 +196,7 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
             target = existing_target
         await self._complete_operation(operation, request.principal.tenant_id, target.session_id, canonical_sha256({"session_id": target.session_id, "revision": target.revision}))
-        _logger.info("session forked: source=%s target=%s", session_id, target.session_id)
+        _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
         return await self._view(target, request.principal)
 
     async def update(self, binding_digest: str, session_id: str, request: UpdateSessionRequest) -> SessionView:
@@ -219,7 +219,7 @@ class DefaultSessionService:
             and current.cwd == requested_cwd
         ):
             await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
-            _logger.info("session update reconciled: session=%s revision=%s", session_id, current.revision)
+            _logger.debug("session update reconciled: session=%s revision=%s", session_id, current.revision)
             return await self._view(current, request.principal)
         if current.status is SessionStatus.CLEANUP_REQUIRED:
             raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
@@ -229,7 +229,7 @@ class DefaultSessionService:
         next_record = replace(current, revision=current.revision + 1, resource_generation=current.resource_generation + 1, cwd=requested_cwd, metadata=request.metadata, updated_at=now)
         updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
         await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
-        _logger.info("session updated: session=%s revision=%s", session_id, updated.revision)
+        _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
         return await self._view(updated, request.principal)
 
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
@@ -286,7 +286,7 @@ class DefaultSessionService:
         closing = replace(current, status=SessionStatus.CLOSED, revision=current.revision + 1, updated_at=now, closed_at=now)
         updated = await self._persistence.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
         await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
-        _logger.info("session closed: session=%s revision=%s force=%s", session_id, updated.revision, request.force)
+        _logger.debug("session closed: session=%s revision=%s force=%s", session_id, updated.revision, request.force)
         return await self._view(updated, request.principal)
 
     async def _active_executions(self, session_id: str, tenant_id: str) -> tuple:

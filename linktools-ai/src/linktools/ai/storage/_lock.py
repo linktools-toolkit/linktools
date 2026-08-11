@@ -220,7 +220,7 @@ class FilesystemWriterLock:
             os.close(descriptor)
             raise
         self._descriptor = descriptor
-        _logger.info("runtime writer lock acquired: path=%s", self.path)
+        _logger.debug("runtime writer lock acquired: path=%s", self.path)
 
     async def release(self) -> None:
         descriptor = self._descriptor
@@ -229,7 +229,7 @@ class FilesystemWriterLock:
             return
         await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
-        _logger.info("runtime writer lock released: path=%s", self.path)
+        _logger.debug("runtime writer lock released: path=%s", self.path)
 
 
 def _read_record(path: Path) -> 'dict[str, str | int | float]':

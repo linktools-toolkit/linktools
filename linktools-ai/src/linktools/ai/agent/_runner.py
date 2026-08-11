@@ -13,7 +13,7 @@ from typing import Protocol, cast
 from urllib.parse import urlsplit
 
 from linktools.core import environ
-from pydantic_ai import Agent, AgentRunResultEvent
+from pydantic_ai import Agent, AgentRunResultEvent, TextOutput
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -25,10 +25,10 @@ from pydantic_ai.messages import (
     PartEndEvent,
     PartStartEvent,
     RetryPromptPart,
-    ThinkingPart,
-    ThinkingPartDelta,
     TextPart,
     TextPartDelta,
+    ThinkingPart,
+    ThinkingPartDelta,
     ToolReturnPart,
 )
 from pydantic_ai.models import Model
@@ -38,12 +38,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
-from ..capability import (
-    CapabilityRuntimeContext,
-    SkillCapability,
-    SkillCatalogView,
-    merge_skill_catalogs,
-)
+from ..capability import CapabilityRuntimeContext
 from ..core import JsonValue, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelMaterializer
@@ -52,9 +47,10 @@ from ._capabilities import (
     AgentCatalogView,
     AgentRunScope,
     EmptyAgentCatalog,
-    EmptySkillCatalog,
     compose_platform_capabilities,
 )
+from ._catalog import AgentCatalogItem
+from ._output import AssistantTextOutput
 
 
 class AgentRunner(Protocol):
@@ -111,7 +107,6 @@ class WorkspaceAgentRunner:
         api_key: "str | None" = None,
         tools: "tuple[AgentTool, ...]" = (),
         capabilities: "tuple[PydanticAgentCapability[None], ...]" = (),
-        skill_catalog: "SkillCatalogView | None" = None,
         agent_catalog: "AgentCatalogView | None" = None,
     ) -> None:
         self._root = root.expanduser().resolve()
@@ -121,7 +116,6 @@ class WorkspaceAgentRunner:
         self._api_key = api_key or os.getenv("OPENAI_API_KEY")
         self._tools = tools
         self._workspace_capabilities = capabilities
-        self._skill_catalog = skill_catalog if skill_catalog is not None else EmptySkillCatalog()
         self._agent_catalog = agent_catalog if agent_catalog is not None else EmptyAgentCatalog()
         self._agents: dict[tuple[str, str], Agent[None, str]] = {}
         self._agent_lock = asyncio.Lock()
@@ -152,16 +146,7 @@ class WorkspaceAgentRunner:
             raise _SegmentAlreadyStarted(step_run_id)
         agent = await self._get_agent(definition)
         parent_model = self._materialize_model(definition.model)
-        external_capabilities: list[PydanticAgentCapability[None]] = []
-        skill_catalogs: list[SkillCatalogView] = [self._skill_catalog]
-        for capability in self._workspace_capabilities:
-            if isinstance(capability, SkillCapability):
-                skill_catalogs.append(capability.catalog)
-            else:
-                external_capabilities.append(capability)
-        skill_catalog = await merge_skill_catalogs(tuple(skill_catalogs))
-        if skill_catalog.descriptors:
-            external_capabilities.append(SkillCapability(skill_catalog))
+        external_capabilities = list(self._workspace_capabilities)
         scope = AgentRunScope(
             root=self._root,
             agent_name=definition.agent_name,
@@ -181,7 +166,7 @@ class WorkspaceAgentRunner:
             model_factory=lambda value: self._materialize_model(definition.model if value is None else value),
             parent_model=parent_model,
         )
-        self._logger.info(
+        self._logger.debug(
             "workspace agent segment started: agent=%s conversation=%s step=%s segment=%s",
             definition.agent_name,
             conversation_id,
@@ -239,13 +224,24 @@ class WorkspaceAgentRunner:
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         result = WorkspaceAgentResult(final_result.run_id, "".join(output_parts) or str(final_result.output), messages)
-        self._logger.info("workspace agent segment completed: agent=%s run=%s", definition.agent_name, result.run_id)
+        self._logger.debug("workspace agent segment completed: agent=%s run=%s", definition.agent_name, result.run_id)
         return result
 
     async def _resolve_definition(self, agent_id: "str | None") -> _ResolvedDefinition:
         selected = self._selected_agent_name(agent_id)
-        instructions = await asyncio.to_thread(self._instructions, selected)
-        model = self._model or _config_string(self._config, "model") or os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+        catalog_item = await self._find_agent(selected)
+        instructions = (
+            catalog_item.instructions
+            if catalog_item is not None
+            else await asyncio.to_thread(self._instructions, selected)
+        )
+        model = (
+            self._model
+            or (None if catalog_item is None else catalog_item.model)
+            or _config_string(self._config, "model")
+            or os.getenv("OPENAI_MODEL")
+            or "gpt-4o-mini"
+        )
         model_identity = model if isinstance(model, str) else f"{type(model).__module__}.{type(model).__qualname__}"
         fingerprint: dict[str, JsonValue] = {
             "agent_name": selected,
@@ -258,7 +254,16 @@ class WorkspaceAgentRunner:
             "output_schema_revision": _config_int(self._config, "output_schema_revision", 1),
             "workspace_config": _stable_config(self._config),
         }
-        return _ResolvedDefinition(selected, instructions, model, fingerprint)
+        agent_name = selected if catalog_item is None else catalog_item.name
+        fingerprint["catalog_agent_name"] = agent_name
+        return _ResolvedDefinition(agent_name, instructions, model, fingerprint)
+
+    async def _find_agent(self, agent_id: str) -> "AgentCatalogItem | None":
+        for item in await self._agent_catalog.list_agents():
+            if item.id == agent_id:
+                self._logger.debug("agent spec loaded from catalog: agent=%s", agent_id)
+                return item
+        return None
 
     async def _get_agent(self, definition: _ResolvedDefinition) -> "Agent[None, str]":
         cache_key = (definition.agent_name, canonical_sha256(definition.fingerprint))
@@ -330,13 +335,13 @@ class BoundAgentRunner:
         *,
         binding: AgentBinding,
         materializer: ModelMaterializer,
-        agent_catalog: "AgentCatalogView | None" = None,
+        execution_root: Path,
         memory_store: "SearchableMemoryStore | None" = None,
     ) -> None:
         self._binding = binding
         self._materializer = materializer
+        self._execution_root = execution_root
         self._model: "Model | None" = None
-        self._agent_catalog = agent_catalog if agent_catalog is not None else EmptyAgentCatalog()
         self._memory_store = memory_store
         self._agent: "Agent[None, object] | None" = None
         self._lock = asyncio.Lock()
@@ -375,7 +380,7 @@ class BoundAgentRunner:
         if model is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         scope = AgentRunScope(
-            root=Path.cwd(),
+            root=self._execution_root,
             agent_name=self._binding.spec.id,
             conversation_id=conversation_id,
             step_run_id=step_run_id,
@@ -383,12 +388,13 @@ class BoundAgentRunner:
             memory_namespace=memory_namespace,
             step_store=step_store,
             inherited_capabilities=tuple(inherited),
-            agent_catalog=self._agent_catalog,
+            agent_catalog=EmptyAgentCatalog(),
             memory_store=memory_store if memory_store is not None else self._memory_store,
+            enable_subagents=False,
             parent_step_run_id=parent_step_run_id,
         )
         composed = tuple(materialized) + await compose_platform_capabilities(scope, model_factory=lambda _value: model, parent_model=model)
-        self._logger.info("bound agent segment started: agent=%s execution_step=%s binding=%s", self._binding.spec.id, step_run_id, self._binding.manifest.digest)
+        self._logger.debug("bound agent segment started: agent=%s execution_step=%s binding=%s", self._binding.spec.id, step_run_id, self._binding.manifest.digest)
         final_result = None
         output_parts: list[str] = []
         async with agent.run_stream_events(
@@ -422,7 +428,7 @@ class BoundAgentRunner:
         if not isinstance(output, self._binding.output_type):
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         encoded = canonical_json_bytes(output.model_dump(mode="json")).decode("utf-8")
-        self._logger.info("bound agent segment completed: agent=%s run=%s", self._binding.spec.id, final_result.run_id)
+        self._logger.debug("bound agent segment completed: agent=%s run=%s", self._binding.spec.id, final_result.run_id)
         return WorkspaceAgentResult(final_result.run_id, encoded or "null", final_result.all_messages())
 
     async def _get_agent(self) -> "Agent[None, object]":
@@ -431,15 +437,22 @@ class BoundAgentRunner:
                 return self._agent
             model = self._materializer.materialize(self._binding.model_route, self._binding.model_connection)
             self._model = model
+            output_type = self._binding.output_type
+            if output_type is AssistantTextOutput:
+                output_type = TextOutput(_assistant_text_output)
             agent = Agent(
                 model,
                 name=self._binding.spec.id,
                 system_prompt=self._binding.prompt.system,
                 instructions="\n".join((*self._binding.spec.instructions, *self._binding.prompt.instructions)),
-                output_type=self._binding.output_type,
+                output_type=output_type,
             )
             self._agent = cast("Agent[None, object]", agent)
             return self._agent
+
+
+def _assistant_text_output(value: str) -> AssistantTextOutput:
+    return AssistantTextOutput(text=value)
 
 
 def _validate_agent_id(agent_id: str) -> None:

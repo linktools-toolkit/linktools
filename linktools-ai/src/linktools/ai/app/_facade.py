@@ -2,26 +2,18 @@
 # -*- coding: utf-8 -*-
 """Runtime containers with explicit query/mutation separation."""
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from linktools.core import environ
 
 from ..agent import (
-    AgentBinder,
     AgentBinding,
     AgentBindingRegistry,
-    OutputTypeRegistry,
 )
-from ..capability import (
-    CapabilityInjection,
-    CapabilityResolver,
-    CapabilityResolverRegistry,
-)
-from ..core import Page, Principal, canonical_sha256
+from ..core import Page, Principal
 from ..errors import AIError, ErrorCode
-from ..model import ModelConnectionRegistry, ModelResolver
-from ..observe import MiddlewarePipeline, RunSnapshot
+from ..observe import RunSnapshot
 from ..runtime import (
     ApprovalApi,
     ApprovalDecisionRequest,
@@ -71,13 +63,11 @@ from ..runtime import (
     SessionService,
     SessionView,
     TaskService,
-    ToolPolicy,
     TraceItem,
     TranscriptItem,
     UpdateSessionRequest,
     validate_compare_request,
 )
-from ..spec import AgentSpec, PromptSpec
 from ..task import (
     CancelGraphRequest,
     TaskApi,
@@ -85,7 +75,6 @@ from ..task import (
     TaskGraphResult,
     TaskGraphView,
 )
-from ..workspace import Sandbox
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,34 +132,6 @@ class LocalRuntimeServices:
         return cls(services, binding_registry, _token=_LOCAL_RUNTIME_SERVICES_TOKEN)
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimeDependencies:
-    model_resolver: ModelResolver
-    capability_resolvers: "tuple[CapabilityResolver, ...]"
-    model_connections: ModelConnectionRegistry
-    middleware: MiddlewarePipeline
-    sandbox: Sandbox
-    tool_policy: ToolPolicy
-    output_types: OutputTypeRegistry
-    local: LocalRuntimeServices
-    platform_capability_profile_fingerprint: str = canonical_sha256("linktools-ai-platform-v1")
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.local, LocalRuntimeServices):
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-
-    @property
-    def execution_profile_fingerprint(self) -> str:
-        return canonical_sha256(
-            {
-                "tool_policy": self.tool_policy.fingerprint,
-                "sandbox": self.sandbox.fingerprint,
-                "middleware": self.middleware.fingerprint,
-                "platform_capabilities": self.platform_capability_profile_fingerprint,
-            }
-        )
-
-
 def _build_bound_runtime(binding: AgentBinding, local: LocalRuntimeServices) -> Runtime:
     return Runtime(
         local.services.identity,
@@ -186,58 +147,16 @@ def _build_bound_runtime(binding: AgentBinding, local: LocalRuntimeServices) -> 
 
 
 def build_runtime(
-    spec: AgentSpec,
-    prompt: PromptSpec,
+    binding: AgentBinding,
     *,
-    dependencies: RuntimeDependencies,
-    additional_capability_resolvers: "Sequence[CapabilityResolver]" = (),
-    capability_injections: "Sequence[CapabilityInjection]" = (),
-) -> Runtime:
-    if any(
-        value is None
-        for value in (
-            dependencies.model_resolver,
-            dependencies.capability_resolvers,
-            dependencies.model_connections,
-            dependencies.middleware,
-            dependencies.sandbox,
-            dependencies.tool_policy,
-            dependencies.output_types,
-            dependencies.local,
-            dependencies.execution_profile_fingerprint,
-        )
-    ):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    if not spec.id or not prompt.id or spec.revision < 1 or prompt.revision < 1:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "invalid Agent or Prompt revision")
-    resolver_registry = CapabilityResolverRegistry((*dependencies.capability_resolvers, *additional_capability_resolvers))
-    binder = AgentBinder(
-        model_resolver=dependencies.model_resolver,
-        model_connections=dependencies.model_connections,
-        output_types=dependencies.output_types,
-        capability_resolvers=resolver_registry,
-        execution_profile_fingerprint=dependencies.execution_profile_fingerprint,
-    )
-    binding = binder.bind(spec, prompt, injections=tuple(capability_injections))
-    dependencies.local.binding_registry.register(binding)
-    binding = dependencies.local.binding_registry.resolve(binding.manifest.digest)
-    logger = environ.get_logger("ai.app.facade")
-    logger.debug("runtime binding prepared agent=%s model=%s route=%s", spec.id, spec.model, binding.model_route.route_id)
-    return _build_bound_runtime(binding, dependencies.local)
-
-
-def build_local_runtime(
-    spec: AgentSpec,
-    prompt: PromptSpec,
-    *,
-    binder: AgentBinder,
     local: LocalRuntimeServices,
 ) -> Runtime:
-    binding = binder.bind(spec, prompt)
+    if not isinstance(binding, AgentBinding) or not isinstance(local, LocalRuntimeServices):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
     local.binding_registry.register(binding)
     binding = local.binding_registry.resolve(binding.manifest.digest)
-    _logger = environ.get_logger("ai.app.facade")
-    _logger.info("local runtime binding registered: agent=%s binding=%s", spec.id, binding.manifest.digest)
+    logger = environ.get_logger("ai.app.facade")
+    logger.debug("runtime binding attached: agent=%s binding=%s route=%s", binding.spec.id, binding.manifest.digest, binding.model_route.route_id)
     return _build_bound_runtime(binding, local)
 
 
@@ -460,4 +379,4 @@ class _ArtifactApi:
         return await self._service.get(artifact_id, principal=principal)
 
 
-__all__ = ["RuntimeDependencies", "build_local_runtime", "build_runtime", "build_runtime_access"]
+__all__ = ["build_runtime", "build_runtime_access"]

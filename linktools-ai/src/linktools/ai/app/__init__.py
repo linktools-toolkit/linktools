@@ -4,9 +4,11 @@
 
 from ._acp import ACPAgent, ACPApplication, ACPConnection, run_stdio, serve_stdio
 from ._assembly import (
+    BOUND_RUNTIME_PROFILE_FINGERPRINT,
     AppServices,
     RuntimePersistenceConfig,
     RuntimeResources,
+    build_agent_binding_composer,
     build_app_services,
     build_asset_repository,
     build_asset_store,
@@ -16,11 +18,9 @@ from ._assembly import (
     open_runtime_resources,
     open_runtime_services,
 )
-from ._catalog import AssetAgentCatalog, AssetSkillCatalog
+from ._composition import AgentBindingComposer, CapabilityPreparer
 from ._facade import (
     Runtime,
-    RuntimeDependencies,
-    build_local_runtime,
     build_runtime,
     build_runtime_access,
 )
@@ -38,10 +38,10 @@ from ._workbench import (
 
 __all__ = [
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "REMOTE_RUNTIME_URL", "ACPAgent", "ACPApplication",
-    "ACPConnection", "AppServices", "AssetAgentCatalog", "AssetSkillCatalog", "BindingExecutionLauncher", "EventHandler", "Runtime",
-    "RuntimeDependencies", "RuntimePersistenceConfig", "RuntimeResources", "TextHandler", "WorkspaceAgentRuntime",
-    "WorkspaceExecutionLauncher", "WorkspaceRunResult", "WorkspaceSession", "build_app_services", "build_asset_repository", "build_asset_store",
-    "build_local_runtime", "build_local_runtime_services", "build_runtime", "build_runtime_access", "build_runtime_services",
+    "ACPConnection", "AgentBindingComposer", "AppServices", "BOUND_RUNTIME_PROFILE_FINGERPRINT", "BindingExecutionLauncher",
+    "CapabilityPreparer", "EventHandler", "Runtime", "RuntimePersistenceConfig", "RuntimeResources", "TextHandler", "WorkspaceAgentRuntime",
+    "WorkspaceExecutionLauncher", "WorkspaceRunResult", "WorkspaceSession", "build_agent_binding_composer", "build_app_services",
+    "build_asset_repository", "build_asset_store", "build_local_runtime_services", "build_runtime", "build_runtime_access", "build_runtime_services",
     "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services", "open_workspace_runtime", "run_stdio",
     "serve_stdio",
 ]

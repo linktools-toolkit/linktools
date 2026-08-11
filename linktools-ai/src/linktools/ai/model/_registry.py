@@ -80,7 +80,7 @@ class ModelRegistry:
         if normalized == dict(self._snapshot.routes):
             return self._snapshot
         self._snapshot = ModelRegistrySnapshot(self._snapshot.revision + 1, MappingProxyType(normalized), digest)
-        _logger.info("model registry committed: revision=%s routes=%s", self._snapshot.revision, len(normalized))
+        _logger.debug("model registry committed: revision=%s routes=%s", self._snapshot.revision, len(normalized))
         return self._snapshot
 
 

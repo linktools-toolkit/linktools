@@ -148,7 +148,7 @@ def build_temporal_components() -> 'tuple[TemporalSdkDataConverter, TemporalSdkP
     payload_codec = AssetPayloadCodec()
     data_converter = _TemporalDataConverter(payload_codec=payload_codec)
     interceptor = AssetWorkerInterceptor()
-    _logger.info("temporal components built: converter=%s codec=%s interceptor=%s", DATA_CONVERTER, PAYLOAD_CODEC, INTERCEPTOR)
+    _logger.debug("temporal components built: converter=%s codec=%s interceptor=%s", DATA_CONVERTER, PAYLOAD_CODEC, INTERCEPTOR)
     return data_converter, payload_codec, interceptor
 
 

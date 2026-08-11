@@ -4,6 +4,7 @@
 
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
@@ -13,8 +14,8 @@ from ..adapter import RuntimeMemoryStore
 from ..agent import (
     AgentBinding,
     AgentBindingRegistry,
-    AgentCatalogView,
     BoundAgentRunner,
+    EventHandler,
     WorkspaceAgentResult,
 )
 from ..capability import CapabilityRuntimeContext
@@ -56,12 +57,14 @@ class BindingExecutionLauncher:
         materializer: ModelMaterializer,
         resources: "RuntimeResources",
         *,
-        agent_catalog: "AgentCatalogView | None" = None,
+        execution_root: "Path",
+        event_handler: "EventHandler | None" = None,
     ) -> None:
         self._registry = registry
         self._materializer = materializer
         self._resources = resources
-        self._agent_catalog = agent_catalog
+        self._execution_root = execution_root
+        self._event_handler = event_handler
         self._tasks: dict[str, asyncio.Task[WorkspaceAgentResult]] = {}
         self._accepting = True
 
@@ -72,7 +75,7 @@ class BindingExecutionLauncher:
         if execution.execution_id in self._tasks:
             return
         self._tasks[execution.execution_id] = asyncio.create_task(self._execute(binding, request, execution))
-        _logger.info("binding launch registered: execution=%s binding=%s", execution.execution_id, execution.binding_digest)
+        _logger.debug("binding launch registered: execution=%s binding=%s", execution.execution_id, execution.binding_digest)
 
     def validate_binding(self, binding_digest: str) -> None:
         self._registry.resolve(binding_digest)
@@ -83,7 +86,7 @@ class BindingExecutionLauncher:
             return CancelEffectOutcome.UNKNOWN
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        _logger.info("binding cancellation resolved: execution=%s", execution.execution_id)
+        _logger.debug("binding cancellation resolved: execution=%s", execution.execution_id)
         return CancelEffectOutcome.CONFIRMED
 
     async def shutdown(self) -> None:
@@ -99,7 +102,7 @@ class BindingExecutionLauncher:
         runner = BoundAgentRunner(
             binding=binding,
             materializer=self._materializer,
-            agent_catalog=self._agent_catalog,
+            execution_root=self._execution_root,
         )
         run_id = step_run_id(
             namespace=self._resources.domain.namespace,
@@ -132,6 +135,7 @@ class BindingExecutionLauncher:
                     request.principal,
                     ResourceRef(ResourceKind.EXECUTION, execution.execution_id, execution.tenant_id),
                 ),
+                on_event=self._event_handler,
             )
             await self._commit_success(binding, execution, result)
             return result

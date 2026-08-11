@@ -125,7 +125,7 @@ class LocalTaskGraphLauncher:
         existing = self._graphs.get(request.graph.graph_id)
         if existing is None or existing.done():
             self._graphs[request.graph.graph_id] = asyncio.create_task(self._run_graph(request))
-        _logger.info("local task graph launched: graph=%s nodes=%s", request.graph.graph_id, len(request.graph.nodes))
+        _logger.debug("local task graph launched: graph=%s nodes=%s", request.graph.graph_id, len(request.graph.nodes))
         return TaskGraphHandle(request.graph.graph_id, f"local:{request.graph.graph_id}")
 
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
@@ -133,7 +133,7 @@ class LocalTaskGraphLauncher:
         task = self._graphs.get(graph_id)
         if task is not None and not task.done():
             task.cancel()
-        _logger.info("local task graph cancelled: graph=%s", graph_id)
+        _logger.debug("local task graph cancelled: graph=%s", graph_id)
         return view
 
     async def shutdown(self) -> None:
@@ -206,7 +206,7 @@ class LocalTaskGraphLauncher:
                 result = await self._runner.run(node, graph_id=request.graph.graph_id, principal=request.principal, dependency_results=dependency_results)
                 await self._verifier.verify(result, tenant_id=request.principal.tenant_id)
                 await self._repository.complete(lease, tenant_id=request.principal.tenant_id, execution_id=result.execution_id, result_digest=result.result_digest)
-                _logger.info("local task node completed: graph=%s task=%s execution=%s", request.graph.graph_id, node.task_id, result.execution_id)
+                _logger.debug("local task node completed: graph=%s task=%s execution=%s", request.graph.graph_id, node.task_id, result.execution_id)
             except asyncio.CancelledError:
                 raise
             except Exception as error:

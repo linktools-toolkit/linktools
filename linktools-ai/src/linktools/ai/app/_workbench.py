@@ -156,17 +156,17 @@ class WorkspaceExecutionLauncher:
             return
         task = asyncio.create_task(self._execute(request, execution, context))
         self._tasks[execution.execution_id] = task
-        _logger.info("workspace launch registered: execution=%s segment=%s", execution.execution_id, execution.agent_run_sequence)
+        _logger.debug("workspace launch registered: execution=%s segment=%s", execution.execution_id, execution.agent_run_sequence)
 
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome":
         task = self._tasks.get(execution.execution_id)
         if task is None:
-            _logger.info("workspace cancellation effect unknown: execution=%s reason=task_missing", execution.execution_id)
+            _logger.debug("workspace cancellation effect unknown: execution=%s reason=task_missing", execution.execution_id)
             return CancelEffectOutcome.UNKNOWN
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         outcome = CancelEffectOutcome.CONFIRMED if task.cancelled() else CancelEffectOutcome.UNKNOWN
-        _logger.info("workspace cancellation effect resolved: execution=%s outcome=%s", execution.execution_id, outcome.value)
+        _logger.debug("workspace cancellation effect resolved: execution=%s outcome=%s", execution.execution_id, outcome.value)
         return outcome
 
     async def wait(self, execution_id: str) -> WorkspaceAgentResult:
@@ -319,7 +319,7 @@ class WorkspaceExecutionLauncher:
             )
             await self._commit_success(execution, result)
             self._results[execution.execution_id] = result
-            _logger.info("workspace execution completed: execution=%s run=%s", execution.execution_id, result.run_id)
+            _logger.debug("workspace execution completed: execution=%s run=%s", execution.execution_id, result.run_id)
             return result
         except asyncio.CancelledError:
             raise
@@ -627,7 +627,7 @@ async def open_workspace_runtime(
                 execution_launcher=launcher,
             )
             runtime = WorkspaceAgentRuntime(workspace, runner=workspace_runner, resources=resources, services=services, launcher=launcher)
-            _logger.info("workspace runtime opened: workspace=%s backend=%s", workspace.workspace_id, persistence_config.backend)
+            _logger.debug("workspace runtime opened: workspace=%s backend=%s", workspace.workspace_id, persistence_config.backend)
             try:
                 yield runtime
             finally:

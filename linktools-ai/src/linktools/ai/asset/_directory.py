@@ -100,7 +100,7 @@ class LocalDirectoryAssetBackend:
     async def initialize(self) -> None:
         if self._writable:
             await asyncio.to_thread(self._directory.mkdir, parents=True, exist_ok=True)
-        _logger.info(
+        _logger.debug(
             "local directory asset backend initialized: root=%s writable=%s",
             self._directory,
             self._writable,
@@ -187,7 +187,7 @@ class LocalDirectoryAssetBackend:
                 datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
                 revision,
             )
-            _logger.info("local asset file stored: kind=%s id=%s", key.kind, key.id)
+            _logger.debug("local asset file stored: kind=%s id=%s", key.kind, key.id)
             return StoragePutResult(info, info.revision, revision, True)
 
     async def delete(
@@ -208,7 +208,7 @@ class LocalDirectoryAssetBackend:
             await asyncio.to_thread(path.unlink)
             self._remove_empty_parents(path.parent)
             revision = _store_revision(await asyncio.to_thread(self._scan))
-            _logger.info("local asset file deleted: kind=%s id=%s", key.kind, key.id)
+            _logger.debug("local asset file deleted: kind=%s id=%s", key.kind, key.id)
             return StorageDeleteResult(key, True, current_revision, revision)
 
     async def reset(
@@ -227,7 +227,7 @@ class LocalDirectoryAssetBackend:
                 return StorageResetResult(key, False, _store_revision(await asyncio.to_thread(self._scan)))
             await asyncio.to_thread(path.unlink)
             self._remove_empty_parents(path.parent)
-            _logger.info("local asset file reset: kind=%s id=%s", key.kind, key.id)
+            _logger.debug("local asset file reset: kind=%s id=%s", key.kind, key.id)
             return StorageResetResult(key, True, _store_revision(await asyncio.to_thread(self._scan)))
 
     async def apply_batch(

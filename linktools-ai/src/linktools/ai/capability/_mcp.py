@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""MCP capability resolution and execution-scoped toolset materialization."""
+"""MCP capability binding and execution-scoped toolset materialization."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -52,10 +52,12 @@ class MCPConnectionPool(Protocol):
     async def call(self, request: MCPCallRequest) -> JsonValue: ...
 
 
-class MCPToolProvider(Protocol):
-    def manifest(self) -> str: ...
-    def resolve_ref(self, server_id: str, revision: "int | None" = None) -> MCPServerSpec: ...
+class MCPRuntimeProvider(Protocol):
+    @property
+    def fingerprint(self) -> str: ...
+
     async def connect(self, server_id: str) -> MCPConnectionPool: ...
+
     async def toolsets(
         self,
         servers: Sequence[MCPServerSpec],
@@ -69,7 +71,7 @@ class MCPToolProvider(Protocol):
 class MCPServerCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]"
     servers: "tuple[MCPServerSpec, ...]"
-    source: MCPToolProvider
+    runtime: MCPRuntimeProvider
     fingerprint: str
     inherit_to_subagents: bool = False
 
@@ -80,7 +82,7 @@ class MCPServerCapabilityBinding:
     async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[PydanticToolset[None], ...]":
         if not self.servers:
             return ()
-        toolsets = await self.source.toolsets(
+        toolsets = await self.runtime.toolsets(
             self.servers,
             principal=context.principal,
             execution=context.execution,
@@ -89,63 +91,50 @@ class MCPServerCapabilityBinding:
         return tuple(PydanticToolset(toolset) for toolset in toolsets)
 
 
-class MCPServerCapabilityResolver:
-    provider = "mcp"
-
-    def __init__(self, provider: MCPToolProvider) -> None:
-        self._source = provider
-        self._fingerprint = provider.manifest()
-        validate_fingerprint(self._fingerprint)
-
-    @property
-    def fingerprint(self) -> str:
-        return self._fingerprint
-
-    def resolve(self, refs: "tuple[AgentCapabilityRef, ...]") -> MCPServerCapabilityBinding:
-        resolutions: list[CapabilityRefResolution] = []
-        servers: list[MCPServerSpec] = []
-        for ref in refs:
-            try:
-                server = self._source.resolve_ref(ref.id, ref.revision)
-            except (KeyError, LookupError):
-                server = None
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_NOT_FOUND:
-                    server = None
-                else:
-                    raise
-            if server is None:
-                if ref.required:
-                    raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
-                resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
-                continue
-            if server.id != ref.id or (ref.revision is not None and server.revision != ref.revision):
-                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-            fingerprint = canonical_sha256(
-                {
-                    "id": server.id,
-                    "revision": server.revision,
-                    "command": server.command,
-                    "args": list(server.args),
-                }
-            )
-            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, server.revision, ref.required, "resolved", fingerprint))
-            servers.append(server)
-        binding_resolutions = tuple(resolutions)
-        return MCPServerCapabilityBinding(
-            binding_resolutions,
-            tuple(servers),
-            self._source,
-            canonical_sha256(
-                {
-                    "provider": self.provider,
-                    "resolver_fingerprint": self.fingerprint,
-                    "inherit_to_subagents": False,
-                    "configs": [dict(ref.config) for ref in refs],
-                    "resolutions": [_resolution_payload(item) for item in binding_resolutions],
-                }
-            ),
+def bind_mcp_capability(
+    refs: "Sequence[AgentCapabilityRef]",
+    servers: "Sequence[MCPServerSpec | None]",
+    runtime: MCPRuntimeProvider,
+) -> MCPServerCapabilityBinding:
+    """Compile resolved MCP declarations with their execution provider."""
+    if len(refs) != len(servers):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    validate_fingerprint(runtime.fingerprint)
+    resolutions: list[CapabilityRefResolution] = []
+    resolved: list[MCPServerSpec] = []
+    for ref, server in zip(refs, servers):
+        if server is None:
+            if ref.required:
+                raise AIError(ErrorCode.CAPABILITY_REQUIRED_MISSING)
+            resolutions.append(CapabilityRefResolution(ref.id, ref.revision, None, False, "unresolved", None))
+            continue
+        if server.id != ref.id or (ref.revision is not None and server.revision != ref.revision):
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        fingerprint = canonical_sha256(
+            {
+                "id": server.id,
+                "revision": server.revision,
+                "command": server.command,
+                "args": list(server.args),
+            }
         )
+        resolutions.append(CapabilityRefResolution(ref.id, ref.revision, server.revision, ref.required, "resolved", fingerprint))
+        resolved.append(server)
+    binding_resolutions = tuple(resolutions)
+    return MCPServerCapabilityBinding(
+        binding_resolutions,
+        tuple(resolved),
+        runtime,
+        canonical_sha256(
+            {
+                "provider": "mcp",
+                "runtime_fingerprint": runtime.fingerprint,
+                "inherit_to_subagents": False,
+                "configs": [dict(ref.config) for ref in refs],
+                "resolutions": [_resolution_payload(item) for item in binding_resolutions],
+            }
+        ),
+    )
 
 
 def _validate_mcp_toolsets(toolsets: Sequence[AbstractToolset[None]]) -> None:
@@ -170,6 +159,6 @@ def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, objec
 
 
 __all__ = [
-    "MCPCallRequest", "MCPConnectionPool", "MCPServerCapabilityBinding", "MCPServerCapabilityResolver",
-    "MCPToolProvider", "validate_mcp_response",
+    "MCPCallRequest", "MCPConnectionPool", "MCPRuntimeProvider", "MCPServerCapabilityBinding",
+    "bind_mcp_capability", "validate_mcp_response",
 ]
