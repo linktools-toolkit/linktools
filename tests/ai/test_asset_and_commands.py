@@ -28,6 +28,7 @@ from linktools.ai.storage import (
     StorageLayer,
     StorageOperation,
     StorageOverlay,
+    StorageOwnedInfo,
     StorageResetResult,
 )
 
@@ -175,6 +176,10 @@ def test_asset_store_reads_effective_layer_owner() -> None:
         await store.initialize()
         assert await primary.get(key) is None
         assert await store.get(key) == b"value"
+        owners = await store.list_info_with_owners()
+        fallback_info = await fallback.stat(key)
+        assert fallback_info is not None
+        assert owners.items == (StorageOwnedInfo(fallback_info, "fallback", False),)
 
     asyncio.run(run())
 

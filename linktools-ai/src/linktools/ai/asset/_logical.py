@@ -378,8 +378,12 @@ def _is_concrete_value_type(value_type: object) -> bool:
         value_type is not Any
         and isinstance(value_type, type)
         and not inspect.isabstract(value_type)
-        and not issubclass(value_type, Protocol)
+        and not _is_protocol_class(value_type)
     )
+
+
+def _is_protocol_class(value_type: type[object]) -> bool:
+    return value_type is Protocol or Protocol in value_type.__bases__
 
 
 def _manifest_entries(bindings: tuple[AssetTypeBinding[object], ...]) -> tuple[dict[str, JsonValue], ...]:

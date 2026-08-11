@@ -85,6 +85,22 @@ class _ValueProtocol(Protocol):
     def render(self) -> str: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _ConcreteProtocolValue(_ValueProtocol):
+    value: str
+
+    def render(self) -> str:
+        return self.value
+
+
+class _ConcreteProtocolCodec:
+    def encode(self, value: _ConcreteProtocolValue) -> bytes:
+        return value.value.encode("utf-8")
+
+    def decode(self, data: bytes) -> _ConcreteProtocolValue:
+        return _ConcreteProtocolValue(data.decode("utf-8"))
+
+
 class _RaceStore(AssetStore):
     def __init__(self, backend: InMemoryAssetBackend) -> None:
         super().__init__(StorageOverlay(backend, writer=backend))
@@ -315,7 +331,7 @@ def test_registry_rejects_unsupported_layout_objects(layout: object) -> None:
         AssetVariantBinding("invalid", layout, _Codec(), "invalid", 1)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("value_type", (Any, _AbstractValue, _ValueProtocol))
+@pytest.mark.parametrize("value_type", (Any, _AbstractValue, _ValueProtocol, object()))
 def test_registry_rejects_non_concrete_value_types(value_type: object) -> None:
     with pytest.raises(ValueError):
         AssetTypeBinding(
@@ -326,8 +342,49 @@ def test_registry_rejects_non_concrete_value_types(value_type: object) -> None:
         )
 
 
+def test_registry_accepts_concrete_protocol_subclass_value_type() -> None:
+    registry = AssetTypeRegistry()
+    registry.register(
+        AssetTypeBinding(
+            "concrete-protocol",
+            _ConcreteProtocolValue,
+            (AssetVariantBinding("file", SingleFileLayout(""), _Codec(), "concrete-protocol", 1),),
+            "file",
+        )
+    )
+    assert "concrete-protocol" in registry.freeze().kinds
 
 
+@pytest.mark.asyncio
+async def test_concrete_protocol_subclass_keeps_typed_runtime_exact_type() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    registry = AssetTypeRegistry()
+    registry.register(
+        AssetTypeBinding(
+            "concrete-protocol-runtime",
+            _ConcreteProtocolValue,
+            (
+                AssetVariantBinding(
+                    "file",
+                    SingleFileLayout(""),
+                    _ConcreteProtocolCodec(),
+                    "concrete-protocol-runtime",
+                    1,
+                ),
+            ),
+            "file",
+        )
+    )
+    repository = AssetRepository(store, registry.freeze())
+    ref = AssetRef("concrete-protocol-runtime", "value")
+    value = _ConcreteProtocolValue("ok")
+    written = await repository.put(ref, value)
+    resolved = await repository.resolve(ref)
+    assert written.spec == value
+    assert resolved.spec == value
+    assert type(resolved.spec) is _ConcreteProtocolValue
 def test_skill_markdown_codec_and_adapter_contract() -> None:
     content = "---\nname: foo\ndescription: A skill\n---\n# Instructions\n"
     codec = SkillMarkdownSpecCodec()

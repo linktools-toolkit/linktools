@@ -19,6 +19,7 @@ from ..storage import (
     StorageEntryRevision,
     StorageEntryStatus,
     StorageOverlay,
+    StorageOwnedInfo,
     StorageResetResult,
     StorageRevision,
     VersionSummary,
@@ -169,6 +170,31 @@ class AssetStore:
         next_key = selected[-1].key if selected and start + len(selected) < len(ordered) else None
         return Page(selected, _make_cursor(revision, kind, prefix, next_key))
 
+    async def list_info_with_owners(
+        self,
+        *,
+        kind: "str | None" = None,
+        prefix: "str | None" = None,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[StorageOwnedInfo[AssetInfo]]":
+        """Page active file metadata together with its effective storage owner."""
+        self._ensure_ready()
+        _validate_limit(limit)
+        values = [
+            owned
+            for owned in await self._storage.list_info_with_owners()
+            if owned.info.status is StorageEntryStatus.NORMAL
+            and (kind is None or owned.info.key.kind == kind)
+            and (prefix is None or owned.info.key.id.startswith(prefix))
+        ]
+        ordered = tuple(sorted(values, key=lambda owned: (owned.info.key.kind, owned.info.key.id)))
+        revision = await self._storage.current_revision()
+        start = _cursor_start(cursor, revision, kind, prefix, ordered)
+        selected = ordered[start : start + limit]
+        next_key = _info_key(selected[-1]) if selected and start + len(selected) < len(ordered) else None
+        return Page(selected, _make_cursor(revision, kind, prefix, next_key))
+
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         """List immutable file versions from newest to oldest."""
         self._ensure_ready()
@@ -221,7 +247,7 @@ def _cursor_start(
     revision: StorageRevision,
     kind: "str | None",
     prefix: "str | None",
-    values: "Sequence[AssetInfo]",
+    values: "Sequence[AssetInfo | StorageOwnedInfo[AssetInfo]]",
 ) -> int:
     if cursor is None:
         return 0
@@ -252,10 +278,14 @@ def _cursor_start(
         (
             index
             for index, value in enumerate(values)
-            if (value.key.kind, value.key.id) > last
+            if (_info_key(value).kind, _info_key(value).id) > last
         ),
         len(values),
     )
+
+
+def _info_key(value: "AssetInfo | StorageOwnedInfo[AssetInfo]") -> AssetKey:
+    return value.info.key if isinstance(value, StorageOwnedInfo) else value.key
 
 
 __all__ = ["AssetCacheAdapter", "AssetStore"]
