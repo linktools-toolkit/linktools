@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Logical AssetRepository behavior and Skill Markdown contract checks."""
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Protocol
 
 import pytest
 from linktools.ai.app import build_asset_repository
@@ -66,6 +68,23 @@ class _BrokenCodec:
         raise ValueError("broken")
 
 
+class _SingleLayout(SingleFileLayout):
+    pass
+
+
+class _DirectoryLayout(DirectoryLayout):
+    pass
+
+
+class _AbstractValue(ABC):
+    @abstractmethod
+    def render(self) -> str: ...
+
+
+class _ValueProtocol(Protocol):
+    def render(self) -> str: ...
+
+
 class _RaceStore(AssetStore):
     def __init__(self, backend: InMemoryAssetBackend) -> None:
         super().__init__(StorageOverlay(backend, writer=backend))
@@ -109,6 +128,18 @@ def _binding() -> AssetTypeBinding[object]:
         lambda ref, value: value.id == ref.id,
         "exact-id-v1",
         True,
+    )
+
+
+def _multi_directory_binding() -> AssetTypeBinding[object]:
+    return AssetTypeBinding(
+        "multi",
+        _Value,
+        (
+            AssetVariantBinding("agent", DirectoryLayout("AGENT.md"), _Codec(), "multi-agent", 1),
+            AssetVariantBinding("skill", DirectoryLayout("SKILL.md"), _Codec(), "multi-skill", 1),
+        ),
+        "agent",
     )
 
 
@@ -158,6 +189,67 @@ async def test_repository_reports_layout_conflict_without_decoding_list_content(
     with pytest.raises(AIError) as error:
         await repository.resolve(AssetRef("subagent", "same"))
     assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_ancestor_layout_conflict_is_consistent_for_list_resolve_and_put() -> None:
+    store, repository = await _repo()
+    await store.put(AssetKey("subagent", "foo.md"), b"legacy")
+    await store.put(AssetKey("subagent", "foo/AGENT.md"), b"directory")
+
+    entry = next(item for item in (await repository.list(kind="subagent")).items if item.ref.id == "foo")
+    assert entry.status.value == "CONFLICT"
+    for operation in (
+        repository.resolve(AssetRef("subagent", "foo")),
+        repository.resolve(AssetRef("subagent", "foo/bar")),
+        repository.put(AssetRef("subagent", "foo/bar"), _Value("foo/bar", "value")),
+    ):
+        with pytest.raises(AIError) as error:
+            await operation
+        assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_ancestor_probe_reports_multiple_directory_variants() -> None:
+    backend = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(backend, writer=backend))
+    await store.initialize()
+    registry = AssetTypeRegistry()
+    registry.register(_multi_directory_binding())
+    repository = AssetRepository(store, registry.freeze())
+    await store.put(AssetKey("multi", "foo/AGENT.md"), b"agent")
+    await store.put(AssetKey("multi", "foo/SKILL.md"), b"skill")
+
+    with pytest.raises(AIError) as error:
+        await repository.resolve(AssetRef("multi", "foo/bar"))
+    assert error.value.code is ErrorCode.ASSET_LAYOUT_CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_ancestor_probe_reuses_directory_stat_when_completing_variants() -> None:
+    backend = InMemoryAssetBackend()
+
+    class _CountingStore(AssetStore):
+        def __init__(self) -> None:
+            super().__init__(StorageOverlay(backend, writer=backend))
+            self.stat_keys: list[AssetKey] = []
+
+        async def stat(self, key: AssetKey) -> AssetInfo | None:
+            self.stat_keys.append(key)
+            return await super().stat(key)
+
+    store = _CountingStore()
+    await store.initialize()
+    registry = AssetTypeRegistry()
+    registry.register(_binding())
+    repository = AssetRepository(store, registry.freeze())
+    await store.put(AssetKey("subagent", "foo.md"), b"legacy")
+    await store.put(AssetKey("subagent", "foo/AGENT.md"), b"directory")
+
+    with pytest.raises(AIError):
+        await repository.resolve(AssetRef("subagent", "foo/bar"))
+    assert store.stat_keys.count(AssetKey("subagent", "foo.md")) == 1
+    assert store.stat_keys.count(AssetKey("subagent", "foo/AGENT.md")) == 1
 
 
 @pytest.mark.asyncio
@@ -215,6 +307,25 @@ def test_registry_freeze_rejects_overlapping_single_file_layouts() -> None:
     frozen.freeze()
     with pytest.raises(AIError):
         frozen.register(_binding())
+
+
+@pytest.mark.parametrize("layout", (object(), _SingleLayout(".md"), _DirectoryLayout("AGENT.md")))
+def test_registry_rejects_unsupported_layout_objects(layout: object) -> None:
+    with pytest.raises(TypeError):
+        AssetVariantBinding("invalid", layout, _Codec(), "invalid", 1)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value_type", (Any, _AbstractValue, _ValueProtocol))
+def test_registry_rejects_non_concrete_value_types(value_type: object) -> None:
+    with pytest.raises(ValueError):
+        AssetTypeBinding(
+            "invalid-type",
+            value_type,  # type: ignore[arg-type]
+            (AssetVariantBinding("file", SingleFileLayout(""), _Codec(), "invalid-type", 1),),
+            "file",
+        )
+
+
 
 
 def test_skill_markdown_codec_and_adapter_contract() -> None:

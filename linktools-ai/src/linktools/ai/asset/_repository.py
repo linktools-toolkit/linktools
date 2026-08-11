@@ -402,14 +402,24 @@ class AssetRepository:
         parts = ref.id.split("/")
         for index in range(1, len(parts)):
             ancestor = "/".join(parts[:index])
-            matches: list[_Candidate] = []
             ancestor_ref = AssetRef(ref.kind, ancestor)
+            directory_matches: dict[str, _Candidate] = {}
             for variant in binding.variants:
                 if not isinstance(variant.layout, DirectoryLayout):
                     continue
                 info = await self._normal_stat(variant.layout.entry_key(ancestor_ref))
                 if info is not None:
+                    directory_matches[variant.name] = _Candidate(variant, ancestor_ref, info)
+            if not directory_matches:
+                continue
+            matches = list(directory_matches.values())
+            for variant in binding.variants:
+                if variant.name in directory_matches:
+                    continue
+                info = await self._normal_stat(variant.layout.entry_key(ancestor_ref))
+                if info is not None:
                     matches.append(_Candidate(variant, ancestor_ref, info))
+            matches.sort(key=lambda item: item.variant.name)
             if matches:
                 owner_id = ancestor
                 owner_variants = sorted(item.variant.name for item in matches)

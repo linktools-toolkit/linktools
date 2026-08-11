@@ -2,11 +2,20 @@
 # -*- coding: utf-8 -*-
 """Logical asset bindings and immutable discovery registry."""
 
+import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Protocol,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
@@ -146,6 +155,8 @@ class AssetVariantBinding(Generic[LogicalT]):
     adapter_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.layout) not in (SingleFileLayout, DirectoryLayout):
+            raise TypeError("asset variant layout must be a supported concrete layout")
         if (
             not isinstance(self.name, str)
             or not isinstance(self.fingerprint, str)
@@ -189,7 +200,7 @@ class AssetTypeBinding(Generic[LogicalT]):
             raise ValueError("asset type binding kind is invalid") from error
         variants = tuple(self.variants)
         object.__setattr__(self, "variants", variants)
-        if not isinstance(self.value_type, type) or not variants or not self.default_write_variant:
+        if not _is_concrete_value_type(self.value_type) or not variants or not self.default_write_variant:
             raise ValueError("asset type binding is incomplete")
         names = tuple(variant.name for variant in variants)
         if len(set(names)) != len(names) or self.default_write_variant not in names:
@@ -360,6 +371,15 @@ def _validate_layouts(binding: AssetTypeBinding[object]) -> None:
             for other_index, other in enumerate(single)
         ):
             raise AIError(ErrorCode.ASSET_CODEC_CONFLICT, "single-file layouts overlap")
+
+
+def _is_concrete_value_type(value_type: object) -> bool:
+    return (
+        value_type is not Any
+        and isinstance(value_type, type)
+        and not inspect.isabstract(value_type)
+        and not issubclass(value_type, Protocol)
+    )
 
 
 def _manifest_entries(bindings: tuple[AssetTypeBinding[object], ...]) -> tuple[dict[str, JsonValue], ...]:
