@@ -9,6 +9,29 @@ Its public storage abstraction is `AssetStore`; specification DTOs and codecs
 live in `linktools.ai.spec`, while the concrete SQL asset backend is available
 as `linktools.ai.asset.SqlAssetBackend`.
 
+For typed logical assets, compose `AssetRepository` from an initialized
+`AssetStore` with `build_asset_repository()`. `AssetStore` remains a raw
+`AssetKey`-to-bytes boundary; the repository resolves registered layouts and
+codecs, exposes directory resources through `ResolvedAsset.scope`, and reports
+multiple layouts for one logical id as a conflict. Typed writes preserve an
+existing layout and use the registered default only for new assets; they do not
+migrate files.
+
+Downstream kinds are added at composition time:
+
+```python
+repository = build_asset_repository(
+    asset_store,
+    extra_bindings=(subagent_binding,),
+)
+resolved = await repository.resolve(AssetRef("subagent", "team/reviewer"))
+rules = await resolved.scope.get("references/python/rules.md")
+```
+
+If more than one registered layout matches the same logical id, `list()` keeps
+the item visible as `CONFLICT`, while `resolve()` and typed `put()` fail with
+`ASSET_LAYOUT_CONFLICT`.
+
 Storage builders are lazy. SQL runtime startup validates the pre-provisioned
 schema and never creates or alters tables. Deployment platforms must provision
 the Runtime, StepStore and Asset tables before starting a SQL runtime. The `ai run` command

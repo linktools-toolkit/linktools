@@ -1,5 +1,5 @@
 {
-  "digest": "78c5b8d171401d384dd8591df9cee7568266bf7b2c2b3627da484ef6a1355a1f",
+  "digest": "956dc059a3070fa3d4809321ce83321b2eab466755e98a2a9906bb207edc0f38",
   "entries": [
     {
       "kind": "agent",
@@ -9,7 +9,7 @@
     },
     {
       "kind": "mcp",
-      "value_type": "linktools.ai.capability._mcp.MCPServerSpec",
+      "value_type": "linktools.ai.spec._contract.MCPServerSpec",
       "fingerprint": "mcp-server-spec",
       "codec_version": 1
     },
@@ -21,7 +21,7 @@
     },
     {
       "kind": "skill",
-      "value_type": "linktools.ai.capability._skill.SkillSpec",
+      "value_type": "linktools.ai.spec._contract.SkillSpec",
       "fingerprint": "skill-spec",
       "codec_version": 1
     }

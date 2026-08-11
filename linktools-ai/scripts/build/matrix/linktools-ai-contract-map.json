@@ -2,6 +2,7 @@
   "contracts": {
     "storage": {"owner": "storage", "replacement": "linktools.ai.storage"},
     "asset": {"owner": "asset", "replacement": "linktools.ai.asset.AssetStore"},
+    "logical_asset": {"owner": "asset", "replacement": "linktools.ai.asset.AssetRepository"},
     "sql_asset_backend": {"owner": "asset", "replacement": "linktools.ai.asset.SqlAssetBackend"},
     "spec_dto": {"owner": "spec", "replacement": "linktools.ai.spec"},
     "agent_binding": {"owner": "agent", "replacement": "linktools.ai.agent.AgentBinding"},

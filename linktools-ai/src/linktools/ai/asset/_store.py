@@ -18,9 +18,9 @@ from ..storage import (
     StorageDeleteResult,
     StorageEntryRevision,
     StorageEntryStatus,
+    StorageOverlay,
     StorageResetResult,
     StorageRevision,
-    StorageOverlay,
     VersionSummary,
 )
 from ._domain import AssetInfo, AssetKey

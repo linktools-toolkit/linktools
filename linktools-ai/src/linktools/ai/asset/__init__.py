@@ -19,26 +19,57 @@ from ._directory import (
 )
 from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot
 from ._filesystem import FilesystemAssetBackend, filesystem_root
+from ._logical import (
+    AssetCodec,
+    AssetDiscoveryStatus,
+    AssetEntry,
+    AssetRef,
+    AssetResource,
+    AssetTypeBinding,
+    AssetTypeRegistry,
+    AssetTypeRegistrySnapshot,
+    AssetValueAdapter,
+    AssetVariantBinding,
+    DirectoryLayout,
+    ResolvedAsset,
+    SingleFileLayout,
+)
+from ._repository import AssetRepository, AssetScope
 from ._sql import SqlAssetBackend, SqlAssetTables
 from ._store import AssetCacheAdapter, AssetStore
 
 __all__ = [
     "AssetBackend",
     "AssetCacheAdapter",
+    "AssetCodec",
     "AssetConflictError",
+    "AssetDiscoveryStatus",
+    "AssetEntry",
     "AssetError",
     "AssetInfo",
     "AssetKey",
     "AssetNotFoundError",
     "AssetParseError",
     "AssetPathAdapter",
+    "AssetRef",
+    "AssetRepository",
+    "AssetResource",
+    "AssetScope",
     "AssetRoot",
     "AssetStore",
+    "AssetTypeBinding",
+    "AssetTypeRegistry",
+    "AssetTypeRegistrySnapshot",
+    "AssetValueAdapter",
+    "AssetVariantBinding",
+    "DirectoryLayout",
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
     "InvalidAssetError",
     "LocalDirectoryAssetBackend",
     "PrefixAssetPathAdapter",
+    "ResolvedAsset",
+    "SingleFileLayout",
     "SqlAssetBackend",
     "SqlAssetTables",
     "StrictConfigReader",

@@ -26,6 +26,8 @@ class ErrorCode(StrEnum):
     AGENT_NOT_FOUND = "AGENT_NOT_FOUND"
     ASSET_CODEC_CONFLICT = "ASSET_CODEC_CONFLICT"
     ASSET_CODEC_UNKNOWN = "ASSET_CODEC_UNKNOWN"
+    ASSET_LAYOUT_CONFLICT = "ASSET_LAYOUT_CONFLICT"
+    ASSET_LAYOUT_UNKNOWN = "ASSET_LAYOUT_UNKNOWN"
     ASSET_CONFIG_TYPE_INVALID = "ASSET_CONFIG_TYPE_INVALID"
     ASSET_CONTENT_MISMATCH = "ASSET_CONTENT_MISMATCH"
     ASSET_CURSOR_INVALID = "ASSET_CURSOR_INVALID"
@@ -221,6 +223,7 @@ class InvalidAssetError(AssetError):
 
 
 __all__ = [
+    "AIError",
     "AssetConflictError",
     "AssetError",
     "AssetNotFoundError",
@@ -228,9 +231,8 @@ __all__ = [
     "ErrorCode",
     "InvalidAssetError",
     "InvalidStoragePathError",
-    "AIError",
+    "SafeError",
     "StorageConflictError",
     "StorageCorruptionError",
     "StorageError",
-    "SafeError",
 ]

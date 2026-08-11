@@ -2,6 +2,7 @@ dependencies:
   - pydantic-ai-slim[mcp,openai]>=2.27.0
   - pydantic-ai-harness[dynamic-workflow]>=0.13.0
   - jsonschema>=4.23.0
+  - PyYAML>=6.0,<7.0
 
 dev-dependencies:
   - linktools

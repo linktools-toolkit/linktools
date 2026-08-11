@@ -1,0 +1,46 @@
+{
+  "digest": "08a8ba46a1668bccb261126932b171f6949912c1f3de346ef2466e93e0cd80cf",
+  "entries": [
+    {
+      "kind": "agent",
+      "value_type": "linktools.ai.spec._contract.AgentSpec",
+      "allow_nested_id": true,
+      "identity_fingerprint": "exact-id-v1",
+      "default_write_variant": "legacy-json",
+      "variants": [
+        {"name": "legacy-json", "layout": {"type": "single-file", "suffix": ""}, "codec_fingerprint": "agent-spec", "codec_version": 1, "adapter_fingerprint": null}
+      ]
+    },
+    {
+      "kind": "mcp",
+      "value_type": "linktools.ai.spec._contract.MCPServerSpec",
+      "allow_nested_id": true,
+      "identity_fingerprint": "exact-id-v1",
+      "default_write_variant": "legacy-json",
+      "variants": [
+        {"name": "legacy-json", "layout": {"type": "single-file", "suffix": ""}, "codec_fingerprint": "mcp-server-spec", "codec_version": 1, "adapter_fingerprint": null}
+      ]
+    },
+    {
+      "kind": "prompt",
+      "value_type": "linktools.ai.spec._contract.PromptSpec",
+      "allow_nested_id": true,
+      "identity_fingerprint": "exact-id-v1",
+      "default_write_variant": "legacy-json",
+      "variants": [
+        {"name": "legacy-json", "layout": {"type": "single-file", "suffix": ""}, "codec_fingerprint": "prompt-spec", "codec_version": 1, "adapter_fingerprint": null}
+      ]
+    },
+    {
+      "kind": "skill",
+      "value_type": "linktools.ai.spec._contract.SkillSpec",
+      "allow_nested_id": true,
+      "identity_fingerprint": "exact-id-v1",
+      "default_write_variant": "skill-directory",
+      "variants": [
+        {"name": "legacy-json", "layout": {"type": "single-file", "suffix": ""}, "codec_fingerprint": "skill-spec", "codec_version": 1, "adapter_fingerprint": null},
+        {"name": "skill-directory", "layout": {"type": "directory", "entry": "SKILL.md"}, "codec_fingerprint": "skill-markdown-spec", "codec_version": 1, "adapter_fingerprint": "skill-local-name-v1"}
+      ]
+    }
+  ]
+}

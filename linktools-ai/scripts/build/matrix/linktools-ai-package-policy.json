@@ -33,5 +33,5 @@
   "public_modules": ["errors"],
   "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
   "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],
-  "asset_invariants": ["immutable-root", "typed-codec-freeze", "etag-validation", "entry-cas", "store-cas", "tombstone", "stable-cursor", "sql-backend", "file-journal"]
+  "asset_invariants": ["immutable-root", "typed-codec-freeze", "immutable-registry-snapshot", "builtin-binding-manifest", "etag-validation", "entry-cas", "store-cas", "tombstone", "stable-cursor", "sql-backend", "file-journal"]
 }

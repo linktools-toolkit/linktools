@@ -3,11 +3,12 @@
 """唯一 Composition Root for process-local Runtime services."""
 
 import hashlib
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from linktools.core import environ
 from pydantic_ai_harness.step_persistence import (
@@ -26,9 +27,25 @@ from ..adapter import (
     open_sql_runtime,
 )
 from ..agent import AgentBindingRegistry, AgentCatalogView, OutputTypeRegistry
-from ..asset import AssetInfo, AssetKey, AssetStore
+from ..asset import (
+    AssetInfo,
+    AssetKey,
+    AssetRef,
+    AssetRepository,
+    AssetStore,
+    AssetTypeBinding,
+    AssetTypeRegistry,
+    AssetVariantBinding,
+    DirectoryLayout,
+    SingleFileLayout,
+)
 from ..capability import MCPToolProvider, SkillProvider
-from ..core import AuthorizationPolicy, HmacCursorSigner, PrincipalProvider
+from ..core import (
+    AuthorizationPolicy,
+    HmacCursorSigner,
+    PrincipalProvider,
+    canonical_sha256,
+)
 from ..errors import AIError, ErrorCode
 from ..model import ModelMaterializer, ModelRegistry, ModelResolver
 from ..observe import MiddlewarePipeline
@@ -53,6 +70,18 @@ from ..runtime import (
     WorkflowGateway,
     WorkflowTaskGraphLauncher,
     new_runtime_service_identity,
+)
+from ..spec import (
+    AgentSpec,
+    AgentSpecCodec,
+    MCPServerSpec,
+    MCPServerSpecCodec,
+    PromptSpec,
+    PromptSpecCodec,
+    SkillMarkdownSpecAdapter,
+    SkillMarkdownSpecCodec,
+    SkillSpec,
+    SkillSpecCodec,
 )
 from ..storage import StorageOverlay
 from ..task import (
@@ -274,6 +303,121 @@ def build_asset_store(
     return AssetStore(storage)
 
 
+def build_asset_repository(
+    asset_store: AssetStore,
+    *,
+    extra_bindings: "Sequence[AssetTypeBinding[object]]" = (),
+) -> AssetRepository:
+    """Compose immutable built-in and downstream logical asset bindings."""
+    registry = AssetTypeRegistry()
+    builtins = _builtin_asset_bindings()
+    for binding in builtins:
+        registry.register(cast("AssetTypeBinding[object]", binding))
+    _validate_asset_binding_manifest(registry.manifest_entries())
+    for binding in extra_bindings:
+        registry.register(binding)
+    snapshot = registry.freeze()
+    _logger.info(
+        "asset repository composed: builtins=%s extras=%s binding_digest=%s",
+        len(builtins),
+        len(extra_bindings),
+        snapshot.binding_digest,
+    )
+    return AssetRepository(asset_store, snapshot)
+
+
+def _builtin_asset_bindings() -> tuple[AssetTypeBinding[object], ...]:
+    def agent_identity(ref: AssetRef, value: AgentSpec) -> bool:
+        return value.id == ref.id
+
+    def prompt_identity(ref: AssetRef, value: PromptSpec) -> bool:
+        return value.id == ref.id
+
+    def mcp_identity(ref: AssetRef, value: MCPServerSpec) -> bool:
+        return value.id == ref.id
+
+    def skill_identity(ref: AssetRef, value: SkillSpec) -> bool:
+        return value.id == ref.id
+
+    return (
+        cast(
+            "AssetTypeBinding[object]",
+            AssetTypeBinding(
+                "agent",
+                AgentSpec,
+                (AssetVariantBinding("legacy-json", SingleFileLayout(""), AgentSpecCodec(), "agent-spec", 1),),
+                "legacy-json",
+                agent_identity,
+                "exact-id-v1",
+                True,
+            ),
+        ),
+        cast(
+            "AssetTypeBinding[object]",
+            AssetTypeBinding(
+                "mcp",
+                MCPServerSpec,
+                (AssetVariantBinding("legacy-json", SingleFileLayout(""), MCPServerSpecCodec(), "mcp-server-spec", 1),),
+                "legacy-json",
+                mcp_identity,
+                "exact-id-v1",
+                True,
+            ),
+        ),
+        cast(
+            "AssetTypeBinding[object]",
+            AssetTypeBinding(
+                "prompt",
+                PromptSpec,
+                (AssetVariantBinding("legacy-json", SingleFileLayout(""), PromptSpecCodec(), "prompt-spec", 1),),
+                "legacy-json",
+                prompt_identity,
+                "exact-id-v1",
+                True,
+            ),
+        ),
+        cast(
+            "AssetTypeBinding[object]",
+            AssetTypeBinding(
+                "skill",
+                SkillSpec,
+                (
+                    AssetVariantBinding("legacy-json", SingleFileLayout(""), SkillSpecCodec(), "skill-spec", 1),
+                    AssetVariantBinding(
+                        "skill-directory",
+                        DirectoryLayout("SKILL.md"),
+                        SkillMarkdownSpecCodec(),
+                        "skill-markdown-spec",
+                        1,
+                        SkillMarkdownSpecAdapter(),
+                        "skill-local-name-v1",
+                    ),
+                ),
+                "skill-directory",
+                skill_identity,
+                "exact-id-v1",
+                True,
+            ),
+        ),
+    )
+
+
+def _validate_asset_binding_manifest(entries: tuple[dict[str, object], ...]) -> None:
+    source_path = Path(__file__).resolve().parents[4] / "scripts" / "build" / "matrix" / "asset-binding-manifest.json"
+    package_path = Path(__file__).resolve().parents[1] / "asset-binding-manifest.json"
+    path = source_path if source_path.is_file() else package_path
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        digest = manifest["digest"]
+        expected_entries = manifest["entries"]
+        if not isinstance(digest, str) or not isinstance(expected_entries, list):
+            raise TypeError("asset binding manifest is malformed")
+        if digest != canonical_sha256(entries) or tuple(expected_entries) != entries:
+            raise ValueError("asset binding manifest does not match built-ins")
+    except Exception as error:
+        raise AIError(ErrorCode.LINKTOOLS_AI_RELEASE_MISMATCH) from error
+
+
 def build_app_services(
     asset_store: AssetStore,
     model_registry: ModelRegistry,
@@ -419,4 +563,4 @@ def build_local_runtime_services(
     return LocalRuntimeServices.compose(services, registry)
 
 
-__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]
+__all__ = ["AppServices", "RuntimePersistenceConfig", "RuntimeResources", "build_app_services", "build_asset_repository", "build_asset_store", "build_local_runtime_services", "build_runtime_services", "namespace_scoped_step_db_path", "open_runtime_resources", "open_runtime_services"]
