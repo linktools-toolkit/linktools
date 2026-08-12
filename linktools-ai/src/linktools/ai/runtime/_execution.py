@@ -30,6 +30,7 @@ from ..core import (
     StopReason,
     canonical_sha256,
     idempotency_key_hash,
+    principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
 from ._persistence import (
@@ -276,16 +277,20 @@ class DefaultExecutionService:
 
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+        if execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         result = await self._persistence.results.get(execution_id, tenant_id=principal.tenant_id)
         if result is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if result.status is not execution.status or execution.result_ref != result.payload_ref or execution.result_digest != result.payload_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             return ExecutionResult(execution.execution_id, result.status, None, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
         if not result.payload_ref or not result.payload_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             payload = await BlobPayloadService(self._persistence.blobs, tenant_id=principal.tenant_id).load(PayloadRef(result.payload_ref))
-            if hashlib.sha256(payload).hexdigest() != result.payload_digest:
+            if hashlib.sha256(payload).hexdigest() != result.payload_digest or canonical_sha256(json.loads(payload.decode("utf-8"))) != result.payload_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if result.output_schema_id == "text":
                 output: JsonValue = payload.decode("utf-8")
@@ -347,8 +352,7 @@ class DefaultExecutionService:
         operation_digest = canonical_sha256(
             {
                 "action": "execution.cancel",
-                "tenant_id": request.principal.tenant_id,
-                "principal_id": request.principal.principal_id,
+                "principal": principal_identity_payload(request.principal),
                 "execution_id": execution_id,
                 "force": request.force,
             }
@@ -612,8 +616,7 @@ def _request_digest(
             "prompt": request.prompt,
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
-            "principal_id": request.principal.principal_id,
-            "tenant_id": request.principal.tenant_id,
+            "principal": principal_identity_payload(request.principal),
             "session_id": session_id,
             "source_execution_id": source_execution_id,
             "base_execution_id": base_execution_id,

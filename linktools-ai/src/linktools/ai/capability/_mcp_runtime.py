@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..core import Principal, ResourceRef, canonical_sha256
+from ..errors import AIError, ErrorCode
 from ..spec import MCPServerSpec
 
 if TYPE_CHECKING:
@@ -51,6 +52,8 @@ class PydanticMCPRuntimeProvider:
                 )
             )
             values.append(MCPToolset(client, id=f"mcp:{server.id}"))
+        if len(values) != len(servers) or len({value.id for value in values}) != len(values):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return tuple(values)
 
 

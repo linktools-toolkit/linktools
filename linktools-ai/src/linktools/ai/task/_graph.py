@@ -38,6 +38,31 @@ class TaskNode:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskLease:
+    graph_id: str
+    task_id: str
+    tenant_id: str
+    owner: str
+    fence: int
+    lease_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TaskNodeView:
+    graph_id: str
+    task_id: str
+    dependencies: "tuple[str, ...]"
+    status: TaskStatus
+    owner: "str | None"
+    fence: int
+    lease_expires_at: "datetime | None"
+    result_digest: "str | None"
+    error_code: "str | None"
+    error_digest: "str | None"
+    execution_id: "str | None" = None
+
+
+@dataclass(frozen=True, slots=True)
 class TaskGraph:
     graph_id: str
     nodes: "tuple[TaskNode, ...]"

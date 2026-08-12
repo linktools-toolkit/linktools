@@ -8,7 +8,11 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import cast
 
-from ..core import JsonValue, canonical_json_bytes, canonical_sha256
+from ..core import (
+    JsonValue,
+    canonical_json_bytes,
+    canonical_string_tuple,
+)
 from ..errors import AIError, ErrorCode
 
 
@@ -59,10 +63,6 @@ def _normalize_value(value: object) -> JsonValue:
     raise TypeError(f"unsupported JSON value: {type(value).__name__}")
 
 
-def _mapping_json(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
-    return _normalize_mapping(value)
-
-
 @dataclass(frozen=True, slots=True)
 class AgentCapabilityRef:
     provider: str
@@ -86,17 +86,18 @@ class AgentSpec:
     output_schema: str
     output_schema_revision: int
     instructions: "tuple[str, ...]" = ()
-    allow_tools: bool = True
-    allow_skills: bool = True
-    allow_subagents: bool = False
+    allow_tools: "tuple[str, ...]" = ("*",)
+    allow_skills: "tuple[str, ...]" = ("*",)
+    allow_subagents: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
             raise ValueError("agent spec is incomplete")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
-        if not isinstance(self.allow_tools, bool) or not isinstance(self.allow_skills, bool) or not isinstance(self.allow_subagents, bool):
-            raise ValueError("agent capability policy is invalid")
+        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
+        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
+        object.__setattr__(self, "allow_subagents", canonical_string_tuple(self.allow_subagents, field="allow_subagents"))
         object.__setattr__(self, "instructions", tuple(self.instructions))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
         unique: dict[tuple[str, str], AgentCapabilityRef] = {}
@@ -104,9 +105,8 @@ class AgentSpec:
             key = capability.provider, capability.id
             previous = unique.get(key)
             if previous is not None:
-                if _capability_digest(previous) != _capability_digest(capability):
-                    raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-                continue
+                del previous
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             unique[key] = capability
         object.__setattr__(self, "capabilities", tuple(unique.values()))
 
@@ -146,18 +146,6 @@ class MCPServerSpec:
         if not self.id.strip() or self.revision < 1 or not self.command.strip():
             raise ValueError("MCP server spec is incomplete")
         object.__setattr__(self, "args", tuple(self.args))
-
-
-def _capability_digest(capability: AgentCapabilityRef) -> str:
-    return canonical_sha256(
-        {
-            "provider": capability.provider,
-            "id": capability.id,
-            "revision": capability.revision,
-            "required": capability.required,
-            "config": _mapping_json(capability.config),
-        }
-    )
 
 
 __all__ = ["AgentCapabilityRef", "AgentSpec", "MCPServerSpec", "PromptSpec", "SkillSpec"]

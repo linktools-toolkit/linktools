@@ -946,7 +946,7 @@ class _TaskRepository(_Base):
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             nodes = {key[2]: value for key, value in self._nodes.items() if key[:2] == (tenant_id, graph_id)}
-            if current.status is not TaskStatus.CANCELLED:
+            if current.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
                 for task_id, node in tuple(nodes.items()):
                     if node.status in {TaskStatus.PENDING, TaskStatus.READY}:
                         dependencies = tuple(nodes[dependency] for dependency in node.dependencies)
@@ -977,29 +977,28 @@ class _TaskRepository(_Base):
                 current = replace(current, status=status)
                 self._plans[(tenant_id, graph_id)] = current
                 self._mark_changed()
+            else:
+                for key, node in tuple(self._nodes.items()):
+                    if key[:2] == (tenant_id, graph_id) and node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
+                        self._nodes[key] = replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None)
+                        self._mark_changed()
             return current
 
     async def cancel_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        current = self._plans.get((tenant_id, graph_id))
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-            return current
-        updated = replace(current, status=TaskStatus.CANCELLED)
-        self._plans[(tenant_id, graph_id)] = updated
-        for key, node in tuple(self._nodes.items()):
-            if key[:2] != (tenant_id, graph_id):
-                continue
-            if node.status in {TaskStatus.PENDING, TaskStatus.READY}:
-                self._nodes[key] = replace(node, status=TaskStatus.CANCELLED, lease_expires_at=None)
-            elif node.status in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED, TaskStatus.SUCCEEDED}:
-                continue
-            else:
-                self._nodes[key] = replace(node, status=TaskStatus.CANCELLED, lease_expires_at=None)
-        self._mark_changed()
-        return updated
+        async with self._lock:
+            current = self._plans.get((tenant_id, graph_id))
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph_status = current.status if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED} else TaskStatus.CANCELLED
+            updated = replace(current, status=graph_status)
+            self._plans[(tenant_id, graph_id)] = updated
+            for key, node in tuple(self._nodes.items()):
+                if key[:2] == (tenant_id, graph_id) and node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
+                    self._nodes[key] = replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None)
+            self._mark_changed()
+            return updated
 
     async def claim(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
         self._ensure_open()
@@ -1008,6 +1007,11 @@ class _TaskRepository(_Base):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (tenant_id, graph_id, task_id)
         async with self._lock:
+            plan = self._plans.get((tenant_id, graph_id))
+            if plan is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if plan.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
+                raise AIError(ErrorCode.TASK_NOT_READY)
             current = self._nodes.get(key)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1026,13 +1030,16 @@ class _TaskRepository(_Base):
             self._mark_changed()
             return TaskLease(graph_id, task_id, tenant_id, owner, fence, expiry)
 
-    async def renew(self, lease: TaskLease, *, tenant_id: str) -> TaskLease:
+    async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
         self._ensure_open()
         self._check_tenant(tenant_id)
+        if not lease.owner.strip() or lease.tenant_id != tenant_id or not 1 <= lease_seconds <= 3600:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        now = datetime.now(timezone.utc)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
-        if current is None or current.owner != lease.owner or current.fence != lease.fence or current.lease_expires_at is None or current.lease_expires_at <= datetime.now(timezone.utc):
+        if current is None or current.status is not TaskStatus.RUNNING or current.owner != lease.owner or current.fence != lease.fence or current.lease_expires_at is None or current.lease_expires_at <= now:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        expiry = datetime.now(timezone.utc) + timedelta(seconds=60)
+        expiry = now + timedelta(seconds=lease_seconds)
         self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, lease_expires_at=expiry)
         self._mark_changed()
         return replace(lease, lease_expires_at=expiry)
@@ -1040,28 +1047,26 @@ class _TaskRepository(_Base):
     async def complete(self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> TaskTerminalRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
-        if current is None or current.owner != lease.owner or current.fence != lease.fence:
+        if lease.tenant_id != tenant_id:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-            if current.status is TaskStatus.SUCCEEDED and current.result_digest == result_digest and current.execution_id == execution_id:
-                return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, result_digest, None, None, execution_id=execution_id)
-            raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.SUCCEEDED, result_digest=result_digest, execution_id=execution_id, lease_expires_at=None)
+        current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
+        now = datetime.now(timezone.utc)
+        if current is None or current.status is not TaskStatus.RUNNING or current.owner != lease.owner or current.fence != lease.fence or current.lease_expires_at is None or current.lease_expires_at <= now:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.SUCCEEDED, owner=None, result_digest=result_digest, execution_id=execution_id, lease_expires_at=None)
         self._mark_changed()
         return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
 
     async def fail(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> TaskTerminalRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
-        if current is None or current.owner != lease.owner or current.fence != lease.fence:
+        if lease.tenant_id != tenant_id:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        if current.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-            if current.status is TaskStatus.FAILED and current.error_code == error_code and current.error_digest == error_digest:
-                return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, current.status, None, error_code, error_digest)
-            raise AIError(ErrorCode.TASK_TERMINAL_CONFLICT)
-        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.FAILED, error_code=error_code, error_digest=error_digest, lease_expires_at=None)
+        current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
+        now = datetime.now(timezone.utc)
+        if current is None or current.status is not TaskStatus.RUNNING or current.owner != lease.owner or current.fence != lease.fence or current.lease_expires_at is None or current.lease_expires_at <= now:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+        self._nodes[(tenant_id, lease.graph_id, lease.task_id)] = replace(current, status=TaskStatus.FAILED, owner=None, error_code=error_code, error_digest=error_digest, lease_expires_at=None)
         self._mark_changed()
         return TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
 

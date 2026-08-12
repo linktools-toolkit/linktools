@@ -6,6 +6,7 @@ import hashlib
 import uuid
 
 from ._json import JsonValue, canonical_json_bytes
+from ._value import Principal
 
 
 def canonical_sha256(value: JsonValue) -> str:
@@ -38,10 +39,20 @@ def step_run_id(*, namespace: str, tenant_id: str, execution_id: str, segment_se
     )
 
 
+def principal_identity_payload(principal: Principal) -> dict[str, str]:
+    """Return the stable principal identity used by request digests."""
+    return {
+        "tenant_id": principal.tenant_id,
+        "principal_id": principal.principal_id,
+        "kind": principal.kind,
+    }
+
+
 __all__ = [
     "canonical_sha256",
     "deterministic_id",
     "idempotency_key_hash",
+    "principal_identity_payload",
     "step_conversation_id",
     "step_run_id",
 ]

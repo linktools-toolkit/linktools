@@ -76,10 +76,13 @@ class InMemoryContentCache:
     """Bounded LRU content cache. ``contains_many`` checks all keys under one
     lock and does NOT touch LRU order (existence is not an access)."""
 
-    def __init__(self, *, max_bytes: int) -> None:
+    def __init__(self, *, max_bytes: int, max_size: "int | None" = None) -> None:
         if max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
+        if max_size is not None and max_size < 0:
+            raise ValueError("max_size must be non-negative")
         self.max_bytes = max_bytes
+        self.max_size = max_size
         self._items: "OrderedDict[ContentCacheKey, bytes]" = OrderedDict()
         self._size = 0
         self._lock = asyncio.Lock()
@@ -100,7 +103,10 @@ class InMemoryContentCache:
                 self._size -= len(previous)
             self._items[key] = content
             self._size += len(content)
-            while self._size > self.max_bytes and self._items:
+            while (
+                self._size > self.max_bytes
+                or (self.max_size is not None and len(self._items) > self.max_size)
+            ) and self._items:
                 _, removed = self._items.popitem(last=False)
                 self._size -= len(removed)
 

@@ -40,14 +40,13 @@ class Command(BaseCommand):
         parser.add_argument("--base-url", action=ConfigAction, config=OPENAI_BASE_URL)
         parser.add_argument("--model", action=ConfigAction, config=OPENAI_MODEL)
         parser.add_argument("--api-key", action=ConfigAction, config=OPENAI_API_KEY)
-        parser.add_argument("--memory", default=None, help="memory namespace (defaults to the workspace)")
         parser.add_argument("--json", action="store_true", help="emit one final JSON result")
 
     def run(self, args: Namespace) -> int:
         workspace = Workspace.discover(Path.cwd(), root=args.project)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
-        memory_namespace = args.memory or workspace.workspace_id
+        memory_namespace = workspace.workspace_id
 
         async def execute() -> int:
             async with open_workspace_runtime(

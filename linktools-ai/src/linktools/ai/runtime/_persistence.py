@@ -23,17 +23,17 @@ from ..core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
-    OperationKind,
+    OperationLedgerInput,
+    OperationLedgerRecord,
     OperationStatus,
     Page,
     ResourceKind,
     ResourceRef,
     SessionStatus,
     StopReason,
-    TaskStatus,
     ToolOperationStatus,
 )
-from ..task import TaskGraph, TaskGraphView, TaskTerminalRecord
+from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
 from ._tool import ToolStateStore
 
 
@@ -187,43 +187,6 @@ class ResultRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class OperationLedgerRecord:
-    operation_id: str
-    tenant_id: str
-    resource_kind: ResourceKind
-    resource_id: str
-    execution_id: "str | None"
-    kind: OperationKind
-    status: OperationStatus
-    request_digest: str
-    result_ref: "str | None"
-    result_digest: "str | None"
-    error_code: "str | None"
-    compactable: bool
-    sequence: int
-    created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class OperationLedgerInput:
-    operation_id: str
-    tenant_id: str
-    resource_kind: ResourceKind
-    resource_id: str
-    execution_id: "str | None"
-    kind: OperationKind
-    status: OperationStatus
-    request_digest: str
-    result_ref: "str | None"
-    result_digest: "str | None"
-    error_code: "str | None"
-    compactable: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
 class MemoryRecord:
     memory_id: str
     tenant_id: str
@@ -345,31 +308,6 @@ class ExternalResultRecord:
     supplied_at: "datetime | None"
 
 
-@dataclass(frozen=True, slots=True)
-class TaskLease:
-    graph_id: str
-    task_id: str
-    tenant_id: str
-    owner: str
-    fence: int
-    lease_expires_at: datetime
-
-
-@dataclass(frozen=True, slots=True)
-class TaskNodeView:
-    graph_id: str
-    task_id: str
-    dependencies: "tuple[str, ...]"
-    status: TaskStatus
-    owner: "str | None"
-    fence: int
-    lease_expires_at: "datetime | None"
-    result_digest: "str | None"
-    error_code: "str | None"
-    error_digest: "str | None"
-    execution_id: "str | None" = None
-
-
 class RuntimeRepository(Protocol):
     @property
     def mode(self) -> RuntimePersistenceMode: ...
@@ -468,7 +406,7 @@ class TaskRepository(RuntimeRepository, Protocol):
     async def reconcile_plan(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def cancel_plan(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView": ...
     async def claim(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease: ...
-    async def renew(self, lease: TaskLease, *, tenant_id: str) -> TaskLease: ...
+    async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease: ...
     async def complete(self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> "TaskTerminalRecord": ...
     async def fail(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> "TaskTerminalRecord": ...
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> tuple[TaskNodeView, ...]: ...

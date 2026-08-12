@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
-from ..capability import CapabilityFeature, StaticCapabilityBinding
+from ..capability import StaticCapabilityBinding
 from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
@@ -141,13 +141,11 @@ def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[StaticCapabi
     return (
         StaticCapabilityBinding(
             "workspace-filesystem",
-            frozenset({CapabilityFeature.TOOLS}),
             canonical_sha256({"kind": "filesystem", "root": project_root.as_posix(), "version": 1}),
             filesystem,
         ),
         StaticCapabilityBinding(
             "workspace-shell",
-            frozenset({CapabilityFeature.TOOLS}),
             canonical_sha256({"kind": "shell", "root": project_root.as_posix(), "version": 1}),
             shell,
         ),

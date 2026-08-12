@@ -30,8 +30,11 @@ class AgentDefinition:
         validate_fingerprint(self.output_schema_fingerprint)
         if any(capability is None for capability in self.effective_capabilities):
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        ids = tuple(capability.id for capability in self.effective_capabilities)
-        if len(set(ids)) != len(ids):
+        try:
+            identities = tuple((capability.provider, capability.id) for capability in self.effective_capabilities)
+        except (AttributeError, TypeError) as error:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+        if len(set(identities)) != len(identities):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
 

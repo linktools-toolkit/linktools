@@ -3,17 +3,22 @@
 """Workspace composition root for the public Runtime."""
 
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore, StepStore
+from pydantic_ai_harness.step_persistence import (
+    InMemoryStepStore,
+    SqliteStepStore,
+    StepStore,
+)
 
 from ..adapter import (
     DurableFilesystemStepStore,
+    RuntimeMemoryStore,
     SqlRuntimeSchema,
     SqlStepStore,
     StepExecutionHistoryReader,
@@ -21,7 +26,6 @@ from ..adapter import (
     build_in_memory_runtime,
     open_sql_runtime,
 )
-from ..adapter import RuntimeMemoryStore
 from ..agent import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -30,23 +34,25 @@ from ..agent import (
     AgentExecutor,
     AssistantTextOutput,
     OutputTypeRegistry,
-    build_asset_capability_providers,
 )
 from ..asset import (
-    AssetKey,
     AssetRef,
     AssetRepository,
     AssetStore,
     AssetTypeBinding,
     AssetTypeRegistry,
-    AssetVariantBinding,
-    DirectoryLayout,
+    AssetTypeRegistrySnapshot,
     InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     PrefixAssetPathAdapter,
-    SingleFileLayout,
 )
-from ..capability import MCPRuntimeProvider, PydanticMCPRuntimeProvider
+from ..capability import (
+    CapabilityBinding,
+    CapabilityProvider,
+    MCPRuntimeProvider,
+    build_builtin_capability_providers,
+    canonical_bootstrap_refs,
+)
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import (
@@ -68,27 +74,20 @@ from ..runtime import (
     DefaultExecutionService,
     DefaultSessionService,
     DefaultTaskService,
+    LocalExecutionBackend,
     Runtime,
     RuntimeBackend,
     RuntimePersistence,
     RuntimeTaskNodeRunner,
 )
-from ..runtime import LocalExecutionBackend
 from ..spec import (
     AgentCapabilityRef,
     AgentSpec,
-    AgentSpecCodec,
-    MCPServerSpec,
-    MCPServerSpecCodec,
     PromptSpec,
-    PromptSpecCodec,
-    SkillMarkdownSpecAdapter,
-    SkillMarkdownSpecCodec,
-    SkillSpec,
-    SkillSpecCodec,
+    builtin_asset_bindings,
 )
 from ..storage import StorageLayer, StorageOverlay
-from ..task import LocalTaskGraphLauncher, RuntimeTaskNodeResultVerifier
+from ..task import LocalTaskGraphLauncher, TaskNodeRunner
 from ._root import Workspace
 from ._tools import build_workspace_capability_grants
 
@@ -189,7 +188,12 @@ async def _open_resources(
         return
     if session_factory is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires a session factory")
-    from ..storage import SqlSchemaRegistry, build_sqlite_storage, build_storage, initialize_storage
+    from ..storage import (
+        SqlSchemaRegistry,
+        build_sqlite_storage,
+        build_storage,
+        initialize_storage,
+    )
 
     registry = SqlSchemaRegistry()
     tables = SqlRuntimeSchema.register_schema(registry)
@@ -228,7 +232,7 @@ def namespace_scoped_step_db_path(runtime_path: str, namespace: str) -> Path:
 
 
 async def build_asset_store(root: str | Path) -> AssetStore:
-    """Build the read-only workspace asset layer plus built-in defaults."""
+    """Build the read-only workspace asset layer."""
     workspace_root = Path(root).expanduser().resolve()
     local = LocalDirectoryAssetBackend(
         str(workspace_root),
@@ -236,13 +240,22 @@ async def build_asset_store(root: str | Path) -> AssetStore:
         path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
     )
     defaults = InMemoryAssetBackend()
-    await _put_default_assets(defaults, _discover_workspace_capability_refs(workspace_root))
-    return AssetStore(StorageOverlay(local, layers=(StorageLayer("defaults", defaults),)))
+    store = AssetStore(StorageOverlay(local, writer=defaults, layers=(StorageLayer("defaults", defaults),)))
+    await store.initialize()
+    repository = build_workspace_asset_repository(store)
+    await _put_default_asset(repository, AssetRef("prompt", "default"), PromptSpec("default", 1, "", ()))
+    return store
 
 
-def build_asset_repository(store: AssetStore) -> AssetRepository:
+def build_workspace_asset_repository(
+    store: AssetStore,
+    *,
+    extra_bindings: "Sequence[AssetTypeBinding[object]]" = (),
+) -> AssetRepository:
     registry = AssetTypeRegistry()
-    for binding in _asset_bindings():
+    for binding in builtin_asset_bindings():
+        registry.register(binding)
+    for binding in extra_bindings:
         registry.register(binding)
     return AssetRepository(store, registry.freeze())
 
@@ -257,11 +270,26 @@ async def open_workspace_runtime(
     api_key: str | None = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
     mcp_runtime: "MCPRuntimeProvider | None" = None,
+    extra_asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
+    capability_provider_factories: "Sequence[Callable[[AssetRepository], CapabilityProvider]]" = (),
+    capability_grants: "Sequence[CapabilityBinding]" = (),
+    task_node_runner: "TaskNodeRunner | None" = None,
 ) -> AsyncIterator[Runtime]:
     persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.root), workspace_id=workspace.workspace_id)
-    asset_store = await build_asset_store(workspace.root / ".linktools")
-    await asset_store.initialize()
-    assets = build_asset_repository(asset_store)
+    registry = _build_asset_registry(extra_asset_bindings)
+    phase_a_store, phase_a_assets = await _create_workspace_repository(workspace.root / ".linktools", registry)
+    phase_a_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
+    phase_a_refs = await _bootstrap_refs(phase_a_providers)
+    _logger.debug("workspace capability bootstrap phase A complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_a_refs))
+    del phase_a_store
+    final_store, assets = await _create_workspace_repository(workspace.root / ".linktools", registry, generated_refs=phase_a_refs)
+    final_providers = _build_capability_providers(assets, mcp_runtime, capability_provider_factories)
+    phase_b_refs = await _bootstrap_refs(final_providers)
+    if phase_a_refs != phase_b_refs:
+        _logger.error("workspace capability bootstrap changed between phases: workspace=%s", workspace.workspace_id)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+    _logger.debug("workspace capability bootstrap phase B complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_b_refs))
+    del final_store
     output_types = OutputTypeRegistry()
     output_types.register(ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AssistantTextOutput)
     output_types.freeze()
@@ -276,13 +304,13 @@ async def open_workspace_runtime(
     resolver: ModelResolver = SnapshotModelResolver(snapshot)
     materializer: ModelMaterializer = OpenAIModelMaterializer(StaticModelCredentialProvider({} if api_key is None else {credential_id: api_key}))
     profile = canonical_sha256({"workspace": workspace.root.as_posix(), "grants": 2, "version": 2})
-    grants = build_workspace_capability_grants(workspace.root)
+    grants = (*build_workspace_capability_grants(workspace.root), *capability_grants)
     compiler = AgentCompiler(
         assets,
         model_resolver=resolver,
         model_connections=connections,
         output_types=output_types,
-        capability_providers=build_asset_capability_providers(assets, mcp_runtime=mcp_runtime or PydanticMCPRuntimeProvider(execution_root=workspace.root)),
+        capability_providers=final_providers,
         capability_grants=grants,
         execution_profile_fingerprint=profile,
     )
@@ -301,11 +329,10 @@ async def open_workspace_runtime(
         authorization = TenantAuthorizationPolicy()
         execution = DefaultExecutionService(resources.domain, authorization, backend=backend, history_reader=history)
         session = DefaultSessionService(resources.domain, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)))
-        task_runner = RuntimeTaskNodeRunner(execution, definitions)
+        task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)
         task_launcher = LocalTaskGraphLauncher(
             resources.domain.tasks,
             task_runner,
-            RuntimeTaskNodeResultVerifier(resources.domain.executions),
             owner=f"workspace:{workspace.workspace_id}",
         )
         task = DefaultTaskService(resources.domain, authorization, task_launcher)
@@ -324,43 +351,67 @@ async def open_workspace_runtime(
             yield runtime
         finally:
             await runtime.close()
+def _build_asset_registry(extra_bindings: Sequence[AssetTypeBinding[object]]) -> AssetTypeRegistrySnapshot:
+    registry = AssetTypeRegistry()
+    for binding in builtin_asset_bindings():
+        registry.register(binding)
+    for binding in extra_bindings:
+        registry.register(binding)
+    return registry.freeze()
 
 
-async def _put_default_assets(
-    backend: InMemoryAssetBackend,
-    capabilities: tuple[AgentCapabilityRef, ...],
-) -> None:
-    await backend.put(
-        AssetKey("agent", "default"),
-        AgentSpecCodec().encode(AgentSpec("default", 1, "default", capabilities, "assistant-text", 1)),
+async def _create_workspace_repository(
+    root: Path,
+    registry: AssetTypeRegistrySnapshot,
+    *,
+    generated_refs: "tuple[AgentCapabilityRef, ...] | None" = None,
+) -> "tuple[AssetStore, AssetRepository]":
+    local = LocalDirectoryAssetBackend(
+        str(root),
+        writable=False,
+        path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
     )
-    await backend.put(AssetKey("prompt", "default"), PromptSpecCodec().encode(PromptSpec("default", 1, "", ())))
+    defaults = InMemoryAssetBackend()
+    store = AssetStore(StorageOverlay(local, writer=defaults, layers=(StorageLayer("defaults", defaults),)))
+    await store.initialize()
+    repository = AssetRepository(store, registry)
+    await _put_default_asset(repository, AssetRef("prompt", "default"), PromptSpec("default", 1, "", ()))
+    if generated_refs is not None:
+        await _put_default_asset(repository, AssetRef("agent", "default"), AgentSpec("default", 1, "default", generated_refs, "assistant-text", 1))
+    return store, repository
 
 
-def _discover_workspace_capability_refs(root: Path) -> tuple[AgentCapabilityRef, ...]:
+async def _put_default_asset(repository: AssetRepository, ref: AssetRef, value: object) -> None:
+    try:
+        await repository.resolve(ref)
+    except AIError as error:
+        if error.code is not ErrorCode.STORAGE_NOT_FOUND:
+            raise
+        await repository.put(ref, value)
+
+
+def _build_capability_providers(
+    assets: AssetRepository,
+    mcp_runtime: "MCPRuntimeProvider | None",
+    factories: Sequence[Callable[[AssetRepository], CapabilityProvider]],
+) -> "tuple[CapabilityProvider, ...]":
+    providers = list(build_builtin_capability_providers(assets, mcp_runtime=mcp_runtime))
+    providers.extend(factory(assets) for factory in factories)
+    return tuple(providers)
+
+
+async def _bootstrap_refs(providers: Sequence[CapabilityProvider]) -> "tuple[AgentCapabilityRef, ...]":
     refs: list[AgentCapabilityRef] = []
-    refs.extend(AgentCapabilityRef("mcp", server_id, required=False) for server_id in _discover_mcp_ids(root / "mcp"))
-    return tuple(refs)
-
-
-def _discover_mcp_ids(mcp_root: Path) -> tuple[str, ...]:
-    if not mcp_root.is_dir():
-        return ()
-    codec = MCPServerSpecCodec()
-    server_ids: list[str] = []
-    for path in sorted(item for item in mcp_root.rglob("*") if item.is_file()):
-        server_id = path.relative_to(mcp_root).as_posix()
-        try:
-            AssetRef("mcp", server_id)
-            specification = codec.decode(path.read_bytes())
-        except (AIError, OSError, ValueError) as error:
-            _logger.debug("workspace mcp skipped: path=%s reason=%s", path, type(error).__name__)
-            continue
-        if specification.id != server_id:
-            _logger.debug("workspace mcp skipped: path=%s reason=declaration_id_mismatch", path)
-            continue
-        server_ids.append(server_id)
-    return tuple(server_ids)
+    for provider in providers:
+        refs.extend(canonical_bootstrap_refs(provider.provider, await provider.bootstrap_refs()))
+    grouped: dict[tuple[str, str], AgentCapabilityRef] = {}
+    for ref in refs:
+        key = ref.provider, ref.id
+        previous = grouped.get(key)
+        if previous is not None and previous != ref:
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        grouped[key] = ref
+    return tuple(sorted(grouped.values(), key=lambda ref: (ref.provider, ref.id, 0 if ref.revision is None else ref.revision)))
 
 
 def _configured_model(config: dict[str, object]) -> str | None:
@@ -372,19 +423,4 @@ def _grant_key(workspace: Workspace) -> bytes:
     return hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
 
 
-def _asset_bindings() -> tuple[AssetTypeBinding[object], ...]:
-    def identity(ref: AssetRef, value: object) -> bool:
-        return isinstance(value, (AgentSpec, PromptSpec, MCPServerSpec, SkillSpec)) and value.id == ref.id
-
-    return (
-        cast("AssetTypeBinding[object]", AssetTypeBinding("agent", AgentSpec, (AssetVariantBinding("json", SingleFileLayout(""), AgentSpecCodec(), "agent-spec", 1),), "json", identity, "id-v1", True)),
-        cast("AssetTypeBinding[object]", AssetTypeBinding("prompt", PromptSpec, (AssetVariantBinding("json", SingleFileLayout(""), PromptSpecCodec(), "prompt-spec", 1),), "json", identity, "id-v1", True)),
-        cast("AssetTypeBinding[object]", AssetTypeBinding("mcp", MCPServerSpec, (AssetVariantBinding("json", SingleFileLayout(""), MCPServerSpecCodec(), "mcp-spec", 1),), "json", identity, "id-v1", True)),
-        cast("AssetTypeBinding[object]", AssetTypeBinding("skill", SkillSpec, (
-            AssetVariantBinding("json", SingleFileLayout(""), SkillSpecCodec(), "skill-spec", 1),
-            AssetVariantBinding("directory", DirectoryLayout("SKILL.md"), SkillMarkdownSpecCodec(), "skill-markdown", 1, SkillMarkdownSpecAdapter(), "skill-name-v1"),
-        ), "directory", identity, "id-v1", True)),
-    )
-
-
-__all__ = ["RuntimePersistenceConfig", "build_asset_repository", "build_asset_store", "namespace_scoped_step_db_path", "open_workspace_runtime"]
+__all__ = ["RuntimePersistenceConfig", "build_asset_store", "build_workspace_asset_repository", "namespace_scoped_step_db_path", "open_workspace_runtime"]

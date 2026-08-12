@@ -10,7 +10,6 @@ from linktools.core import environ
 from ..asset import AssetRef, AssetRepository
 from ..capability import (
     CapabilityBinding,
-    CapabilityFeature,
     CapabilityProvider,
     CapabilityRefResolution,
     group_capability_refs,
@@ -19,7 +18,12 @@ from ..capability import (
 )
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelConnectionConfig, ModelConnectionRegistry, ModelResolver, ModelRoute
+from ..model import (
+    ModelConnectionConfig,
+    ModelConnectionRegistry,
+    ModelResolver,
+    ModelRoute,
+)
 from ..spec import AgentCapabilityRef, AgentSpec, PromptSpec
 from ._definition import AgentDefinition
 from ._output import OutputTypeRegistry
@@ -48,12 +52,17 @@ class AgentCompiler:
         validate_fingerprint(execution_profile_fingerprint)
         providers: dict[str, CapabilityProvider] = {}
         for provider in capability_providers:
-            name = provider.provider
+            try:
+                name = provider.provider
+            except (AttributeError, TypeError) as error:
+                raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
             if not isinstance(name, str) or not name.strip() or name in providers:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             providers[name] = provider
         grants = tuple(capability_grants)
         _validate_bindings(grants)
+        if any(grant.provider in providers for grant in grants):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._assets = assets
         self._model_resolver = model_resolver
         self._model_connections = model_connections
@@ -76,6 +85,9 @@ class AgentCompiler:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         spec = agent.spec
         prompt_spec = prompt.spec
+        grant_providers = {grant.provider for grant in self._grants}
+        if any(ref.provider in grant_providers for ref in spec.capabilities):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         groups = group_capability_refs(spec.capabilities)
         declarative: list[CapabilityBinding] = []
         for provider_name, refs in groups:
@@ -87,9 +99,8 @@ class AgentCompiler:
             else:
                 binding = await provider.bind(refs)
                 _validate_binding(provider_name, refs, binding)
-            _validate_policy(spec, binding)
             declarative.append(binding)
-        effective = tuple(declarative) + tuple(grant for grant in self._grants if _grant_allowed(spec, grant))
+        effective = tuple(declarative) + self._grants
         _validate_bindings(effective)
         route = self._model_resolver.resolve(spec.model)
         connection = self._model_connections.resolve_optional(route.connection_id)
@@ -125,6 +136,7 @@ class AgentCompiler:
 
 
 def _validate_binding(provider: str, refs: tuple[AgentCapabilityRef, ...], binding: CapabilityBinding) -> None:
+    _validate_binding_shape(binding)
     if binding.provider != provider or len(binding.resolutions) != len(refs):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     validate_fingerprint(binding.fingerprint)
@@ -145,34 +157,34 @@ def _validate_binding(provider: str, refs: tuple[AgentCapabilityRef, ...], bindi
 
 
 def _validate_bindings(bindings: Sequence[CapabilityBinding]) -> None:
-    ids = [binding.id for binding in bindings]
-    if len(ids) != len(set(ids)):
-        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
     for binding in bindings:
-        validate_fingerprint(binding.fingerprint)
+        _validate_binding_shape(binding)
+    identities = [(binding.provider, binding.id) for binding in bindings]
+    if len(identities) != len(set(identities)):
+        raise AIError(ErrorCode.CAPABILITY_CONFLICT)
 
 
-def _validate_policy(spec: AgentSpec, binding: CapabilityBinding) -> None:
-    for feature in _blocked_features(spec, binding.features):
-        raise AIError(
-            ErrorCode.CAPABILITY_POLICY_CONFLICT,
-            safe_details={"provider": binding.provider, "feature": feature.value},
-        )
-
-
-def _grant_allowed(spec: AgentSpec, binding: CapabilityBinding) -> bool:
-    return not _blocked_features(spec, binding.features)
-
-
-def _blocked_features(spec: AgentSpec, features: frozenset[CapabilityFeature]) -> tuple[CapabilityFeature, ...]:
-    blocked: list[CapabilityFeature] = []
-    if CapabilityFeature.TOOLS in features and not spec.allow_tools:
-        blocked.append(CapabilityFeature.TOOLS)
-    if CapabilityFeature.SKILLS in features and not spec.allow_skills:
-        blocked.append(CapabilityFeature.SKILLS)
-    if CapabilityFeature.SUBAGENTS in features and not spec.allow_subagents:
-        blocked.append(CapabilityFeature.SUBAGENTS)
-    return tuple(blocked)
+def _validate_binding_shape(binding: CapabilityBinding) -> None:
+    try:
+        provider = binding.provider
+        binding_id = binding.id
+        resolutions = binding.resolutions
+        inherit_to_subagents = binding.inherit_to_subagents
+        fingerprint = binding.fingerprint
+    except (AttributeError, TypeError) as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if (
+        not isinstance(provider, str)
+        or not provider.strip()
+        or not isinstance(binding_id, str)
+        or not binding_id.strip()
+        or not isinstance(resolutions, tuple)
+        or not isinstance(inherit_to_subagents, bool)
+    ):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    validate_fingerprint(fingerprint)
+    if any(not isinstance(resolution, CapabilityRefResolution) for resolution in resolutions):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 def _definition_digest(
@@ -240,7 +252,6 @@ def _binding_payload(binding: CapabilityBinding) -> dict[str, object]:
     return {
         "id": binding.id,
         "provider": binding.provider,
-        "features": sorted(feature.value for feature in binding.features),
         "fingerprint": binding.fingerprint,
         "inherit_to_subagents": binding.inherit_to_subagents,
         "resolutions": [

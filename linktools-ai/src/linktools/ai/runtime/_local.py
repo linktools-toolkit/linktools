@@ -9,9 +9,15 @@ from pathlib import Path
 
 from linktools.core import environ
 from pydantic import ValidationError
+from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore, continue_run, fork_run
 
-from ..agent import AgentDefinition, AgentExecutor
+from ..agent import (
+    MEMORY_TOOL_NAMES,
+    AgentDefinition,
+    AgentExecutor,
+    select_platform_tool_names,
+)
 from ..capability import CapabilityRuntimeContext
 from ..core import (
     ExecutionEventType,
@@ -27,7 +33,6 @@ from ..core import (
     step_run_id,
 )
 from ..errors import AIError, ErrorCode
-from pydantic_ai_harness.memory import SearchableMemoryStore
 from ._execution import CancelEffectOutcome
 from ._persistence import (
     ExecutionRecord,
@@ -145,7 +150,12 @@ class LocalExecutionBackend:
                 await self._append_event(current, event_type, payload)
 
             memory = None
-            if current.memory_namespace is not None:
+            platform_tool_names = select_platform_tool_names(
+                allow_tools=definition.spec.allow_tools,
+                memory_namespace=current.memory_namespace,
+            )
+            selected_memory = tuple(name for name in platform_tool_names if name in MEMORY_TOOL_NAMES)
+            if selected_memory:
                 if self._memory_store_factory is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
                 memory = self._memory_store_factory(current.tenant_id, current.memory_namespace)
@@ -160,9 +170,13 @@ class LocalExecutionBackend:
                 capability_context=CapabilityRuntimeContext(
                     request.principal,
                     ResourceRef(ResourceKind.EXECUTION, execution_id, current.tenant_id),
+                    definition.spec.allow_tools,
+                    definition.spec.allow_skills,
+                    definition.spec.allow_subagents,
                 ),
                 memory_namespace=current.memory_namespace,
                 memory_store=memory,
+                platform_tool_names=platform_tool_names,
                 event_sink=sink,
             )
             await self._commit_success(current, definition, result.output, result.run_id)

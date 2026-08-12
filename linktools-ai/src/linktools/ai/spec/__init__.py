@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Spec DTOs, codecs and output schemas; no storage owner."""
 
+from ._assets import builtin_asset_bindings
 from ._codec import (
     AgentSpecCodec,
     MCPServerSpecCodec,
@@ -22,5 +23,5 @@ from ._contract import (
 __all__ = [
     "AgentCapabilityRef", "AgentSpec", "AgentSpecCodec", "MCPServerSpec", "MCPServerSpecCodec",
     "PromptSpec", "PromptSpecCodec", "SkillMarkdownSpecAdapter", "SkillMarkdownSpecCodec",
-    "SkillSpec", "SkillSpecCodec", "SpecCodec",
+    "SkillSpec", "SkillSpecCodec", "SpecCodec", "builtin_asset_bindings",
 ]

@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
+from ._allowlist import canonical_string_tuple
 from ._ids import (
     canonical_sha256,
     deterministic_id,
     idempotency_key_hash,
+    principal_identity_payload,
     step_conversation_id,
     step_run_id,
 )
 from ._json import JsonValue, canonical_json_bytes
+from ._operation import OperationLedgerInput, OperationLedgerRecord
 from ._paging import CursorPayload, CursorSigner, HmacCursorSigner, Page
 from ._principal import (
     AuthorizationAction,
@@ -76,8 +79,10 @@ __all__ = [
     "Principal",
     "PrincipalKind",
     "PrincipalProvider",
-    "canonical_sha256", "idempotency_key_hash", "step_conversation_id", "step_run_id",
+    "canonical_sha256", "idempotency_key_hash", "principal_identity_payload", "step_conversation_id", "step_run_id",
     "canonical_json_bytes",
+    "OperationLedgerInput", "OperationLedgerRecord",
+    "canonical_string_tuple",
     "deterministic_id",
     "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
     "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus", "IdempotencyStatus",

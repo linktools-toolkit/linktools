@@ -4,22 +4,15 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
-from ..core import Principal, ResourceRef, canonical_sha256
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
 
 _FINGERPRINT_LENGTH = 64
-
-
-class CapabilityFeature(StrEnum):
-    TOOLS = "tools"
-    SKILLS = "skills"
-    SUBAGENTS = "subagents"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +27,7 @@ class CapabilityRefResolution:
     def __post_init__(self) -> None:
         if (
             not self.id.strip()
+            or not isinstance(self.required, bool)
             or self.requested_revision is not None
             and (not isinstance(self.requested_revision, int) or isinstance(self.requested_revision, bool) or self.requested_revision < 1)
             or self.resolved_revision is not None
@@ -54,10 +48,16 @@ class CapabilityRefResolution:
 class CapabilityRuntimeContext:
     principal: Principal
     execution: ResourceRef
+    allow_tools: "tuple[str, ...]" = ("*",)
+    allow_skills: "tuple[str, ...]" = ("*",)
+    allow_subagents: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         if self.principal.tenant_id != self.execution.tenant_id:
             raise ValueError("capability context tenant mismatch")
+        object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
+        object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
+        object.__setattr__(self, "allow_subagents", canonical_string_tuple(self.allow_subagents, field="allow_subagents"))
 
 
 class CapabilityBinding(Protocol):
@@ -66,9 +66,6 @@ class CapabilityBinding(Protocol):
 
     @property
     def provider(self) -> str: ...
-
-    @property
-    def features(self) -> "frozenset[CapabilityFeature]": ...
 
     @property
     def resolutions(self) -> "tuple[CapabilityRefResolution, ...]": ...
@@ -89,6 +86,8 @@ class CapabilityProvider(Protocol):
     @property
     def provider(self) -> str: ...
 
+    async def bootstrap_refs(self) -> "tuple[AgentCapabilityRef, ...]": ...
+
     async def bind(
         self,
         refs: "tuple[AgentCapabilityRef, ...]",
@@ -100,7 +99,6 @@ class StaticCapabilityBinding:
     """Wrap one application-authorized capability as an immutable grant."""
 
     id: str
-    features: "frozenset[CapabilityFeature]"
     fingerprint: str
     capability: "PydanticAgentCapability[None]"
     inherit_to_subagents: bool = True
@@ -110,7 +108,6 @@ class StaticCapabilityBinding:
     def __post_init__(self) -> None:
         if not self.id.strip() or not self.provider.strip() or self.capability is None:
             raise ValueError("static capability binding is incomplete")
-        _validate_features(self.features)
         validate_fingerprint(self.fingerprint)
 
     async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[PydanticAgentCapability[None], ...]":
@@ -124,7 +121,6 @@ class UnresolvedCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]"
     fingerprint: str
     inherit_to_subagents: bool = False
-    features: "frozenset[CapabilityFeature]" = frozenset()
 
     @property
     def id(self) -> str:
@@ -135,7 +131,6 @@ class UnresolvedCapabilityBinding:
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
         if not self.resolutions or any(item.status != "unresolved" for item in self.resolutions):
             raise ValueError("unresolved capability binding requires unresolved resolutions")
-        _validate_features(self.features)
 
     async def materialize(
         self,
@@ -154,7 +149,6 @@ def unresolved_binding(provider: str, refs: Sequence[AgentCapabilityRef]) -> Unr
             {
                 "provider": provider,
                 "status": "UNRESOLVED_PROVIDER",
-                "features": [],
                 "refs": [
                     {
                         "provider": ref.provider,
@@ -184,14 +178,34 @@ def group_capability_refs(
     return tuple((provider, tuple(grouped[provider])) for provider in order)
 
 
+def canonical_bootstrap_refs(
+    provider: str,
+    refs: Sequence[AgentCapabilityRef],
+) -> "tuple[AgentCapabilityRef, ...]":
+    if not isinstance(provider, str) or not provider.strip() or not isinstance(refs, tuple):
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+    groups: dict[tuple[str, str], AgentCapabilityRef] = {}
+    for ref in refs:
+        if not isinstance(ref, AgentCapabilityRef) or ref.provider != provider or ref.required or ref.revision is not None and ref.revision < 1:
+            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
+        key = ref.provider, ref.id
+        previous = groups.get(key)
+        if previous is not None:
+            if _ref_payload(previous) != _ref_payload(ref):
+                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+            continue
+        groups[key] = ref
+    return tuple(
+        sorted(
+            groups.values(),
+            key=lambda ref: (ref.provider, ref.id, 0 if ref.revision is None else ref.revision),
+        )
+    )
+
+
 def validate_fingerprint(value: str) -> None:
     if not _is_fingerprint(value):
         raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
-
-
-def _validate_features(features: frozenset[CapabilityFeature]) -> None:
-    if not isinstance(features, frozenset) or any(not isinstance(feature, CapabilityFeature) for feature in features):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
 
 
 def _is_fingerprint(value: "str | None") -> bool:
@@ -199,6 +213,10 @@ def _is_fingerprint(value: "str | None") -> bool:
 
 
 __all__ = [
-    "CapabilityBinding", "CapabilityFeature", "CapabilityProvider", "CapabilityRefResolution", "CapabilityRuntimeContext",
-    "StaticCapabilityBinding", "UnresolvedCapabilityBinding", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
+    "CapabilityBinding", "CapabilityProvider", "CapabilityRefResolution", "CapabilityRuntimeContext",
+    "StaticCapabilityBinding", "UnresolvedCapabilityBinding", "canonical_bootstrap_refs", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
 ]
+
+
+def _ref_payload(ref: AgentCapabilityRef) -> tuple[object, ...]:
+    return ref.provider, ref.id, ref.revision, ref.required, canonical_sha256(dict(ref.config))

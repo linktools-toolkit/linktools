@@ -91,3 +91,35 @@ create or alter production tables. Applications that own provisioning may call
 `.mysql(...)`, and `.postgresql(...)` select the persistence deployment. A
 non-empty `memory_namespace` enables the Runtime memory capability; `None`
 leaves memory disabled and an empty string is rejected.
+
+## Standalone local Task API
+
+Task scheduling can be composed without constructing Runtime, Agent, Model, or
+Workspace objects:
+
+```python
+from linktools.ai.task import open_local_task_api
+
+async with open_local_task_api(
+    persistence,
+    authorization,
+    runner=my_task_runner,
+    owner="worker-1",
+) as tasks:
+    result = await tasks.run_graph(request)
+```
+
+`my_task_runner` implements `TaskNodeRunner` and returns only a canonical
+`TaskNodeRunResult(result_digest, execution_id=None)`. The launcher owns local
+leases and heartbeats; durable task state remains in the supplied persistence.
+
+## Breaking cutover
+
+The current decoder accepts only array allowlists. Before a coordinated cutover,
+drain or cancel nonterminal work, verify that no old worker lease remains,
+convert legacy boolean fields offline (`true` to `["*"]`, `false` to `[]`),
+then validate every asset with the strict codec before starting the new workers.
+Do not run old and new workers against the same workload. Rollback is another
+coordinated cutover: drain new work, restore the pre-cutover AgentSpec backup,
+stop all new workers, and start the complete old worker set only after leases
+have expired or been cleared.

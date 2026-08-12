@@ -10,6 +10,7 @@ from typing import cast
 from linktools.core import environ
 from pydantic import BaseModel
 from pydantic_ai import Agent, AgentRunResultEvent, TextOutput
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -26,6 +27,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.models import Model
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
@@ -33,7 +35,11 @@ from ..capability import CapabilityRuntimeContext
 from ..core import ExecutionEventType, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelMaterializer
-from ._capabilities import AgentRunScope, compose_platform_capabilities
+from ._capabilities import (
+    AgentRunScope,
+    compose_platform_capabilities,
+    tool_name_allowed,
+)
 from ._definition import AgentDefinition
 from ._output import AssistantTextOutput
 
@@ -69,6 +75,7 @@ class AgentExecutor:
         capability_context: CapabilityRuntimeContext,
         memory_namespace: "str | None" = None,
         memory_store: "SearchableMemoryStore | None" = None,
+        platform_tool_names: "tuple[str, ...]" = (),
         parent_step_run_id: "str | None" = None,
         event_sink: EventSink,
     ) -> AgentExecutionResult:
@@ -90,7 +97,7 @@ class AgentExecutor:
             memory_namespace=memory_namespace,
             step_store=step_store,
             memory_store=memory_store,
-            allow_tools=definition.spec.allow_tools,
+            platform_tool_names=platform_tool_names,
             parent_step_run_id=parent_step_run_id,
         )
         platform = await compose_platform_capabilities(
@@ -99,6 +106,7 @@ class AgentExecutor:
             parent_model=model,
         )
         capabilities = tuple(materialized) + platform
+        capabilities = (*capabilities, _AllowlistPresentation(definition.spec.allow_tools))
         _logger.debug(
             "agent execution started: agent=%s definition=%s step=%s capability_count=%s",
             definition.spec.id,
@@ -148,6 +156,34 @@ class AgentExecutor:
                 output_type=output_type,
             ),
         )
+
+
+class _AllowlistPresentation(AbstractCapability[None]):
+    def __init__(self, allow_tools: "tuple[str, ...]") -> None:
+        self._allow_tools = allow_tools
+
+    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+        selected = [tool for tool in tool_defs if _function_tool_allowed(tool.name, self._allow_tools)]
+        names = [tool.name for tool in selected]
+        if len(names) != len(set(names)):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        return selected
+
+    @classmethod
+    def get_serialization_name(cls) -> "str | None":
+        return None
+
+
+def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
+    if tool_name_allowed(name, allow_tools):
+        return True
+    if not name.startswith("mcp__"):
+        return False
+    server, separator, tool = name[5:].partition("__")
+    if not separator or not server or not tool:
+        return False
+    selector = f"mcp__{server}"
+    return selector in allow_tools or f"{selector}__*" in allow_tools
 
 
 def _assistant_text_output(value: str) -> AssistantTextOutput:

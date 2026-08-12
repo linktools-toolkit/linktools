@@ -9,6 +9,7 @@ from typing import Protocol, TypeVar, cast
 
 import yaml
 
+from ..core import canonical_string_tuple
 from ..errors import AIError, ErrorCode
 from ._contract import (
     AgentCapabilityRef,
@@ -75,9 +76,9 @@ class AgentSpecCodec:
             str(raw["output_schema"]),
             int(raw["output_schema_revision"]),
             tuple(str(item) for item in cast("list[object]", raw.get("instructions", []))),
-            _strict_bool(raw, "allow_tools", True),
-            _strict_bool(raw, "allow_skills", True),
-            _strict_bool(raw, "allow_subagents", False),
+            _strict_allowlist(raw, "allow_tools", ("*",)),
+            _strict_allowlist(raw, "allow_skills", ("*",)),
+            _strict_allowlist(raw, "allow_subagents", ()),
             cast("dict[str, object]", raw.get("metadata", {})),
         )
 
@@ -194,6 +195,13 @@ def _strict_bool(raw: Mapping[str, object], name: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, f"{name} must be a boolean")
     return value
+
+
+def _strict_allowlist(raw: Mapping[str, object], name: str, default: "tuple[str, ...]") -> "tuple[str, ...]":
+    value = raw.get(name, list(default))
+    if not isinstance(value, list):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{name} must be a JSON array")
+    return canonical_string_tuple(value, field=name)
 
 
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
