@@ -5,7 +5,8 @@
 from .agent import AgentCompiler, AgentDefinition, AgentExecutor
 from .errors import AIError, ErrorCode, SafeError
 from .runtime import Runtime
-from .workspace import RuntimePersistenceConfig, Workspace, open_workspace_runtime
+from .storage import RuntimeStorage, StorageDomain
+from .workspace import Workspace, open_workspace_runtime
 
 __all__ = [
     "AIError",
@@ -14,7 +15,8 @@ __all__ = [
     "AgentExecutor",
     "ErrorCode",
     "Runtime",
-    "RuntimePersistenceConfig",
+    "RuntimeStorage",
+    "StorageDomain",
     "SafeError",
     "Workspace",
     "open_workspace_runtime",

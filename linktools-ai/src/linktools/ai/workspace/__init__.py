@@ -3,7 +3,8 @@
 """Workspace discovery and local execution boundaries."""
 
 from ._factory import (
-    RuntimePersistenceConfig,
+    RuntimeStorage,
+    StorageDomain,
     build_workspace_asset_repository,
     open_workspace_runtime,
 )
@@ -18,5 +19,5 @@ from ._tools import (
 
 __all__ = [
     "DisabledSandbox", "Sandbox", "Workspace", "WorkspacePolicy", "WorkspaceTool", "build_workspace_capability_grants", "build_workspace_tool_map",
-    "RuntimePersistenceConfig", "build_workspace_asset_repository", "build_workspace_tools", "open_workspace_runtime", "trusted_workspace_principal",
+    "RuntimeStorage", "StorageDomain", "build_workspace_asset_repository", "build_workspace_tools", "open_workspace_runtime", "trusted_workspace_principal",
 ]

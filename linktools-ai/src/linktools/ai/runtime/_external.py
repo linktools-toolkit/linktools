@@ -6,25 +6,25 @@ from datetime import datetime, timezone
 
 from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimePersistence
+from ._persistence import RuntimeStores
 from ._services import ExternalResultRequest, ExternalResultResult, WorkflowGateway
 
 
 class DefaultExternalService:
-    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
+    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
     async def supply(self, execution_id: str, request: ExternalResultRequest) -> ExternalResultResult:
-        header = await self._persistence.executions.get_header(execution_id, tenant_id=request.principal.tenant_id)
+        call = await self._persistence.recovery_external.get(request.call_id, tenant_id=request.principal.tenant_id)
+        if call is None or call.execution_id != execution_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        header = await self._persistence.recovery_external.get_header(request.call_id, tenant_id=request.principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXTERNAL_SUPPLY, header)
-        call = await self._persistence.externals.get(request.call_id, tenant_id=request.principal.tenant_id)
-        if call is None or call.execution_id != execution_id:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        updated = await self._persistence.externals.supply(
+        updated = await self._persistence.recovery_external.supply(
             request.call_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ExternalCallStatus.PENDING,

@@ -9,16 +9,19 @@ import pytest
 from linktools.ai.adapter import SqlRuntimeSchema, build_step_schema
 from linktools.ai.asset import SqlAssetSchema
 from linktools.ai.migrate import provision_database
-from linktools.ai.storage import SqlSchemaRegistry
+from linktools.ai.storage import SqlSchemaRegistry, register_storage_schema
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _expected_tables() -> set[str]:
+    storage_registry = SqlSchemaRegistry()
+    register_storage_schema(storage_registry)
     runtime_registry = SqlSchemaRegistry()
     runtime_manifest = SqlRuntimeSchema.register_schema(runtime_registry)
     asset_registry = SqlSchemaRegistry()
     asset_tables = SqlAssetSchema.register_schema(asset_registry)
     return {
+        *(table.name for table in storage_registry.metadata.tables.values()),
         *(table.name for table in runtime_manifest.values()),
         *build_step_schema().tables,
         *(table.name for table in (asset_tables.entry, asset_tables.change, asset_tables.blob, asset_tables.revision)),

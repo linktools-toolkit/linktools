@@ -6,12 +6,14 @@ import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from linktools.core import environ
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
+from ._names import storage_name
+from ._dialects import MySQLDialect, PostgreSQLDialect, SQLiteDialect, SqlAlchemyDialect
 
 if TYPE_CHECKING:
     from sqlalchemy import (
@@ -36,6 +38,49 @@ class CoordinationScope(StrEnum):
     SHARED_DATABASE = "shared_database"
 
 
+@dataclass(slots=True)
+class SqlStorageContext:
+    """Runtime-wide SQL engine and session factory boundary."""
+
+    engine: "AsyncEngine"
+    sessions: "async_sessionmaker[AsyncSession]"
+    dialect: SqlAlchemyDialect
+    namespace: str
+    owns_engine: bool = False
+    schema_manifest_digest: "str | None" = None
+
+    async def initialize(
+        self,
+        *,
+        metadata: "MetaData | None" = None,
+        schema_manifest_digest: "str | None" = None,
+    ) -> None:
+        if self.engine.dialect.name == "sqlite":
+            await _configure_sqlite_engine(self.engine)
+        if metadata is not None:
+            if not schema_manifest_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await validate_schema(self.engine, metadata)
+            await _validate_schema_generation(self.engine, metadata, schema_manifest_digest)
+            self.schema_manifest_digest = schema_manifest_digest
+        _logger.debug(
+            "SQL storage context initialized: dialect=%s namespace=%s owns_engine=%s schema_manifest_digest=%s",
+            self.dialect.name,
+            self.namespace,
+            self.owns_engine,
+            schema_manifest_digest,
+        )
+
+    async def close(self) -> None:
+        _SQL_CONTEXTS.pop((id(self.engine), self.namespace), None)
+        if self.owns_engine:
+            await self.engine.dispose()
+
+
+_SQL_CONTEXTS: dict[tuple[int, str], SqlStorageContext] = {}
+_SQL_SCHEMA_CONTRIBUTORS: dict[str, Callable[["SqlSchemaRegistry"], "SqlSchemaContribution"]] = {}
+
+
 @dataclass(frozen=True, slots=True)
 class SqlTableManifest:
     name: str
@@ -54,6 +99,10 @@ class SqlSchemaManifest:
 class SqlSchemaContributor(Protocol):
     @classmethod
     def register_schema(cls, registry: "SqlSchemaRegistry") -> "Table": ...
+
+
+class SqlSchemaContribution(Protocol):
+    """Marker for the backend-specific value returned by a schema registrar."""
 
 
 class _SqlTypeValue(Protocol):
@@ -131,7 +180,8 @@ class SqlSchemaRegistry:
 
 @dataclass(frozen=True, slots=True)
 class StorageDatabase:
-    session_factory: "async_sessionmaker[AsyncSession]"
+    sessions: "async_sessionmaker[AsyncSession]"
+    engine: "AsyncEngine"
     coordination_scope: CoordinationScope
     metadata: "MetaData"
     schema_manifest_digest: str
@@ -139,7 +189,7 @@ class StorageDatabase:
     async def initialize(self) -> None:
         if not self.schema_manifest_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await validate_schema(self.session_factory, self.metadata)
+        await validate_schema(self.engine, self.metadata)
 
 
 def sql_constraint_signature(constraint: "Constraint") -> str:
@@ -203,15 +253,17 @@ def _index_signature(index: "Index") -> str:
     return f"{name}:{columns}"
 
 
-def build_storage(
+def _build_storage(
     *,
-    session_factory: "async_sessionmaker[AsyncSession]",
+    sessions: "async_sessionmaker[AsyncSession]",
+    engine: "AsyncEngine",
     metadata: "MetaData",
     schema_manifest_digest: str,
     coordination_scope: CoordinationScope = CoordinationScope.SHARED_DATABASE,
 ) -> StorageDatabase:
     return StorageDatabase(
-        session_factory,
+        sessions,
+        engine,
         coordination_scope,
         metadata,
         schema_manifest_digest,
@@ -219,18 +271,22 @@ def build_storage(
 
 
 async def prepare_storage_database(
+    engine: "AsyncEngine",
     *,
-    session_factory: "async_sessionmaker[AsyncSession]",
     metadata: "MetaData",
     schema_manifest_digest: str,
+    context: "SqlStorageContext | None" = None,
 ) -> StorageDatabase:
-    engine = await resolve_engine(session_factory)
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions = context.sessions if context is not None else async_sessionmaker(engine, expire_on_commit=False)
     coordination_scope = CoordinationScope.SHARED_DATABASE
     if engine.dialect.name == "sqlite":
         await _configure_sqlite_engine(engine)
         coordination_scope = CoordinationScope.PROCESS
-    database = build_storage(
-        session_factory=session_factory,
+    database = _build_storage(
+        sessions=sessions,
+        engine=engine,
         coordination_scope=coordination_scope,
         metadata=metadata,
         schema_manifest_digest=schema_manifest_digest,
@@ -244,22 +300,11 @@ async def prepare_storage_database(
     return database
 
 
-async def resolve_engine(session_factory: "async_sessionmaker[AsyncSession]") -> "AsyncEngine":
-    from sqlalchemy.ext.asyncio import AsyncEngine
-
-    async with session_factory() as session:
-        bound = session.bind
-    if not isinstance(bound, AsyncEngine):
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    return bound
-
-
 async def validate_schema(
-    session_factory: "async_sessionmaker[AsyncSession]",
+    engine: "AsyncEngine",
     metadata: "MetaData",
 ) -> None:
     """Validate owned tables without issuing schema-changing statements."""
-    engine = await resolve_engine(session_factory)
     try:
         async with engine.begin() as connection:
             await connection.run_sync(_validate_schema, metadata)
@@ -359,6 +404,111 @@ async def _configure_sqlite_engine(bound: "AsyncEngine") -> None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQLite WAL is unavailable")
 
 
+async def _validate_schema_generation(
+    engine: "AsyncEngine",
+    metadata: "MetaData",
+    schema_manifest_digest: str,
+) -> None:
+    from sqlalchemy import insert, select
+
+    table = metadata.tables.get(storage_name("storage_schema_manifest"))
+    if table is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    async with engine.begin() as connection:
+        row = (await connection.execute(select(table.c.generation, table.c.manifest_digest).where(table.c.id == 1))).first()
+        if row is None:
+            await connection.execute(
+                insert(table).values(
+                    id=1,
+                    generation=1,
+                    manifest_digest=schema_manifest_digest,
+                )
+            )
+            return
+        if int(row.generation) != 1 or str(row.manifest_digest) != schema_manifest_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def register_storage_schema(registry: SqlSchemaRegistry) -> "Table":
+    from sqlalchemy import Column, DateTime, Index, Integer, Table, UniqueConstraint
+    from sqlalchemy.sql import func
+
+    table = Table(
+        storage_name("storage_schema_manifest"),
+        registry.metadata,
+        Column("id", sql_integer_id(), primary_key=True, autoincrement=True),
+        Column("generation", Integer, nullable=False),
+        Column("manifest_digest", sql_digest(), nullable=False),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+        UniqueConstraint("generation", name="uk_storage_generation"),
+        **sql_table_options(),
+    )
+    sql_index(Index("ix_updated_at", table.c.updated_at))
+    sql_index(Index("ix_created_at", table.c.created_at))
+    registry.add_table(table, owner="storage.database")
+    return table
+
+
+def register_sql_schema_contributor(
+    owner: str,
+    contributor: Callable[[SqlSchemaRegistry], "SqlSchemaContribution"],
+) -> None:
+    if not owner or owner in _SQL_SCHEMA_CONTRIBUTORS:
+        raise ValueError("SQL schema contributor is already registered")
+    _SQL_SCHEMA_CONTRIBUTORS[owner] = contributor
+
+
+def build_sql_schema_metadata() -> "tuple[MetaData, str]":
+    registry = SqlSchemaRegistry()
+    register_storage_schema(registry)
+    for contributor in _SQL_SCHEMA_CONTRIBUTORS.values():
+        contributor(registry)
+    manifest = registry.freeze()
+    return registry.metadata, manifest.digest
+
+
+def create_sql_storage_context(
+    engine: "AsyncEngine",
+    namespace: str,
+    *,
+    owns_engine: bool = False,
+) -> SqlStorageContext:
+    from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+
+    if not isinstance(engine, AsyncEngine):
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    validate_persistence_namespace(namespace)
+    dialect = _dialect_for_name(engine.dialect.name)
+    context = SqlStorageContext(
+        engine,
+        async_sessionmaker(engine, expire_on_commit=False),
+        dialect,
+        namespace,
+        owns_engine,
+    )
+    _SQL_CONTEXTS[(id(engine), namespace)] = context
+    return context
+
+
+def get_sql_storage_context(engine: "AsyncEngine", namespace: str) -> SqlStorageContext:
+    validate_persistence_namespace(namespace)
+    context = _SQL_CONTEXTS.get((id(engine), namespace))
+    if context is not None and context.engine is engine:
+        return context
+    return create_sql_storage_context(engine, namespace)
+
+
+def _dialect_for_name(name: str) -> SqlAlchemyDialect:
+    if name == "sqlite":
+        return SQLiteDialect()
+    if name in {"postgresql", "postgres"}:
+        return PostgreSQLDialect()
+    if name in {"mysql", "mariadb"}:
+        return MySQLDialect()
+    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, f"unsupported SQL dialect: {name}")
+
+
 def _configure_sqlite_connection(connection: Any, connection_record: Any, _: Any) -> None:
     if connection_record.info.get("linktools_ai_sqlite_configured"):
         return
@@ -378,7 +528,12 @@ __all__ = [
     "SqlSchemaRegistry",
     "SqlTableManifest",
     "StorageDatabase",
-    "build_storage",
+    "SqlStorageContext",
+    "create_sql_storage_context",
+    "build_sql_schema_metadata",
+    "get_sql_storage_context",
+    "register_storage_schema",
+    "register_sql_schema_contributor",
     "prepare_storage_database",
     "sql_blob",
     "sql_constraint_signature",

@@ -4,6 +4,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from ..core import (
     JsonValue,
     ResourceKind,
     ResourceRef,
+    Principal,
     StopReason,
     canonical_json_bytes,
     step_conversation_id,
@@ -34,14 +36,16 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import StorageDomain
 from ._execution import CancelEffectOutcome
 from ._persistence import (
+    ConversationCursor,
     ExecutionRecord,
     ExecutionTerminalCommit,
     IdempotencyTerminalUpdate,
     ResultRecord,
-    RuntimePersistence,
-    SessionHeadAdvance,
+    RecoveryCheckpoint,
+    RuntimeStores,
 )
 from ._services import ExecutionRequest
 
@@ -53,7 +57,7 @@ class LocalExecutionBackend:
 
     def __init__(
         self,
-        persistence: RuntimePersistence,
+        persistence: RuntimeStores,
         steps: StepStore,
         executor: AgentExecutor,
         definitions: dict[str, AgentDefinition],
@@ -95,7 +99,7 @@ class LocalExecutionBackend:
     async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
         task = self._tasks.get(execution.execution_id)
         if task is None:
-            current = await self._persistence.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+            current = await self._persistence.execution.get(execution.execution_id, tenant_id=execution.tenant_id)
             if current is not None and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 return CancelEffectOutcome.CONFIRMED
             return CancelEffectOutcome.UNKNOWN
@@ -104,26 +108,64 @@ class LocalExecutionBackend:
         return CancelEffectOutcome.CONFIRMED
 
     async def reconcile(self) -> None:
-        """Cancel claimed executions whose Harness run was never created."""
-        sessions = await self._persistence.sessions.list(tenant_id=self._tenant_id)
-        for session in sessions:
-            executions = await self._persistence.executions.list_by_session(session.session_id, tenant_id=session.tenant_id)
-            for execution in executions:
-                if execution.status is not ExecutionStatus.STARTED or execution.agent_run_sequence < 1:
-                    continue
-                run_id = step_run_id(
-                    namespace=self._persistence.namespace,
-                    tenant_id=execution.tenant_id,
-                    execution_id=execution.execution_id,
-                    segment_sequence=execution.agent_run_sequence,
+        """Rebuild transient execution state from recovery-owned checkpoints."""
+        checkpoints = await self._persistence.recovery_checkpoint.list(tenant_id=self._tenant_id)
+        for checkpoint in checkpoints:
+            if checkpoint.phase in {"completed", "failed", "cancelled"}:
+                continue
+            payload = checkpoint.payload
+            prompt = payload.get("prompt")
+            principal_id = payload.get("principal_id")
+            principal_kind = payload.get("principal_kind")
+            if not isinstance(prompt, str) or not isinstance(principal_id, str) or not isinstance(principal_kind, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            principal = Principal(principal_id, checkpoint.tenant_id, principal_kind)
+            execution = await self._persistence.execution.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
+            if execution is not None and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                phase = "completed" if execution.status is ExecutionStatus.SUCCEEDED else execution.status.value.lower()
+                await self._finish_checkpoint(checkpoint, phase)
+                continue
+            if execution is None:
+                sequence = payload.get("agent_run_sequence")
+                if not isinstance(sequence, int) or sequence < 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                session_id = payload.get("session_id")
+                if isinstance(session_id, str):
+                    session = await self._persistence.conversation.get(session_id, tenant_id=checkpoint.tenant_id)
+                    if session is None:
+                        session_id = None
+                execution = ExecutionRecord(
+                    checkpoint.execution_id,
+                    checkpoint.tenant_id,
+                    session_id if isinstance(session_id, str) else None,
+                    checkpoint.binding_digest,
+                    None,
+                    checkpoint.execution_id,
+                    None,
+                    None,
+                    ExecutionLineageKind.RUN,
+                    ExecutionStatus.STARTED,
+                    0,
+                    0,
+                    sequence,
+                    None,
+                    None,
+                    None,
+                    {},
+                    checkpoint.created_at,
+                    checkpoint.updated_at,
+                    payload.get("memory_namespace") if isinstance(payload.get("memory_namespace"), str) else None,
+                    checkpoint.run_id,
                 )
-                if await self._steps.get_run(run_id=run_id) is None:
-                    _logger.warning(
-                        "local recovery cancelling execution without step run: tenant=%s execution=%s",
-                        execution.tenant_id,
-                        execution.execution_id,
-                    )
-                    await self._commit_terminal(execution, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED)
+                await self._persistence.execution.create(execution)
+            request = ExecutionRequest(
+                prompt=prompt,
+                principal=principal,
+                idempotency_key=f"recovery:{checkpoint.checkpoint_id}",
+                memory_namespace=payload.get("memory_namespace") if isinstance(payload.get("memory_namespace"), str) else None,
+            )
+            await self.start(request, execution)
+            _logger.info("local recovery execution relaunched: tenant=%s checkpoint=%s execution=%s", checkpoint.tenant_id, checkpoint.checkpoint_id, checkpoint.execution_id)
 
     async def close(self) -> None:
         self._accepting = False
@@ -136,11 +178,12 @@ class LocalExecutionBackend:
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
         execution_id = original.execution_id
+        checkpoint: RecoveryCheckpoint | None = None
         try:
-            current = await self._persistence.executions.get(execution_id, tenant_id=original.tenant_id)
+            current = await self._persistence.execution.get(execution_id, tenant_id=original.tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            current = await self._persistence.executions.claim_next_agent_run(
+            current = await self._persistence.execution.claim_next_agent_run(
                 execution_id,
                 tenant_id=current.tenant_id,
                 expected_revision=current.revision,
@@ -149,7 +192,6 @@ class LocalExecutionBackend:
             definition = self._definitions.get(current.binding_digest)
             if definition is None:
                 raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-            history = await self._history(current)
             run_id = step_run_id(
                 namespace=self._persistence.namespace,
                 tenant_id=current.tenant_id,
@@ -161,6 +203,56 @@ class LocalExecutionBackend:
                 tenant_id=current.tenant_id,
                 execution_id=execution_id,
             )
+            now = datetime.now(timezone.utc)
+            existing_checkpoint = await self._persistence.recovery_checkpoint.get(execution_id, tenant_id=current.tenant_id)
+            if existing_checkpoint is not None and existing_checkpoint.phase not in {"completed", "failed", "cancelled"}:
+                checkpoint = existing_checkpoint
+                history_run_id = checkpoint.payload.get("history_run_id")
+                if not isinstance(history_run_id, str):
+                    history_run_id = checkpoint.run_id
+                snapshot = await self._steps.latest_snapshot(run_id=history_run_id, include_interrupted=True)
+                current = replace(current, conversation_run_id=history_run_id if snapshot is not None else None)
+                if current.session_id is not None:
+                    session = await self._persistence.conversation.get(current.session_id, tenant_id=current.tenant_id)
+                    if session is None:
+                        current = replace(current, session_id=None)
+            else:
+                checkpoint = await self._persistence.recovery_checkpoint.create(
+                    RecoveryCheckpoint(
+                        execution_id,
+                        execution_id,
+                        current.tenant_id,
+                        current.binding_digest,
+                        run_id,
+                        "running",
+                        f"execution:{execution_id}",
+                        {
+                            "agent_run_sequence": current.agent_run_sequence,
+                            "prompt": request.prompt,
+                            "principal_id": request.principal.principal_id,
+                            "principal_kind": request.principal.kind,
+                            "session_id": current.session_id,
+                            "memory_namespace": current.memory_namespace,
+                            "agent_id": definition.spec.id,
+                            "prompt_id": definition.prompt.id,
+                            "history_run_id": run_id,
+                            "idempotency": {"key": request.idempotency_key, "status": "running"},
+                            "approval": {"pending": []},
+                            "external": {"pending": []},
+                            "tool_effect": {"pending": []},
+                            "terminal_handoff": None,
+                        },
+                        0,
+                        now,
+                        now,
+                        {"pending": []},
+                        {"pending": []},
+                        {"pending": []},
+                        {"key": request.idempotency_key, "status": "running"},
+                        None,
+                    )
+                )
+            history = await self._history(current)
 
             async def sink(event_type: ExecutionEventType, payload: JsonValue) -> None:
                 await self._append_event(current, event_type, payload)
@@ -196,24 +288,68 @@ class LocalExecutionBackend:
                 event_sink=sink,
             )
             await self._commit_success(current, definition, result.output, result.run_id)
+            await self._finish_checkpoint(checkpoint, "completed")
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, result.run_id)
         except asyncio.CancelledError:
-            current = await self._persistence.executions.get(execution_id, tenant_id=original.tenant_id)
+            current = await self._persistence.execution.get(execution_id, tenant_id=original.tenant_id)
             if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED)
+            if checkpoint is not None:
+                await self._finish_checkpoint(checkpoint, "cancelled")
             raise
         except Exception as error:
-            current = await self._persistence.executions.get(execution_id, tenant_id=original.tenant_id)
+            current = await self._persistence.execution.get(execution_id, tenant_id=original.tenant_id)
             if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 await self._commit_failure(current, error)
+            if checkpoint is not None:
+                await self._finish_checkpoint(checkpoint, "failed")
             _logger.error("local execution failed: execution=%s", execution_id, exc_info=True)
         finally:
             self._tasks.pop(execution_id, None)
 
+    async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint, phase: str) -> None:
+        if checkpoint.phase == phase:
+            return
+        payload = dict(checkpoint.payload)
+        handoff = {"phase": phase, "execution_id": checkpoint.execution_id}
+        payload["terminal_handoff"] = handoff
+        idempotency = payload.get("idempotency")
+        if isinstance(idempotency, dict):
+            idempotency = dict(idempotency)
+            idempotency["status"] = phase
+            payload["idempotency"] = idempotency
+        updated = replace(
+            checkpoint,
+            phase=phase,
+            payload=payload,
+            idempotency_state=idempotency if isinstance(idempotency, dict) else checkpoint.idempotency_state,
+            terminal_handoff=handoff,
+            revision=checkpoint.revision + 1,
+            updated_at=datetime.now(timezone.utc),
+        )
+        try:
+            await self._persistence.recovery_checkpoint.compare_and_swap(
+                checkpoint.checkpoint_id,
+                tenant_id=checkpoint.tenant_id,
+                expected_revision=checkpoint.revision,
+                next_record=updated,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._persistence.recovery_checkpoint.get(checkpoint.checkpoint_id, tenant_id=checkpoint.tenant_id)
+            if current is None or current.phase != phase:
+                raise
+
     async def _history(self, execution: ExecutionRecord) -> list[object]:
+        if execution.conversation_run_id is not None:
+            try:
+                return list(await continue_run(self._steps, run_id=execution.conversation_run_id, include_interrupted=True))
+            except LookupError as error:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
         if execution.base_execution_id is None:
             return []
-        base = await self._persistence.executions.get(execution.base_execution_id, tenant_id=execution.tenant_id)
+        base = await self._persistence.execution.get(execution.base_execution_id, tenant_id=execution.tenant_id)
         if base is None or base.agent_run_sequence < 1:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
         run_id = step_run_id(
@@ -230,11 +366,11 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
     async def _append_event(self, execution: ExecutionRecord, event_type: ExecutionEventType, payload: JsonValue) -> None:
-        current = await self._persistence.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+        current = await self._persistence.execution.get(execution.execution_id, tenant_id=execution.tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         try:
-            await self._persistence.events.append(
+            await self._persistence.execution_events.append(
                 execution.execution_id,
                 tenant_id=execution.tenant_id,
                 expected_sequence=current.event_sequence,
@@ -244,10 +380,10 @@ class LocalExecutionBackend:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            latest = await self._persistence.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+            latest = await self._persistence.execution.get(execution.execution_id, tenant_id=execution.tenant_id)
             if latest is None:
                 raise
-            await self._persistence.events.append(
+            await self._persistence.execution_events.append(
                 execution.execution_id,
                 tenant_id=execution.tenant_id,
                 expected_sequence=latest.event_sequence,
@@ -257,8 +393,8 @@ class LocalExecutionBackend:
 
     async def _commit_success(self, execution: ExecutionRecord, definition: AgentDefinition, output: JsonValue, run_id: str) -> None:
         payload = canonical_json_bytes(output)
-        blob = await self._persistence.blobs.put_bytes(tenant_id=execution.tenant_id, data=payload)
-        current = await self._persistence.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+        blob = await self._persistence.blobs.for_domain(StorageDomain.EXECUTION).put_bytes(tenant_id=execution.tenant_id, data=payload)
+        current = await self._persistence.execution.get(execution.execution_id, tenant_id=execution.tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._commit_terminal(
@@ -288,7 +424,7 @@ class LocalExecutionBackend:
         output_digest: str | None = None,
         run_id: str | None = None,
     ) -> None:
-        current = await self._persistence.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
+        current = await self._persistence.execution.get(execution.execution_id, tenant_id=execution.tenant_id)
         if current is None or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             return
         now = datetime.now(timezone.utc)
@@ -298,11 +434,35 @@ class LocalExecutionBackend:
             schema_id, schema_revision, schema_fingerprint = "none", 1, "none"
         else:
             schema_id, schema_revision, schema_fingerprint = definition.spec.output_schema, definition.spec.output_schema_revision, definition.output_schema_fingerprint
-        head = None
-        if current.session_id is not None and status is ExecutionStatus.SUCCEEDED and current.lineage_kind in {ExecutionLineageKind.SESSION_RESUME, ExecutionLineageKind.RETRY}:
-            expected = current.base_execution_id if current.lineage_kind is ExecutionLineageKind.SESSION_RESUME else current.source_execution_id
-            head = SessionHeadAdvance(current.session_id, expected, current.execution_id)
-        await self._persistence.results.commit_terminal(
+        if current.session_id is not None and status is ExecutionStatus.SUCCEEDED and run_id is not None:
+            session = await self._persistence.conversation.get(current.session_id, tenant_id=current.tenant_id)
+            if session is None:
+                checkpoint = await self._persistence.recovery_checkpoint.get(current.execution_id, tenant_id=current.tenant_id)
+                if checkpoint is None or checkpoint.phase in {"completed", "failed", "cancelled"}:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                _logger.info(
+                    "recovery terminal handoff without conversation cursor: execution=%s checkpoint=%s",
+                    current.execution_id,
+                    checkpoint.checkpoint_id,
+                )
+                session = None
+            if session is not None:
+                next_cursor = ConversationCursor(run_id, terminal.revision)
+                if session.continuation != next_cursor:
+                    try:
+                        await self._persistence.conversation.advance_continuation(
+                            current.session_id,
+                            tenant_id=current.tenant_id,
+                            expected=session.continuation,
+                            next_cursor=next_cursor,
+                        )
+                    except AIError as error:
+                        if error.code is not ErrorCode.STORAGE_CONFLICT:
+                            raise
+                        latest = await self._persistence.conversation.get(current.session_id, tenant_id=current.tenant_id)
+                        if latest is None or latest.continuation != next_cursor:
+                            raise
+        await self._persistence.execution_result.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
                 current.event_sequence,
@@ -311,7 +471,6 @@ class LocalExecutionBackend:
                 ExecutionEventType.EXECUTION_SUCCEEDED if status is ExecutionStatus.SUCCEEDED else ExecutionEventType.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED else ExecutionEventType.EXECUTION_FAILED,
                 {"run_id": run_id} if run_id is not None else {"error_code": error_code},
                 identity,
-                session_head=head,
             )
         )
 
@@ -321,12 +480,12 @@ def _terminal_record(record: ExecutionRecord, status: ExecutionStatus, now: date
         record.execution_id, record.tenant_id, record.session_id, record.binding_digest,
         record.parent_execution_id, record.root_execution_id, record.source_execution_id, record.base_execution_id,
         record.lineage_kind, status, record.revision + 1, record.event_sequence + 1, record.agent_run_sequence,
-        result_ref, result_digest, error_code, {}, record.created_at, now, record.memory_namespace,
+        result_ref, result_digest, error_code, {}, record.created_at, now, record.memory_namespace, record.conversation_run_id,
     )
 
 
-async def _terminal_idempotency(persistence: RuntimePersistence, execution: ExecutionRecord, status: ExecutionStatus, result_digest: str | None, error_code: str | None) -> IdempotencyTerminalUpdate | None:
-    records = await persistence.idempotency.list_by_execution(execution.execution_id, tenant_id=execution.tenant_id)
+async def _terminal_idempotency(persistence: RuntimeStores, execution: ExecutionRecord, status: ExecutionStatus, result_digest: str | None, error_code: str | None) -> IdempotencyTerminalUpdate | None:
+    records = await persistence.execution_idempotency.list_by_execution(execution.execution_id, tenant_id=execution.tenant_id)
     if len(records) > 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if not records:

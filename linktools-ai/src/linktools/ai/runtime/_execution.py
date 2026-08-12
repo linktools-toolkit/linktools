@@ -33,6 +33,7 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import StorageDomain
 from ._persistence import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -46,7 +47,7 @@ from ._persistence import (
     OperationLedgerRecord,
     OperationTerminalUpdate,
     ResultRecord,
-    RuntimePersistence,
+    RuntimeStores,
 )
 from ._services import (
     BlobPayloadService,
@@ -100,7 +101,7 @@ class DefaultExecutionService:
 
     def __init__(
         self,
-        persistence: RuntimePersistence,
+        persistence: RuntimeStores,
         authorization: AuthorizationPolicy,
         *,
         backend: "ExecutionBackend | None" = None,
@@ -137,33 +138,35 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
+        conversation_run_id = None
         if session_id is not None and source_execution_id is None:
-            session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            session = await self._persistence.conversation.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
-            base_execution_id = session.head_execution_id
+            conversation_run_id = None if session.continuation is None else session.continuation.run_id
+            base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
         resource = ResourceRef(ResourceKind.EXECUTION, execution_id, request.principal.tenant_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, resource)
         key_hash = idempotency_key_hash(request.idempotency_key)
         request_digest = _request_digest(request, binding_digest, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind)
-        existing = await self._persistence.idempotency.get(scope, key_hash, tenant_id=request.principal.tenant_id)
+        existing = await self._persistence.execution_idempotency.get(scope, key_hash, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             if existing.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
-                pending = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
+                pending = await self._persistence.execution.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
                     return ExecutionHandle(existing.execution_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
-                    await self._persistence.executions.claim_start(ExecutionStartClaim(existing.execution_id, request.principal.tenant_id, pending.revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
+                    await self._persistence.execution.claim_start(ExecutionStartClaim(existing.execution_id, request.principal.tenant_id, pending.revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
                 except AIError as error:
-                    current = await self._persistence.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
+                    current = await self._persistence.execution.get(existing.execution_id, tenant_id=request.principal.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
                     return ExecutionHandle(existing.execution_id)
@@ -175,7 +178,7 @@ class DefaultExecutionService:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_CANCELLED)
             return ExecutionHandle(existing.execution_id)
         if session_id is not None:
-            active = await self._persistence.executions.list_by_session(session_id, tenant_id=request.principal.tenant_id)
+            active = await self._persistence.execution.list_by_session(session_id, tenant_id=request.principal.tenant_id)
             if any(item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} for item in active):
                 raise AIError(ErrorCode.SESSION_BUSY)
         now = datetime.now(timezone.utc)
@@ -200,35 +203,36 @@ class DefaultExecutionService:
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
             memory_namespace=request.memory_namespace,
+            conversation_run_id=conversation_run_id,
         )
-        reservation = await self._persistence.executions.reserve_start(
+        reservation = await self._persistence.execution.reserve_start(
             ExecutionStartReservation(
                 execution,
                 IdempotencyRecord(request.principal.tenant_id, scope, key_hash, request_digest, execution_id, IdempotencyStatus.RESERVED, None, None, now, now),
             )
         )
         if not reservation.created:
-            if reservation.idempotency.request_digest != request_digest:
+            if reservation.execution_idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
+            if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.execution_idempotency.status is IdempotencyStatus.RESERVED:
                 try:
-                    await self._persistence.executions.claim_start(ExecutionStartClaim(reservation.execution.execution_id, reservation.execution.tenant_id, reservation.execution.revision, reservation.execution.event_sequence, scope, key_hash, request_digest, now))
+                    await self._persistence.execution.claim_start(ExecutionStartClaim(reservation.execution.execution_id, reservation.execution.tenant_id, reservation.execution.revision, reservation.execution.event_sequence, scope, key_hash, request_digest, now))
                 except AIError as error:
-                    current = await self._persistence.executions.get(reservation.execution.execution_id, tenant_id=reservation.execution.tenant_id)
+                    current = await self._persistence.execution.get(reservation.execution.execution_id, tenant_id=reservation.execution.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
                     return ExecutionHandle(reservation.execution.execution_id)
                 await self._launch_claim(request, reservation.execution.execution_id, reservation.execution.tenant_id, scope, key_hash)
-            elif reservation.execution.status is ExecutionStatus.STARTED and reservation.idempotency.status is IdempotencyStatus.STARTED:
+            elif reservation.execution.status is ExecutionStatus.STARTED and reservation.execution_idempotency.status is IdempotencyStatus.STARTED:
                 return ExecutionHandle(reservation.execution.execution_id)
-            elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
+            elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.execution_idempotency.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionHandle(reservation.execution.execution_id)
         execution_id = reservation.execution.execution_id
         try:
-            await self._persistence.executions.claim_start(
+            await self._persistence.execution.claim_start(
                 ExecutionStartClaim(execution_id, request.principal.tenant_id, 0, 0, scope, key_hash, request_digest, now)
             )
         except BaseException as error:
@@ -252,19 +256,19 @@ class DefaultExecutionService:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
-            launch_record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
+            launch_record = await self._persistence.execution.get(execution_id, tenant_id=tenant_id)
             if launch_record is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._backend.start(request, launch_record)
         except asyncio.CancelledError:
             raise
         except BaseException as error:
-            current = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
+            current = await self._persistence.execution.get(execution_id, tenant_id=tenant_id)
             if current is not None and current.status is ExecutionStatus.STARTED:
-                identity = await self._persistence.idempotency.get(scope, key_hash, tenant_id=tenant_id)
+                identity = await self._persistence.execution_idempotency.get(scope, key_hash, tenant_id=tenant_id)
                 if identity is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._persistence.executions.mark_start_unknown(ExecutionStartUnknownCommit(execution_id, tenant_id, current.revision, current.event_sequence, scope, key_hash, identity.request_digest, datetime.now(timezone.utc)))
+                await self._persistence.execution.mark_start_unknown(ExecutionStartUnknownCommit(execution_id, tenant_id, current.revision, current.event_sequence, scope, key_hash, identity.request_digest, datetime.now(timezone.utc)))
             _logger.error("execution start outcome unknown: execution=%s", execution_id)
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
 
@@ -276,7 +280,7 @@ class DefaultExecutionService:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         if execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        result = await self._persistence.results.get(execution_id, tenant_id=principal.tenant_id)
+        result = await self._persistence.execution_result.get(execution_id, tenant_id=principal.tenant_id)
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result.status is not execution.status or execution.result_ref != result.payload_ref or execution.result_digest != result.payload_digest:
@@ -296,7 +300,7 @@ class DefaultExecutionService:
         if not result.payload_ref or not result.payload_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            payload = await BlobPayloadService(self._persistence.blobs, tenant_id=principal.tenant_id).load(PayloadRef(result.payload_ref))
+            payload = await BlobPayloadService(self._persistence.blobs.for_domain(StorageDomain.EXECUTION), tenant_id=principal.tenant_id).load(PayloadRef(result.payload_ref))
             if hashlib.sha256(payload).hexdigest() != result.payload_digest or canonical_sha256(json.loads(payload.decode("utf-8"))) != result.payload_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if result.output_schema_id == "text":
@@ -365,7 +369,7 @@ class DefaultExecutionService:
             }
         )
         operation_id = idempotency_key_hash(request.cancel_request_id)
-        operation = await self._persistence.operations.get(
+        operation = await self._persistence.operation_ledger.get(
             operation_id,
             tenant_id=request.principal.tenant_id,
         )
@@ -399,14 +403,14 @@ class DefaultExecutionService:
                 now,
                 now,
             )
-            operation = await self._persistence.operations.append(operation)
+            operation = await self._persistence.operation_ledger.append(operation)
         if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
             if resolved is not None:
                 return resolved
         try:
             try:
-                cancelling = await self._persistence.executions.request_cancel(
+                cancelling = await self._persistence.execution.request_cancel(
                     ExecutionCancelRequestCommit(
                         execution_id=execution_id,
                         tenant_id=request.principal.tenant_id,
@@ -430,12 +434,12 @@ class DefaultExecutionService:
                 resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
                 if resolved is not None:
                     return resolved
-                current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
+                current = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if current.status is OperationStatus.PENDING:
                     try:
-                        current = await self._persistence.operations.compare_and_swap(
+                        current = await self._persistence.operation_ledger.compare_and_swap(
                             operation.operation_id,
                             tenant_id=request.principal.tenant_id,
                             expected_status=OperationStatus.PENDING,
@@ -447,21 +451,21 @@ class DefaultExecutionService:
                         resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
                         if resolved is not None:
                             return resolved
-                        current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
+                        current = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                         if current is None:
                             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if current.status is OperationStatus.EFFECT_UNKNOWN:
                     _logger.warning("execution cancellation effect unknown: execution=%s operation=%s", execution_id, operation.operation_id)
                     return CancelExecutionResult(execution_id, False)
                 if current.status in {OperationStatus.SUCCEEDED, OperationStatus.CANCELLED}:
-                    latest = await self._persistence.executions.get(execution_id, tenant_id=request.principal.tenant_id)
+                    latest = await self._persistence.execution.get(execution_id, tenant_id=request.principal.tenant_id)
                     if latest is None or latest.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     return CancelExecutionResult(execution_id, latest.status is ExecutionStatus.CANCELLED)
                 if current.status is OperationStatus.FAILED:
                     raise _stable_operation_error(current.error_code)
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            cancelling_current = await self._persistence.executions.get(execution_id, tenant_id=request.principal.tenant_id)
+            cancelling_current = await self._persistence.execution.get(execution_id, tenant_id=request.principal.tenant_id)
             if cancelling_current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
@@ -472,16 +476,16 @@ class DefaultExecutionService:
             now = datetime.now(timezone.utc)
             terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
             result = ResultRecord(execution_id, request.principal.tenant_id, ExecutionStatus.CANCELLED, "none", 1, "none", None, None, StopReason.CANCELLED, 0, 0, 0, now)
-            idempotency_records = await self._persistence.idempotency.list_by_execution(execution_id, tenant_id=request.principal.tenant_id)
+            idempotency_records = await self._persistence.execution_idempotency.list_by_execution(execution_id, tenant_id=request.principal.tenant_id)
             if len(idempotency_records) > 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             identity = idempotency_records[0] if idempotency_records else None
             idempotency = None if identity is None else IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, IdempotencyStatus.CANCELLED, identity.request_digest, None, None)
-            current_operation = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
+            current_operation = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=request.principal.tenant_id)
             if current_operation is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current_operation.status in {OperationStatus.SUCCEEDED, OperationStatus.CANCELLED}:
-                latest = await self._persistence.executions.get(execution_id, tenant_id=request.principal.tenant_id)
+                latest = await self._persistence.execution.get(execution_id, tenant_id=request.principal.tenant_id)
                 if latest is None or latest.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return CancelExecutionResult(execution_id, latest.status is ExecutionStatus.CANCELLED)
@@ -491,7 +495,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             operation_update = OperationTerminalUpdate(operation.operation_id, current_operation.status, OperationStatus.SUCCEEDED, execution_id, cancelling_current.result_digest, None)
             try:
-                await self._persistence.results.commit_terminal(
+                await self._persistence.execution_result.commit_terminal(
                     ExecutionTerminalCommit(
                         expected_revision=cancelling_current.revision,
                         expected_event_sequence=cancelling_current.event_sequence,
@@ -521,9 +525,9 @@ class DefaultExecutionService:
                 raise
             error_code = error.code.value if isinstance(error, AIError) else ErrorCode.STORAGE_UNAVAILABLE.value
             try:
-                current = await self._persistence.operations.get(operation.operation_id, tenant_id=request.principal.tenant_id)
+                current = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=request.principal.tenant_id)
                 if current is not None and current.status is OperationStatus.PENDING:
-                    await self._persistence.operations.compare_and_swap(
+                    await self._persistence.operation_ledger.compare_and_swap(
                         operation.operation_id,
                         tenant_id=request.principal.tenant_id,
                         expected_status=OperationStatus.PENDING,
@@ -545,10 +549,10 @@ class DefaultExecutionService:
         tenant_id: str,
         operation: OperationLedgerRecord,
     ) -> "CancelExecutionResult | None":
-        current = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
+        current = await self._persistence.execution.get(execution_id, tenant_id=tenant_id)
         if current is None or current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             return None
-        current_operation = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+        current_operation = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=tenant_id)
         if current_operation is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         for attempt in range(2):
@@ -559,7 +563,7 @@ class DefaultExecutionService:
             if current_operation.status not in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             try:
-                current_operation = await self._persistence.operations.compare_and_swap(
+                current_operation = await self._persistence.operation_ledger.compare_and_swap(
                     operation.operation_id,
                     tenant_id=tenant_id,
                     expected_status=current_operation.status,
@@ -569,7 +573,7 @@ class DefaultExecutionService:
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-                reloaded = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+                reloaded = await self._persistence.operation_ledger.get(operation.operation_id, tenant_id=tenant_id)
                 if reloaded is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 current_operation = reloaded
@@ -597,11 +601,11 @@ class DefaultExecutionService:
         return await self._history_reader.history(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
 
     async def _load_authorized(self, execution_id: str, principal: Principal, action: AuthorizationAction) -> ExecutionRecord:
-        header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        header = await self._persistence.execution.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._persistence.executions.get(execution_id, tenant_id=principal.tenant_id)
+        record = await self._persistence.execution.get(execution_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record

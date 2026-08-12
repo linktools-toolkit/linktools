@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimePersistenceConfig
+from linktools.ai import RuntimeStorage
 from linktools.ai.adapter import SqlRuntimeSchema
 from linktools.ai.asset import SqlAssetSchema
 from linktools.ai.core import ToolOperationStatus
@@ -24,6 +24,7 @@ from linktools.ai.storage import (
     MetadataLoad,
     MetadataLoadMode,
     SqlSchemaRegistry,
+    register_storage_schema,
     StorageDeleteResult,
     StorageEntryRevision,
     StorageLayer,
@@ -231,6 +232,8 @@ def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
     assert "not a production bootstrap or migration" in sql
     assert "reviewed, environment-specific DBA migration tooling" in sql
     matrix = json.loads(Path("linktools-ai/scripts/build/matrix/sql-schema-manifest.json").read_text(encoding="utf-8"))
+    storage_registry = SqlSchemaRegistry()
+    register_storage_schema(storage_registry)
     registry = SqlSchemaRegistry()
     SqlRuntimeSchema.register_schema(registry)
     manifest = registry.freeze()
@@ -238,13 +241,13 @@ def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
     asset_tables = SqlAssetSchema.register_schema(asset_registry)
     asset_table_values = (asset_tables.entry, asset_tables.change, asset_tables.blob, asset_tables.revision)
     assert tuple(table.name for table in asset_table_values) == tuple(matrix["asset_tables"])
-    expected_tables = tuple(table.name for table in manifest.tables) + tuple(matrix["step_tables"]) + tuple(matrix["asset_tables"])
+    expected_tables = tuple(matrix["storage_tables"]) + tuple(table.name for table in manifest.tables) + tuple(matrix["step_tables"]) + tuple(matrix["asset_tables"])
     actual_tables = tuple(re.findall(r"CREATE TABLE `([^`]+)`", sql))
     assert actual_tables == expected_tables
     assert matrix["runtime_digest"] == manifest.digest
     assert "CHARACTER SET ascii" not in sql
     assert " COLLATE ascii_bin" not in sql
-    for table in tuple(registry.metadata.sorted_tables) + tuple(asset_table_values):
+    for table in tuple(storage_registry.metadata.sorted_tables) + tuple(registry.metadata.sorted_tables) + tuple(asset_table_values):
         for index in table.indexes:
             assert not index.name.startswith("ai_")
             assert len(index.columns) <= 3
@@ -418,8 +421,8 @@ async def test_read_only_write_is_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
     timestamp = datetime.now(timezone.utc)
-    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime")
-    async with open_sql_resources(config) as runtime:
+    storage = RuntimeStorage.sqlite(str(tmp_path / "tool-state.db"))
+    async with open_sql_resources(storage, namespace="runtime") as runtime:
         record = ToolOperationRecord(
             "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
             ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,

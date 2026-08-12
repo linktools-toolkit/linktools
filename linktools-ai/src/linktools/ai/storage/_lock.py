@@ -4,7 +4,6 @@
 """Process and shared-filesystem coordination primitives."""
 
 import asyncio
-import fcntl
 import hashlib
 import json
 import os
@@ -14,6 +13,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+
+from filelock import FileLock, Timeout
 
 from linktools.core import environ
 
@@ -191,12 +192,8 @@ def _lease_name(key: str) -> str:
 def _lease_guard(root: Path, key: str) -> Iterator[None]:
     root.mkdir(parents=True, exist_ok=True)
     guard_path = root / f"{_lease_name(key)}.guard"
-    with guard_path.open("a+", encoding="utf-8") as guard:
-        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(guard.fileno(), fcntl.LOCK_UN)
+    with FileLock(str(guard_path), thread_local=False):
+        yield
 
 
 class FilesystemWriterLock:
@@ -204,31 +201,26 @@ class FilesystemWriterLock:
 
     def __init__(self, path: "str | Path") -> None:
         self.path = Path(path)
-        self._descriptor: int | None = None
+        self._lock: FileLock | None = None
 
     async def acquire(self) -> None:
-        if self._descriptor is not None:
+        if self._lock is not None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = await asyncio.to_thread(os.open, self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        lock = FileLock(str(self.path), thread_local=False)
         try:
-            await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            os.close(descriptor)
+            await asyncio.to_thread(lock.acquire, timeout=0)
+        except Timeout as error:
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-        except BaseException:
-            os.close(descriptor)
-            raise
-        self._descriptor = descriptor
+        self._lock = lock
         _logger.debug("runtime writer lock acquired: path=%s", self.path)
 
     async def release(self) -> None:
-        descriptor = self._descriptor
-        self._descriptor = None
-        if descriptor is None:
+        lock = self._lock
+        self._lock = None
+        if lock is None:
             return
-        await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_UN)
-        os.close(descriptor)
+        await asyncio.to_thread(lock.release)
         _logger.debug("runtime writer lock released: path=%s", self.path)
 
 
@@ -251,9 +243,8 @@ def _read_fence(path: Path) -> int:
 
 def _next_fence(path: Path) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
+    with FileLock(str(path) + ".lock"):
+        with path.open("a+", encoding="utf-8") as handle:
             handle.seek(0)
             raw = handle.read().strip()
             fence = 0 if not raw else int(raw)
@@ -266,8 +257,6 @@ def _next_fence(path: Path) -> int:
             handle.flush()
             os.fsync(handle.fileno())
             return fence
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def _write_fence(path: Path, fence: int) -> None:

@@ -6,13 +6,12 @@
 import asyncio
 import json
 from datetime import datetime, timezone
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from linktools.ai.adapter import DurableFilesystemStepStore
 from linktools.ai.errors import AIError, ErrorCode
-from pydantic_ai.messages import ModelRequest, UserPromptPart
+from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -50,6 +49,38 @@ async def test_filesystem_step_store_round_trip_and_restart(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_filesystem_step_store_persists_reachable_media_before_snapshot(tmp_path: Path) -> None:
+    first = DurableFilesystemStepStore(tmp_path, "namespace")
+    await first.initialize()
+    run = _run("media-run")
+    await first.register_run(run)
+    data = b"media" * 16000
+    message = ModelRequest(
+        parts=[UserPromptPart(content=[BinaryContent(data, media_type="application/octet-stream")])],
+        conversation_id=run.conversation_id,
+    )
+    snapshot = ContinuableSnapshot(
+        run_id=run.run_id,
+        step_index=1,
+        messages=[message],
+        conversation_id=run.conversation_id,
+        parent_run_id=None,
+        agent_name="agent",
+        timestamp=datetime.now(timezone.utc),
+    )
+    await first.save_snapshot(snapshot)
+    await first.close()
+
+    assert list((tmp_path / "step").rglob("media/*.bin"))
+    second = DurableFilesystemStepStore(tmp_path, "namespace")
+    await second.initialize()
+    restored = await second.latest_snapshot(run_id=run.run_id)
+    assert restored is not None
+    assert restored.messages[0].parts[0].content[0].data == data
+    await second.close()
+
+
+@pytest.mark.asyncio
 async def test_filesystem_step_store_rejects_path_identifiers(tmp_path: Path) -> None:
     store = DurableFilesystemStepStore(tmp_path, "namespace")
     await store.initialize()
@@ -70,11 +101,10 @@ async def test_filesystem_step_store_normalizes_snapshot_state_and_rejects_unkno
     interrupted = ContinuableSnapshot(run_id=run.run_id, step_index=2, messages=[message], conversation_id=run.conversation_id, parent_run_id=None, agent_name="agent", timestamp=datetime.now(timezone.utc), state="interrupted")
     await store.save_snapshot(complete)
     await store.save_snapshot(interrupted)
-    normalized = replace(interrupted, state="complete")
-    assert await store.latest_snapshot(run_id=run.run_id) == normalized
-    assert await store.latest_snapshot(run_id=run.run_id, include_interrupted=True) == normalized
-    assert await store.list_snapshots(run_id=run.run_id) == [complete, normalized]
-    snapshot_path = sorted((tmp_path / "steps").rglob("snapshots/snapshot-*.json"))[-1]
+    assert await store.latest_snapshot(run_id=run.run_id) == complete
+    assert await store.latest_snapshot(run_id=run.run_id, include_interrupted=True) == interrupted
+    assert await store.list_snapshots(run_id=run.run_id) == [complete]
+    snapshot_path = sorted((tmp_path / "step").rglob("snapshots/snapshot-*.json"))[-1]
     payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
     payload["state"] = "unknown"
     snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
@@ -89,7 +119,7 @@ def test_filesystem_step_store_writes_hashed_run_directory(tmp_path: Path) -> No
         store = DurableFilesystemStepStore(tmp_path, "namespace")
         await store.initialize()
         await store.register_run(_run("r-run"))
-        path = next((tmp_path / "steps").rglob("run.json"))
+        path = next((tmp_path / "step").rglob("run.json"))
         await store.close()
         return path
 

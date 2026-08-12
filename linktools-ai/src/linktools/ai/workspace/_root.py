@@ -64,7 +64,12 @@ class Workspace:
     @classmethod
     def _build(cls, root: Path, config_path: "Path | None", storage_root: "str | Path | None") -> "Workspace":
         normalized_root = _normalized_root(root)
-        resolved_storage_root = root if storage_root is None else Path(storage_root).expanduser().resolve()
+        resolved_storage_root = (root / ".linktools") if storage_root is None else Path(storage_root).expanduser().resolve()
+        resolved_config_path = resolved_storage_root / "config.yaml"
+        if storage_root is not None:
+            config_path = resolved_config_path if resolved_config_path.exists() else None
+        elif config_path is None and resolved_config_path.exists():
+            config_path = resolved_config_path
         return cls(
             root=root,
             storage_root=resolved_storage_root,

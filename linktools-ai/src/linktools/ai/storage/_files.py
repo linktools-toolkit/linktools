@@ -41,11 +41,7 @@ def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None
         os.replace(temporary, path)
         replaced = True
         if fsync:
-            directory = os.open(path.parent, os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            sync_directory(path.parent)
     except BaseException as error:
         Path(temporary).unlink(missing_ok=True)
         if replaced:
@@ -70,6 +66,21 @@ def write_json_atomic(path: Path, value: 'dict[str, JsonValue]', *, fsync: bool 
 
 def unlink_if_exists(path: Path) -> None:
     path.unlink(missing_ok=True)
+
+
+def sync_directory(path: Path) -> None:
+    """Flush a directory when the platform exposes directory descriptors."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.fsync(descriptor)
+        except OSError:
+            return
+    finally:
+        os.close(descriptor)
 
 
 def atomic_write_bytes(path: "str | Path", value: bytes) -> None:
@@ -157,6 +168,7 @@ __all__ = [
     "read_bytes",
     "read_json",
     "safe_child",
+    "sync_directory",
     "unlink_if_exists",
     "validate_root_path",
     "write_bytes_atomic",

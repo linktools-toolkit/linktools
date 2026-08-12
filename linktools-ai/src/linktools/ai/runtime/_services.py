@@ -535,7 +535,7 @@ class PayloadService(Protocol):
 
 
 class BlobPayloadService:
-    """Payload facade backed by the RuntimePersistence blob store."""
+    """Payload facade backed by the runtime blob store."""
 
     def __init__(self, blobs: BlobStore, *, tenant_id: str) -> None:
         try:

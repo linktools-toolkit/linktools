@@ -40,18 +40,15 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 
 ## 3. Composition and lifecycle
 
-Keep common construction paths short. Callers should pass domain inputs such as a session factory, backend selection, and namespace; they should not assemble registries, table collections, manifests, atomic-domain identities, or internal storage bundles.
+Keep common construction paths short. Callers should pass `RuntimeStorage` and domain inputs; they should not assemble registries, table collections, manifests, or internal storage bundles.
 
 The current SQL entry points follow this rule:
 
 ```python
-domain = await open_sql_runtime(
-    session_factory,
-    backend=backend,
-    namespace=namespace,
-)
-steps = SqlStepStore(session_factory, namespace)
-assets = SqlAssetBackend(session_factory, namespace=namespace)
+context = create_sql_storage_context(engine, namespace)
+domain = await open_sql_runtime(context)
+steps = SqlStepStore(engine, namespace=namespace, context=context)
+assets = SqlAssetBackend(engine, namespace=namespace, context=context)
 ```
 
 Schema owners expose public schema contributors for migration and evidence generation. Runtime constructors register and freeze their own schema; normal callers do not pass tables around.
@@ -63,7 +60,7 @@ Keep classification identities distinct:
 - `memory_namespace` selects a memory collection within a tenant; persistence stores only its derived `memory_namespace_key`.
 - Asset `namespace` partitions raw Asset storage independently from Runtime persistence; Asset `kind` selects the logical representation.
 - Task and tool lease records use `owner`; schema registries and storage overlays also use `owner` because each declaring type makes the role explicit.
-- `atomic_domain_id` is composed by the backend and is never accepted as deployment identity from application callers.
+- `StorageDomain` selects durable business domains; Blob, Media, StepStore, Idempotency, OperationLedger, Approval, ExternalResult, ToolState, and Repository remain implementation details of those domains.
 - Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
 - Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
 - Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
@@ -78,7 +75,7 @@ Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `init
 
 `AssetBackend` and the public storage protocols are the extension boundary for custom loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, call `initialize()`, then create an `AssetRepository` from a frozen `AssetTypeRegistry` snapshot.
 
-The default workspace loader reads `<workspace>/.linktools` through a read-only `LocalDirectoryAssetBackend`. `PrefixAssetPathAdapter` maps the logical `skill` kind to `skills`; generated Agent and Prompt defaults live in a writable in-memory layer. Do not hard-code that policy into generic Asset or Storage code.
+The default workspace loader reads `<workspace>/.linktools/assets` through a read-only `LocalDirectoryAssetBackend`. `PrefixAssetPathAdapter` maps the logical `skill` kind to `skills`; generated Agent and Prompt defaults use the selected Asset writer when durable, otherwise they live in a writable in-memory layer. Do not hard-code that policy into generic Asset or Storage code.
 
 Register custom logical representations with `AssetTypeBinding` and `AssetVariantBinding`. Codecs validate bytes at the repository boundary. Backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
 
@@ -90,8 +87,9 @@ Layer precedence is primary first, followed by declared fallback layers. Tombsto
 - Freeze the registry before deriving a manifest digest.
 - Use `prepare_storage_database()` for dialect preparation and `StorageDatabase.initialize()` for schema validation.
 - SQLite requires WAL and process-scoped coordination. MySQL and PostgreSQL use shared-database coordination.
+- Filesystem coordination uses `filelock`; do not add `fcntl`, `msvcrt`, or platform-specific advisory-lock code.
 - Keep schema creation out of runtime startup. Tests and deployment tooling call `provision_database()` explicitly.
-- SQL backends receive the public async SQLAlchemy session factory. When an owner already has `StorageDatabase`, derive the factory from it instead of accepting a second constructor argument.
+- Public SQL backends receive an `AsyncEngine`; composition creates one `SqlStorageContext` and shares its session factory internally. Each operation creates its own `AsyncSession`.
 - Add logs at database preparation, schema validation, transaction retry, lease transition, and backend initialization boundaries.
 
 ## 6. Python and logging style

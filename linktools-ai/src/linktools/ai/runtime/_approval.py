@@ -7,9 +7,9 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import ApprovalStatus, AuthorizationAction, AuthorizationPolicy, Principal
+from ..core import ApprovalStatus, AuthorizationAction, AuthorizationPolicy, Principal, ResourceKind, ResourceRef
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimePersistence
+from ._persistence import RuntimeStores
 from ._services import (
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
@@ -31,23 +31,30 @@ class ApprovalApi(ApprovalQueryApi, Protocol):
 class DefaultApprovalService:
     """Persist decisions before any optional workflow notification."""
 
-    def __init__(self, persistence: RuntimePersistence, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
+    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
     async def list(self, execution_id: str, *, principal: Principal) -> tuple[ApprovalView, ...]:
-        await self._authorize_execution(execution_id, principal, AuthorizationAction.APPROVAL_READ)
-        records = await self._persistence.approvals.list_pending(execution_id, tenant_id=principal.tenant_id)
+        await self._authorization.authorize(
+            principal,
+            AuthorizationAction.APPROVAL_READ,
+            ResourceRef(ResourceKind.APPROVAL, execution_id, principal.tenant_id),
+        )
+        records = await self._persistence.recovery_approval.list_pending(execution_id, tenant_id=principal.tenant_id)
         return tuple(ApprovalView(record.approval_id, record.status) for record in records)
 
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult:
-        await self._authorize_execution(execution_id, request.principal, AuthorizationAction.APPROVAL_DECIDE)
-        record = await self._persistence.approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
+        record = await self._persistence.recovery_approval.get(request.approval_id, tenant_id=request.principal.tenant_id)
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        header = await self._persistence.recovery_approval.get_header(request.approval_id, tenant_id=request.principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(request.principal, AuthorizationAction.APPROVAL_DECIDE, header)
         decision_digest = _decision_digest(request)
-        updated = await self._persistence.approvals.decide(
+        updated = await self._persistence.recovery_approval.decide(
             request.approval_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ApprovalStatus.PENDING,
@@ -65,13 +72,6 @@ class DefaultApprovalService:
             )
         _logger.info("approval decided: execution=%s approval=%s", execution_id, updated.approval_id)
         return ApprovalDecisionResult(updated.approval_id, updated.decision_id or request.decision_id, updated.decision or request.decision)
-
-    async def _authorize_execution(self, execution_id: str, principal: Principal, action: AuthorizationAction) -> None:
-        header = await self._persistence.executions.get_header(execution_id, tenant_id=principal.tenant_id)
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(principal, action, header)
-
 
 def _decision_digest(request: ApprovalDecisionRequest) -> str:
     from ..core import canonical_sha256

@@ -58,14 +58,15 @@ Compile a named Agent and Prompt with `runtime.compile_agent("coding", prompt_id
 
 ### 2.1 Default workspace loader
 
-`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools`. The directory is a read-only `LocalDirectoryAssetBackend`; generated defaults live in a writable in-memory layer.
+`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools/assets`. The asset directory is a read-only `LocalDirectoryAssetBackend`; generated defaults use the selected Asset writer when `StorageDomain.ASSET` is durable, otherwise they live in a writable in-memory layer.
 
 ```text
 .linktools/
-├── agent/<id>
-├── prompt/<id>
-├── mcp/<id>
-└── skills/<id>/SKILL.md
+├── assets/
+│   ├── agent/<id>
+│   ├── prompt/<id>
+│   ├── mcp/<id>
+│   └── skills/<id>/SKILL.md
 ```
 
 Agent, Prompt, and MCP declarations use their JSON codecs even though the canonical filenames have no suffix. Skills default to the directory layout shown above and may also use the single-file JSON representation.
@@ -105,13 +106,15 @@ assets = build_workspace_asset_repository(store, extra_bindings=(my_binding,))
 
 `MyAssetBackend` should implement the public `AssetBackend` and storage contracts. Use `StorageLayer` to add ordered fallback sources. Do not import another package's private module or call private backend methods.
 
-Built-in backends include `InMemoryAssetBackend`, `LocalDirectoryAssetBackend`, `FilesystemAssetBackend`, and `SqlAssetBackend`. A SQL-backed store remains simple to construct:
+Built-in backends include `InMemoryAssetBackend`, `LocalDirectoryAssetBackend`, `FilesystemAssetBackend`, and `SqlAssetBackend`. A SQL-backed store receives an `AsyncEngine`:
 
 ```python
 from linktools.ai.asset import AssetStore, SqlAssetBackend
 from linktools.ai.storage import StorageOverlay
+from sqlalchemy.ext.asyncio import create_async_engine
 
-backend = SqlAssetBackend(session_factory, namespace="assets")
+engine = create_async_engine("sqlite+aiosqlite:///assets.db")
+backend = SqlAssetBackend(engine, namespace="assets")
 store = AssetStore(StorageOverlay(backend, writer=backend))
 await store.initialize()
 ```
@@ -120,51 +123,51 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 
 ## 3. Runtime persistence
 
-`RuntimePersistenceConfig.in_memory(...)`, `.filesystem(...)`, `.sqlite(...)`, `.mysql(...)`, and `.postgresql(...)` select the persistence backend. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
+`RuntimeStorage.memory()`, `.filesystem(...)`, `.sqlite(...)`, and `.sql(...)` select the runtime target. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
+
+`persist=None` selects only `StorageDomain.CONVERSATION`; pass an exact domain set for selective durability or `StorageDomain.ALL` for every domain. Unselected domains use process-local stores and are intentionally absent after restart.
 
 The identity fields are intentionally independent:
 
 | Field | Meaning |
 |---|---|
-| persistence `namespace` | Isolates one Runtime data set inside a backend |
+| Runtime `namespace` | The workspace identity that isolates one Runtime data set inside a target |
 | `tenant_id` | Authorization and resource ownership boundary inside that data set |
 | `memory_namespace` | Selects a memory collection inside one tenant |
-| Asset `namespace` | Isolates raw Asset data and is unrelated to Runtime persistence |
+| Asset `namespace` | Isolates raw Asset data and is unrelated to Runtime storage |
 | Asset `kind` | Selects a logical Asset type such as `agent`, `prompt`, or `skill` |
 | Task/Tool `owner` | Identifies the current lease holder |
 
 Fields stay short when their declaring type supplies the domain, such as `Principal.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. A qualifier is retained where another meaning is plausible in the same record or flattened storage boundary, such as `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or where it preserves an authorization identity domain, such as `owner_principal_id`.
 
-`open_workspace_runtime()` binds all service authorization and local recovery to `workspace.workspace_id` as one tenant. A custom persistence namespace changes storage placement only; it does not change the Workspace tenant. Lower-level `RuntimePersistence` implementations remain multi-tenant.
+`open_workspace_runtime()` uses `workspace.workspace_id` as both the Runtime namespace and the Workspace tenant boundary. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
 
-SQL deployments require an application-owned async SQLAlchemy session factory and a pre-provisioned schema. Runtime startup validates tables but never creates or alters them:
+External SQL deployments borrow an application-owned async SQLAlchemy `AsyncEngine` and require a pre-provisioned schema. Runtime startup validates tables but never creates or alters them. `RuntimeStorage.sqlite()` creates and owns its SQLite engine and provisions its LinkTools schema:
 
 ```python
+from linktools.ai import RuntimeStorage, StorageDomain
 from linktools.ai.migrate import provision_database
-from linktools.ai.workspace import RuntimePersistenceConfig
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 path = "/var/lib/my-app/runtime.db"
-config = RuntimePersistenceConfig.sqlite(
-    path,
-    namespace="project-a",
-)
 engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-session_factory = async_sessionmaker(engine, expire_on_commit=False)
-
 await provision_database(engine)
 async with open_workspace_runtime(
     workspace,
-    config=config,
+    storage=RuntimeStorage.sql(
+        engine,
+        persist={StorageDomain.CONVERSATION, StorageDomain.MEMORY},
+    ),
     model="gpt-4o-mini",
-    session_factory=session_factory,
 ) as runtime:
     result = await runtime.run("inspect the patch", principal=principal)
+
+await engine.dispose()
 ```
 
-MySQL and PostgreSQL use the same `session_factory` entry point. SQLite enables its connection policy in the storage layer and keeps Harness step persistence in a namespace-scoped sibling database. Every lifecycle object uses `initialize()`.
+MySQL, PostgreSQL, and SQLite use the same `RuntimeStorage.sql(engine)` contract. SQLite enables its connection policy in `storage`; Step, Media, Runtime, and Asset operations share one internal `SqlStorageContext` while creating a fresh `AsyncSession` per operation. Every lifecycle object uses `initialize()`.
 
-The application owns the engine and session factory and must dispose the engine after the Runtime closes.
+The application owns an external engine and must dispose it after the Runtime closes. The engine created by `RuntimeStorage.sqlite()` is disposed by the Runtime.
 
 A non-empty `memory_namespace` enables Runtime memory for an execution. `None` disables it. Classification fields reject empty values, surrounding whitespace, control characters, and values beyond their UTF-8 byte limit.
 

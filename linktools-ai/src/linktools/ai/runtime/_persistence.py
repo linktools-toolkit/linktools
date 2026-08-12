@@ -7,9 +7,8 @@ is the single semantic boundary shared by the local and SQL implementations.
 """
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from enum import StrEnum
 from typing import Protocol
 
 from ..core import (
@@ -36,29 +35,8 @@ from ..core import (
 )
 from ..errors import AIError
 from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
+from ..storage import StorageDomain
 from ._tool import ToolStateStore
-
-
-class RuntimePersistenceMode(StrEnum):
-    IN_MEMORY = "MEMORY"
-    FILESYSTEM = "FILE"
-    SQL = "SQL"
-
-
-class RuntimeBackend(StrEnum):
-    IN_MEMORY = "memory"
-    FILESYSTEM = "file"
-    SQLITE = "sqlite"
-    MYSQL = "mysql"
-    POSTGRESQL = "postgresql"
-
-
-def backend_mode(backend: RuntimeBackend) -> RuntimePersistenceMode:
-    if backend is RuntimeBackend.IN_MEMORY:
-        return RuntimePersistenceMode.IN_MEMORY
-    if backend is RuntimeBackend.FILESYSTEM:
-        return RuntimePersistenceMode.FILESYSTEM
-    return RuntimePersistenceMode.SQL
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +45,12 @@ class BlobRef:
     digest: str
     size: int
     locator: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationCursor:
+    run_id: str
+    revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +67,7 @@ class SessionRecord:
     created_at: datetime
     updated_at: datetime
     closed_at: "datetime | None"
-    head_execution_id: "str | None" = None
+    continuation: "ConversationCursor | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +92,7 @@ class ExecutionRecord:
     created_at: datetime
     updated_at: datetime
     memory_namespace: "str | None" = None
+    conversation_run_id: "str | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +228,6 @@ class ExecutionTerminalCommit:
     terminal_event_payload: Mapping[str, JsonValue]
     idempotency: "IdempotencyTerminalUpdate | None" = None
     operation: "OperationTerminalUpdate | None" = None
-    session_head: "SessionHeadAdvance | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,13 +249,6 @@ class OperationTerminalUpdate:
     result_ref: "str | None"
     result_digest: "str | None"
     error_code: "str | None"
-
-
-@dataclass(frozen=True, slots=True)
-class SessionHeadAdvance:
-    session_id: str
-    expected_head_execution_id: "str | None"
-    next_head_execution_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,19 +286,27 @@ class ExternalResultRecord:
     supplied_at: "datetime | None"
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryCheckpoint:
+    checkpoint_id: str
+    execution_id: str
+    tenant_id: str
+    binding_digest: str
+    run_id: str
+    phase: str
+    pending_operation_id: "str | None"
+    payload: Mapping[str, JsonValue]
+    revision: int
+    created_at: datetime
+    updated_at: datetime
+    approval_state: Mapping[str, JsonValue] = field(default_factory=dict)
+    external_state: Mapping[str, JsonValue] = field(default_factory=dict)
+    tool_effect_state: Mapping[str, JsonValue] = field(default_factory=dict)
+    idempotency_state: Mapping[str, JsonValue] = field(default_factory=dict)
+    terminal_handoff: "Mapping[str, JsonValue] | None" = None
+
+
 class RuntimeRepository(Protocol):
-    @property
-    def mode(self) -> RuntimePersistenceMode: ...
-
-    @property
-    def backend(self) -> RuntimeBackend: ...
-
-    @property
-    def namespace(self) -> str: ...
-
-    @property
-    def atomic_domain_id(self) -> str: ...
-
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
 
@@ -332,6 +317,7 @@ class SessionRepository(RuntimeRepository, Protocol):
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
     async def compare_and_swap(self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord) -> SessionRecord: ...
+    async def advance_continuation(self, session_id: str, *, tenant_id: str, expected: "ConversationCursor | None", next_cursor: ConversationCursor) -> SessionRecord: ...
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):
@@ -392,6 +378,13 @@ class ExternalResultRepository(RuntimeRepository, Protocol):
     async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ExternalResultRecord, ...]: ...
 
 
+class RecoveryCheckpointRepository(RuntimeRepository, Protocol):
+    async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint: ...
+    async def get(self, checkpoint_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None: ...
+    async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]: ...
+    async def compare_and_swap(self, checkpoint_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint) -> RecoveryCheckpoint: ...
+
+
 class OperationLedgerRepository(RuntimeRepository, Protocol):
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord: ...
     async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None: ...
@@ -445,29 +438,29 @@ class BlobStore(RuntimeRepository, Protocol):
     def open(self, ref: BlobRef, *, tenant_id: str) -> AsyncIterator[bytes]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class RuntimePersistence:
-    mode: RuntimePersistenceMode
-    backend: RuntimeBackend
-    namespace: str
-    sessions: SessionRepository
-    executions: ExecutionRepository
-    results: ResultRepository
-    idempotency: IdempotencyRepository
-    events: EventRepository
-    tasks: TaskRepository
-    evaluations: EvaluationRepository
-    memories: MemoryRepository
-    artifacts: ArtifactRepository
-    approvals: ApprovalRepository
-    externals: ExternalResultRepository
-    operations: OperationLedgerRepository
-    tools: ToolStateStore
-    blobs: BlobStore
+class DomainBlobStore(RuntimeRepository, Protocol):
+    def for_domain(self, domain: StorageDomain) -> BlobStore: ...
 
-    @property
-    def atomic_domain_id(self) -> str:
-        return self.sessions.atomic_domain_id
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStores:
+    namespace: str
+    conversation: SessionRepository
+    execution: ExecutionRepository
+    execution_result: ResultRepository
+    execution_idempotency: IdempotencyRepository
+    evaluation_idempotency: IdempotencyRepository
+    execution_events: EventRepository
+    task: TaskRepository
+    evaluation: EvaluationRepository
+    memory: MemoryRepository
+    artifact: ArtifactRepository
+    recovery_approval: ApprovalRepository
+    recovery_external: ExternalResultRepository
+    recovery_checkpoint: RecoveryCheckpointRepository
+    operation_ledger: OperationLedgerRepository
+    tools: ToolStateStore
+    blobs: DomainBlobStore
 
     def __post_init__(self) -> None:
         try:
@@ -475,24 +468,38 @@ class RuntimePersistence:
         except AIError as error:
             raise ValueError("runtime persistence namespace is invalid") from error
         components = (
-            self.sessions, self.executions, self.results, self.idempotency, self.events,
-            self.tasks, self.evaluations, self.memories, self.artifacts,
-            self.approvals, self.externals, self.operations, self.tools, self.blobs,
+            self.conversation, self.execution, self.execution_result, self.execution_idempotency, self.evaluation_idempotency, self.execution_events,
+            self.task, self.evaluation, self.memory, self.artifact,
+            self.recovery_approval, self.recovery_external, self.recovery_checkpoint, self.operation_ledger, self.tools, self.blobs,
         )
         if any(component is None for component in components):
             raise ValueError("runtime persistence requires every repository")
-        identities = {(component.mode, component.backend, component.namespace, component.atomic_domain_id) for component in components}
-        identity = next(iter(identities), None)
-        if identity != (self.mode, self.backend, self.namespace, self.atomic_domain_id) or len(identities) != 1:
-            raise ValueError("runtime persistence components must share one atomic domain")
+    async def initialize(self) -> None:
+        seen: set[int] = set()
+        for component in self._components():
+            if id(component) not in seen:
+                await component.initialize()
+                seen.add(id(component))
+
+    async def close(self) -> None:
+        seen: set[int] = set()
+        for component in reversed(self._components()):
+            if id(component) not in seen:
+                await component.close()
+                seen.add(id(component))
+
+    def _components(self) -> tuple[RuntimeRepository, ...]:
+        return (self.conversation, self.execution, self.execution_result, self.execution_idempotency, self.evaluation_idempotency, self.execution_events, self.task, self.evaluation, self.memory, self.artifact, self.recovery_approval, self.recovery_external, self.recovery_checkpoint, self.operation_ledger, self.tools, self.blobs)
+
+
 
 
 __all__ = [
-    "ApprovalRecord", "ApprovalRepository", "ArtifactRecord", "ArtifactRepository", "BlobRef", "BlobStatus",
-    "BlobStore", "EvaluationRecord", "EvaluationRepository", "ExecutionEventRecord", "ExecutionRecord",
-    "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate", "SessionHeadAdvance",
-    "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository",
-    "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeBackend", "RuntimePersistence",
-    "RuntimePersistenceMode", "RuntimeRepository", "SessionRecord", "SessionRepository", "backend_mode",
+    "ApprovalRecord", "ApprovalRepository", "ArtifactRecord", "ArtifactRepository", "BlobRef", "BlobStatus", "ConversationCursor",
+    "BlobStore", "DomainBlobStore", "EvaluationRecord", "EvaluationRepository", "ExecutionEventRecord", "ExecutionRecord",
+    "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate",
+    "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository", "RecoveryCheckpoint", "RecoveryCheckpointRepository",
+    "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeRepository", "RuntimeStores",
+    "SessionRecord", "SessionRepository", "StorageDomain",
     "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus",
 ]

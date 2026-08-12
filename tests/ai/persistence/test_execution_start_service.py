@@ -67,7 +67,7 @@ async def test_execution_memory_namespace_can_be_disabled_but_not_blank() -> Non
             "a" * 64,
             ExecutionRequest("without memory", principal, "without-memory", memory_namespace=None),
         )
-        execution = await runtime.persistence.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+        execution = await runtime.persistence.execution.get(handle.execution_id, tenant_id=principal.tenant_id)
         assert execution is not None
         assert execution.memory_namespace is None
 

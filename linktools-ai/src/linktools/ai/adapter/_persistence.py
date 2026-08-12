@@ -61,18 +61,21 @@ from ..runtime import (
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
     ExternalResultRecord,
+    RecoveryCheckpoint,
     IdempotencyRecord,
+    IdempotencyRepository,
     IdempotencyTerminalUpdate,
     MemoryRecord,
     OperationLedgerInput,
     OperationLedgerRecord,
+    OperationLedgerRepository,
     OperationTerminalUpdate,
     ResultRecord,
-    RuntimeBackend,
-    RuntimePersistence,
-    RuntimePersistenceMode,
+    RuntimeStores,
     RuntimeRepository,
     SessionRecord,
+    ConversationCursor,
+    DomainBlobStore,
     TaskLease,
     TaskNodeView,
     ToolOperationRecord,
@@ -82,7 +85,9 @@ from ..storage import (
     FilesystemLeaseCoordinator,
     FilesystemWriterLock,
     read_json,
+    sync_directory,
     write_json_atomic,
+    StorageDomain,
 )
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 
@@ -118,31 +123,16 @@ class _SharedTransactionLock:
 
 
 class _Base:
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str, backend: RuntimeBackend | None = None) -> None:
-        self._mode = mode
-        self._backend = backend or (RuntimeBackend.FILESYSTEM if mode is RuntimePersistenceMode.FILESYSTEM else RuntimeBackend.IN_MEMORY)
+    def __init__(self, namespace: str) -> None:
         self._namespace = namespace
-        self._atomic_domain_id = atomic_domain_id
         self._closed = False
         self._lock = asyncio.Lock()
         self._on_change: Callable[[], None] | None = None
         self._refresh_source: Callable[[], None] | None = None
 
     @property
-    def mode(self) -> RuntimePersistenceMode:
-        return self._mode
-
-    @property
-    def backend(self) -> RuntimeBackend:
-        return self._backend
-
-    @property
     def namespace(self) -> str:
         return self._namespace
-
-    @property
-    def atomic_domain_id(self) -> str:
-        return self._atomic_domain_id
 
     async def initialize(self) -> None:
         self._closed = False
@@ -165,8 +155,8 @@ class _Base:
 
 
 class _SessionRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], SessionRecord] = {}
 
     async def create(self, record: SessionRecord) -> SessionRecord:
@@ -211,9 +201,21 @@ class _SessionRepository(_Base):
             self._mark_changed()
             return next_record
 
+    async def advance_continuation(self, session_id: str, *, tenant_id: str, expected: "ConversationCursor | None", next_cursor: ConversationCursor) -> SessionRecord:
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        async with self._lock:
+            current = self._records.get((tenant_id, session_id))
+            if current is None or current.continuation != expected or current.status is not SessionStatus.OPEN:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            updated = replace(current, continuation=next_cursor, revision=current.revision + 1, updated_at=datetime.now(timezone.utc))
+            self._records[(tenant_id, session_id)] = updated
+            self._mark_changed()
+            return updated
+
 class _ExecutionRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], ExecutionRecord] = {}
         self._idempotency: _IdempotencyRepository | None = None
         self._events: _EventRepository | None = None
@@ -417,8 +419,8 @@ class _ExecutionRepository(_Base):
 
 
 class _IdempotencyRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str, str], IdempotencyRecord] = {}
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
@@ -463,8 +465,8 @@ class _IdempotencyRepository(_Base):
 
 
 class _EventRepository(_Base):
-    def __init__(self, executions: _ExecutionRepository, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, executions: _ExecutionRepository, namespace: str) -> None:
+        super().__init__(namespace)
         self._executions = executions
         self._items: dict[tuple[str, str], list[ExecutionEventRecord]] = {}
 
@@ -493,8 +495,8 @@ class _EventRepository(_Base):
 
 
 class _ResultRepository(_Base):
-    def __init__(self, executions: _ExecutionRepository, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, executions: _ExecutionRepository, namespace: str) -> None:
+        super().__init__(namespace)
         self._executions = executions
         self._results: dict[tuple[str, str], ResultRecord] = {}
         self._sessions: _SessionRepository | None = None
@@ -527,8 +529,6 @@ class _ResultRepository(_Base):
         if not isinstance(commit.terminal_event_payload, dict):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         validate_observation_payload(commit.terminal_event_payload)
-        if commit.session_head is not None and (execution.status is not ExecutionStatus.SUCCEEDED or execution.lineage_kind not in {ExecutionLineageKind.SESSION_RESUME, ExecutionLineageKind.RETRY}):
-            raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         if self._sessions is None or self._idempotency is None or self._events is None or self._operations is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = (execution.tenant_id, execution.execution_id)
@@ -544,11 +544,6 @@ class _ResultRepository(_Base):
             current = self._executions._records.get(key)
             if current is None or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if commit.session_head is not None:
-                session = self._sessions._records.get((execution.tenant_id, commit.session_head.session_id))
-                if session is None or session.status is not SessionStatus.OPEN or session.head_execution_id != commit.session_head.expected_head_execution_id:
-                    _logger.warning("session head CAS rejected: session=%s expected=%s", commit.session_head.session_id, commit.session_head.expected_head_execution_id)
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
             identity = self._find_idempotency(commit, execution)
             self._validate_idempotency(identity, commit.idempotency, execution)
             self._validate_operation(commit.operation, execution)
@@ -563,9 +558,6 @@ class _ResultRepository(_Base):
             if commit.operation is not None:
                 current_operation = self._operations._records[(execution.tenant_id, commit.operation.operation_id)]
                 self._operations._records[(execution.tenant_id, commit.operation.operation_id)] = replace(current_operation, status=commit.operation.next_status, result_ref=commit.operation.result_ref, result_digest=commit.operation.result_digest, error_code=commit.operation.error_code, updated_at=execution.updated_at)
-            if commit.session_head is not None:
-                session = self._sessions._records[(execution.tenant_id, commit.session_head.session_id)]
-                self._sessions._records[(execution.tenant_id, session.session_id)] = replace(session, revision=session.revision + 1, head_execution_id=commit.session_head.next_head_execution_id, updated_at=execution.updated_at)
             self._mark_changed()
             return ExecutionTerminalCommitResult(execution, result)
 
@@ -600,8 +592,8 @@ class _ResultRepository(_Base):
 
 
 class _MemoryRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], MemoryRecord] = {}
         self._operations: _OperationRepository | None = None
 
@@ -705,8 +697,8 @@ class _MemoryRepository(_Base):
 
 
 class _ArtifactRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], ArtifactRecord] = {}
 
     async def put_metadata(self, record: ArtifactRecord) -> ArtifactRecord:
@@ -742,8 +734,8 @@ class _ArtifactRepository(_Base):
 
 
 class _ApprovalRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], ApprovalRecord] = {}
 
     async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None:
@@ -790,8 +782,8 @@ class _ApprovalRepository(_Base):
 
 
 class _ExternalRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], ExternalResultRecord] = {}
 
     async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None:
@@ -836,9 +828,48 @@ class _ExternalRepository(_Base):
         return tuple(item for item in self._records.values() if item.tenant_id == tenant_id and item.execution_id == execution_id and item.status is ExternalCallStatus.PENDING)
 
 
+class _RecoveryCheckpointRepository(_Base):
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
+        self._records: dict[tuple[str, str], RecoveryCheckpoint] = {}
+
+    async def create(self, record: RecoveryCheckpoint) -> RecoveryCheckpoint:
+        self._ensure_open()
+        self._check_tenant(record.tenant_id)
+        key = record.tenant_id, record.checkpoint_id
+        current = self._records.get(key)
+        if current is not None:
+            if current == record:
+                return current
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._records[key] = record
+        self._mark_changed()
+        return record
+
+    async def get(self, checkpoint_id: str, *, tenant_id: str) -> RecoveryCheckpoint | None:
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        return self._records.get((tenant_id, checkpoint_id))
+
+    async def list(self, *, tenant_id: str) -> tuple[RecoveryCheckpoint, ...]:
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        return tuple(item for item in self._records.values() if item.tenant_id == tenant_id)
+
+    async def compare_and_swap(self, checkpoint_id: str, *, tenant_id: str, expected_revision: int, next_record: RecoveryCheckpoint) -> RecoveryCheckpoint:
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        current = self._records.get((tenant_id, checkpoint_id))
+        if current is None or current.revision != expected_revision or next_record.revision != expected_revision + 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._records[(tenant_id, checkpoint_id)] = next_record
+        self._mark_changed()
+        return next_record
+
+
 class _OperationRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], OperationLedgerRecord] = {}
 
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord:
@@ -913,8 +944,8 @@ class _OperationRepository(_Base):
 
 
 class _TaskRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._plans: dict[tuple[str, str], TaskGraphView] = {}
         self._nodes: dict[tuple[str, str, str], TaskNodeView] = {}
 
@@ -1084,8 +1115,8 @@ class _TaskRepository(_Base):
 
 
 class _EvaluationRepository(_Base):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], EvaluationRecord] = {}
 
     async def get_header(self, evaluation_id: str, *, tenant_id: str) -> ResourceRef | None:
@@ -1135,8 +1166,8 @@ class _EvaluationRepository(_Base):
 
 
 class _ToolRepository(_Base, ToolStateStore):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._records: dict[tuple[str, str], ToolOperationRecord] = {}
 
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord:
@@ -1230,8 +1261,8 @@ class _ToolRepository(_Base, ToolStateStore):
 
 
 class InMemoryBlobStore(_Base, BlobStore):
-    def __init__(self, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, namespace: str) -> None:
+        super().__init__(namespace)
         self._blobs: dict[tuple[str, str], bytes] = {}
 
     async def put_bytes(self, *, tenant_id: str, data: bytes, expected_digest: str | None = None) -> BlobRef:
@@ -1281,11 +1312,36 @@ class InMemoryBlobStore(_Base, BlobStore):
         return self._open(ref, tenant_id)
 
 
+class DomainBlobRouter(DomainBlobStore):
+    def __init__(self, stores: "dict[StorageDomain, BlobStore]") -> None:
+        self._stores = dict(stores)
+
+    def for_domain(self, domain: StorageDomain) -> BlobStore:
+        try:
+            return self._stores[domain]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    async def initialize(self) -> None:
+        seen: set[int] = set()
+        for store in self._stores.values():
+            if id(store) not in seen:
+                await store.initialize()
+                seen.add(id(store))
+
+    async def close(self) -> None:
+        seen: set[int] = set()
+        for store in reversed(tuple(self._stores.values())):
+            if id(store) not in seen:
+                await store.close()
+                seen.add(id(store))
+
+
 class FilesystemBlobStore(_Base, BlobStore):
     """Tenant-scoped streaming Blob store for filesystem runtimes."""
 
-    def __init__(self, root: Path, mode: RuntimePersistenceMode, namespace: str, atomic_domain_id: str) -> None:
-        super().__init__(mode, namespace, atomic_domain_id)
+    def __init__(self, root: Path, namespace: str) -> None:
+        super().__init__(namespace)
         self._root = root
         self._leases = FilesystemLeaseCoordinator(root / "leases")
 
@@ -1415,14 +1471,14 @@ class FilesystemBlobStore(_Base, BlobStore):
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(temporary, target)
-        _fsync_directory(target.parent)
+        sync_directory(target.parent)
         self._write_metadata(tenant_id, digest, int(payload["size"]))
         committed = dict(payload)
         committed["status"] = "COMMITTED"
         committed["fence"] = fence
         write_json_atomic(journal, committed, fsync=True)
         journal.unlink(missing_ok=True)
-        _fsync_directory(journal.parent)
+        sync_directory(journal.parent)
 
     def _recover_uploads(self) -> None:
         for journal in sorted(self._transaction_directory.glob("*.json")):
@@ -1495,15 +1551,134 @@ class FilesystemBlobStore(_Base, BlobStore):
         )
 
 
+class RoutedOperationRepository:
+    """Route operation records to the owning domain target."""
+
+    def __init__(self, durable: OperationLedgerRepository, memory: OperationLedgerRepository, persist: frozenset[StorageDomain]) -> None:
+        self._durable = durable
+        self._memory = memory
+        self._persist = persist
+
+    def _store(self, kind: ResourceKind) -> OperationLedgerRepository:
+        return self._durable if _operation_domain(kind) in self._persist else self._memory
+
+    async def initialize(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord:
+        return await self._store(record.resource_kind).append(record)
+
+    async def get(self, operation_id: str, *, tenant_id: str) -> OperationLedgerRecord | None:
+        record = await self._memory.get(operation_id, tenant_id=tenant_id)
+        if record is not None:
+            return record
+        if self._persist:
+            return await self._durable.get(operation_id, tenant_id=tenant_id)
+        return None
+
+    async def compare_and_swap(self, operation_id: str, *, tenant_id: str, expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord:
+        return await self._store(next_record.resource_kind).compare_and_swap(operation_id, tenant_id=tenant_id, expected_status=expected_status, next_record=next_record)
+
+    async def list_pending(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, limit: int) -> tuple[OperationLedgerRecord, ...]:
+        return await self._store(resource_kind).list_pending(resource_kind, resource_id, tenant_id=tenant_id, limit=limit)
+
+    async def compact_terminal(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, through_sequence: int) -> str:
+        return await self._store(resource_kind).compact_terminal(resource_kind, resource_id, tenant_id=tenant_id, through_sequence=through_sequence)
+
+
+class RoutedIdempotencyRepository:
+    def __init__(self, durable: "IdempotencyRepository", memory: "IdempotencyRepository", persist: frozenset[StorageDomain], domain: StorageDomain) -> None:
+        self._durable = durable
+        self._memory = memory
+        self._persist = persist
+        self._domain = domain
+
+    def _store(self) -> "IdempotencyRepository":
+        return self._durable if self._domain in self._persist else self._memory
+
+    async def initialize(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
+        return await self._store().reserve(record)
+
+    async def get(self, scope: str, key_hash: str, *, tenant_id: str) -> IdempotencyRecord | None:
+        record = await self._memory.get(scope, key_hash, tenant_id=tenant_id)
+        if record is not None or self._domain not in self._persist:
+            return record
+        return await self._durable.get(scope, key_hash, tenant_id=tenant_id)
+
+    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
+        return await self._store().list_by_execution(execution_id, tenant_id=tenant_id)
+
+    async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
+        return await self._store().compare_and_swap(scope, key_hash, tenant_id=tenant_id, expected_status=expected_status, next_record=next_record)
+
+
+def _operation_domain(kind: ResourceKind) -> StorageDomain:
+    return {
+        ResourceKind.SESSION: StorageDomain.CONVERSATION,
+        ResourceKind.EXECUTION: StorageDomain.EXECUTION,
+        ResourceKind.MEMORY: StorageDomain.MEMORY,
+        ResourceKind.ARTIFACT: StorageDomain.ARTIFACT,
+        ResourceKind.TASK_GRAPH: StorageDomain.TASK,
+        ResourceKind.EVALUATION: StorageDomain.EVALUATION,
+        ResourceKind.DOWNLOAD_GRANT: StorageDomain.ARTIFACT,
+        ResourceKind.APPROVAL: StorageDomain.RECOVERY,
+        ResourceKind.EXTERNAL_CALL: StorageDomain.RECOVERY,
+        ResourceKind.TOOL_OPERATION: StorageDomain.RECOVERY,
+    }.get(kind, StorageDomain.RECOVERY)
+
+
+def _route_runtime_stores(
+    durable: RuntimeStores,
+    memory: RuntimeStores,
+    persist: frozenset[StorageDomain],
+) -> RuntimeStores:
+    def selected(domain: StorageDomain) -> bool:
+        return domain in persist
+
+    execution = selected(StorageDomain.EXECUTION)
+    recovery = selected(StorageDomain.RECOVERY)
+    return RuntimeStores(
+        namespace=durable.namespace,
+        conversation=durable.conversation if selected(StorageDomain.CONVERSATION) else memory.conversation,
+        execution=durable.execution if execution else memory.execution,
+        execution_result=durable.execution_result if execution else memory.execution_result,
+        execution_idempotency=RoutedIdempotencyRepository(durable.execution_idempotency, memory.execution_idempotency, persist, StorageDomain.EXECUTION),
+        evaluation_idempotency=RoutedIdempotencyRepository(durable.evaluation_idempotency, memory.evaluation_idempotency, persist, StorageDomain.EVALUATION),
+        execution_events=durable.execution_events if execution else memory.execution_events,
+        task=durable.task if selected(StorageDomain.TASK) else memory.task,
+        evaluation=durable.evaluation if selected(StorageDomain.EVALUATION) else memory.evaluation,
+        memory=durable.memory if selected(StorageDomain.MEMORY) else memory.memory,
+        artifact=durable.artifact if selected(StorageDomain.ARTIFACT) else memory.artifact,
+        recovery_approval=durable.recovery_approval if recovery else memory.recovery_approval,
+        recovery_external=durable.recovery_external if recovery else memory.recovery_external,
+        recovery_checkpoint=durable.recovery_checkpoint if recovery else memory.recovery_checkpoint,
+        operation_ledger=RoutedOperationRepository(durable.operation_ledger, memory.operation_ledger, persist),
+        tools=durable.tools if recovery else memory.tools,
+        blobs=DomainBlobRouter({
+            domain: durable.blobs.for_domain(domain) if domain in persist else memory.blobs.for_domain(domain)
+            for domain in (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
+        }),
+    )
+
+
 class InMemoryRuntime:
-    def __init__(self, persistence: RuntimePersistence, components: tuple[RuntimeRepository, ...]) -> None:
+    def __init__(self, persistence: RuntimeStores, components: tuple[RuntimeRepository, ...]) -> None:
         self.persistence = persistence
         self.components = components
         self._initialized = False
         self._closed = False
         self._initialize_lock = asyncio.Lock()
 
-    persistence: RuntimePersistence
+    persistence: RuntimeStores
     components: tuple[RuntimeRepository, ...]
 
     async def initialize(self) -> None:
@@ -1518,7 +1693,7 @@ class InMemoryRuntime:
                         initialized.append(component)
                 self._initialized = True
                 self._closed = False
-                _logger.debug("runtime persistence initialized mode=%s backend=%s namespace=%s", self.persistence.mode, self.persistence.backend, self.persistence.namespace)
+                _logger.debug("runtime stores initialized: namespace=%s", self.persistence.namespace)
             except BaseException:
                 for component in reversed(initialized):
                     try:
@@ -1543,13 +1718,15 @@ class InMemoryRuntime:
 
 
 class _DurableRuntime(InMemoryRuntime):
-    def __init__(self, persistence: RuntimePersistence, components: tuple[RuntimeRepository, ...], state_path: str, writer_lock: FilesystemWriterLock | None = None) -> None:
+    def __init__(self, persistence: RuntimeStores, components: tuple[RuntimeRepository, ...], state_path: str, persist: frozenset[StorageDomain], writer_lock: FilesystemWriterLock | None = None, durable_components: tuple[RuntimeRepository, ...] | None = None) -> None:
         super().__init__(persistence, components)
+        self._durable_components = components if durable_components is None else durable_components
         self._state_path = state_path
-        self._writer_lock = writer_lock or FilesystemWriterLock(Path(state_path).with_name("runtime.lock"))
+        self._persist = persist
+        self._writer_lock = writer_lock or FilesystemWriterLock(Path(state_path).parent / "runtime.lock")
         self._transaction_lock = _SharedTransactionLock()
         self._commit_lock = threading.Lock()
-        for component in components:
+        for component in self._durable_components:
             if isinstance(component, _Base):
                 component._lock = self._transaction_lock
         self._durable_initialize_lock = asyncio.Lock()
@@ -1570,10 +1747,12 @@ class _DurableRuntime(InMemoryRuntime):
             await self._writer_lock.acquire()
             try:
                 await asyncio.to_thread(self._load)
-                for component in self.components:
+                for component in self._durable_components:
                     if isinstance(component, _Base):
                         component._on_change = self._commit
                 await super().initialize()
+                if not Path(self._state_path).is_file():
+                    self._flush()
             except BaseException:
                 await self._writer_lock.release()
                 raise
@@ -1586,7 +1765,7 @@ class _DurableRuntime(InMemoryRuntime):
             await super().close()
         finally:
             await self._writer_lock.release()
-        _logger.debug("runtime persistence closed mode=%s namespace=%s", self.persistence.mode, self.persistence.namespace)
+        _logger.debug("filesystem runtime stores closed: namespace=%s", self.persistence.namespace)
 
     def _commit(self) -> None:
         with self._commit_lock:
@@ -1609,6 +1788,8 @@ class _DurableRuntime(InMemoryRuntime):
         executions = self.components[1]
         results = self.components[2]
         idempotency = self.components[3]
+        evaluation_idempotency = self._durable_components[-2]
+        recovery_checkpoint = self._durable_components[-1]
         events = self.components[4]
         tasks = self.components[5]
         evaluations = self.components[6]
@@ -1618,7 +1799,7 @@ class _DurableRuntime(InMemoryRuntime):
         externals = self.components[10]
         operations = self.components[11]
         tools = self.components[12]
-        if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository):
+        if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository) or not isinstance(evaluation_idempotency, _IdempotencyRepository):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._clear_payload()
         for raw in value.get("sessions", []):
@@ -1627,7 +1808,12 @@ class _DurableRuntime(InMemoryRuntime):
             executions._records[(str(raw["tenant_id"]), str(raw["execution_id"]))] = _execution_from_json(raw)
         for raw in value.get("idempotency", []):
             record = _idempotency_from_json(raw)
-            idempotency._records[(record.tenant_id, record.scope, str(raw["key_hash"]))] = record
+            target = evaluation_idempotency if record.scope == "evaluation.run" else idempotency
+            target._records[(record.tenant_id, record.scope, str(raw["key_hash"]))] = record
+        if isinstance(recovery_checkpoint, _RecoveryCheckpointRepository):
+            for raw in value.get("recovery_checkpoints", []):
+                record = _recovery_checkpoint_from_json(raw)
+                recovery_checkpoint._records[(record.tenant_id, record.checkpoint_id)] = record
         if isinstance(results, _ResultRepository):
             for raw in value.get("results", []):
                 record = _result_from_json(raw)
@@ -1674,7 +1860,7 @@ class _DurableRuntime(InMemoryRuntime):
                 tools._records[(record.tenant_id, record.operation_id)] = record
 
     def _clear_payload(self) -> None:
-        for component in self.components:
+        for component in self._durable_components:
             if isinstance(component, _SessionRepository):
                 component._records.clear()
             elif isinstance(component, _ExecutionRepository):
@@ -1682,6 +1868,8 @@ class _DurableRuntime(InMemoryRuntime):
             elif isinstance(component, _ResultRepository):
                 component._results.clear()
             elif isinstance(component, _IdempotencyRepository):
+                component._records.clear()
+            elif isinstance(component, _RecoveryCheckpointRepository):
                 component._records.clear()
             elif isinstance(component, _EventRepository):
                 component._items.clear()
@@ -1706,25 +1894,20 @@ class _DurableRuntime(InMemoryRuntime):
                 component._blobs.clear()
 
     def _flush(self) -> None:
-        records = self._repository_payload()
-        tasks = [
-            {"record_type": "plan", **item}
-            for item in records.pop("task_plans", [])
-            if isinstance(item, dict)
-        ] + [
-            {"record_type": "node", **item}
-            for item in records.pop("task_nodes", [])
-            if isinstance(item, dict)
-        ]
-        records["tasks"] = tasks
-        state: dict[str, JsonValue] = {
-            "schema_version": 2,
+        root = Path(self._state_path).parent
+        manifest = {
+            "format": "linktools-ai-runtime",
+            "generation": 1,
             "namespace": self.persistence.namespace,
-            "atomic_domain_id": self.persistence.atomic_domain_id,
-            "records": records,
+            "domains": sorted(domain.value for domain in self._persist),
         }
-        write_json_atomic(Path(self._state_path), state, fsync=True)
-        _logger.debug("runtime metadata committed: backend=%s namespace=%s", self.persistence.backend, self.persistence.namespace)
+        write_json_atomic(Path(self._state_path), manifest, fsync=True)
+        payload = self._repository_payload()
+        for domain in self._persist:
+            directory = root / domain.value
+            directory.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(directory / "records.json", _domain_payload(payload, domain), fsync=True)
+        _logger.debug("runtime metadata committed: namespace=%s selected_domains=%s", self.persistence.namespace, sorted(domain.value for domain in self._persist))
     def _repository_payload(self) -> dict[str, JsonValue]:
         sessions = self.components[0]
         executions = self.components[1]
@@ -1739,12 +1922,19 @@ class _DurableRuntime(InMemoryRuntime):
         externals = self.components[10]
         operations = self.components[11]
         tools = self.components[12]
-        if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository):
+        evaluation_idempotency = self._durable_components[-2]
+        recovery_checkpoint = self._durable_components[-1]
+        if not isinstance(sessions, _SessionRepository) or not isinstance(executions, _ExecutionRepository) or not isinstance(idempotency, _IdempotencyRepository) or not isinstance(evaluation_idempotency, _IdempotencyRepository):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return {
             "sessions": [_record_json(item) for item in sorted(sessions._records.values(), key=lambda value: (value.tenant_id, value.session_id))],
             "executions": [_record_json(item) for item in sorted(executions._records.values(), key=lambda value: (value.tenant_id, value.execution_id))],
-            "idempotency": [_idempotency_json(record, key_hash) for (tenant_id, scope, key_hash), record in sorted(idempotency._records.items())],
+            "idempotency": [
+                _idempotency_json(record, key_hash)
+                for repository in (idempotency, evaluation_idempotency)
+                for (tenant_id, scope, key_hash), record in sorted(repository._records.items())
+            ],
+            "recovery_checkpoints": [_json_record(item) for item in recovery_checkpoint._records.values()] if isinstance(recovery_checkpoint, _RecoveryCheckpointRepository) else [],
             "results": [_json_record(item) for item in sorted(results._results.values(), key=lambda value: (value.tenant_id, value.execution_id))] if isinstance(results, _ResultRepository) else [],
             "events": [_json_record(item) for items in events._items.values() for item in items] if isinstance(events, _EventRepository) else [],
             "task_plans": [{"tenant_id": tenant_id, "view": _json_record(view)} for (tenant_id, _), view in tasks._plans.items()] if isinstance(tasks, _TaskRepository) else [],
@@ -1760,34 +1950,29 @@ class _DurableRuntime(InMemoryRuntime):
 
 
 class FilesystemRuntime(_DurableRuntime):
-    """Durable filesystem runtime backed by one versioned metadata state file."""
+    """Durable filesystem runtime with one independent file per domain."""
 
     def _load(self) -> None:
         state_path = Path(self._state_path)
         if not state_path.is_file():
-            legacy = state_path.parent / "runtime-file-manifest.json"
-            if legacy.exists() or (state_path.parent / "session-state").exists():
+            if any(item.name != "runtime.lock" for item in state_path.parent.iterdir()):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            payload: dict[str, JsonValue] = {"sessions": [], "executions": [], "results": [], "idempotency": [], "events": [], "tasks": [], "evaluations": [], "memories": [], "artifacts": [], "approvals": [], "externals": [], "operations": [], "tools": []}
-            self._load_payload(payload)
+            self._load_payload(_empty_payload())
             return
         try:
             state = read_json(state_path)
-            if state.get("schema_version") != 2 or state.get("namespace") != self.persistence.namespace or state.get("atomic_domain_id") != self.persistence.atomic_domain_id:
+            if state.get("format") != "linktools-ai-runtime" or state.get("generation") != 1 or state.get("namespace") != self.persistence.namespace:
                 raise ValueError("runtime state identity mismatch")
-            records = state.get("records")
-            if not isinstance(records, dict):
-                raise ValueError("runtime records must be an object")
-            required = ("sessions", "executions", "results", "idempotency", "events", "tasks", "evaluations", "memories", "artifacts", "approvals", "externals", "operations", "tools")
-            if set(records) != set(required) or any(not isinstance(records[name], list) for name in required):
-                raise ValueError("runtime records shape mismatch")
-            _validate_state_record_uniqueness(records)
-            payload = dict(records)
-            task_records = payload.pop("tasks")
-            if any(not isinstance(item, dict) or item.get("record_type") not in {"plan", "node"} for item in task_records):
-                raise ValueError("runtime task record shape mismatch")
-            payload["task_plans"] = [item for item in task_records if isinstance(item, dict) and item.get("record_type") == "plan"]
-            payload["task_nodes"] = [item for item in task_records if isinstance(item, dict) and item.get("record_type") == "node"]
+            payload = _empty_payload()
+            for domain in StorageDomain.durable():
+                records_path = state_path.parent / domain.value / "records.json"
+                if not records_path.is_file():
+                    continue
+                records = read_json(records_path)
+                if not isinstance(records, dict):
+                    raise ValueError("runtime domain records must be an object")
+                _merge_domain_payload(payload, records)
+            _validate_state_record_uniqueness({"sessions": payload["sessions"], "executions": payload["executions"], "results": payload["results"], "idempotency": payload["idempotency"], "events": payload["events"], "tasks": payload["task_plans"] + payload["task_nodes"], "evaluations": payload["evaluations"], "memories": payload["memories"], "artifacts": payload["artifacts"], "approvals": payload["approvals"], "externals": payload["externals"], "operations": payload["operations"], "tools": payload["tools"]})
             self._load_payload(payload)
             self._validate_payload()
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
@@ -1864,6 +2049,80 @@ def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
         if identity in task_keys:
             raise ValueError("runtime task identity is duplicated")
         task_keys.add(identity)
+
+
+def _empty_payload() -> dict[str, JsonValue]:
+    return {
+        "sessions": [], "executions": [], "results": [], "idempotency": [], "events": [],
+        "task_plans": [], "task_nodes": [], "evaluations": [], "memories": [], "artifacts": [],
+        "approvals": [], "externals": [], "recovery_checkpoints": [], "operations": [], "tools": [],
+    }
+
+
+def _domain_payload(payload: dict[str, JsonValue], domain: StorageDomain) -> dict[str, JsonValue]:
+    keys: dict[StorageDomain, tuple[str, ...]] = {
+        StorageDomain.CONVERSATION: ("sessions", "operations"),
+        StorageDomain.EXECUTION: ("executions", "results", "idempotency", "events", "operations"),
+        StorageDomain.MEMORY: ("memories", "operations"),
+        StorageDomain.ARTIFACT: ("artifacts",),
+        StorageDomain.TASK: ("task_plans", "task_nodes", "operations"),
+        StorageDomain.EVALUATION: ("evaluations", "idempotency", "operations"),
+        StorageDomain.RECOVERY: ("approvals", "externals", "recovery_checkpoints", "tools", "operations"),
+        StorageDomain.ASSET: (),
+    }
+    values = {key: payload[key] for key in keys[domain] if key != "operations"}
+    if domain is StorageDomain.EXECUTION:
+        values["idempotency"] = [item for item in values["idempotency"] if isinstance(item, dict) and item.get("scope") != "evaluation.run"]
+    elif domain is StorageDomain.EVALUATION:
+        values["idempotency"] = [item for item in values["idempotency"] if isinstance(item, dict) and item.get("scope") == "evaluation.run"]
+    if "operations" in keys[domain]:
+        values["operations"] = [
+            item for item in payload["operations"]
+            if isinstance(item, dict) and _operation_storage_domain(item.get("resource_kind")) is domain
+        ]
+    values["tasks"] = [
+        {"record_type": "plan", **item}
+        for item in values.pop("task_plans", [])
+        if isinstance(item, dict)
+    ] + [
+        {"record_type": "node", **item}
+        for item in values.pop("task_nodes", [])
+        if isinstance(item, dict)
+    ]
+    return values
+
+
+def _operation_storage_domain(value: object) -> StorageDomain:
+    return {
+        "SESSION": StorageDomain.CONVERSATION,
+        "EXECUTION": StorageDomain.EXECUTION,
+        "MEMORY": StorageDomain.MEMORY,
+        "ARTIFACT": StorageDomain.ARTIFACT,
+        "TASK_GRAPH": StorageDomain.TASK,
+        "EVALUATION": StorageDomain.EVALUATION,
+        "DOWNLOAD_GRANT": StorageDomain.ARTIFACT,
+        "APPROVAL": StorageDomain.RECOVERY,
+        "EXTERNAL_CALL": StorageDomain.RECOVERY,
+        "TOOL_OPERATION": StorageDomain.RECOVERY,
+    }.get(str(value), StorageDomain.RECOVERY)
+
+
+def _merge_domain_payload(payload: dict[str, JsonValue], records: dict[str, JsonValue]) -> None:
+    for key, value in records.items():
+        if key == "tasks":
+            if not isinstance(value, list):
+                raise ValueError("runtime task records must be a list")
+            for item in value:
+                if not isinstance(item, dict):
+                    raise ValueError("runtime task record must be an object")
+                target = "task_plans" if item.get("record_type") == "plan" else "task_nodes" if item.get("record_type") == "node" else None
+                if target is None:
+                    raise ValueError("runtime task record type is invalid")
+                payload[target].append({key: value for key, value in item.items() if key != "record_type"})
+        elif key in payload:
+            if not isinstance(value, list):
+                raise ValueError("runtime domain records must be lists")
+            payload[key].extend(value)
 def _record_json(record: SessionRecord | ExecutionRecord | IdempotencyRecord) -> dict[str, JsonValue]:
     value = asdict(record)
     return _json_value(value)
@@ -1888,11 +2147,13 @@ def _time(value: str) -> datetime:
 
 
 def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
-    return SessionRecord(session_id=str(value["session_id"]), tenant_id=str(value["tenant_id"]), owner_principal_id=str(value["owner_principal_id"]), binding_digest=str(value["binding_digest"]), status=SessionStatus(str(value["status"])), revision=int(value["revision"]), resource_generation=int(value["resource_generation"]), cwd=None if value.get("cwd") is None else str(value["cwd"]), metadata=value.get("metadata", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), closed_at=None if value.get("closed_at") is None else _time(value["closed_at"]), head_execution_id=None if value.get("head_execution_id") is None else str(value["head_execution_id"]))
+    raw_cursor = value.get("continuation")
+    continuation = None if raw_cursor is None else ConversationCursor(str(raw_cursor["run_id"]), int(raw_cursor["revision"]))
+    return SessionRecord(session_id=str(value["session_id"]), tenant_id=str(value["tenant_id"]), owner_principal_id=str(value["owner_principal_id"]), binding_digest=str(value["binding_digest"]), status=SessionStatus(str(value["status"])), revision=int(value["revision"]), resource_generation=int(value["resource_generation"]), cwd=None if value.get("cwd") is None else str(value["cwd"]), metadata=value.get("metadata", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), closed_at=None if value.get("closed_at") is None else _time(value["closed_at"]), continuation=continuation)
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), memory_namespace=None if value.get("memory_namespace") is None else str(value["memory_namespace"]))
+    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), result_ref=None if value.get("result_ref") is None else str(value["result_ref"]), result_digest=None if value.get("result_digest") is None else str(value["result_digest"]), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), memory_namespace=None if value.get("memory_namespace") is None else str(value["memory_namespace"]), conversation_run_id=None if value.get("conversation_run_id") is None else str(value["conversation_run_id"]))
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
@@ -1900,6 +2161,27 @@ def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
     if re.fullmatch(r"[0-9a-f]{64}", key_hash) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return IdempotencyRecord(str(value["tenant_id"]), str(value["scope"]), key_hash, str(value["request_digest"]), str(value["execution_id"]), IdempotencyStatus(str(value["status"])), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), _time(value["created_at"]), _time(value["updated_at"]))
+
+
+def _recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckpoint:
+    return RecoveryCheckpoint(
+        str(value["checkpoint_id"]),
+        str(value["execution_id"]),
+        str(value["tenant_id"]),
+        str(value["binding_digest"]),
+        str(value["run_id"]),
+        str(value["phase"]),
+        None if value.get("pending_operation_id") is None else str(value["pending_operation_id"]),
+        value.get("payload", {}),
+        int(value["revision"]),
+        _time(value["created_at"]),
+        _time(value["updated_at"]),
+        value.get("approval_state", {}),
+        value.get("external_state", {}),
+        value.get("tool_effect_state", {}),
+        value.get("idempotency_state", {}),
+        value.get("terminal_handoff"),
+    )
 
 
 def _json_record(record: object) -> dict[str, JsonValue]:
@@ -1961,14 +2243,6 @@ def _component(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode("utf-8")).rstrip(b"=").decode("ascii")
 
 
-def _fsync_directory(path: Path) -> None:
-    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _validate_blob_digest(value: str) -> None:
     if re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1990,28 +2264,40 @@ def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ..
     )
 
 
-def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: "str | None" = None, atomic_domain_id: "str | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> InMemoryRuntime:
+def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None" = None, persist: frozenset[StorageDomain] | None = None, writer_lock: "FilesystemWriterLock | None" = None) -> InMemoryRuntime:
     validate_persistence_namespace(namespace)
-    mode = RuntimePersistenceMode.IN_MEMORY if backend is RuntimeBackend.IN_MEMORY else RuntimePersistenceMode.FILESYSTEM
-    domain = atomic_domain_id or f"{backend.value}-domain-{uuid.uuid4().hex}"
-    args = (mode, namespace, domain)
-    sessions = _SessionRepository(*args)
-    executions = _ExecutionRepository(*args)
+    selected_domains = frozenset(StorageDomain.durable() if persist is None and filesystem else persist or ())
+    sessions = _SessionRepository(namespace)
+    executions = _ExecutionRepository(namespace)
+    execution_idempotency = _IdempotencyRepository(namespace)
+    evaluation_idempotency = _IdempotencyRepository(namespace)
+    recovery_checkpoint = _RecoveryCheckpointRepository(namespace)
+    blob_domains = (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
+    if filesystem and state_path is not None:
+        blob_stores = {
+            domain: FilesystemBlobStore(Path(state_path).parent / domain.value / "blob", namespace) if domain in selected_domains else InMemoryBlobStore(namespace)
+            for domain in blob_domains
+        }
+    else:
+        blob_stores = {domain: InMemoryBlobStore(namespace) for domain in blob_domains}
+    blob_router = DomainBlobRouter(blob_stores)
     components: tuple[RuntimeRepository, ...] = (
         sessions,
         executions,
-        _ResultRepository(executions, *args),
-        _IdempotencyRepository(*args),
-        _EventRepository(executions, *args),
-        _TaskRepository(*args),
-        _EvaluationRepository(*args),
-        _MemoryRepository(*args),
-        _ArtifactRepository(*args),
-        _ApprovalRepository(*args),
-        _ExternalRepository(*args),
-        _OperationRepository(*args),
-        _ToolRepository(*args),
-        FilesystemBlobStore(Path(state_path).parent, *args) if backend is RuntimeBackend.FILESYSTEM and state_path is not None else InMemoryBlobStore(*args),
+        _ResultRepository(executions, namespace),
+        execution_idempotency,
+        _EventRepository(executions, namespace),
+        _TaskRepository(namespace),
+        _EvaluationRepository(namespace),
+        _MemoryRepository(namespace),
+        _ArtifactRepository(namespace),
+        _ApprovalRepository(namespace),
+        _ExternalRepository(namespace),
+        _OperationRepository(namespace),
+        _ToolRepository(namespace),
+        blob_router,
+        evaluation_idempotency,
+        recovery_checkpoint,
     )
     executions.bind_start_repositories(components[3], components[4], components[11])
     components[2].bind_terminal_repositories(components[0], components[3], components[4], components[11])
@@ -2021,46 +2307,54 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: "str 
     for component in components:
         if isinstance(component, _Base):
             component._lock = transaction_lock
-    persistence = RuntimePersistence(
-        mode=mode,
-        backend=backend,
+    persistence = RuntimeStores(
         namespace=namespace,
-        sessions=sessions,
-        executions=executions,
-        results=components[2],
-        idempotency=components[3],
-        events=components[4],
-        tasks=components[5],
-        evaluations=components[6],
-        memories=components[7],
-        artifacts=components[8],
-        approvals=components[9],
-        externals=components[10],
-        operations=components[11],
+        conversation=sessions,
+        execution=executions,
+        execution_result=components[2],
+        execution_idempotency=components[3],
+        evaluation_idempotency=components[-2],
+        execution_events=components[4],
+        task=components[5],
+        evaluation=components[6],
+        memory=components[7],
+        artifact=components[8],
+        recovery_approval=components[9],
+        recovery_external=components[10],
+        recovery_checkpoint=components[-1],
+        operation_ledger=components[11],
         tools=components[12],
         blobs=components[13],
     )
-    if backend is RuntimeBackend.FILESYSTEM:
+    if filesystem:
         if state_path is None:
             raise ValueError("filesystem runtime requires a state path")
-        return FilesystemRuntime(persistence, components, state_path, writer_lock)
+        memory_runtime = _build_runtime(filesystem=False, namespace=namespace)
+        routed = _route_runtime_stores(persistence, memory_runtime.persistence, selected_domains)
+        return FilesystemRuntime(
+            routed,
+            (*components, *memory_runtime.components),
+            state_path,
+            selected_domains,
+            writer_lock,
+            durable_components=components,
+        )
     return InMemoryRuntime(persistence, components)
 
 
 def build_in_memory_runtime(*, namespace: "str | None" = None) -> InMemoryRuntime:
     selected_namespace = f"memory-{uuid.uuid4().hex}" if namespace is None else namespace
-    return _build_runtime(RuntimeBackend.IN_MEMORY, namespace=selected_namespace)
+    return _build_runtime(filesystem=False, namespace=selected_namespace)
 
 
-def build_filesystem_runtime(root: str, *, namespace: str, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
+def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[StorageDomain] | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
     if not isinstance(root, str) or not root.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     validate_persistence_namespace(namespace)
     root_path = Path(root).expanduser().resolve()
     namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-    state_path = root_path / ".linktools" / "runtime" / namespace_digest / "state.json"
-    domain = hashlib.sha256(f"filesystem\0{root_path}\0{namespace}".encode("utf-8")).hexdigest()
-    return _build_runtime(RuntimeBackend.FILESYSTEM, namespace=namespace, state_path=str(state_path), atomic_domain_id=domain, writer_lock=writer_lock)
+    state_path = root_path / namespace_digest / "manifest.json"
+    return _build_runtime(filesystem=True, namespace=namespace, state_path=str(state_path), persist=persist, writer_lock=writer_lock)
 
 
 __all__ = ["FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime", "build_filesystem_runtime", "build_in_memory_runtime"]

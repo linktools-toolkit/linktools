@@ -28,7 +28,6 @@ from ..storage import (
     StorageRevision,
     VersionSummary,
     classify_sql_error,
-    prepare_storage_database,
     resolve_dialect,
     sql_blob,
     sql_digest,
@@ -37,13 +36,16 @@ from ..storage import (
     sql_table_options,
     sql_text_key,
     storage_name,
+    get_sql_storage_context,
+    register_sql_schema_contributor,
+    validate_schema,
 )
 from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 
 _logger = environ.get_logger("ai.asset.sql")
@@ -174,15 +176,22 @@ class SqlAssetSchema:
         return tables
 
 
+register_sql_schema_contributor("asset.sql", SqlAssetSchema.register_schema)
+
+
 class SqlAssetBackend(InMemoryAssetBackend):
     """Persist current files, history, content blobs, and revisions separately."""
 
     def __init__(
         self,
-        session_factory: "async_sessionmaker[AsyncSession]",
+        engine: "AsyncEngine",
         *,
         namespace: str,
     ) -> None:
+        from sqlalchemy.ext.asyncio import AsyncEngine
+
+        if not isinstance(engine, AsyncEngine):
+            raise ValueError("SqlAssetBackend requires an AsyncEngine")
         try:
             validate_asset_namespace(namespace)
         except AIError as error:
@@ -191,18 +200,16 @@ class SqlAssetBackend(InMemoryAssetBackend):
         super().__init__(AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest))
         registry = SqlSchemaRegistry()
         self._tables = SqlAssetSchema.register_schema(registry)
-        self._schema_manifest_digest = registry.freeze().digest
-        self._session_factory = session_factory
+        registry.freeze()
+        self._engine = engine
+        self._context = get_sql_storage_context(engine, namespace)
+        self._session_factory = self._context.sessions
         self._namespace = namespace
         self._state_loaded = False
 
     async def initialize(self) -> None:
-        database = await prepare_storage_database(
-            session_factory=self._session_factory,
-            metadata=self._tables.revision.metadata,
-            schema_manifest_digest=self._schema_manifest_digest,
-        )
-        await database.initialize()
+        if self._context.schema_manifest_digest is None:
+            await validate_schema(self._engine, self._tables.revision.metadata)
         await self._refresh_state()
         _logger.debug(
             "SQL asset backend initialized: namespace=%s revision=%s",

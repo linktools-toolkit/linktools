@@ -13,6 +13,7 @@ from ..storage import (
     sql_table_options,
     sql_text_key,
     storage_name,
+    register_sql_schema_contributor,
 )
 
 runtime_metadata: object | None = None
@@ -40,15 +41,17 @@ class SqlRuntimeSchema:
         runtime_metadata = registry.metadata
         integer_id = sql_integer_id()
         names = (
-            "sessions", "executions", "results", "idempotency", "execution_events",
+            "sessions", "executions", "results", "idempotency", "evaluation_idempotency", "execution_events",
             "task_graphs", "task_nodes", "evaluations", "memories", "artifacts", "approvals",
             "external_results", "operation_counters", "operation_ledger", "tool_operations", "blobs", "blob_chunks",
+            "recovery_checkpoints",
         )
         physical_names = {
             "sessions": "runtime_sessions",
             "executions": "runtime_executions",
             "results": "runtime_results",
             "idempotency": "runtime_idempotency",
+            "evaluation_idempotency": "runtime_evaluation_idempotency",
             "execution_events": "runtime_events",
             "task_graphs": "runtime_tasks",
             "task_nodes": "runtime_task_nodes",
@@ -62,6 +65,7 @@ class SqlRuntimeSchema:
             "tool_operations": "runtime_tools",
             "blobs": "runtime_blobs",
             "blob_chunks": "runtime_blob_chunks",
+            "recovery_checkpoints": "runtime_recovery_checkpoints",
         }
         tables: dict[str, Table] = {}
         for name in names:
@@ -81,10 +85,7 @@ class SqlRuntimeSchema:
                 Column("payload", JSON, nullable=False),
             ]
             if name == "sessions":
-                columns.extend((
-                    Column("profile", sql_text_key(64), nullable=False, default=""),
-                    Column("head_execution_id", sql_text_key(256), nullable=True),
-                ))
+                columns.append(Column("profile", sql_text_key(64), nullable=False, default=""))
             if name == "executions":
                 columns.append(Column("agent_run_sequence", BigInteger, nullable=False, default=0))
             if name == "tool_operations":
@@ -108,7 +109,7 @@ class SqlRuntimeSchema:
                     Column("resource_id", sql_text_key(256), nullable=False, default=""),
                     Column("partition_key", sql_digest(), nullable=False, default=""),
                 ))
-            if name == "idempotency":
+            if name in {"idempotency", "evaluation_idempotency"}:
                 columns.extend((
                     Column("scope", sql_text_key(64), nullable=False, default=""),
                     Column("key_hash", sql_digest(), nullable=False, default=""),
@@ -156,15 +157,16 @@ class SqlRuntimeSchema:
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "call_key", name="uk_namespace_key_tenant_id_call_key"))
             if name == "operation_counters":
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "partition_key", name="uk_namespace_key_tenant_id_partition_key"))
-            if name == "idempotency":
+            if name in {"idempotency", "evaluation_idempotency"}:
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "identity_key", name="uk_namespace_key_tenant_id_identity_key"))
-            if name == "blobs":
-                table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "digest", name="uk_namespace_key_tenant_id_digest"))
             if name == "blob_chunks":
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "chunk_key", name="uk_namespace_key_tenant_id_chunk_key"))
             registry.add_table(table, owner="adapter.sql")
             tables[name] = table
         return tables
+
+
+register_sql_schema_contributor("adapter.sql", SqlRuntimeSchema.register_schema)
 
 
 def ensure_step_metadata() -> "MetaData":

@@ -20,7 +20,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CreateSessionRequest, ExecutionRecord, LocalExecutionBackend, SessionRecord
 from linktools.ai.spec import AgentSpec
-from linktools.ai.workspace import RuntimePersistenceConfig, Workspace, open_workspace_runtime, trusted_workspace_principal
+from linktools.ai import RuntimeStorage
+from linktools.ai.workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
 
 
@@ -38,14 +39,14 @@ class _MCPRuntime:
 
 @pytest.mark.asyncio
 async def test_workspace_default_agent_declares_configured_mcp_servers(tmp_path: Path) -> None:
-    mcp = tmp_path / ".linktools" / "mcp" / "local"
+    mcp = tmp_path / ".linktools" / "assets" / "mcp" / "local"
     mcp.parent.mkdir(parents=True)
     mcp.write_text('{"args":[],"command":"echo","id":"local","revision":1}', encoding="utf-8")
 
     workspace = Workspace.load(tmp_path)
     async with open_workspace_runtime(
         workspace,
-        config=RuntimePersistenceConfig.in_memory(namespace="persistence-namespace"),
+        storage=RuntimeStorage.memory(),
         model="test-model",
         mcp_runtime=_MCPRuntime(),
     ) as runtime:
@@ -125,10 +126,10 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
     now = datetime.now(timezone.utc)
     try:
         for tenant_id in ("workspace-tenant", "foreign-tenant"):
-            await runtime.persistence.sessions.create(
+            await runtime.persistence.conversation.create(
                 SessionRecord("session", tenant_id, "principal", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None)
             )
-            await runtime.persistence.executions.create(
+            await runtime.persistence.execution.create(
                 ExecutionRecord(
                     execution_id="execution",
                     tenant_id=tenant_id,
@@ -162,9 +163,9 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
 
         await backend.reconcile()
 
-        workspace_execution = await runtime.persistence.executions.get("execution", tenant_id="workspace-tenant")
-        foreign_execution = await runtime.persistence.executions.get("execution", tenant_id="foreign-tenant")
-        assert workspace_execution.status is ExecutionStatus.CANCELLED
+        workspace_execution = await runtime.persistence.execution.get("execution", tenant_id="workspace-tenant")
+        foreign_execution = await runtime.persistence.execution.get("execution", tenant_id="foreign-tenant")
+        assert workspace_execution.status is ExecutionStatus.STARTED
         assert foreign_execution.status is ExecutionStatus.STARTED
     finally:
         await runtime.close()

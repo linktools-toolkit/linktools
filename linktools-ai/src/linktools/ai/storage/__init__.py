@@ -48,8 +48,12 @@ from ._database import (
     SqlSchemaRegistry,
     SqlTableManifest,
     StorageDatabase,
-    build_storage,
+    build_sql_schema_metadata,
+    create_sql_storage_context,
+    get_sql_storage_context,
     prepare_storage_database,
+    register_storage_schema,
+    register_sql_schema_contributor,
     sql_blob,
     sql_digest,
     sql_index,
@@ -82,6 +86,7 @@ from ._files import (
     read_bytes,
     read_json,
     safe_child,
+    sync_directory,
     write_bytes_atomic,
     write_json_atomic,
 )
@@ -95,6 +100,7 @@ from ._lock import (
 )
 from ._names import TABLE_PREFIX, storage_name
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
+from ._selection import RuntimeStorage, StorageDomain
 
 __all__ = [
     "TABLE_PREFIX",
@@ -155,13 +161,20 @@ __all__ = [
     "StorageRevisionSource",
     "StorageValueValidator",
     "StorageWriter",
+    "sync_directory",
+    "RuntimeStorage",
+    "StorageDomain",
     "TieredContentCache",
     "VersionSummary",
     "VersionedStorage",
     "atomic_write_bytes",
     "atomic_write_json",
-    "build_storage",
+    "create_sql_storage_context",
+    "build_sql_schema_metadata",
+    "get_sql_storage_context",
     "prepare_storage_database",
+    "register_storage_schema",
+    "register_sql_schema_contributor",
     "classify_integrity_error_by_message",
     "classify_sql_error",
     "is_retryable_sql_transaction",

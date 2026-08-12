@@ -27,6 +27,8 @@ from ._persistence import (
     BlobRef,
     BlobStatus,
     BlobStore,
+    ConversationCursor,
+    DomainBlobStore,
     EvaluationRecord,
     EvaluationRepository,
     ExecutionCancelRequestCommit,
@@ -41,6 +43,8 @@ from ._persistence import (
     ExecutionTerminalCommitResult,
     ExternalResultRecord,
     ExternalResultRepository,
+    RecoveryCheckpoint,
+    RecoveryCheckpointRepository,
     IdempotencyRecord,
     IdempotencyRepository,
     IdempotencyTerminalUpdate,
@@ -52,18 +56,14 @@ from ._persistence import (
     OperationTerminalUpdate,
     ResultRecord,
     ResultRepository,
-    RuntimeBackend,
-    RuntimePersistence,
-    RuntimePersistenceMode,
+    RuntimeStores,
     RuntimeRepository,
-    SessionHeadAdvance,
     SessionRecord,
     SessionRepository,
     TaskLease,
     TaskNodeView,
     TaskRepository,
     ToolOperationStatus,
-    backend_mode,
 )
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner, WorkflowTaskGraphLauncher
 from ._services import (
@@ -135,6 +135,6 @@ from ._tool import (
     ToolStateStore,
 )
 
-__all__ = [
-    "AllowAllToolPolicy", "ApprovalApi", "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalQueryApi", "ApprovalRecord", "ApprovalRepository", "ApprovalService", "ApprovalView", "ArtifactApi", "ArtifactDownload", "ArtifactRecord", "ArtifactRepository", "ArtifactService", "ArtifactView", "BlobPayloadService", "BlobRef", "BlobStatus", "BlobStore", "BudgetReservation", "BudgetReservationRequest", "BudgetService", "BudgetSettlement", "BudgetSettlementRequest", "CancelEffectOutcome", "CancelExecutionRequest", "CancelExecutionResult", "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest", "CreateSessionRequest", "DefaultApprovalService", "DefaultArtifactService", "DefaultEventService", "DefaultExternalService", "DefaultEvaluationService", "DefaultExecutionService", "DefaultSessionService", "DefaultTaskService", "EvaluationApi", "EvaluationComparison", "EvaluationHandle", "EvaluationQueryApi", "EvaluationRecord", "EvaluationRepository", "EvaluationService", "EvaluationView", "EventApi", "EventService", "ExecutionApi", "ExecutionBackend", "ExecutionCancelRequest", "ExecutionCancelRequestCommit", "ExecutionEvent", "ExecutionEventRecord", "ExecutionHandle", "ExecutionHistoryItem", "ExecutionHistoryReader", "ExecutionQueryApi", "ExecutionRecord", "ExecutionRepository", "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExecutionTraceItem", "ExecutionView", "ExternalResultRecord", "ExternalResultRepository", "ExternalResultRequest", "ExternalResultResult", "ExternalService", "ForkExecutionRequest", "ForkSessionRequest", "IdempotencyRecord", "IdempotencyRepository", "IdempotencyTerminalUpdate", "ListSessionRequest", "LoadedSession", "LocalExecutionBackend", "MemoryRecord", "MemoryRepository", "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "OperationTerminalUpdate", "Page", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResultRecord", "ResultRepository", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest", "Runtime", "RuntimeBackend", "RuntimePersistence", "RuntimePersistenceMode", "RuntimeRepository", "RuntimeTaskNodeRunner", "SessionApi", "SessionHeadAdvance", "SessionRecord", "SessionRepository", "SessionService", "SessionQueryApi", "SessionView", "TaskLease", "TaskNodeView", "TaskRepository", "TaskService", "ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore", "ToolOperationStatus", "TranscriptItem", "UpdateSessionRequest", "WorkflowGateway", "WorkflowQueryResult", "WorkflowTaskGraphLauncher", "WorkflowUpdateResult", "backend_mode", "validate_compare_request",
+__all__ = ["RecoveryCheckpoint", "RecoveryCheckpointRepository",
+    "AllowAllToolPolicy", "ApprovalApi", "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalQueryApi", "ApprovalRecord", "ApprovalRepository", "ApprovalService", "ApprovalView", "ArtifactApi", "ArtifactDownload", "ArtifactRecord", "ArtifactRepository", "ArtifactService", "ArtifactView", "BlobPayloadService", "BlobRef", "BlobStatus", "BlobStore", "BudgetReservation", "BudgetReservationRequest", "BudgetService", "BudgetSettlement", "BudgetSettlementRequest", "CancelEffectOutcome", "CancelExecutionRequest", "CancelExecutionResult", "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest", "ConversationCursor", "CreateSessionRequest", "DefaultApprovalService", "DefaultArtifactService", "DefaultEventService", "DefaultExternalService", "DefaultEvaluationService", "DefaultExecutionService", "DefaultSessionService", "DefaultTaskService", "DomainBlobStore", "EvaluationApi", "EvaluationComparison", "EvaluationHandle", "EvaluationQueryApi", "EvaluationRecord", "EvaluationRepository", "EvaluationService", "EvaluationView", "EventApi", "EventService", "ExecutionApi", "ExecutionBackend", "ExecutionCancelRequest", "ExecutionCancelRequestCommit", "ExecutionEvent", "ExecutionEventRecord", "ExecutionHandle", "ExecutionHistoryItem", "ExecutionHistoryReader", "ExecutionQueryApi", "ExecutionRecord", "ExecutionRepository", "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExecutionTraceItem", "ExecutionView", "ExternalResultRecord", "ExternalResultRepository", "ExternalResultRequest", "ExternalResultResult", "ExternalService", "ForkExecutionRequest", "ForkSessionRequest", "IdempotencyRecord", "IdempotencyRepository", "IdempotencyTerminalUpdate", "ListSessionRequest", "LoadedSession", "LocalExecutionBackend", "MemoryRecord", "MemoryRepository", "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "OperationTerminalUpdate", "Page", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResultRecord", "ResultRepository", "ResumeSessionRequest", "RetryExecutionRequest", "RunEvaluationRequest", "Runtime", "RuntimeRepository", "RuntimeStores", "RuntimeTaskNodeRunner", "SessionApi", "SessionRecord", "SessionRepository", "SessionService", "SessionQueryApi", "SessionView", "TaskLease", "TaskNodeView", "TaskRepository", "TaskService", "ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore", "ToolOperationStatus", "TranscriptItem", "UpdateSessionRequest", "WorkflowGateway", "WorkflowQueryResult", "WorkflowTaskGraphLauncher", "WorkflowUpdateResult", "validate_compare_request",
 ]

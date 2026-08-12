@@ -20,7 +20,7 @@ async def open_local_task_api(
     owner: str,
 ) -> "AsyncIterator[TaskApi]":
     """Open only the durable local Task launcher and service façade."""
-    launcher = LocalTaskGraphLauncher(persistence.tasks, runner, owner=owner)
+    launcher = LocalTaskGraphLauncher(persistence.task, runner, owner=owner)
     service = DefaultTaskService(persistence, authorization, launcher)
     try:
         yield service

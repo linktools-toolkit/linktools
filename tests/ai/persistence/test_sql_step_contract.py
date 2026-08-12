@@ -4,16 +4,15 @@
 """Dialect-independent SQL StepStore checks."""
 
 import pytest
-from linktools.ai.adapter import SqlMediaStore, SqlStepStore
+from linktools.ai.adapter import SqlStepStore
 from linktools.ai.errors import AIError, ErrorCode
 from pydantic_ai_harness.step_persistence import StepStore
 from sqlalchemy import inspect
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def test_one_sql_step_store_implements_the_public_harness_protocol() -> None:
     assert isinstance(SqlStepStore.__new__(SqlStepStore), StepStore)
-    assert hasattr(SqlMediaStore, "put")
 
 
 def test_sql_table_names_and_namespace_columns_are_separate() -> None:
@@ -27,8 +26,7 @@ def test_sql_table_names_and_namespace_columns_are_separate() -> None:
 @pytest.mark.asyncio
 async def test_sql_step_store_requires_preprovisioned_schema() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    store = SqlStepStore(session_factory, "namespace")
+    store = SqlStepStore(engine, namespace="namespace")
     try:
         with pytest.raises(AIError) as error:
             await store.initialize()

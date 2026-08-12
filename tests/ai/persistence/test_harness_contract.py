@@ -58,7 +58,7 @@ def test_filesystem_step_store_uses_digest_only_paths(tmp_path: Path) -> None:
     async def run() -> list[Path]:
         store = DurableFilesystemStepStore(tmp_path, "tenant/unsafe")
         await store.initialize()
-        paths = list((tmp_path / "steps").rglob("*"))
+        paths = list((tmp_path / "step").rglob("*"))
         await store.close()
         return paths
 

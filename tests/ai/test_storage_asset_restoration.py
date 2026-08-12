@@ -176,15 +176,14 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
 
 @pytest.mark.asyncio
 async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         registry = SqlSchemaRegistry()
         tables = SqlAssetSchema.register_schema(registry)
         manifest = registry.freeze()
-        backend = SqlAssetBackend(session_factory, namespace="test")
+        backend = SqlAssetBackend(engine, namespace="test")
         assert backend.root.scheme == "sql"
         assert manifest.digest
         assert tuple(table.name for table in (tables.entry, tables.change, tables.blob, tables.revision)) == (
@@ -197,19 +196,23 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
         await engine.dispose()
 
 
-def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
+@pytest.mark.asyncio
+async def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     with pytest.raises(ValueError, match="SQL asset namespace is invalid"):
-        SqlAssetBackend(object(), namespace="a" * 129)
+        SqlAssetBackend(engine, namespace="a" * 129)
+    await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_sql_asset_namespace_isolates_the_same_logical_key(tmp_path: Path) -> None:
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset-isolation.db'}")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    first = SqlAssetBackend(session_factory, namespace="assets-a")
-    second = SqlAssetBackend(session_factory, namespace="assets-b")
+    first = SqlAssetBackend(engine, namespace="assets-a")
+    second = SqlAssetBackend(engine, namespace="assets-b")
     key = AssetKey("prompt", "shared")
     try:
         await provision_database(engine)
@@ -247,7 +250,7 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
     try:
         registry = SqlSchemaRegistry()
         tables = SqlAssetSchema.register_schema(registry)
-        backend = SqlAssetBackend(session_factory, namespace="history")
+        backend = SqlAssetBackend(engine, namespace="history")
         await provision_database(engine)
         await backend.initialize()
         key = AssetKey("mcp", "history.yaml")
@@ -287,12 +290,11 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
 @pytest.mark.asyncio
 async def test_sql_asset_backend_requires_preprovisioned_schema(tmp_path: Path) -> None:
     from sqlalchemy import inspect
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        backend = SqlAssetBackend(session_factory, namespace="missing")
+        backend = SqlAssetBackend(engine, namespace="missing")
         with pytest.raises(AIError) as error:
             await backend.initialize()
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
@@ -392,7 +394,7 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
     try:
         registry = SqlSchemaRegistry()
         tables = SqlAssetSchema.register_schema(registry)
-        backend = SqlAssetBackend(session_factory, namespace="batch")
+        backend = SqlAssetBackend(engine, namespace="batch")
         await provision_database(engine)
         await backend.initialize()
         changes = tuple(

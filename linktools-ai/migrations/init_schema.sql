@@ -5,12 +5,13 @@
 -- reviewed, environment-specific DBA migration tooling.
 --
 -- This reference contains every current SQL table, grouped by its owner:
+--   * Schema manifest table owned by storage.database;
 --   * Runtime tables owned by adapter.sql;
 --   * Harness StepStore tables owned by adapter._step;
 --   * Asset current entries, change history, content blobs, and revision
 --     counter tables owned by asset.sql.
--- Each owner retains an independent runtime initialization boundary. Do not
--- register this complete reference as one metadata set in application code.
+-- The application validates this complete manifest before opening SQL-backed
+-- runtime resources.
 --
 -- Reference DBA rules:
 --   * Every table uses the ai_ prefix and every table/column carries a COMMENT.
@@ -21,7 +22,7 @@
 --     keys use uk_namespace_key_tenant_id_record_id; timestamp keys use
 --     ix_updated_at and ix_created_at. Special keys retain the exact logical
 --     names declared by their columns, including uk_namespace, uk_digest,
---     uk_namespace_asset_key_hash, uk_namespace_key_tenant_id_digest,
+--     uk_namespace_asset_key_hash,
 --     uk_namespace_key_tenant_id_chunk_key,
 --     uk_namespace_key_tenant_id_call_key, and
 --     uk_namespace_key_tenant_id_identity_key.
@@ -43,6 +44,18 @@
 --   * JSON and LONGBLOB payloads are limited to fields required by each contract.
 
 SET NAMES utf8mb4;
+
+CREATE TABLE `ai_storage_schema_manifest` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Singleton schema manifest identifier',
+  `generation` INT NOT NULL COMMENT 'Storage format generation',
+  `manifest_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Complete schema manifest digest',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_storage_generation` (`generation`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Linktools AI storage schema manifest';
 
 CREATE TABLE `ai_runtime_approvals` (
   `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
@@ -135,10 +148,35 @@ CREATE TABLE `ai_runtime_blobs` (
   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_digest` (`namespace_key`, `tenant_id`, `digest`),
   KEY `ix_created_at` (`created_at`),
   KEY `ix_updated_at` (`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime content blob records';
+
+CREATE TABLE `ai_runtime_evaluation_idempotency` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
+  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
+  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
+  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
+  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
+  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
+  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
+  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
+  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
+  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
+  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
+  `scope` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency scope',
+  `key_hash` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency key digest',
+  `identity_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Idempotency identity digest',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
+  UNIQUE KEY `uk_namespace_key_tenant_id_identity_key` (`namespace_key`, `tenant_id`, `identity_key`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime evaluation idempotency records';
 
 CREATE TABLE `ai_runtime_evaluations` (
   `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
@@ -331,6 +369,28 @@ CREATE TABLE `ai_runtime_operations` (
   KEY `ix_updated_at` (`updated_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime operation ledger';
 
+CREATE TABLE `ai_runtime_recovery_checkpoints` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
+  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
+  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
+  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
+  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
+  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
+  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
+  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
+  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
+  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
+  `payload` JSON NOT NULL COMMENT 'Canonical recovery checkpoint payload',
+  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime recovery checkpoints';
+
 CREATE TABLE `ai_runtime_results` (
   `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
   `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
@@ -368,7 +428,6 @@ CREATE TABLE `ai_runtime_sessions` (
   `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
   `payload` JSON NOT NULL COMMENT 'Canonical record payload',
   `profile` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Session profile',
-  `head_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Current session head execution',
   `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
   `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),

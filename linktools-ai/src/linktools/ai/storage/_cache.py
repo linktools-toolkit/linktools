@@ -21,6 +21,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
+from ._files import sync_directory
+
 ContentCacheKey: TypeAlias = str
 
 
@@ -250,11 +252,7 @@ class FilesystemContentCache:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-            directory = os.open(self.root, os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
+            sync_directory(self.root)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

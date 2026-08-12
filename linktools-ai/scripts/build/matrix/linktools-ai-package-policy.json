@@ -1,37 +1,212 @@
 {
-  "top_level_packages": ["core", "storage", "asset", "spec", "model", "observe", "capability", "task", "agent", "runtime", "workspace", "adapter", "temporal", "migrate"],
+  "top_level_packages": [
+    "core",
+    "storage",
+    "asset",
+    "spec",
+    "model",
+    "observe",
+    "capability",
+    "task",
+    "agent",
+    "runtime",
+    "workspace",
+    "adapter",
+    "temporal",
+    "migrate"
+  ],
   "dependencies": {
     "core": [],
-    "storage": ["core"],
-    "asset": ["core", "storage"],
-    "spec": ["core", "asset"],
-    "model": ["core"],
-    "observe": ["core"],
-    "capability": ["core", "asset", "spec"],
-    "task": ["core", "observe"],
-    "agent": ["core", "storage", "asset", "spec", "model", "capability"],
-    "runtime": ["core", "observe", "task", "agent", "capability"],
-    "workspace": ["core", "storage", "asset", "spec", "model", "capability", "agent", "runtime", "adapter", "task"],
-    "adapter": ["core", "storage", "spec", "model", "observe", "capability", "task", "runtime"],
-    "temporal": ["core", "spec", "model", "observe", "capability", "task", "agent", "runtime"],
-    "migrate": ["core", "storage", "asset", "adapter"]
+    "storage": [
+      "core"
+    ],
+    "asset": [
+      "core",
+      "storage"
+    ],
+    "spec": [
+      "core",
+      "asset"
+    ],
+    "model": [
+      "core"
+    ],
+    "observe": [
+      "core"
+    ],
+    "capability": [
+      "core",
+      "asset",
+      "spec"
+    ],
+    "task": [
+      "core",
+      "observe"
+    ],
+    "agent": [
+      "core",
+      "storage",
+      "asset",
+      "spec",
+      "model",
+      "capability"
+    ],
+    "runtime": [
+      "core",
+      "observe",
+      "task",
+      "agent",
+      "capability",
+      "storage"
+    ],
+    "workspace": [
+      "core",
+      "storage",
+      "asset",
+      "spec",
+      "model",
+      "capability",
+      "agent",
+      "runtime",
+      "adapter",
+      "task",
+      "migrate"
+    ],
+    "adapter": [
+      "core",
+      "storage",
+      "spec",
+      "model",
+      "observe",
+      "capability",
+      "task",
+      "runtime"
+    ],
+    "temporal": [
+      "core",
+      "spec",
+      "model",
+      "observe",
+      "capability",
+      "task",
+      "agent",
+      "runtime"
+    ],
+    "migrate": [
+      "core",
+      "storage",
+      "asset",
+      "adapter"
+    ]
   },
   "module_dependencies": {
-    "adapter._sql": ["core", "storage", "runtime", "capability", "task"],
-    "adapter._nats": ["core", "observe"],
-    "adapter._provider": ["core", "model"],
-    "adapter._identity": ["core"],
-    "adapter._schema": ["core", "storage"],
-    "agent._compiler": ["core", "asset", "spec", "model", "capability"],
-    "capability._mcp": ["core", "asset", "spec"],
-    "capability._skill": ["core", "asset", "spec"],
-    "runtime._root": ["core", "agent"],
-    "runtime._local": ["core", "agent", "capability", "task"],
-    "workspace._factory": ["core", "storage", "asset", "spec", "model", "capability", "agent", "runtime", "adapter", "task"],
-    "temporal._context": ["core"]
+    "adapter._sql": [
+      "core",
+      "storage",
+      "runtime",
+      "capability",
+      "task"
+    ],
+    "adapter._nats": [
+      "core",
+      "observe"
+    ],
+    "adapter._provider": [
+      "core",
+      "model"
+    ],
+    "adapter._identity": [
+      "core"
+    ],
+    "adapter._schema": [
+      "core",
+      "storage"
+    ],
+    "agent._compiler": [
+      "core",
+      "asset",
+      "spec",
+      "model",
+      "capability"
+    ],
+    "capability._mcp": [
+      "core",
+      "asset",
+      "spec"
+    ],
+    "capability._skill": [
+      "core",
+      "asset",
+      "spec"
+    ],
+    "runtime._root": [
+      "core",
+      "agent"
+    ],
+    "runtime._local": [
+      "agent",
+      "capability",
+      "core",
+      "storage",
+      "task"
+    ],
+    "workspace._factory": [
+      "core",
+      "storage",
+      "asset",
+      "spec",
+      "model",
+      "capability",
+      "agent",
+      "runtime",
+      "adapter",
+      "task",
+      "migrate"
+    ],
+    "temporal._context": [
+      "core"
+    ],
+    "runtime._execution": [
+      "core",
+      "storage"
+    ]
   },
-  "public_modules": ["errors", "acp"],
-  "forbidden": ["SpecStore", "runtime.run", "runtime.fork", "runtime.inspect", "__getattr__", "dynamic_import", "compat"],
-  "storage_invariants": ["primary-first-layer-precedence", "metadata-refresh", "owner-directed-read", "cache-validation", "batch-fallback", "preload", "revision-notification", "versioning", "atomic-file-write", "explicit-sql-initialize"],
-  "asset_invariants": ["immutable-root", "typed-codec-freeze", "immutable-registry-snapshot", "builtin-binding-manifest", "etag-validation", "entry-cas", "store-cas", "tombstone", "stable-cursor", "sql-backend", "file-journal"]
+  "public_modules": [
+    "errors",
+    "acp"
+  ],
+  "forbidden": [
+    "SpecStore",
+    "runtime.run",
+    "runtime.fork",
+    "runtime.inspect",
+    "__getattr__",
+    "dynamic_import",
+    "compat"
+  ],
+  "storage_invariants": [
+    "primary-first-layer-precedence",
+    "metadata-refresh",
+    "owner-directed-read",
+    "cache-validation",
+    "batch-fallback",
+    "preload",
+    "revision-notification",
+    "versioning",
+    "atomic-file-write",
+    "explicit-sql-initialize"
+  ],
+  "asset_invariants": [
+    "immutable-root",
+    "typed-codec-freeze",
+    "immutable-registry-snapshot",
+    "builtin-binding-manifest",
+    "etag-validation",
+    "entry-cas",
+    "store-cas",
+    "tombstone",
+    "stable-cursor",
+    "sql-backend",
+    "file-journal"
+  ]
 }

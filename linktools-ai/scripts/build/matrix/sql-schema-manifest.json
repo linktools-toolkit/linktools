@@ -2,13 +2,18 @@
   "runtime_owner": "adapter.sql",
   "step_owner": "adapter._step",
   "asset_owner": "asset.sql",
-  "runtime_digest": "8acf99fc8a15b6c8821463e721d212a39ec4dbdf566ebc8c637409dea3f5a315",
+  "storage_tables": [
+    "ai_storage_schema_manifest"
+  ],
+  "schema_digest": "929d5b8f066f28b95ea2adbe32737cdfdbe4b5a26cca25e97a110bb9f6822624",
+  "runtime_digest": "e61feb0012748b6bf5e0816f6a9ae47a13208b1236fba89935d93463708cb125",
   "step_digest": "e550cb9b40ebcc18d55e395658e2a9bac7febfe0a300049fae0bd4f29ed74060",
   "runtime_tables": [
     "ai_runtime_approvals",
     "ai_runtime_artifacts",
     "ai_runtime_blob_chunks",
     "ai_runtime_blobs",
+    "ai_runtime_evaluation_idempotency",
     "ai_runtime_evaluations",
     "ai_runtime_events",
     "ai_runtime_executions",
@@ -17,6 +22,7 @@
     "ai_runtime_memories",
     "ai_runtime_operation_counters",
     "ai_runtime_operations",
+    "ai_runtime_recovery_checkpoints",
     "ai_runtime_results",
     "ai_runtime_sessions",
     "ai_runtime_task_nodes",

@@ -3,7 +3,7 @@
 """Regression checks for the current runtime composition boundary."""
 
 from linktools.ai.model import ModelConnectionConfig, ModelRoute, OpenAIModelMaterializer, StaticModelCredentialProvider
-from linktools.ai.workspace import RuntimePersistenceConfig
+from linktools.ai import RuntimeStorage
 
 
 def test_model_connection_configuration_is_secret_free_and_stable() -> None:
@@ -15,6 +15,6 @@ def test_model_connection_configuration_is_secret_free_and_stable() -> None:
     assert "secret" not in repr(model)
 
 
-def test_runtime_persistence_normalizes_sqlite_paths() -> None:
-    config = RuntimePersistenceConfig.sqlite("relative.db", namespace="namespace")
-    assert config.location is not None and config.location.endswith("/relative.db")
+def test_runtime_storage_normalizes_sqlite_paths() -> None:
+    storage = RuntimeStorage.sqlite("relative.db")
+    assert storage.location is not None and storage.location.as_posix().endswith("/relative.db")

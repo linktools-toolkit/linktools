@@ -20,6 +20,7 @@ limitations under the License.
 # Package filtering and output improvements by Jake Wharton, http://jakewharton.com
 
 import re
+import shutil
 import sys
 from subprocess import PIPE
 from typing import TYPE_CHECKING
@@ -89,10 +90,8 @@ class Command(AndroidCommand):
         width = -1
         try:
             # Get the current terminal width
-            import fcntl, termios, struct
-
-            h, width = struct.unpack('hh', fcntl.ioctl(0, termios.TIOCGWINSZ, struct.pack('hh', 0, 0)))
-        except:
+            width = shutil.get_terminal_size().columns
+        except OSError:
             pass
 
         BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA, CYAN, WHITE = range(8)

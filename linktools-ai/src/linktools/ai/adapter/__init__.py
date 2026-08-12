@@ -19,13 +19,14 @@ from ._schema import SqlRuntimeSchema
 from ._sql import open_sql_runtime
 from ._step import (
     DurableFilesystemStepStore,
-    SqlMediaStore,
+    RoutedStepStore,
     SqlStepStore,
     build_step_schema,
+    register_step_schema,
 )
 
 __all__ = [
-    "DurableFilesystemStepStore", "FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime",
-    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlMediaStore", "SqlRuntimeSchema", "SqlStepStore",
-    "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "open_sql_runtime",
+    "DurableFilesystemStepStore", "RoutedStepStore", "FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime",
+    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlRuntimeSchema", "SqlStepStore",
+    "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "register_step_schema", "open_sql_runtime",
 ]

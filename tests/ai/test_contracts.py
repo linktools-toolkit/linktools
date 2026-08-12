@@ -46,7 +46,8 @@ from linktools.ai.temporal.workflow import (
     TaskWorkflowInput,
     TaskWorkflowResult,
 )
-from linktools.ai.workspace import RuntimePersistenceConfig, trusted_workspace_principal
+from linktools.ai import RuntimeStorage
+from linktools.ai.workspace import trusted_workspace_principal
 from scripts.build.agent_bundle import build_bundle
 
 
@@ -71,9 +72,9 @@ def test_classification_fields_reject_noncanonical_values(value: str) -> None:
         AssetRef(value, "asset")
     with pytest.raises(ValueError):
         AgentCapabilityRef(value, "capability")
-    with pytest.raises(AIError) as namespace_error:
-        RuntimePersistenceConfig.in_memory(namespace=value)
-    assert namespace_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    with pytest.raises(AIError) as storage_error:
+        RuntimeStorage.filesystem(".", persist={value})
+    assert storage_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 def test_payload_service_rejects_a_noncanonical_tenant() -> None:
