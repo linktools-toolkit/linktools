@@ -63,9 +63,6 @@ class InMemoryAssetBackend:
     async def initialize(self) -> None:
         return None
 
-    async def initialize_storage(self) -> None:
-        await self.initialize()
-
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             return self._store_revision()

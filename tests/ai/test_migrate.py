@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from linktools.ai.adapter import SqlRuntimeSchema, build_step_schema
-from linktools.ai.asset import SqlAssetBackend
+from linktools.ai.asset import SqlAssetSchema
 from linktools.ai.migrate import provision_database
 from linktools.ai.storage import SqlSchemaRegistry
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -17,7 +17,7 @@ def _expected_tables() -> set[str]:
     runtime_registry = SqlSchemaRegistry()
     runtime_manifest = SqlRuntimeSchema.register_schema(runtime_registry)
     asset_registry = SqlSchemaRegistry()
-    asset_tables = SqlAssetBackend.register_schema(asset_registry)
+    asset_tables = SqlAssetSchema.register_schema(asset_registry)
     return {
         *(table.name for table in runtime_manifest.tables.values()),
         *build_step_schema().tables,

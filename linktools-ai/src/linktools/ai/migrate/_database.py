@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ..adapter import SqlRuntimeSchema, build_step_schema
-from ..asset import SqlAssetBackend
+from ..asset import SqlAssetSchema
 from ..storage import SqlSchemaRegistry
 
 if TYPE_CHECKING:
@@ -40,7 +40,7 @@ def _schema_groups() -> "tuple[_SchemaGroup, ...]":
     runtime_registry = SqlSchemaRegistry()
     SqlRuntimeSchema.register_schema(runtime_registry)
     asset_registry = SqlSchemaRegistry()
-    SqlAssetBackend.register_schema(asset_registry)
+    SqlAssetSchema.register_schema(asset_registry)
     return (
         _SchemaGroup("adapter.sql", runtime_registry.metadata),
         _SchemaGroup("adapter._step", build_step_schema()),

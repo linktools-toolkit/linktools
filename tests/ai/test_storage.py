@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.adapter import SqlRuntimeSchema
-from linktools.ai.asset import SqlAssetBackend
+from linktools.ai.asset import SqlAssetSchema
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ToolOperationRecord
@@ -235,7 +235,7 @@ def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
     SqlRuntimeSchema.register_schema(registry)
     manifest = registry.freeze()
     asset_registry = SqlSchemaRegistry()
-    asset_tables = SqlAssetBackend.register_schema(asset_registry)
+    asset_tables = SqlAssetSchema.register_schema(asset_registry)
     asset_table_values = (asset_tables.entry, asset_tables.change, asset_tables.blob, asset_tables.revision)
     assert tuple(table.name for table in asset_table_values) == tuple(matrix["asset_tables"])
     expected_tables = tuple(table.name for table in manifest.tables) + tuple(matrix["step_tables"]) + tuple(matrix["asset_tables"])

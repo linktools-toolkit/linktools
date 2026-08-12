@@ -25,6 +25,7 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
+    prepare_storage_database,
     resolve_dialect,
     sql_blob,
     sql_digest,
@@ -33,7 +34,6 @@ from ..storage import (
     sql_table_options,
     sql_text_key,
     storage_name,
-    validate_schema,
 )
 from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
@@ -56,10 +56,8 @@ class SqlAssetTables:
     revision: "Table"
 
 
-class SqlAssetBackend(InMemoryAssetBackend):
-    """Persist current files, history, content blobs, and revisions separately."""
-
-    _registered_tables: "SqlAssetTables | None" = None
+class SqlAssetSchema:
+    """Register the SQL tables owned by Asset storage."""
 
     @classmethod
     def register_schema(cls, registry: SqlSchemaRegistry) -> SqlAssetTables:
@@ -170,8 +168,11 @@ class SqlAssetBackend(InMemoryAssetBackend):
             sql_index(Index("ix_updated_at", table.c.updated_at))
             sql_index(Index("ix_created_at", table.c.created_at))
             registry.add_table(table, owner="asset.sql")
-        cls._registered_tables = tables
         return tables
+
+
+class SqlAssetBackend(InMemoryAssetBackend):
+    """Persist current files, history, content blobs, and revisions separately."""
 
     def __init__(
         self,
@@ -187,27 +188,26 @@ class SqlAssetBackend(InMemoryAssetBackend):
             raise ValueError("SQL asset namespace is invalid")
         digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         super().__init__(AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest))
-        if self._registered_tables is None:
-            raise ValueError("SqlAssetBackend schema is not registered")
+        registry = SqlSchemaRegistry()
+        self._tables = SqlAssetSchema.register_schema(registry)
+        self._schema_manifest_digest = registry.freeze().digest
         self._session_factory = session_factory
-        self._tables = self._registered_tables
         self._namespace = namespace
         self._state_loaded = False
 
     async def initialize(self) -> None:
-        await self._validate_schema()
+        database = await prepare_storage_database(
+            session_factory=self._session_factory,
+            metadata=self._tables.revision.metadata,
+            schema_manifest_digest=self._schema_manifest_digest,
+        )
+        await database.initialize()
         await self._refresh_state()
         _logger.debug(
             "SQL asset backend initialized: namespace=%s revision=%s",
             self._namespace,
             self._revision,
         )
-
-    async def initialize_storage(self) -> None:
-        await self.initialize()
-
-    async def _validate_schema(self) -> None:
-        await validate_schema(self._session_factory, self._tables.revision.metadata)
 
     async def head_revision(self) -> StorageRevision:
         session = self._session_factory()
@@ -614,4 +614,8 @@ def _asset_key_hash(key: AssetKey) -> str:
     return hashlib.sha256(f"{key.kind}\0{key.id}".encode("utf-8")).hexdigest()
 
 
-__all__ = ["SqlAssetBackend", "SqlAssetTables"]
+__all__ = [
+    "SqlAssetBackend",
+    "SqlAssetSchema",
+    "SqlAssetTables",
+]

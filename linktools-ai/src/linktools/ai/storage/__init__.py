@@ -48,14 +48,15 @@ from ._database import (
     SqlSchemaRegistry,
     SqlTableManifest,
     StorageDatabase,
-    build_sqlite_storage,
     build_storage,
+    prepare_storage_database,
     sql_blob,
     sql_digest,
     sql_index,
     sql_integer_id,
     sql_table_options,
     sql_text_key,
+    validate_schema,
 )
 from ._dialects import (
     InsertResult,
@@ -81,7 +82,6 @@ from ._files import (
     write_bytes_atomic,
     write_json_atomic,
 )
-from ._initialize import initialize_storage, validate_schema
 from ._layer import LayerRefreshPolicy
 from ._lock import (
     FilesystemLeaseCoordinator,
@@ -156,10 +156,9 @@ __all__ = [
     "VersionedStorage",
     "atomic_write_bytes",
     "atomic_write_json",
-    "build_sqlite_storage",
     "build_storage",
+    "prepare_storage_database",
     "classify_integrity_error_by_message",
-    "initialize_storage",
     "read_bytes",
     "read_json",
     "resolve_dialect",

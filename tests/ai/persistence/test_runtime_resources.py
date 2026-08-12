@@ -41,7 +41,12 @@ from linktools.ai.runtime import (
     SessionHeadAdvance,
     SessionRecord,
 )
-from linktools.ai.storage import SqlSchemaRegistry, validate_schema
+from linktools.ai.storage import (
+    CoordinationScope,
+    SqlSchemaRegistry,
+    prepare_storage_database,
+    validate_schema,
+)
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -88,6 +93,27 @@ async def test_sqlite_resources_uses_sibling_harness_database(tmp_path: Path) ->
     assert not any(name.startswith("ai_step_") for name in tables)
     sibling = tmp_path / f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
     assert sibling.name == f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
+
+
+@pytest.mark.asyncio
+async def test_storage_database_preparation_owns_sqlite_dialect_setup(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    registry = SqlSchemaRegistry()
+    tables = SqlRuntimeSchema.register_schema(registry)
+    manifest = registry.freeze()
+    try:
+        database = await prepare_storage_database(
+            session_factory=session_factory,
+            metadata=registry.metadata,
+            schema_manifest_digest=manifest.digest,
+        )
+        assert database.session_factory is session_factory
+        assert database.coordination_scope is CoordinationScope.PROCESS
+        assert database.metadata is next(iter(tables.tables.values())).metadata
+        assert database.schema_manifest_digest == manifest.digest
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

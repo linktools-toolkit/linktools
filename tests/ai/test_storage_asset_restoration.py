@@ -13,6 +13,7 @@ from linktools.ai.asset import (
     InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     SqlAssetBackend,
+    SqlAssetSchema,
     StrictConfigReader,
 )
 from linktools.ai.errors import AIError, ErrorCode
@@ -154,27 +155,36 @@ async def test_sql_dialect_upsert_uses_vendor_statement() -> None:
         assert marker in str(session.statements[0].compile(dialect=compiler_dialect))
 
 
-def test_sql_asset_backend_uses_normalized_history_tables() -> None:
-    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
-    backend = SqlAssetBackend(lambda: None, namespace="test")
-    assert backend.root.scheme == "sql"
-    assert tuple(table.name for table in (tables.entry, tables.change, tables.blob, tables.revision)) == (
-        f"{TABLE_PREFIX}asset_entries",
-        f"{TABLE_PREFIX}asset_changes",
-        f"{TABLE_PREFIX}asset_blobs",
-        f"{TABLE_PREFIX}asset_revision",
-    )
+@pytest.mark.asyncio
+async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        registry = SqlSchemaRegistry()
+        tables = SqlAssetSchema.register_schema(registry)
+        manifest = registry.freeze()
+        backend = SqlAssetBackend(session_factory, namespace="test")
+        assert backend.root.scheme == "sql"
+        assert manifest.digest
+        assert tuple(table.name for table in (tables.entry, tables.change, tables.blob, tables.revision)) == (
+            f"{TABLE_PREFIX}asset_entries",
+            f"{TABLE_PREFIX}asset_changes",
+            f"{TABLE_PREFIX}asset_blobs",
+            f"{TABLE_PREFIX}asset_revision",
+        )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_sql_asset_backend_persists_history_outside_revision_row() -> None:
+async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path: Path) -> None:
     from sqlalchemy import event, func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
-    backend = SqlAssetBackend(session_factory, namespace="history")
     statements: list[str] = []
 
     @event.listens_for(engine.sync_engine, "before_cursor_execute")
@@ -189,8 +199,11 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
         statements.append(statement)
 
     try:
+        registry = SqlSchemaRegistry()
+        tables = SqlAssetSchema.register_schema(registry)
+        backend = SqlAssetBackend(session_factory, namespace="history")
         await provision_database(engine)
-        await backend.initialize_storage()
+        await backend.initialize()
         key = AssetKey("mcp", "history.yaml")
         first = await backend.put(key, b"one")
         second = await backend.put(key, b"two", expected_entry_revision=first.entry_revision)
@@ -226,17 +239,16 @@ async def test_sql_asset_backend_persists_history_outside_revision_row() -> None
 
 
 @pytest.mark.asyncio
-async def test_sql_asset_backend_requires_preprovisioned_schema() -> None:
+async def test_sql_asset_backend_requires_preprovisioned_schema(tmp_path: Path) -> None:
     from sqlalchemy import inspect
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    SqlAssetBackend.register_schema(SqlSchemaRegistry())
-    backend = SqlAssetBackend(session_factory, namespace="missing")
     try:
+        backend = SqlAssetBackend(session_factory, namespace="missing")
         with pytest.raises(AIError) as error:
-            await backend.initialize_storage()
+            await backend.initialize()
         assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
@@ -325,15 +337,16 @@ async def test_sqlite_dialect_uses_native_atomic_returning_operations() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sql_asset_backend_batches_large_file_sets() -> None:
+async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None:
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    tables = SqlAssetBackend.register_schema(SqlSchemaRegistry())
-    backend = SqlAssetBackend(session_factory, namespace="batch")
     try:
+        registry = SqlSchemaRegistry()
+        tables = SqlAssetSchema.register_schema(registry)
+        backend = SqlAssetBackend(session_factory, namespace="batch")
         await provision_database(engine)
         await backend.initialize()
         changes = tuple(

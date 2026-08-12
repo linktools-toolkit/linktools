@@ -69,9 +69,14 @@ from ..runtime import (
     ToolOperationRecord,
     ToolStateStore,
 )
-from ..storage import StorageDatabase, resolve_dialect
+from ..storage import (
+    SqlSchemaRegistry,
+    StorageDatabase,
+    prepare_storage_database,
+    resolve_dialect,
+)
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
-from ._schema import SqlRuntimeTables
+from ._schema import SqlRuntimeSchema, SqlRuntimeTables
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -1400,9 +1405,9 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
 
 
 class _SqlRuntimeOwner:
-    def __init__(self, database: StorageDatabase, session_factory: "async_sessionmaker[AsyncSession]", tables: SqlRuntimeTables, *, backend: RuntimeBackend, namespace: str, atomic_domain_id: str) -> None:
+    def __init__(self, database: StorageDatabase, tables: SqlRuntimeTables, *, backend: RuntimeBackend, namespace: str, atomic_domain_id: str) -> None:
         self.database = database
-        self.session_factory = session_factory
+        self.session_factory = database.session_factory
         self.tables = tables.tables
         self.backend = backend
         self.namespace = namespace
@@ -1531,11 +1536,26 @@ def _blob_ref(value: "dict[str, JsonValue]") -> BlobRef:
     return BlobRef(str(value["tenant_id"]), str(value["digest"]), int(value["size"]), str(value["locator"]))
 
 
-async def open_sql_runtime(database: StorageDatabase, *, session_factory: "async_sessionmaker[AsyncSession]", backend: RuntimeBackend, namespace: str, deployment_id: str, tables: SqlRuntimeTables) -> RuntimePersistence:
+async def open_sql_runtime(
+    session_factory: "async_sessionmaker[AsyncSession]",
+    *,
+    backend: RuntimeBackend,
+    namespace: str,
+    deployment_id: str,
+) -> RuntimePersistence:
     if backend not in {RuntimeBackend.SQLITE, RuntimeBackend.MYSQL, RuntimeBackend.POSTGRESQL}:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    registry = SqlSchemaRegistry()
+    tables = SqlRuntimeSchema.register_schema(registry)
+    manifest = registry.freeze()
+    database = await prepare_storage_database(
+        session_factory=session_factory,
+        metadata=registry.metadata,
+        schema_manifest_digest=manifest.digest,
+    )
+    await database.initialize()
     atomic_domain_id = hashlib.sha256(f"{backend.value}{namespace}{deployment_id}{database.schema_manifest_digest}".encode("utf-8")).hexdigest()
-    owner = _SqlRuntimeOwner(database, session_factory, tables, backend=backend, namespace=namespace, atomic_domain_id=atomic_domain_id)
+    owner = _SqlRuntimeOwner(database, tables, backend=backend, namespace=namespace, atomic_domain_id=atomic_domain_id)
     components = tuple(_SqlRuntimeRepository(owner, name) for name in ("sessions", "executions", "results", "idempotency", "execution_events", "task_graphs", "evaluations", "memories", "artifacts", "approvals", "external_results", "operation_ledger", "tool_operations", "blobs"))
     return RuntimePersistence(
         mode=RuntimePersistenceMode.SQL,

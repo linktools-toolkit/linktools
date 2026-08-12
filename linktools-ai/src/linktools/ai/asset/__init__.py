@@ -35,7 +35,11 @@ from ._logical import (
     SingleFileLayout,
 )
 from ._repository import AssetRepository, AssetScope
-from ._sql import SqlAssetBackend, SqlAssetTables
+from ._sql import (
+    SqlAssetBackend,
+    SqlAssetSchema,
+    SqlAssetTables,
+)
 from ._store import AssetCacheAdapter, AssetStore
 
 __all__ = [
@@ -71,6 +75,7 @@ __all__ = [
     "ResolvedAsset",
     "SingleFileLayout",
     "SqlAssetBackend",
+    "SqlAssetSchema",
     "SqlAssetTables",
     "StrictConfigReader",
     "filesystem_root",

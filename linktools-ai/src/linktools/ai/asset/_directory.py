@@ -106,9 +106,6 @@ class LocalDirectoryAssetBackend:
             self._writable,
         )
 
-    async def initialize_storage(self) -> None:
-        await self.initialize()
-
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             entries = await asyncio.to_thread(self._scan)

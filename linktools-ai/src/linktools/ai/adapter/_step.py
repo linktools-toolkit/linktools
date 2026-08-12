@@ -26,7 +26,6 @@ from ..core import canonical_json_bytes
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemWriterLock,
-    StorageDatabase,
     read_json,
     resolve_dialect,
     sql_blob,
@@ -292,14 +291,13 @@ def _fsync_directory(path: Path) -> None:
 class SqlStepStore:
     """Namespace-bound MySQL/PostgreSQL StepStore implementation."""
 
-    def __init__(self, database: StorageDatabase, session_factory: "async_sessionmaker[AsyncSession]", namespace: str) -> None:
-        self._database = database
+    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str) -> None:
         self._sessions = session_factory
         self._namespace = namespace
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         self._metadata, self._tables = _build_tables()
         self._schema_digest = _schema_digest(self._metadata)
-        self._media = SqlMediaStore(database, session_factory, namespace, metadata=self._metadata, tables=self._tables)
+        self._media = SqlMediaStore(session_factory, namespace, metadata=self._metadata, tables=self._tables)
 
     @property
     def schema_digest(self) -> str:
@@ -420,8 +418,7 @@ class SqlStepStore:
 class SqlMediaStore:
     """Content-addressed SQL media store used by Harness snapshots."""
 
-    def __init__(self, database: StorageDatabase, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
-        self._database = database
+    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
         self._sessions = session_factory
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         if metadata is None or tables is None:

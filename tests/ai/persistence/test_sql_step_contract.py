@@ -6,9 +6,8 @@
 import pytest
 from linktools.ai.adapter import SqlMediaStore, SqlStepStore
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.storage import build_storage
 from pydantic_ai_harness.step_persistence import StepStore
-from sqlalchemy import MetaData, inspect
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -29,8 +28,7 @@ def test_sql_table_names_and_namespace_columns_are_separate() -> None:
 async def test_sql_step_store_requires_preprovisioned_schema() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    database = build_storage(session_factory=session_factory, metadata=MetaData(), schema_manifest_digest="step-test")
-    store = SqlStepStore(database, session_factory, "namespace")
+    store = SqlStepStore(session_factory, "namespace")
     try:
         with pytest.raises(AIError) as error:
             await store.initialize()

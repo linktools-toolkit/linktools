@@ -19,7 +19,6 @@ from pydantic_ai_harness.step_persistence import (
 from ..adapter import (
     DurableFilesystemStepStore,
     RuntimeMemoryStore,
-    SqlRuntimeSchema,
     SqlStepStore,
     StepExecutionHistoryReader,
     build_filesystem_runtime,
@@ -188,34 +187,16 @@ async def _open_resources(
         return
     if session_factory is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime requires a session factory")
-    from ..storage import (
-        SqlSchemaRegistry,
-        build_sqlite_storage,
-        build_storage,
-        initialize_storage,
-    )
-
-    registry = SqlSchemaRegistry()
-    tables = SqlRuntimeSchema.register_schema(registry)
-    manifest = registry.freeze()
-    database = await (
-        build_sqlite_storage(session_factory=session_factory, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
-        if config.backend is RuntimeBackend.SQLITE
-        else build_storage(session_factory=session_factory, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
-    )
-    await initialize_storage(database)
     domain = await open_sql_runtime(
-        database,
-        session_factory=session_factory,
+        session_factory,
         backend=config.backend,
         namespace=config.namespace,
         deployment_id=config.deployment_id,
-        tables=tables,
     )
     if config.backend is RuntimeBackend.SQLITE:
         steps = SqliteStepStore(database=namespace_scoped_step_db_path(str(config.location), config.namespace))
     else:
-        steps = SqlStepStore(database, session_factory, config.namespace)
+        steps = SqlStepStore(session_factory, config.namespace)
         await steps.initialize()
     try:
         await domain.sessions.initialize()

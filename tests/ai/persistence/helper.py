@@ -16,12 +16,7 @@ from linktools.ai.adapter import (
 )
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeBackend, RuntimePersistence
-from linktools.ai.storage import (
-    SqlSchemaRegistry,
-    build_sqlite_storage,
-    build_storage,
-    initialize_storage,
-)
+from linktools.ai.storage import SqlSchemaRegistry
 from linktools.ai.workspace import Workspace, open_workspace_runtime
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepStore
 from sqlalchemy.ext.asyncio import (
@@ -50,27 +45,16 @@ async def open_sql_resources(config: RuntimePersistenceConfig, *, connection_url
     session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(engine, expire_on_commit=False)
     try:
         await _provision_sql_schema(engine, config)
-        registry = SqlSchemaRegistry()
-        tables = SqlRuntimeSchema.register_schema(registry)
-        manifest = registry.freeze()
-        database = await (
-            build_sqlite_storage(session_factory=session_factory, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
-            if config.backend is RuntimeBackend.SQLITE
-            else build_storage(session_factory=session_factory, metadata=registry.metadata, schema_manifest_digest=manifest.digest)
-        )
-        await initialize_storage(database)
         domain = await open_sql_runtime(
-            database,
-            session_factory=session_factory,
+            session_factory,
             backend=config.backend,
             namespace=config.namespace,
             deployment_id=config.deployment_id,
-            tables=tables,
         )
         if config.backend is RuntimeBackend.SQLITE:
             step_store = SqliteStepStore(database=_step_db_path(str(config.location), config.namespace))
         else:
-            step_store = SqlStepStore(database, session_factory, config.namespace)
+            step_store = SqlStepStore(session_factory, config.namespace)
             await step_store.initialize()
         try:
             yield RuntimeResources(config.backend, config.namespace, domain, step_store)
