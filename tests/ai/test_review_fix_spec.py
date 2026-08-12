@@ -9,6 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
 from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.adapter import build_in_memory_runtime
 from linktools.ai.core import (
@@ -29,7 +31,7 @@ from linktools.ai.runtime import (
     ExecutionRecord,
     ResultRecord,
 )
-from linktools.ai.storage import resolve_dialect
+from linktools.ai.storage import SQLiteDialect, resolve_dialect
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskService,
@@ -175,11 +177,45 @@ async def test_sql_database_now_converts_postgresql_offset_to_utc() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sql_task_lease_mutations_share_database_time_contract(tmp_path: Path) -> None:
+async def test_sqlite_database_now_preserves_fractional_seconds() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            values = []
+            for _ in range(3):
+                values.append(await resolve_dialect(session).database_now(session))
+                await asyncio.sleep(0.005)
+            assert all(value.tzinfo is not None for value in values)
+            assert any(value.microsecond >= 1_000 for value in values)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_task_lease_mutations_share_database_time_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace="review-fix-sql", deployment_id="test")
+    captured: list[datetime] = []
+    original_database_now = SQLiteDialect.database_now
+
+    async def capture_database_now(_dialect: SQLiteDialect, session: object) -> datetime:
+        value = await original_database_now(_dialect, session)
+        captured.append(value)
+        return value
+
+    monkeypatch.setattr(
+        "linktools.ai.storage._dialects.SQLiteDialect.database_now",
+        capture_database_now,
+    )
     async with open_sql_resources(config) as resources:
         await resources.domain.tasks.create_plan(TaskGraph("graph", (TaskNode("task"),)), tenant_id="tenant")
         lease = await resources.domain.tasks.claim("graph", "task", tenant_id="tenant", owner="owner", lease_seconds=1)
+        assert len(captured) == 1
+        assert lease.lease_expires_at - captured[0] == timedelta(seconds=1)
+        assert captured[0].microsecond >= 1_000
         renewed = await resources.domain.tasks.renew(lease, tenant_id="tenant", lease_seconds=2)
         assert renewed.lease_expires_at > lease.lease_expires_at
         terminal = await resources.domain.tasks.complete(renewed, tenant_id="tenant", execution_id=None, result_digest="a" * 64)

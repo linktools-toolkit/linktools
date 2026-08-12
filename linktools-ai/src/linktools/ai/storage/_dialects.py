@@ -123,10 +123,10 @@ class SQLiteDialect:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
-    def _database_now_expression(self) -> "ColumnElement[datetime]":
+    def _database_now_expression(self) -> "ColumnElement[str]":
         from sqlalchemy import func
 
-        return func.now()
+        return func.strftime("%Y-%m-%dT%H:%M:%f", "now")
 
     async def insert_ignore_conflict(
         self,
