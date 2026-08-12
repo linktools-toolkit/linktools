@@ -1,58 +1,106 @@
 # AGENTS.md (linktools-ai)
 
-## Layout
+## 1. Layout and ownership
 
-The package is deliberately small and has one owner per concern:
+Each package owns one concern:
 
 | Package | Responsibility |
 |---|---|
-| `core` | Pure values, errors, IDs, JSON, paging and principals |
-| `storage` | Generic layers, cache, revision, versioning, files, locks and SQL setup |
-| `asset` | Raw Asset file keys, metadata, `AssetStore` and file backends |
-| `spec` | Agent/Prompt/Capability declaration DTOs and bytes codecs |
-| `model` | Model registry, configuration and resolver |
-| `observe` | Run context, middleware, trace and snapshots |
-| `capability` | Capability resolver, binding and Pydantic AI materialization contracts |
-| `task` | Task, Job, Swarm and DAG contracts |
-| `agent` | Agent catalog, binding, output schemas and Pydantic AI runner |
-| `runtime` | Runtime persistence contracts, services and the seven runtime APIs |
-| `workspace` | Workspace identity, discovery and local coding tools |
-| `adapter` | Non-Asset external adapters and runtime/task ports |
-| `temporal` | Durable workflows, activities, gateway, worker and launcher |
-| `scripts/build` | Bundle compilation, architecture, import, dependency and data gates |
-| `app` | Runtime/workspace composition, HTTP, CLI, ACP and the only composition root |
+| `core` | Pure values, IDs, JSON, paging, principals, and canonical hashing |
+| `storage` | Generic overlays, caches, revisions, files, locks, SQL dialects, schema manifests, and database initialization |
+| `asset` | Raw Asset keys, metadata, logical bindings, `AssetStore`, `AssetRepository`, and Asset backends |
+| `spec` | Agent, Prompt, Skill, and MCP declaration DTOs and codecs |
+| `model` | Model routes, connections, credentials, registries, and materializers |
+| `observe` | Vendor-neutral run context, middleware, traces, and snapshots |
+| `capability` | Capability resolution, grants, bindings, and Pydantic AI materialization contracts |
+| `task` | Task, Job, Swarm, DAG, lease, and local launcher contracts |
+| `agent` | Agent compilation, output schemas, execution binding, and the Pydantic AI runner |
+| `runtime` | Persistence contracts and the execution, session, task, evaluation, approval, event, and artifact APIs |
+| `workspace` | Workspace discovery, local tools, persistence selection, and the library composition root |
+| `adapter` | Runtime, step, provider, identity, NATS, and history adapters; never Asset storage |
+| `temporal` | Durable workflows, activities, gateway, worker, and launcher |
+| `migrate` | Explicit database schema provisioning |
+| `scripts/build` | Bundle compilation, architecture, import, dependency, and evidence gates |
+| `src/linktools/commands/ai` | Thin CLI composition over public `linktools.ai` APIs |
 
-Normal library modules are directly under `linktools/ai/<package>/`. A
-cross-package public boundary module may live directly under `linktools/ai/`
-only when listed in `public_modules`. Build-time gates live under `scripts/build/`. Only Temporal
-may use `workflow/` and `activity/` subpackages. `AssetStore` stores raw files;
-`spec` owns declaration codecs, `capability` owns resolution/materialization, and `agent` owns executable binding.
+Normal library modules live directly under `linktools/ai/<package>/`. Only Temporal may use `workflow/` and `activity/` subpackages. A cross-package public boundary may live directly under `linktools/ai/` only when listed in the package policy's `public_modules`.
 
-## Boundaries and style
+`AssetStore` owns raw files, `AssetRepository` owns logical Asset resolution, `spec` owns declaration codecs, `capability` owns provider resolution, `agent` owns compilation and executable binding, and `runtime` owns service behavior. Keep those boundaries visible in names and imports.
 
-- Python >=3.10; every Python file starts with the standard two-line header.
-- Do not use `from __future__ import annotations`.
+## 2. Dependency boundaries
+
+- `core` and `storage` stay independent of Asset, Spec, Model, Agent, Runtime, Temporal, and SDK semantics.
 - Imports inside `linktools.ai` use relative paths.
-- Public APIs are fully annotated. Quote annotations containing `|` or `[...]`.
-- Public signatures do not use `Any`, `object`, untyped mappings or unbounded
-  `Callable`.
-- `core` and `storage` remain independent of Asset, Spec, Agent, Runtime,
-  Temporal and SDK semantics.
-- `__init__.py` files only contain static exports and `__all__`.
-- Obtain loggers through `from linktools.core import environ` and
-  `environ.get_logger(...)`; log important state transitions.
-- Do not add compatibility shims, dynamic imports, reflection or private
-  cross-package access.
-- Workflow code is deterministic. External effects belong to Activities.
-- File and SQL initialization is explicit; builders do not perform I/O.
-- Module naming is namespace-scoped, not globally unique. A semantic leaf may
-  repeat under parallel package namespaces, such as
-  `linktools.ai.aaa.bbb` and `linktools.ai.ccc.bbb`, but it must not shadow the
-  same leaf in an ancestor namespace, such as `linktools.ai.aaa.bbb` and
-  `linktools.ai.bbb`. The same rule applies to packages; a leading `_` is
-  visibility-only and ignored when comparing names.
+- Consumers import public package exports, never another package's `_`-prefixed module or member.
+- Do not use reflection to bypass a public interface. Add a public method or protocol operation and implement it on every backend.
+- Runtime module dependencies must remain acyclic. Legitimate annotation-only back-references belong under `TYPE_CHECKING`.
+- `adapter` implements lower-level ports. It must not become a composition root or own Asset loading.
+- SQL dialect detection, SQLite pragmas, vendor statements, integrity classification, and coordination scope belong in `storage`.
+- `observe` stays vendor-neutral. Do not add vendor-specific telemetry dependencies or adapters to the core package surface.
 
-## Verification
+## 3. Composition and lifecycle
+
+Keep common construction paths short. Callers should pass domain inputs such as a session factory, backend selection, namespace, and deployment ID; they should not assemble registries, table collections, manifests, or internal storage bundles.
+
+The current SQL entry points follow this rule:
+
+```python
+domain = await open_sql_runtime(
+    session_factory,
+    backend=backend,
+    namespace=namespace,
+    deployment_id=deployment_id,
+)
+steps = SqlStepStore(session_factory, namespace)
+assets = SqlAssetBackend(session_factory, namespace=namespace)
+```
+
+Schema owners expose public schema contributors for migration and evidence generation. Runtime constructors register and freeze their own schema; normal callers do not pass tables around.
+
+All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. `StorageDatabase.initialize()` validates a frozen schema manifest. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
+
+Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `initialize()` may perform documented I/O. Keep cleanup paired with opening through async context managers where ownership spans a scope.
+
+## 4. Asset rules
+
+`AssetBackend` and the public storage protocols are the extension boundary for custom loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, call `initialize()`, then create an `AssetRepository` from a frozen `AssetTypeRegistry` snapshot.
+
+The default workspace loader reads `<workspace>/.linktools` through a read-only `LocalDirectoryAssetBackend`. `PrefixAssetPathAdapter` maps the logical `skill` kind to `skills`; generated Agent and Prompt defaults live in a writable in-memory layer. Do not hard-code that policy into generic Asset or Storage code.
+
+Register custom logical representations with `AssetTypeBinding` and `AssetVariantBinding`. Codecs validate bytes at the repository boundary. Backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
+
+Layer precedence is primary first, followed by declared fallback layers. Tombstones hide lower values; reset entries reveal them. Writer routing, cache validation, revisions, and owner-aware reads stay in `StorageOverlay`.
+
+## 5. SQL rules
+
+- Schema contributors register only tables they own in `SqlSchemaRegistry`.
+- Freeze the registry before deriving a manifest digest.
+- Use `prepare_storage_database()` for dialect preparation and `StorageDatabase.initialize()` for schema validation.
+- SQLite requires WAL and process-scoped coordination. MySQL and PostgreSQL use shared-database coordination.
+- Keep schema creation out of runtime startup. Tests and deployment tooling call `provision_database()` explicitly.
+- SQL backends receive the public async SQLAlchemy session factory. When an owner already has `StorageDatabase`, derive the factory from it instead of accepting a second constructor argument.
+- Add logs at database preparation, schema validation, transaction retry, lease transition, and backend initialization boundaries.
+
+## 6. Python and logging style
+
+- Python 3.10 or newer; do not use `from __future__ import annotations`.
+- Every Python file starts with the standard shebang and UTF-8 header.
+- Public functions and methods have parameter and return annotations.
+- Quote annotations containing `|` or `[...]`. Keep annotation-only imports under `TYPE_CHECKING`.
+- Public signatures do not use `Any`, `object`, untyped mappings, or unbounded `Callable` unless the value is genuinely untyped.
+- `__init__.py` files contain static imports and `__all__` only.
+- Obtain loggers through `from linktools.core import environ` and `environ.get_logger(...)` with a relative logger name.
+- Log state transitions and decisions, not raw secrets or large payloads. Guard only expensive debug formatting with `if environ.debug`.
+- Do not add compatibility shims, dynamic imports, migration fallbacks, or reflection-based adapters.
+- Comments explain constraints that naming and structure cannot express. Remove comments made stale by the current edit.
+
+## 7. Temporal and external effects
+
+Workflow code must remain deterministic. Network access, processes, filesystem mutation, model calls, and other external effects belong in Activities or explicitly local adapters. Do not import non-deterministic composition code into Temporal workflow modules.
+
+## 8. Verification
+
+Run from the repository root:
 
 ```bash
 PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m compileall -q linktools-ai/src/linktools/ai
@@ -60,6 +108,4 @@ PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m pytest -q test
 PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 ```
 
-The specification, package policy, contract map, traceability and evidence
-manifests under `scripts/build/matrix` are release inputs. Update them only
-with deterministic evidence from the current source and tests.
+The specification, package policy, contract map, traceability files, schema manifests, and evidence matrices under `scripts/build/matrix` are release inputs. Update them only from deterministic current-source evidence. Run architecture checks after changing imports, package ownership, public exports, or module paths.
