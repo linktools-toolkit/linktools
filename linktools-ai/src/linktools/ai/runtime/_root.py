@@ -9,7 +9,7 @@ from typing import Any
 from linktools.core import environ
 
 from ..agent import AgentCompiler, AgentDefinition
-from ..core import JsonValue, Principal, SessionStatus
+from ..core import JsonValue, Principal, SessionStatus, validate_memory_namespace
 from ..errors import AIError, ErrorCode
 from ._services import (
     ArtifactService,
@@ -275,8 +275,8 @@ class Runtime:
 
 
 def _validate_memory_namespace(value: "str | None") -> "str | None":
-    if value is not None and (not isinstance(value, str) or not value.strip()):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if value is not None:
+        validate_memory_namespace(value)
     return value
 
 

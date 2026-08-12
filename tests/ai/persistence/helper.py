@@ -49,7 +49,6 @@ async def open_sql_resources(config: RuntimePersistenceConfig, *, connection_url
             session_factory,
             backend=config.backend,
             namespace=config.namespace,
-            deployment_id=config.deployment_id,
         )
         if config.backend is RuntimeBackend.SQLITE:
             step_store = SqliteStepStore(database=_step_db_path(str(config.location), config.namespace))

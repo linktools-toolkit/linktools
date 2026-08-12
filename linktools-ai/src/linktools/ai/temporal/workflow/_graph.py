@@ -15,6 +15,7 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
+from ...core import validate_lease_owner, validate_tenant_id
 from ...errors import AIError, ErrorCode
 from ...task import SwarmLimits
 from ._execution import (
@@ -35,6 +36,11 @@ class TaskWorkflowNode:
     operation_id: str = ""
 
     def __post_init__(self) -> None:
+        if self.owner:
+            try:
+                validate_lease_owner(self.owner)
+            except AIError as error:
+                raise AIError(ErrorCode.TASK_DAG_INVALID) from error
         if not self.task_id.strip() or not self.binding_digest.strip() or len(self.dependencies) > 256 or len(set(self.dependencies)) != len(self.dependencies) or any(not dependency.strip() for dependency in self.dependencies) or self.budget_cost < 1 or self.fence < 0 or (self.fence and not self.owner.strip()) or (self.operation_id and not self.owner.strip()):
             raise AIError(ErrorCode.TASK_DAG_INVALID)
 
@@ -49,7 +55,11 @@ class TaskWorkflowInput:
     worker_build: str
 
     def __post_init__(self) -> None:
-        if not self.graph_id.strip() or not self.tenant_id.strip() or not self.request_ref.strip() or not self.worker_build.strip():
+        try:
+            validate_tenant_id(self.tenant_id)
+        except AIError as error:
+            raise ValueError("task workflow tenant is invalid") from error
+        if not self.graph_id.strip() or not self.request_ref.strip() or not self.worker_build.strip():
             raise ValueError("task workflow input is incomplete")
         object.__setattr__(self, "nodes", tuple(self.nodes))
 

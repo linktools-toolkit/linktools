@@ -12,9 +12,11 @@ from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
 
+from ..core import validate_asset_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
     MetadataLoad,
+    SqlErrorKind,
     SqlSchemaRegistry,
     StorageBatchResult,
     StorageChange,
@@ -25,6 +27,7 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
+    classify_sql_error,
     prepare_storage_database,
     resolve_dialect,
     sql_blob,
@@ -180,12 +183,10 @@ class SqlAssetBackend(InMemoryAssetBackend):
         *,
         namespace: str,
     ) -> None:
-        if (
-            not isinstance(namespace, str)
-            or not namespace.strip()
-            or any(ord(character) < 32 or ord(character) == 127 for character in namespace)
-        ):
-            raise ValueError("SQL asset namespace is invalid")
+        try:
+            validate_asset_namespace(namespace)
+        except AIError as error:
+            raise ValueError("SQL asset namespace is invalid") from error
         digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         super().__init__(AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest))
         registry = SqlSchemaRegistry()
@@ -325,7 +326,6 @@ class SqlAssetBackend(InMemoryAssetBackend):
         mutation: "Callable[[InMemoryAssetBackend], Awaitable[_ResultT]]",
     ) -> _ResultT:
         from sqlalchemy import select
-        from sqlalchemy.exc import IntegrityError, OperationalError
 
         session = self._session_factory()
         result: _ResultT
@@ -378,8 +378,13 @@ class SqlAssetBackend(InMemoryAssetBackend):
                             raise AIError(ErrorCode.STORAGE_CONFLICT)
         except AIError:
             raise
-        except (IntegrityError, OperationalError) as error:
-            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        except Exception as error:
+            kind = classify_sql_error(error)
+            if kind in {SqlErrorKind.INTEGRITY, SqlErrorKind.RETRYABLE_TRANSACTION}:
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            if kind is SqlErrorKind.DATABASE:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            raise
         self.import_state(next_state)
         self._state_loaded = True
         _logger.debug(

@@ -357,18 +357,18 @@ def _session_snapshot(records: tuple[SessionRecord, ...]) -> int:
     return int(canonical_sha256([(record.session_id, record.revision, record.resource_generation, record.status.value) for record in records])[:16], 16)
 
 
-def _make_cursor(snapshot: int, tenant_id: str, owner_id: str, session_id: str | None, signer: CursorSigner) -> str | None:
+def _make_cursor(snapshot: int, tenant_id: str, owner_principal_id: str, session_id: "str | None", signer: CursorSigner) -> "str | None":
     if session_id is None:
         return None
-    return signer.encode(CursorPayload(1, tenant_id, "SESSION", canonical_sha256({"owner_principal_id": owner_id}), session_id, snapshot, int(time.time()) + 3600))
+    return signer.encode(CursorPayload(1, tenant_id, "SESSION", canonical_sha256({"owner_principal_id": owner_principal_id}), session_id, snapshot, int(time.time()) + 3600))
 
 
-def _cursor_start(cursor: str | None, snapshot: int, tenant_id: str, owner_id: str, records: tuple[SessionRecord, ...], signer: CursorSigner) -> int:
+def _cursor_start(cursor: "str | None", snapshot: int, tenant_id: str, owner_principal_id: str, records: "tuple[SessionRecord, ...]", signer: CursorSigner) -> int:
     if cursor is None:
         return 0
     try:
         payload = signer.decode(cursor)
-        if payload.cursor_version != 1 or payload.tenant_id != tenant_id or payload.resource_kind != "SESSION" or payload.filter_digest != canonical_sha256({"owner_principal_id": owner_id}) or payload.snapshot_or_store_revision != snapshot:
+        if payload.cursor_version != 1 or payload.tenant_id != tenant_id or payload.resource_kind != "SESSION" or payload.filter_digest != canonical_sha256({"owner_principal_id": owner_principal_id}) or payload.snapshot_or_store_revision != snapshot:
             raise ValueError("session cursor identity mismatch")
         if not payload.sort_key.strip():
             raise ValueError("session cursor sort key is empty")

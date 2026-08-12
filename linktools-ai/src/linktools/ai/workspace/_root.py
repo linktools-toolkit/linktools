@@ -12,7 +12,7 @@ try:
 except ImportError:
     _yaml = None
 
-from ..core import JsonValue, Principal, canonical_sha256
+from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256
 from ..errors import AIError, ErrorCode
 
 
@@ -77,7 +77,7 @@ class Workspace:
 def trusted_workspace_principal(workspace_id: str, principal_id: str = "workspace") -> Principal:
     if not workspace_id.strip() or not principal_id.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    return Principal(principal_id, workspace_id, "LOCAL_TRUSTED")
+    return Principal(principal_id, workspace_id, PrincipalKind.LOCAL_TRUSTED.value)
 
 
 def load_config(path: Path) -> "dict[str, JsonValue]":

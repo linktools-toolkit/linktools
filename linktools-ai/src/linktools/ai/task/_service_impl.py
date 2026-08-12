@@ -212,7 +212,7 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return result
 
-    async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> tuple[bool, OperationLedgerRecord]:
+    async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> "tuple[bool, OperationLedgerRecord]":
         operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
         if operation is None:
             now = datetime.now(timezone.utc)

@@ -3,9 +3,12 @@
 
 """Agent, Task, Observe, and Temporal boundary contracts."""
 
+from dataclasses import fields
 from datetime import datetime, timezone
 
 import pytest
+from linktools.ai.asset import AssetRef
+from linktools.ai.core import OperationLedgerRecord, Principal, PrincipalKind, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry, ModelRoute
 from linktools.ai.observe import (
@@ -13,12 +16,12 @@ from linktools.ai.observe import (
     MiddlewarePipeline,
     RunContext,
     RunSnapshot,
-    TraceItem,
+    RecordedTraceItem,
     snapshot_digest,
 )
-from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime import BlobPayloadService, ExecutionRequest, ToolOperationRecord
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
-from linktools.ai.task import TaskGraph, TaskNode
+from linktools.ai.task import SwarmLimits, TaskGraph, TaskLease, TaskNode
 from linktools.ai.temporal import (
     ActivityType,
     EvaluationActivity,
@@ -34,14 +37,16 @@ from linktools.ai.temporal import (
 from linktools.ai.temporal.workflow import (
     EvaluationWorkflowInput,
     EvaluationWorkflowResult,
+    ExecutionWorkflow,
     ExecutionWorkflowInput,
     ExecutionWorkflowResult,
+    SessionWorkflow,
     SessionWorkflowInput,
     SessionWorkflowResult,
     TaskWorkflowInput,
     TaskWorkflowResult,
 )
-from linktools.ai.workspace import trusted_workspace_principal
+from linktools.ai.workspace import RuntimePersistenceConfig, trusted_workspace_principal
 from scripts.build.agent_bundle import build_bundle
 
 
@@ -58,6 +63,48 @@ def test_model_registry_snapshot_is_instance_owned() -> None:
     snapshot = registry.prime({"route": ModelRoute("route", "openai", "model")})
     assert snapshot.routes["route"].model == "model"
     assert snapshot.routes["route"].route_id == "route"
+
+
+@pytest.mark.parametrize("value", ["", " spaced", "spaced ", "line\nbreak", "control\u0085value", "界" * 129])
+def test_classification_fields_reject_noncanonical_values(value: str) -> None:
+    with pytest.raises(ValueError):
+        AssetRef(value, "asset")
+    with pytest.raises(ValueError):
+        AgentCapabilityRef(value, "capability")
+    with pytest.raises(AIError) as namespace_error:
+        RuntimePersistenceConfig.in_memory(namespace=value)
+    assert namespace_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+
+
+def test_payload_service_rejects_a_noncanonical_tenant() -> None:
+    with pytest.raises(ValueError, match="payload tenant is invalid"):
+        BlobPayloadService(object(), tenant_id=" tenant")
+
+
+def test_authorization_kinds_are_canonical() -> None:
+    assert Principal("principal", "tenant", "service").kind == PrincipalKind.SERVICE.value
+    assert Principal("principal", "tenant", "custom").kind == "custom"
+    assert ResourceRef(ResourceKind.EXECUTION.value, "execution", "tenant").kind is ResourceKind.EXECUTION
+    with pytest.raises(ValueError, match="principal identity is invalid"):
+        Principal("principal", "tenant", " custom")
+    with pytest.raises(ValueError, match="resource reference is incomplete"):
+        ResourceRef("custom", "resource", "tenant")
+
+
+def test_contextual_classification_fields_stay_concise() -> None:
+    operation_fields = {field.name for field in fields(OperationLedgerRecord)}
+    task_lease_fields = {field.name for field in fields(TaskLease)}
+    tool_operation_fields = {field.name for field in fields(ToolOperationRecord)}
+    assert "kind" in operation_fields and "operation_kind" not in operation_fields
+    assert "owner" in task_lease_fields and "lease_owner" not in task_lease_fields
+    assert "owner" in tool_operation_fields and "lease_owner" not in tool_operation_fields
+
+
+@pytest.mark.parametrize("value", [" memory", "memory ", "memory\nvalue", "界" * 129])
+def test_memory_namespace_rejects_noncanonical_values(value: str) -> None:
+    with pytest.raises(AIError) as error:
+        ExecutionRequest("prompt", trusted_workspace_principal("workspace"), "request", value)
+    assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
 
 
 def test_task_completion_checks_owner_fence_result_and_terminal_state() -> None:
@@ -78,6 +125,8 @@ def test_task_completion_checks_owner_fence_result_and_terminal_state() -> None:
     with pytest.raises(AIError) as terminal_error:
         ledger.fail("task", "owner", 1, "FAILED", "error")
     assert terminal_error.value.code == ErrorCode.TASK_TERMINAL_CONFLICT
+    with pytest.raises(ValueError):
+        ledger.complete("task", " owner", 2, "digest")
 
 
 @pytest.mark.asyncio
@@ -131,7 +180,7 @@ async def test_middleware_order_and_failure_classification() -> None:
 @pytest.mark.asyncio
 async def test_trace_is_monotonic_and_snapshot_digest_is_verified() -> None:
     recorder = InMemoryTraceRecorder()
-    item = TraceItem("execution", 1, "completed", datetime.now(timezone.utc), "done")
+    item = RecordedTraceItem("execution", 1, "completed", datetime.now(timezone.utc), "done")
     assert await recorder.append(item) == item
     assert await recorder.append(item) == item
     values = {
@@ -172,6 +221,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     assert isinstance(registration, WorkerRegistration)
     assert len(registration.workflows) == len(registration.activities) == 4
     assert tuple(item.__name__ for item in registration.workflows) == ("ExecutionWorkflow", "SessionWorkflow", "TaskWorkflow", "EvaluationWorkflow")
+
     assert tuple(type(item).__name__ for item in registration.activities) == ("ExecuteActivity", "SessionActivity", "TaskActivity", "EvaluationActivity")
     assert ExecuteActivity.run.__name__ == "run"
     assert ExecuteActivity.load_input.__name__ == "load_input"
@@ -209,6 +259,20 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     registration.register(worker)
     assert worker.configuration == ("json", "asset", "linktools-ai", "linktools-ai", "linktools-ai-production")
     assert len(worker.workflows) == 4
+
+
+@pytest.mark.asyncio
+async def test_temporal_workflow_inputs_apply_canonical_tenant_validation() -> None:
+    with pytest.raises(ValueError, match="task workflow tenant is invalid"):
+        TaskWorkflowInput("graph", " tenant", (), SwarmLimits(), "request", "worker")
+
+    with pytest.raises(ValueError, match="execution workflow tenant is invalid"):
+        await ExecutionWorkflow().run(
+            ExecutionWorkflowInput("execution", "tenant ", "binding", "bundle", "request", "worker")
+        )
+
+    with pytest.raises(ValueError, match="session workflow tenant is invalid"):
+        await SessionWorkflow().run(SessionWorkflowInput("session", "tenant\n", 0, "operation", "create"))
 
 
 @pytest.mark.asyncio

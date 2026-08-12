@@ -120,7 +120,22 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 
 ## 3. Runtime persistence
 
-`RuntimePersistenceConfig.in_memory(...)`, `.filesystem(...)`, `.sqlite(...)`, `.mysql(...)`, and `.postgresql(...)` select the deployment. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
+`RuntimePersistenceConfig.in_memory(...)`, `.filesystem(...)`, `.sqlite(...)`, `.mysql(...)`, and `.postgresql(...)` select the persistence backend. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
+
+The identity fields are intentionally independent:
+
+| Field | Meaning |
+|---|---|
+| persistence `namespace` | Isolates one Runtime data set inside a backend |
+| `tenant_id` | Authorization and resource ownership boundary inside that data set |
+| `memory_namespace` | Selects a memory collection inside one tenant |
+| Asset `namespace` | Isolates raw Asset data and is unrelated to Runtime persistence |
+| Asset `kind` | Selects a logical Asset type such as `agent`, `prompt`, or `skill` |
+| Task/Tool `owner` | Identifies the current lease holder |
+
+Fields stay short when their declaring type supplies the domain, such as `Principal.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. A qualifier is retained where another meaning is plausible in the same record or flattened storage boundary, such as `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or where it preserves an authorization identity domain, such as `owner_principal_id`.
+
+`open_workspace_runtime()` binds all service authorization and local recovery to `workspace.workspace_id` as one tenant. A custom persistence namespace changes storage placement only; it does not change the Workspace tenant. Lower-level `RuntimePersistence` implementations remain multi-tenant.
 
 SQL deployments require an application-owned async SQLAlchemy session factory and a pre-provisioned schema. Runtime startup validates tables but never creates or alters them:
 
@@ -133,7 +148,6 @@ path = "/var/lib/my-app/runtime.db"
 config = RuntimePersistenceConfig.sqlite(
     path,
     namespace="project-a",
-    deployment_id="local",
 )
 engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -152,7 +166,7 @@ MySQL and PostgreSQL use the same `session_factory` entry point. SQLite enables 
 
 The application owns the engine and session factory and must dispose the engine after the Runtime closes.
 
-A non-empty `memory_namespace` enables Runtime memory for an execution. `None` disables it, and an empty string is invalid.
+A non-empty `memory_namespace` enables Runtime memory for an execution. `None` disables it. Classification fields reject empty values, surrounding whitespace, control characters, and values beyond their UTF-8 byte limit.
 
 ## 4. Capability providers
 

@@ -16,5 +16,5 @@ def test_model_connection_configuration_is_secret_free_and_stable() -> None:
 
 
 def test_runtime_persistence_normalizes_sqlite_paths() -> None:
-    config = RuntimePersistenceConfig.sqlite("relative.db", namespace="namespace", deployment_id="deployment")
+    config = RuntimePersistenceConfig.sqlite("relative.db", namespace="namespace")
     assert config.location is not None and config.location.endswith("/relative.db")

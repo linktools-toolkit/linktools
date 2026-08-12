@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
+from ..core import validate_asset_kind
+from ..errors import AIError
 from ..storage import (
     ReadableStorageBackend,
     StorageEntryRevision,
@@ -23,16 +25,13 @@ class AssetKey:
 
     def __post_init__(self) -> None:
         try:
-            kind_size = len(self.kind.encode("utf-8"))
+            validate_asset_kind(self.kind)
             identifier_size = len(self.id.encode("utf-8"))
-        except UnicodeEncodeError as error:
+        except (AIError, UnicodeEncodeError) as error:
             raise ValueError("asset key is invalid") from error
         if (
-            not self.kind
-            or not self.id
-            or kind_size > 128
+            not self.id
             or identifier_size > 512
-            or "\x00" in self.kind
             or "\x00" in self.id
         ):
             raise ValueError("asset key is invalid")

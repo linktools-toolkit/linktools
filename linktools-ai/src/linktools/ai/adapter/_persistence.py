@@ -39,7 +39,10 @@ from ..core import (
     TaskStatus,
     ToolOperationStatus,
     canonical_sha256,
+    validate_lease_owner,
+    validate_persistence_namespace,
     validate_observation_payload,
+    validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ..runtime import (
@@ -120,7 +123,6 @@ class _Base:
         self._backend = backend or (RuntimeBackend.FILESYSTEM if mode is RuntimePersistenceMode.FILESYSTEM else RuntimeBackend.IN_MEMORY)
         self._namespace = namespace
         self._atomic_domain_id = atomic_domain_id
-        self._local_tenant_id: str | None = None
         self._closed = False
         self._lock = asyncio.Lock()
         self._on_change: Callable[[], None] | None = None
@@ -159,8 +161,7 @@ class _Base:
             self._refresh_source()
 
     def _check_tenant(self, tenant_id: str) -> None:
-        if self._local_tenant_id is not None and tenant_id != self._local_tenant_id:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        validate_tenant_id(tenant_id)
 
 
 class _SessionRepository(_Base):
@@ -611,7 +612,7 @@ class _MemoryRepository(_Base):
         self._ensure_open()
         self._check_tenant(tenant_id)
         record = self._records.get((tenant_id, memory_id))
-        return None if record is None else ResourceRef(ResourceKind.MEMORY, memory_id, tenant_id, record.owner_id)
+        return None if record is None else ResourceRef(ResourceKind.MEMORY, memory_id, tenant_id)
 
     async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord:
         stored, replayed = await self.put_with_operation(record, expected_revision=expected_revision, operation=None)
@@ -622,6 +623,8 @@ class _MemoryRepository(_Base):
     async def put_with_operation(self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[MemoryRecord | None, bool]":
         self._ensure_open()
         self._check_tenant(record.tenant_id)
+        if operation is not None and operation.tenant_id != record.tenant_id:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         async with self._lock:
             if operation is not None:
                 existing = self._operation(operation)
@@ -647,12 +650,12 @@ class _MemoryRepository(_Base):
         self._check_tenant(tenant_id)
         return self._records.get((tenant_id, memory_id))
 
-    async def list(self, *, tenant_id: str, owner_id: str, cursor: str | None, limit: int) -> Page[MemoryRecord]:
+    async def list(self, *, tenant_id: str, memory_namespace_key: str, cursor: "str | None", limit: int) -> "Page[MemoryRecord]":
         self._ensure_open()
         self._check_tenant(tenant_id)
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        values = tuple(sorted((item for item in self._records.values() if item.tenant_id == tenant_id and item.owner_id == owner_id), key=lambda item: item.memory_id))
+        values = tuple(sorted((item for item in self._records.values() if item.tenant_id == tenant_id and item.memory_namespace_key == memory_namespace_key), key=lambda item: item.memory_id))
         start = 0 if cursor is None else next((index + 1 for index, item in enumerate(values) if item.memory_id == cursor), len(values))
         page = values[start:start + limit]
         return Page(page, page[-1].memory_id if len(values) > start + limit else None)
@@ -665,6 +668,8 @@ class _MemoryRepository(_Base):
     async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[bool, bool]":
         self._ensure_open()
         self._check_tenant(tenant_id)
+        if operation is not None and operation.tenant_id != tenant_id:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         async with self._lock:
             if operation is not None:
                 existing = self._operation(operation)
@@ -1003,7 +1008,8 @@ class _TaskRepository(_Base):
     async def claim(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        if not owner.strip() or not 1 <= lease_seconds <= 3600:
+        validate_lease_owner(owner)
+        if not 1 <= lease_seconds <= 3600:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         key = (tenant_id, graph_id, task_id)
         async with self._lock:
@@ -1033,7 +1039,8 @@ class _TaskRepository(_Base):
     async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        if not lease.owner.strip() or lease.tenant_id != tenant_id or not 1 <= lease_seconds <= 3600:
+        validate_lease_owner(lease.owner)
+        if lease.tenant_id != tenant_id or not 1 <= lease_seconds <= 3600:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         now = datetime.now(timezone.utc)
         current = self._nodes.get((tenant_id, lease.graph_id, lease.task_id))
@@ -1163,6 +1170,9 @@ class _ToolRepository(_Base, ToolStateStore):
     async def claim(self, operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
+        validate_lease_owner(owner)
+        if not 1 <= lease_seconds <= 3600:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         current = self._records.get((tenant_id, operation_id))
         if current is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -1189,7 +1199,7 @@ class _ToolRepository(_Base, ToolStateStore):
         self._mark_changed()
         return updated
 
-    async def complete(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, result_ref: str | None, result_digest: str) -> ToolOperationRecord:
+    async def complete(self, operation_id: str, *, tenant_id: str, owner: str, fence: int, result_ref: "str | None", result_digest: str) -> ToolOperationRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         current = await self._require_claim(operation_id, tenant_id, owner, fence)
@@ -1212,6 +1222,7 @@ class _ToolRepository(_Base, ToolStateStore):
         return updated
 
     async def _require_claim(self, operation_id: str, tenant_id: str, owner: str, fence: int) -> ToolOperationRecord:
+        validate_lease_owner(owner)
         current = self._records.get((tenant_id, operation_id))
         if current is None or current.owner != owner or current.fence != fence or current.lease_expires_at is None or current.lease_expires_at <= datetime.now(timezone.utc):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
@@ -1923,7 +1934,7 @@ def _evaluation_from_json(value: dict[str, JsonValue]) -> EvaluationRecord:
 
 
 def _memory_from_json(value: dict[str, JsonValue]) -> MemoryRecord:
-    return MemoryRecord(str(value["memory_id"]), str(value["tenant_id"]), str(value["owner_id"]), str(value["kind"]), str(value["content_ref"]), str(value["content_digest"]), value.get("metadata", {}), int(value["revision"]), _time(str(value["created_at"])), _time(str(value["updated_at"])))
+    return MemoryRecord(str(value["memory_id"]), str(value["tenant_id"]), str(value["memory_namespace_key"]), str(value["content_ref"]), str(value["content_digest"]), value.get("metadata", {}), int(value["revision"]), _time(str(value["created_at"])), _time(str(value["updated_at"])))
 
 
 def _artifact_from_json(value: dict[str, JsonValue]) -> ArtifactRecord:
@@ -1979,7 +1990,8 @@ def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ..
     )
 
 
-def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str | None = None, atomic_domain_id: str | None = None, local_tenant_id: str | None = None, writer_lock: FilesystemWriterLock | None = None) -> InMemoryRuntime:
+def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: "str | None" = None, atomic_domain_id: "str | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> InMemoryRuntime:
+    validate_persistence_namespace(namespace)
     mode = RuntimePersistenceMode.IN_MEMORY if backend is RuntimeBackend.IN_MEMORY else RuntimePersistenceMode.FILESYSTEM
     domain = atomic_domain_id or f"{backend.value}-domain-{uuid.uuid4().hex}"
     args = (mode, namespace, domain)
@@ -2009,10 +2021,6 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str |
     for component in components:
         if isinstance(component, _Base):
             component._lock = transaction_lock
-    if local_tenant_id is not None:
-        for component in components:
-            if isinstance(component, _Base):
-                component._local_tenant_id = local_tenant_id
     persistence = RuntimePersistence(
         mode=mode,
         backend=backend,
@@ -2031,7 +2039,6 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str |
         operations=components[11],
         tools=components[12],
         blobs=components[13],
-        local_tenant_id=local_tenant_id,
     )
     if backend is RuntimeBackend.FILESYSTEM:
         if state_path is None:
@@ -2040,18 +2047,20 @@ def _build_runtime(backend: RuntimeBackend, *, namespace: str, state_path: str |
     return InMemoryRuntime(persistence, components)
 
 
-def build_in_memory_runtime(*, namespace: str | None = None) -> InMemoryRuntime:
-    return _build_runtime(RuntimeBackend.IN_MEMORY, namespace=namespace or f"memory-{uuid.uuid4().hex}")
+def build_in_memory_runtime(*, namespace: "str | None" = None) -> InMemoryRuntime:
+    selected_namespace = f"memory-{uuid.uuid4().hex}" if namespace is None else namespace
+    return _build_runtime(RuntimeBackend.IN_MEMORY, namespace=selected_namespace)
 
 
-def build_filesystem_runtime(root: str, *, workspace_id: str, writer_lock: FilesystemWriterLock | None = None) -> FilesystemRuntime:
-    if not workspace_id.strip():
-        raise ValueError("filesystem runtime identity is incomplete")
+def build_filesystem_runtime(root: str, *, namespace: str, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
+    if not isinstance(root, str) or not root.strip():
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    validate_persistence_namespace(namespace)
     root_path = Path(root).expanduser().resolve()
-    namespace_digest = hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
+    namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
     state_path = root_path / ".linktools" / "runtime" / namespace_digest / "state.json"
-    domain = hashlib.sha256(f"file{root_path}{workspace_id}2".encode("utf-8")).hexdigest()
-    return _build_runtime(RuntimeBackend.FILESYSTEM, namespace=workspace_id, state_path=str(state_path), atomic_domain_id=domain, local_tenant_id=workspace_id, writer_lock=writer_lock)
+    domain = hashlib.sha256(f"filesystem\0{root_path}\0{namespace}".encode("utf-8")).hexdigest()
+    return _build_runtime(RuntimeBackend.FILESYSTEM, namespace=namespace, state_path=str(state_path), atomic_domain_id=domain, writer_lock=writer_lock)
 
 
 __all__ = ["FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime", "build_filesystem_runtime", "build_in_memory_runtime"]

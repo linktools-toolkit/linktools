@@ -11,7 +11,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import Principal, TaskStatus, canonical_sha256
+from ..core import Principal, TaskStatus, canonical_sha256, validate_lease_owner
 from ..errors import AIError, ErrorCode
 from ._graph import (
     CancelGraphRequest,
@@ -86,8 +86,10 @@ class LocalTaskGraphLauncher:
     """Schedule DAG nodes while keeping durable truth in TaskRepository."""
 
     def __init__(self, repository: _TaskRepository, runner: TaskNodeRunner, *, owner: str) -> None:
-        if not owner.strip():
-            raise ValueError("task launcher owner is required")
+        try:
+            validate_lease_owner(owner)
+        except AIError as error:
+            raise ValueError("task launcher lease owner is invalid") from error
         self._repository = repository
         self._runner = runner
         self._owner = owner

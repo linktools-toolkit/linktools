@@ -6,6 +6,7 @@ import hashlib
 import uuid
 
 from ._json import JsonValue, canonical_json_bytes
+from ._validation import validate_persistence_namespace, validate_resource_id, validate_tenant_id
 from ._value import Principal
 
 
@@ -27,11 +28,17 @@ def deterministic_id(*parts: JsonValue) -> str:
 
 def step_conversation_id(*, namespace: str, tenant_id: str, execution_id: str) -> str:
     """Return the execution-scoped Harness conversation identity."""
+    validate_persistence_namespace(namespace)
+    validate_tenant_id(tenant_id)
+    validate_resource_id(execution_id)
     return "c-" + canonical_sha256(["step-conversation", namespace, tenant_id, execution_id])
 
 
 def step_run_id(*, namespace: str, tenant_id: str, execution_id: str, segment_sequence: int) -> str:
     """Return the deterministic Harness Step identity for one execution segment."""
+    validate_persistence_namespace(namespace)
+    validate_tenant_id(tenant_id)
+    validate_resource_id(execution_id)
     if segment_sequence < 1:
         raise ValueError("segment_sequence must be positive")
     return "r-" + canonical_sha256(

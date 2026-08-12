@@ -31,6 +31,7 @@ from ..core import (
     canonical_json_bytes,
     step_conversation_id,
     step_run_id,
+    validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ._execution import CancelEffectOutcome
@@ -57,6 +58,7 @@ class LocalExecutionBackend:
         executor: AgentExecutor,
         definitions: dict[str, AgentDefinition],
         *,
+        tenant_id: str,
         execution_root: Path,
         memory_store_factory: "Callable[[str, str], SearchableMemoryStore] | None" = None,
     ) -> None:
@@ -64,6 +66,7 @@ class LocalExecutionBackend:
         self._steps = steps
         self._executor = executor
         self._definitions = definitions
+        self._tenant_id = validate_tenant_id(tenant_id)
         self._execution_root = execution_root
         self._memory_store_factory = memory_store_factory
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -72,6 +75,14 @@ class LocalExecutionBackend:
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if request.principal.tenant_id != self._tenant_id or execution.tenant_id != self._tenant_id:
+            _logger.warning(
+                "local execution tenant rejected: expected=%s request=%s execution=%s",
+                self._tenant_id,
+                request.principal.tenant_id,
+                execution.tenant_id,
+            )
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         if execution.binding_digest not in self._definitions:
             raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
         existing = self._tasks.get(execution.execution_id)
@@ -94,7 +105,7 @@ class LocalExecutionBackend:
 
     async def reconcile(self) -> None:
         """Cancel claimed executions whose Harness run was never created."""
-        sessions = await self._persistence.sessions.list(tenant_id=self._persistence.namespace)
+        sessions = await self._persistence.sessions.list(tenant_id=self._tenant_id)
         for session in sessions:
             executions = await self._persistence.executions.list_by_session(session.session_id, tenant_id=session.tenant_id)
             for execution in executions:
@@ -107,6 +118,11 @@ class LocalExecutionBackend:
                     segment_sequence=execution.agent_run_sequence,
                 )
                 if await self._steps.get_run(run_id=run_id) is None:
+                    _logger.warning(
+                        "local recovery cancelling execution without step run: tenant=%s execution=%s",
+                        execution.tenant_id,
+                        execution.execution_id,
+                    )
                     await self._commit_terminal(execution, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED)
 
     async def close(self) -> None:

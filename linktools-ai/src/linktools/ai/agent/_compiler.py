@@ -16,7 +16,7 @@ from ..capability import (
     unresolved_binding,
     validate_fingerprint,
 )
-from ..core import canonical_sha256
+from ..core import canonical_sha256, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..model import (
     ModelConnectionConfig,
@@ -173,10 +173,12 @@ def _validate_binding_shape(binding: CapabilityBinding) -> None:
         fingerprint = binding.fingerprint
     except (AttributeError, TypeError) as error:
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    try:
+        validate_capability_provider(provider)
+    except AIError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
     if (
-        not isinstance(provider, str)
-        or not provider.strip()
-        or not isinstance(binding_id, str)
+        not isinstance(binding_id, str)
         or not binding_id.strip()
         or not isinstance(resolutions, tuple)
         or not isinstance(inherit_to_subagents, bool)

@@ -61,7 +61,7 @@ from ._services import (
     ForkExecutionRequest,
     PayloadRef,
     RetryExecutionRequest,
-    TraceItem,
+    ExecutionTraceItem,
     TranscriptItem,
 )
 
@@ -72,7 +72,7 @@ class ExecutionQueryApi(Protocol):
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
     async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult: ...
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TraceItem]': ...
+    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
     async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
 
@@ -137,9 +137,6 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        memory_namespace = request.memory_namespace
-        if memory_namespace is not None and (not isinstance(memory_namespace, str) or not memory_namespace.strip()):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if session_id is not None and source_execution_id is None:
             session = await self._persistence.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
@@ -587,7 +584,7 @@ class DefaultExecutionService:
         return CancelExecutionResult(execution_id, current.status is ExecutionStatus.CANCELLED)
 
 
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[TraceItem]:
+    async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> "Page[ExecutionTraceItem]":
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.trace(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
 

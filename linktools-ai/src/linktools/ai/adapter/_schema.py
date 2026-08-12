@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Normalized SQL tables owned by the Runtime SQL adapter."""
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..storage import (
@@ -23,19 +22,11 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData, Table
 
 
-@dataclass(frozen=True, slots=True)
-class SqlRuntimeTables:
-    tables: "dict[str, Table]"
-
-    def __getitem__(self, name: str) -> "Table":
-        return self.tables[name]
-
-
 class SqlRuntimeSchema:
     """Register one concrete table for each persisted Runtime fact family."""
 
     @classmethod
-    def register_schema(cls, registry: SqlSchemaRegistry) -> SqlRuntimeTables:
+    def register_schema(cls, registry: SqlSchemaRegistry) -> "dict[str, Table]":
         global runtime_metadata
         from sqlalchemy import (
             JSON,
@@ -43,7 +34,6 @@ class SqlRuntimeSchema:
             Column,
             DateTime,
             Index,
-            String,
             Table,
             UniqueConstraint,
         )
@@ -108,7 +98,7 @@ class SqlRuntimeSchema:
                 ))
             if name == "task_nodes":
                 columns.extend((
-                    Column("owner", String(512), nullable=True),
+                    Column("owner", sql_text_key(256), nullable=True),
                     Column("fence", BigInteger, nullable=False, default=0),
                     Column("lease_expires_at", DateTime(timezone=True), nullable=True),
                 ))
@@ -174,7 +164,7 @@ class SqlRuntimeSchema:
                 table.append_constraint(UniqueConstraint("namespace_key", "tenant_id", "chunk_key", name="uk_namespace_key_tenant_id_chunk_key"))
             registry.add_table(table, owner="adapter.sql")
             tables[name] = table
-        return SqlRuntimeTables(tables)
+        return tables
 
 
 def ensure_step_metadata() -> "MetaData":
@@ -194,4 +184,4 @@ def new_step_metadata() -> "MetaData":
     return metadata
 
 
-__all__ = ["SqlRuntimeSchema", "SqlRuntimeTables", "ensure_step_metadata", "new_step_metadata", "runtime_metadata", "step_metadata"]
+__all__ = ["SqlRuntimeSchema", "ensure_step_metadata", "new_step_metadata", "runtime_metadata", "step_metadata"]

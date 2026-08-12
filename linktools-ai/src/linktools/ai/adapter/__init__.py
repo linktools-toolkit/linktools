@@ -15,7 +15,7 @@ from ._persistence import (
     build_in_memory_runtime,
 )
 from ._provider import ProviderClient
-from ._schema import SqlRuntimeSchema, SqlRuntimeTables
+from ._schema import SqlRuntimeSchema
 from ._sql import open_sql_runtime
 from ._step import (
     DurableFilesystemStepStore,
@@ -26,6 +26,6 @@ from ._step import (
 
 __all__ = [
     "DurableFilesystemStepStore", "FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime",
-    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlMediaStore", "SqlRuntimeSchema", "SqlRuntimeTables", "SqlStepStore",
+    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlMediaStore", "SqlRuntimeSchema", "SqlStepStore",
     "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "open_sql_runtime",
 ]

@@ -12,6 +12,7 @@ from ..core import (
     JsonValue,
     canonical_json_bytes,
     canonical_string_tuple,
+    validate_capability_provider,
 )
 from ..errors import AIError, ErrorCode
 
@@ -72,7 +73,11 @@ class AgentCapabilityRef:
     config: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.provider.strip() or not self.id.strip() or not isinstance(self.required, bool) or (self.revision is not None and self.revision < 1):
+        try:
+            validate_capability_provider(self.provider)
+        except AIError as error:
+            raise ValueError("agent capability reference is invalid") from error
+        if not self.id.strip() or not isinstance(self.required, bool) or (self.revision is not None and self.revision < 1):
             raise ValueError("agent capability reference is invalid")
         object.__setattr__(self, "config", _ImmutableJsonMapping(self.config))
 

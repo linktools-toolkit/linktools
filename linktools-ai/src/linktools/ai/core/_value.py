@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ..errors import AIError, ErrorCode
+from ._validation import validate_principal_id, validate_principal_kind, validate_tenant_id
 from ._paging import Page
 
 
@@ -186,21 +187,25 @@ class StopReason(StrEnum):
     ERROR = "ERROR"
 
 
-@dataclass(frozen=True, slots=True)
-class Principal:
-    principal_id: str
-    tenant_id: str
-    kind: str = "user"
-
-    def __post_init__(self) -> None:
-        if not self.principal_id.strip() or not self.tenant_id.strip() or not self.kind.strip():
-            raise ValueError("principal is incomplete")
-
-
 class PrincipalKind(StrEnum):
     USER = "user"
     SERVICE = "service"
     LOCAL_TRUSTED = "LOCAL_TRUSTED"
+
+
+@dataclass(frozen=True, slots=True)
+class Principal:
+    principal_id: str
+    tenant_id: str
+    kind: str = PrincipalKind.USER.value
+
+    def __post_init__(self) -> None:
+        try:
+            validate_principal_id(self.principal_id)
+            validate_tenant_id(self.tenant_id)
+            validate_principal_kind(self.kind)
+        except AIError as error:
+            raise ValueError("principal identity is invalid") from error
 
 
 __all__ = [

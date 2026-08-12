@@ -18,7 +18,7 @@ async def open_local_task_api(
     *,
     runner: TaskNodeRunner,
     owner: str,
-) -> AsyncIterator[TaskApi]:
+) -> "AsyncIterator[TaskApi]":
     """Open only the durable local Task launcher and service façade."""
     launcher = LocalTaskGraphLauncher(persistence.tasks, runner, owner=owner)
     service = DefaultTaskService(persistence, authorization, launcher)

@@ -15,6 +15,9 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
+from ...core import validate_tenant_id
+from ...errors import AIError
+
 SESSION_OPERATIONS = frozenset({"create", "update", "fork", "close"})
 
 
@@ -25,6 +28,14 @@ class SessionWorkflowInput:
     expected_revision: int
     operation_id: str
     operation: str
+
+    def __post_init__(self) -> None:
+        try:
+            validate_tenant_id(self.tenant_id)
+        except AIError as error:
+            raise ValueError("session workflow tenant is invalid") from error
+        if not self.session_id or not self.operation_id or self.expected_revision < 0 or self.operation not in SESSION_OPERATIONS:
+            raise ValueError("session workflow input is incomplete")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,8 +54,6 @@ class SessionWorkflow:
         self._activity = activity
 
     async def run(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-        if not request.session_id or not request.tenant_id or not request.operation_id or request.expected_revision < 0 or request.operation not in SESSION_OPERATIONS:
-            raise ValueError("session workflow input is incomplete")
         if self._activity is not None:
             result = await self._activity.run(request)
         elif _temporal_workflow is not None and _TemporalRetryPolicy is not None:

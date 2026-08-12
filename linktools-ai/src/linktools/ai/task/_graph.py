@@ -6,7 +6,13 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from ..core import Principal, TaskStatus, validate_idempotency_key
+from ..core import (
+    Principal,
+    TaskStatus,
+    validate_idempotency_key,
+    validate_lease_owner,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 
 
@@ -46,6 +52,15 @@ class TaskLease:
     fence: int
     lease_expires_at: datetime
 
+    def __post_init__(self) -> None:
+        try:
+            validate_tenant_id(self.tenant_id)
+            validate_lease_owner(self.owner)
+        except AIError as error:
+            raise ValueError("task lease identity is invalid") from error
+        if not self.graph_id.strip() or not self.task_id.strip() or self.fence < 1 or self.lease_expires_at.tzinfo is None:
+            raise ValueError("task lease is invalid")
+
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeView:
@@ -60,6 +75,13 @@ class TaskNodeView:
     error_code: "str | None"
     error_digest: "str | None"
     execution_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.owner is not None:
+            try:
+                validate_lease_owner(self.owner)
+            except AIError as error:
+                raise ValueError("task node lease owner is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +144,10 @@ class TaskTerminalRecord:
     execution_id: "str | None" = None
 
     def __post_init__(self) -> None:
+        try:
+            validate_lease_owner(self.owner)
+        except AIError as error:
+            raise ValueError("task terminal identity is invalid") from error
         if self.completed_at.tzinfo is None:
             raise ValueError("task terminal time must be timezone-aware")
 

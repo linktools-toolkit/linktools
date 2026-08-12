@@ -7,7 +7,15 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from ..core import Principal, ResourceRef, ToolOperationStatus, canonical_sha256
+from ..core import (
+    Principal,
+    ResourceRef,
+    ToolOperationStatus,
+    canonical_sha256,
+    validate_lease_owner,
+    validate_tenant_id,
+)
+from ..errors import AIError
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +38,14 @@ class ToolOperationRecord:
     error_code: "str | None"
     created_at: datetime
     updated_at: datetime
+
+    def __post_init__(self) -> None:
+        try:
+            validate_tenant_id(self.tenant_id)
+            if self.owner is not None:
+                validate_lease_owner(self.owner)
+        except AIError as error:
+            raise ValueError("tool operation lease identity is invalid") from error
 
 
 class ToolStateStore(Protocol):

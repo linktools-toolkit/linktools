@@ -2,7 +2,7 @@
   "runtime_owner": "adapter.sql",
   "step_owner": "adapter._step",
   "asset_owner": "asset.sql",
-  "runtime_digest": "f601a969b26dd9598ca082a4b2a0a8582828c80d78ed397e4483b7ab61609960",
+  "runtime_digest": "8acf99fc8a15b6c8821463e721d212a39ec4dbdf566ebc8c637409dea3f5a315",
   "step_digest": "e550cb9b40ebcc18d55e395658e2a9bac7febfe0a300049fae0bd4f29ed74060",
   "runtime_tables": [
     "ai_runtime_approvals",

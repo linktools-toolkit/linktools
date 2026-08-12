@@ -18,12 +18,16 @@ from linktools.ai.adapter import (
     SqlRuntimeSchema,
     build_filesystem_runtime,
     build_in_memory_runtime,
+    open_sql_runtime,
 )
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
     IdempotencyStatus,
+    OperationKind,
+    OperationStatus,
+    ResourceKind,
     SessionStatus,
     StopReason,
     idempotency_key_hash,
@@ -36,6 +40,8 @@ from linktools.ai.runtime import (
     ExecutionTerminalCommit,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
+    MemoryRecord,
+    OperationLedgerInput,
     ResultRecord,
     RuntimeBackend,
     SessionHeadAdvance,
@@ -67,7 +73,7 @@ async def test_in_memory_resources_owns_harness_store() -> None:
 
 @pytest.mark.asyncio
 async def test_filesystem_resources_uses_shared_runtime_writer_and_durable_step_store(tmp_path: Path) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), workspace_id="project")
+    runtime = build_filesystem_runtime(str(tmp_path), namespace="project")
     steps = DurableFilesystemStepStore(runtime.runtime_root, "project", writer_lock=runtime.writer_lock)
     await runtime.initialize()
     await steps.initialize()
@@ -85,7 +91,7 @@ async def test_filesystem_resources_uses_shared_runtime_writer_and_durable_step_
 @pytest.mark.asyncio
 async def test_sqlite_resources_uses_sibling_harness_database(tmp_path: Path) -> None:
     primary = tmp_path / "runtime.db"
-    config = RuntimePersistenceConfig.sqlite(str(primary), namespace="namespace", deployment_id="deployment")
+    config = RuntimePersistenceConfig.sqlite(str(primary), namespace="namespace")
     async with open_sql_resources(config) as resources:
         assert isinstance(resources.steps, SqliteStepStore)
     with sqlite3.connect(primary) as connection:
@@ -93,6 +99,57 @@ async def test_sqlite_resources_uses_sibling_harness_database(tmp_path: Path) ->
     assert not any(name.startswith("ai_step_") for name in tables)
     sibling = tmp_path / f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
     assert sibling.name == f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
+
+
+@pytest.mark.asyncio
+async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'isolation.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    registry = SqlSchemaRegistry()
+    SqlRuntimeSchema.register_schema(registry)
+    async with engine.begin() as connection:
+        await connection.run_sync(registry.metadata.create_all)
+    first = await open_sql_runtime(session_factory, backend=RuntimeBackend.SQLITE, namespace="runtime-a")
+    second = await open_sql_runtime(session_factory, backend=RuntimeBackend.SQLITE, namespace="runtime-b")
+    now = datetime.now(timezone.utc)
+    try:
+        for tenant_id, owner_principal_id in (("tenant-a", "principal-a"), ("tenant-b", "principal-b")):
+            await first.sessions.create(SessionRecord("shared", tenant_id, owner_principal_id, "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+        await second.sessions.create(SessionRecord("shared", "tenant-a", "principal-c", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+
+        assert (await first.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-a"
+        assert (await first.sessions.get("shared", tenant_id="tenant-b")).owner_principal_id == "principal-b"
+        assert (await second.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-c"
+        assert first.atomic_domain_id != second.atomic_domain_id
+        assert first.sessions.atomic_domain_id == first.results.atomic_domain_id
+        with pytest.raises(AIError) as sql_tenant_error:
+            await first.sessions.get("shared", tenant_id=" tenant-a")
+        assert sql_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        memory_record = MemoryRecord("memory", "tenant-a", "a" * 64, "content", "digest", {}, 0, now, now)
+        foreign_operation = OperationLedgerInput(
+            "operation", "tenant-b", ResourceKind.MEMORY, "memory", None,
+            OperationKind.MEMORY_WRITE, OperationStatus.SUCCEEDED, "request",
+            None, None, None, True, now, now,
+        )
+        with pytest.raises(AIError) as sql_atomic_tenant_error:
+            await first.memories.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
+        assert sql_atomic_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    finally:
+        await first.sessions.close()
+        await second.sessions.close()
+        await engine.dispose()
+
+    memory = build_in_memory_runtime(namespace="tenant-validation")
+    await memory.initialize()
+    try:
+        with pytest.raises(AIError) as memory_tenant_error:
+            await memory.persistence.sessions.get("shared", tenant_id="tenant-a ")
+        assert memory_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+        with pytest.raises(AIError) as memory_atomic_tenant_error:
+            await memory.persistence.memories.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
+        assert memory_atomic_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    finally:
+        await memory.close()
 
 
 @pytest.mark.asyncio
@@ -110,7 +167,7 @@ async def test_storage_database_preparation_owns_sqlite_dialect_setup(tmp_path: 
         )
         assert database.session_factory is session_factory
         assert database.coordination_scope is CoordinationScope.PROCESS
-        assert database.metadata is next(iter(tables.tables.values())).metadata
+        assert database.metadata is next(iter(tables.values())).metadata
         assert database.schema_manifest_digest == manifest.digest
     finally:
         await engine.dispose()
@@ -149,7 +206,7 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
 @pytest.mark.asyncio
 async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
-    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "claim.db"), namespace="claim", deployment_id="test")
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "claim.db"), namespace="claim")
     async with open_sql_resources(config) as resources:
         execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
         key_hash = idempotency_key_hash("request")
@@ -182,7 +239,7 @@ async def test_memory_terminal_aggregate_commits_event_idempotency_and_session_h
 
 @pytest.mark.asyncio
 async def test_file_runtime_fault_does_not_publish_a_partial_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), workspace_id="fault")
+    runtime = build_filesystem_runtime(str(tmp_path), namespace="fault")
     await runtime.initialize()
     from linktools.ai.adapter import _persistence as runtime_persistence
     original = runtime_persistence.write_json_atomic

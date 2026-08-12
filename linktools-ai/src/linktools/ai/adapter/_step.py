@@ -22,10 +22,12 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ..core import canonical_json_bytes
+from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemWriterLock,
+    SqlErrorKind,
+    classify_sql_error,
     read_json,
     resolve_dialect,
     sql_blob,
@@ -51,8 +53,10 @@ class DurableFilesystemStepStore:
     """Immutable-file StepStore with crash recovery checks and fsync barriers."""
 
     def __init__(self, root: str | Path, namespace: str, *, writer_lock: FilesystemWriterLock | None = None) -> None:
-        if not namespace.strip():
-            raise ValueError("StepStore namespace is required")
+        try:
+            validate_persistence_namespace(namespace)
+        except AIError as error:
+            raise ValueError("StepStore namespace is invalid") from error
         runtime_root = Path(root).expanduser().resolve()
         self._namespace = namespace
         self._root = runtime_root / "steps" / _file_digest(namespace)
@@ -292,6 +296,10 @@ class SqlStepStore:
     """Namespace-bound MySQL/PostgreSQL StepStore implementation."""
 
     def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str) -> None:
+        try:
+            validate_persistence_namespace(namespace)
+        except AIError as error:
+            raise ValueError("StepStore namespace is invalid") from error
         self._sessions = session_factory
         self._namespace = namespace
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
@@ -317,7 +325,7 @@ class SqlStepStore:
                 async with session.begin():
                     await session.execute(insert(table).values(_run_values(self._namespace_key, record)))
         except Exception as error:
-            if _is_integrity(error):
+            if classify_sql_error(error) is SqlErrorKind.INTEGRITY:
                 raise AIError(ErrorCode.STORAGE_CONFLICT) from error
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
@@ -419,6 +427,10 @@ class SqlMediaStore:
     """Content-addressed SQL media store used by Harness snapshots."""
 
     def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
+        try:
+            validate_persistence_namespace(namespace)
+        except AIError as error:
+            raise ValueError("media namespace is invalid") from error
         self._sessions = session_factory
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         if metadata is None or tables is None:
@@ -442,7 +454,7 @@ class SqlMediaStore:
                 try:
                     await session.execute(insert(table).values(values))
                 except Exception as error:
-                    if not _is_integrity(error):
+                    if classify_sql_error(error) is not SqlErrorKind.INTEGRITY:
                         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         return uri
 
@@ -668,11 +680,6 @@ def _utc(value: object) -> datetime:
 def _validate_media(row: Mapping[str, object], data: bytes) -> None:
     if len(data) != int(row["size_bytes"]) or hashlib.sha256(data).hexdigest() != str(row["sha256"]):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _is_integrity(error: BaseException) -> bool:
-    from sqlalchemy.exc import IntegrityError
-    return isinstance(error, IntegrityError)
 
 
 def _schema_digest(metadata: "MetaData") -> str:

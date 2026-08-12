@@ -27,13 +27,14 @@ from ..core import (
     canonical_sha256,
     step_conversation_id,
     step_run_id,
+    validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
 from ..runtime import (
     ExecutionHistoryItem,
     ExecutionRecord,
     RuntimePersistence,
-    TraceItem,
+    ExecutionTraceItem,
     TranscriptItem,
 )
 
@@ -42,19 +43,23 @@ class StepExecutionHistoryReader:
     """Own the adapter projection between StepStore facts and Runtime views."""
 
     def __init__(self, namespace: str, persistence: RuntimePersistence, store: StepStore, cursor_signer: CursorSigner) -> None:
+        try:
+            validate_persistence_namespace(namespace)
+        except AIError as error:
+            raise ValueError("execution history namespace is invalid") from error
         self._namespace = namespace
         self._persistence = persistence
         self._store = store
         self._cursor_signer = cursor_signer
 
-    async def trace(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TraceItem]:
+    async def trace(self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int) -> "Page[ExecutionTraceItem]":
         record = await self._persistence.executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         entries = await self._history_tree(record, tenant_id)
-        projected: list[tuple[tuple[object, ...], TraceItem]] = []
+        projected: "list[tuple[tuple[object, ...], ExecutionTraceItem]]" = []
         for item, depth in entries:
             for segment_sequence, events in await self._segment_events(item, tenant_id):
                 for ordinal, event in enumerate(events):
@@ -64,7 +69,7 @@ class StepExecutionHistoryReader:
         projected.sort(key=lambda value: value[0])
         values = [item for _, item in projected]
         start = _cursor_offset(cursor, len(values))
-        selected = tuple(TraceItem(item.execution_id, start + index + 1, item.payload) for index, item in enumerate(values[start:start + limit]))
+        selected = tuple(ExecutionTraceItem(item.execution_id, start + index + 1, item.payload) for index, item in enumerate(values[start:start + limit]))
         next_offset = start + len(selected)
         return Page(selected, str(next_offset) if next_offset < len(values) else None)
 
@@ -174,7 +179,7 @@ class StepExecutionHistoryReader:
         return result
 
 
-def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordinal: int, event: StepEvent) -> TraceItem | None:
+def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordinal: int, event: StepEvent) -> "ExecutionTraceItem | None":
     mapping = {
         "model_request_started": ("MODEL_REQUEST", "STARTED"), "model_request_completed": ("MODEL_RESPONSE", "SUCCEEDED"),
         "model_request_failed": ("MODEL_RESPONSE", "FAILED"), "tool_call_started": ("TOOL_CALL", "STARTED"),
@@ -193,7 +198,7 @@ def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordi
         payload["tool_name"] = event.tool_name
     if depth > 0:
         payload["child_execution_id"] = record.execution_id
-    return TraceItem(record.execution_id, ordinal, payload)
+    return ExecutionTraceItem(record.execution_id, ordinal, payload)
 
 
 def _validate_run(run: RunRecord, expected_id: str, conversation_id: str, sequence: int) -> None:

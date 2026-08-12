@@ -19,7 +19,7 @@ def _expected_tables() -> set[str]:
     asset_registry = SqlSchemaRegistry()
     asset_tables = SqlAssetSchema.register_schema(asset_registry)
     return {
-        *(table.name for table in runtime_manifest.tables.values()),
+        *(table.name for table in runtime_manifest.values()),
         *build_step_schema().tables,
         *(table.name for table in (asset_tables.entry, asset_tables.change, asset_tables.blob, asset_tables.revision)),
     }

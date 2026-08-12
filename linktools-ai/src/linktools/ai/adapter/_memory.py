@@ -20,7 +20,14 @@ from pydantic_ai_harness.memory import (
     SearchableMemoryStore,
 )
 
-from ..core import OperationKind, OperationStatus, ResourceKind, canonical_sha256
+from ..core import (
+    OperationKind,
+    OperationStatus,
+    ResourceKind,
+    canonical_sha256,
+    validate_memory_namespace,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ..runtime import BlobRef, MemoryRecord, OperationLedgerInput, RuntimePersistence
 
@@ -32,11 +39,14 @@ class RuntimeMemoryStore(SearchableMemoryStore):
     """Map Harness memory paths to the bound Runtime memory repositories."""
 
     def __init__(self, persistence: RuntimePersistence, *, tenant_id: str, namespace: str) -> None:
-        if not isinstance(namespace, str) or namespace == "":
-            raise ValueError("memory namespace is required")
+        try:
+            validate_tenant_id(tenant_id)
+            validate_memory_namespace(namespace)
+        except AIError as error:
+            raise ValueError("memory store identity is invalid") from error
         self._persistence = persistence
         self._tenant_id = tenant_id
-        self._namespace_digest = canonical_sha256(namespace)
+        self._namespace_key = canonical_sha256(namespace)
         self._lock = asyncio.Lock()
 
     async def read(self, path: str, *, max_chars: int) -> "MemoryFile | None":
@@ -51,7 +61,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return MemoryFile(content[:max_chars], _version(record.revision), operation_id if isinstance(operation_id, str) else None, len(content) > max_chars)
 
     async def get_operation(self, operation: MemoryOperation) -> MemoryMutation | None:
-        record = await self._persistence.operations.get(_operation_id(self._namespace_digest, operation.id), tenant_id=self._tenant_id)
+        record = await self._persistence.operations.get(_operation_id(self._namespace_key, operation.id), tenant_id=self._tenant_id)
         if record is None:
             return None
         if record.resource_kind is not ResourceKind.MEMORY or record.request_digest != operation.fingerprint:
@@ -79,10 +89,9 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             blob = await self._persistence.blobs.put_bytes(tenant_id=self._tenant_id, data=content.encode("utf-8"))
             now = datetime.now(timezone.utc)
             next_record = MemoryRecord(
-                _memory_id(self._namespace_digest, logical_path),
+                _memory_id(self._namespace_key, logical_path),
                 self._tenant_id,
-                self._namespace_digest,
-                "agent-memory",
+                self._namespace_key,
                 blob.digest,
                 hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 {"path": logical_path, **({} if operation is None else {"operation_id": operation.id})},
@@ -91,7 +100,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 now,
             )
             mutation = MemoryMutation(_version(next_record.revision), False, current is not None)
-            operation_input = _operation_input(operation, self._namespace_digest, self._tenant_id, mutation, OperationKind.MEMORY_WRITE, _memory_id(self._namespace_digest, logical_path))
+            operation_input = _operation_input(operation, self._namespace_key, self._tenant_id, mutation, OperationKind.MEMORY_WRITE, _memory_id(self._namespace_key, logical_path))
             try:
                 stored, replayed = await self._persistence.memories.put_with_operation(
                     next_record,
@@ -109,7 +118,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             mutation = MemoryMutation(_version(stored.revision), False, current is not None)
-            _logger.debug("runtime memory written: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory written: namespace_key=%s path_digest=%s replayed=%s", self._namespace_key, canonical_sha256(logical_path), False)
             return mutation
 
     async def delete(
@@ -130,10 +139,10 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 mutation = MemoryMutation(None, False, False)
             else:
                 mutation = MemoryMutation(None, False, True)
-            operation_input = _operation_input(operation, self._namespace_digest, self._tenant_id, mutation, OperationKind.MEMORY_DELETE, _memory_id(self._namespace_digest, logical_path))
+            operation_input = _operation_input(operation, self._namespace_key, self._tenant_id, mutation, OperationKind.MEMORY_DELETE, _memory_id(self._namespace_key, logical_path))
             try:
                 deleted, replayed = await self._persistence.memories.delete_with_operation(
-                    _memory_id(self._namespace_digest, logical_path),
+                    _memory_id(self._namespace_key, logical_path),
                     tenant_id=self._tenant_id,
                     expected_revision=None if current is None else current.revision,
                     operation=operation_input,
@@ -148,7 +157,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 return replay
             if deleted != (current is not None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _logger.debug("runtime memory deleted: namespace_digest=%s path_digest=%s replayed=%s", self._namespace_digest, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory deleted: namespace_key=%s path_digest=%s replayed=%s", self._namespace_key, canonical_sha256(logical_path), False)
             return mutation
 
     async def list_paths(self, prefix: str = "", *, limit: int) -> "list[str]":
@@ -224,7 +233,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             page_limit = 200 if limit is None else min(200, limit - len(records))
             page = await self._persistence.memories.list(
                 tenant_id=self._tenant_id,
-                owner_id=self._namespace_digest,
+                memory_namespace_key=self._namespace_key,
                 cursor=cursor,
                 limit=page_limit,
             )
@@ -235,7 +244,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return records if limit is None else records[:limit]
 
     async def _record(self, logical_path: str) -> MemoryRecord | None:
-        return await self._persistence.memories.get(_memory_id(self._namespace_digest, logical_path), tenant_id=self._tenant_id)
+        return await self._persistence.memories.get(_memory_id(self._namespace_key, logical_path), tenant_id=self._tenant_id)
 
     async def _content(self, record: MemoryRecord) -> str:
         blob = await self._persistence.blobs.stat(BlobRef(self._tenant_id, record.content_ref, 0, ""), tenant_id=self._tenant_id)
@@ -256,7 +265,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         if error.code is not ErrorCode.STORAGE_CONFLICT:
             return error
         if operation is not None:
-            existing = await self._persistence.operations.get(_operation_id(self._namespace_digest, operation.id), tenant_id=self._tenant_id)
+            existing = await self._persistence.operations.get(_operation_id(self._namespace_key, operation.id), tenant_id=self._tenant_id)
             if existing is not None:
                 if existing.request_digest != operation.fingerprint:
                     return MemoryOperationConflictError("memory operation fingerprint conflict")
@@ -280,12 +289,12 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return f"{normalized}/"
 
 
-def _operation_input(operation: MemoryOperation | None, namespace_digest: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> OperationLedgerInput | None:
+def _operation_input(operation: "MemoryOperation | None", namespace_key: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> "OperationLedgerInput | None":
     if operation is None:
         return None
     now = datetime.now(timezone.utc)
     return OperationLedgerInput(
-        _operation_id(namespace_digest, operation.id),
+        _operation_id(namespace_key, operation.id),
         tenant_id,
         ResourceKind.MEMORY,
         resource_id,
@@ -302,12 +311,12 @@ def _operation_input(operation: MemoryOperation | None, namespace_digest: str, t
     )
 
 
-def _memory_id(namespace_digest: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode("utf-8")).hexdigest()
+def _memory_id(namespace_key: str, logical_path: str) -> str:
+    return hashlib.sha256(f"{namespace_key}\0{logical_path}".encode("utf-8")).hexdigest()
 
 
-def _operation_id(namespace_digest: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode("utf-8")).hexdigest()
+def _operation_id(namespace_key: str, operation_id: str) -> str:
+    return hashlib.sha256(f"{namespace_key}\0{operation_id}".encode("utf-8")).hexdigest()
 
 
 def _version(revision: int) -> str:

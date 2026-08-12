@@ -23,11 +23,14 @@ from linktools.ai.storage import (
     MySQLDialect,
     PostgreSQLDialect,
     SQLiteDialect,
+    SqlErrorKind,
     SqlSchemaRegistry,
     StorageLayer,
     StorageChange,
     StorageOverlay,
     StorageOperation,
+    classify_sql_error,
+    is_retryable_sql_transaction,
     resolve_dialect,
 )
 
@@ -59,6 +62,22 @@ class _MappedPathAdapter:
         if len(parts) != 3 or parts[0] != "mapped" or not parts[2].endswith(".json"):
             return None
         return AssetKey(parts[1], parts[2][:-5])
+
+
+def test_sql_error_classification_is_owned_by_storage() -> None:
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
+    integrity = IntegrityError("insert", {}, RuntimeError("unique constraint failed"))
+    locked = OperationalError("update", {}, RuntimeError("database is locked"))
+    unavailable = OperationalError("select", {}, RuntimeError("connection refused"))
+    assert classify_sql_error(integrity) is SqlErrorKind.INTEGRITY
+    assert is_retryable_sql_transaction(integrity)
+    assert classify_sql_error(locked) is SqlErrorKind.RETRYABLE_TRANSACTION
+    assert is_retryable_sql_transaction(locked)
+    assert classify_sql_error(unavailable) is SqlErrorKind.DATABASE
+    assert not is_retryable_sql_transaction(unavailable)
+    assert classify_sql_error(RuntimeError("application failure")) is SqlErrorKind.UNKNOWN
+    assert not is_retryable_sql_transaction(RuntimeError("application failure"))
 
 
 def test_asset_path_adapter_and_config_are_available() -> None:
@@ -174,6 +193,33 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
             f"{TABLE_PREFIX}asset_blobs",
             f"{TABLE_PREFIX}asset_revision",
         )
+    finally:
+        await engine.dispose()
+
+
+def test_sql_asset_namespace_matches_the_persisted_column_limit() -> None:
+    with pytest.raises(ValueError, match="SQL asset namespace is invalid"):
+        SqlAssetBackend(object(), namespace="a" * 129)
+
+
+@pytest.mark.asyncio
+async def test_sql_asset_namespace_isolates_the_same_logical_key(tmp_path: Path) -> None:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset-isolation.db'}")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    first = SqlAssetBackend(session_factory, namespace="assets-a")
+    second = SqlAssetBackend(session_factory, namespace="assets-b")
+    key = AssetKey("prompt", "shared")
+    try:
+        await provision_database(engine)
+        await first.initialize()
+        await second.initialize()
+        await first.put(key, b"first")
+        await second.put(key, b"second")
+
+        assert await first.get(key) == b"first"
+        assert await second.get(key) == b"second"
     finally:
         await engine.dispose()
 

@@ -392,7 +392,7 @@ CREATE TABLE `ai_runtime_task_nodes` (
   `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
   `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
   `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `owner` VARCHAR(512) NULL COMMENT 'Lease owner',
+  `owner` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Lease owner',
   `fence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Lease fence',
   `lease_expires_at` DATETIME NULL COMMENT 'Lease expiration',
   `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',

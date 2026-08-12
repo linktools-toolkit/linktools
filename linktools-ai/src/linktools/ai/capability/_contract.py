@@ -8,7 +8,7 @@ from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
 
@@ -106,7 +106,11 @@ class StaticCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]" = ()
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or not self.provider.strip() or self.capability is None:
+        try:
+            validate_capability_provider(self.provider)
+        except AIError as error:
+            raise ValueError("static capability binding is incomplete") from error
+        if not self.id.strip() or self.capability is None:
             raise ValueError("static capability binding is incomplete")
         validate_fingerprint(self.fingerprint)
 
@@ -127,7 +131,8 @@ class UnresolvedCapabilityBinding:
         return f"unresolved:{self.provider}"
 
     def __post_init__(self) -> None:
-        if not self.provider.strip() or not _is_fingerprint(self.fingerprint):
+        validate_capability_provider(self.provider)
+        if not _is_fingerprint(self.fingerprint):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
         if not self.resolutions or any(item.status != "unresolved" for item in self.resolutions):
             raise ValueError("unresolved capability binding requires unresolved resolutions")
@@ -182,7 +187,11 @@ def canonical_bootstrap_refs(
     provider: str,
     refs: Sequence[AgentCapabilityRef],
 ) -> "tuple[AgentCapabilityRef, ...]":
-    if not isinstance(provider, str) or not provider.strip() or not isinstance(refs, tuple):
+    try:
+        validate_capability_provider(provider)
+    except AIError as error:
+        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
+    if not isinstance(refs, tuple):
         raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
     groups: dict[tuple[str, str], AgentCapabilityRef] = {}
     for ref in refs:

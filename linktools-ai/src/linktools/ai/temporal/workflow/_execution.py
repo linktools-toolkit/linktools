@@ -17,7 +17,7 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...core import ApprovalDecision, ExecutionStatus, JsonValue
+from ...core import ApprovalDecision, ExecutionStatus, JsonValue, validate_lease_owner, validate_tenant_id
 from ...errors import AIError, ErrorCode
 
 CONTINUE_EVENT_THRESHOLD = 10000
@@ -68,6 +68,9 @@ class ExecutionWorkflowInput:
     owner: str = ""
     fence: int = 0
     operation_id: str = ""
+
+    def __post_init__(self) -> None:
+        _require_request(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +324,15 @@ def _require_request(request: ExecutionWorkflowInput) -> None:
     )
     if any(not value.strip() for value in values):
         raise ValueError("execution workflow input is incomplete")
+    try:
+        validate_tenant_id(request.tenant_id)
+    except AIError as error:
+        raise ValueError("execution workflow tenant is invalid") from error
+    if request.owner:
+        try:
+            validate_lease_owner(request.owner)
+        except AIError as error:
+            raise ValueError("execution workflow lease identity is invalid") from error
     if request.fence < 0 or (request.fence and not request.owner.strip()) or (request.operation_id and not request.owner.strip()):
         raise ValueError("execution workflow lease identity is incomplete")
 

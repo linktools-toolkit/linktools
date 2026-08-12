@@ -5,7 +5,8 @@
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
-from ..core import Principal
+from ..core import Principal, validate_principal_id, validate_resource_id, validate_tenant_id
+from ..errors import AIError
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,11 +23,14 @@ class RunContext:
     depth: int = 0
 
     def __post_init__(self) -> None:
+        try:
+            validate_tenant_id(self.tenant_id)
+            validate_principal_id(self.principal_id)
+            validate_resource_id(self.execution_id)
+        except AIError as error:
+            raise ValueError("run context identity is invalid") from error
         if (
-            not self.tenant_id.strip()
-            or not self.principal_id.strip()
-            or not self.execution_id.strip()
-            or not self.session_id.strip()
+            not self.session_id.strip()
             or not self.run_id.strip()
             or not self.agent_id.strip()
             or self.depth < 0

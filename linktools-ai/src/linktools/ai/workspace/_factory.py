@@ -52,7 +52,12 @@ from ..capability import (
     build_builtin_capability_providers,
     canonical_bootstrap_refs,
 )
-from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
+from ..core import (
+    HmacCursorSigner,
+    TenantAuthorizationPolicy,
+    canonical_sha256,
+    validate_persistence_namespace,
+)
 from ..errors import AIError, ErrorCode
 from ..model import (
     ModelConnectionConfig,
@@ -97,57 +102,50 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.workspace.runtime")
 
 
-def _has_control(value: str) -> bool:
-    return any(ord(char) < 32 or ord(char) == 127 for char in value)
-
-
 @dataclass(frozen=True, slots=True)
 class RuntimePersistenceConfig:
     """Select the runtime persistence implementation."""
 
     backend: RuntimeBackend
     namespace: str
-    deployment_id: str = "workspace"
-    location: str | None = field(default=None, repr=False)
-    local_tenant_id: str | None = None
+    location: "str | None" = field(default=None, repr=False)
 
     @classmethod
-    def in_memory(cls, *, namespace: str, deployment_id: str = "memory") -> "RuntimePersistenceConfig":
-        return cls(RuntimeBackend.IN_MEMORY, namespace, deployment_id)
+    def in_memory(cls, *, namespace: str) -> "RuntimePersistenceConfig":
+        return cls(RuntimeBackend.IN_MEMORY, namespace)
 
     @classmethod
-    def filesystem(cls, root: str, *, workspace_id: str) -> "RuntimePersistenceConfig":
-        if not root.strip() or not workspace_id.strip():
+    def filesystem(cls, root: str, *, namespace: str) -> "RuntimePersistenceConfig":
+        if not root.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return cls(RuntimeBackend.FILESYSTEM, workspace_id, "workspace", str(Path(root).expanduser().resolve()), workspace_id)
+        return cls(RuntimeBackend.FILESYSTEM, namespace, str(Path(root).expanduser().resolve()))
 
     @classmethod
-    def sqlite(cls, path: str, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
+    def sqlite(cls, path: str, *, namespace: str) -> "RuntimePersistenceConfig":
         if not path.strip() or path == ":memory:":
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        return cls(RuntimeBackend.SQLITE, namespace, deployment_id, str(Path(path).expanduser().resolve()))
+        return cls(RuntimeBackend.SQLITE, namespace, str(Path(path).expanduser().resolve()))
 
     @classmethod
-    def mysql(cls, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
-        return cls(RuntimeBackend.MYSQL, namespace, deployment_id)
+    def mysql(cls, *, namespace: str) -> "RuntimePersistenceConfig":
+        return cls(RuntimeBackend.MYSQL, namespace)
 
     @classmethod
-    def postgresql(cls, *, namespace: str, deployment_id: str) -> "RuntimePersistenceConfig":
-        return cls(RuntimeBackend.POSTGRESQL, namespace, deployment_id)
+    def postgresql(cls, *, namespace: str) -> "RuntimePersistenceConfig":
+        return cls(RuntimeBackend.POSTGRESQL, namespace)
 
     def __post_init__(self) -> None:
-        if not self.namespace.strip() or not self.deployment_id.strip() or _has_control(self.namespace) or _has_control(self.deployment_id):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        validate_persistence_namespace(self.namespace)
         if self.backend is RuntimeBackend.IN_MEMORY:
-            if self.location is not None or self.local_tenant_id is not None:
+            if self.location is not None:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.FILESYSTEM:
-            if self.location is None or not Path(self.location).is_absolute() or not self.local_tenant_id or _has_control(self.local_tenant_id):
+            if self.location is None or not Path(self.location).is_absolute():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         elif self.backend is RuntimeBackend.SQLITE:
-            if self.location is None or self.location == ":memory:" or not Path(self.location).is_absolute() or self.local_tenant_id is not None:
+            if self.location is None or self.location == ":memory:" or not Path(self.location).is_absolute():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        elif self.backend in {RuntimeBackend.MYSQL, RuntimeBackend.POSTGRESQL} and (self.location is not None or self.local_tenant_id is not None):
+        elif self.backend in {RuntimeBackend.MYSQL, RuntimeBackend.POSTGRESQL} and self.location is not None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
@@ -164,7 +162,7 @@ async def _open_resources(
     config: RuntimePersistenceConfig,
     *,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
-) -> AsyncIterator[_RuntimeResources]:
+) -> "AsyncIterator[_RuntimeResources]":
     if config.backend is RuntimeBackend.IN_MEMORY:
         runtime = build_in_memory_runtime(namespace=config.namespace)
         steps = InMemoryStepStore()
@@ -175,7 +173,7 @@ async def _open_resources(
             await runtime.close()
         return
     if config.backend is RuntimeBackend.FILESYSTEM:
-        runtime = build_filesystem_runtime(str(config.location), workspace_id=config.namespace)
+        runtime = build_filesystem_runtime(str(config.location), namespace=config.namespace)
         steps = DurableFilesystemStepStore(runtime.runtime_root, config.namespace, writer_lock=runtime.writer_lock)
         await runtime.initialize()
         await steps.initialize()
@@ -191,7 +189,6 @@ async def _open_resources(
         session_factory,
         backend=config.backend,
         namespace=config.namespace,
-        deployment_id=config.deployment_id,
     )
     if config.backend is RuntimeBackend.SQLITE:
         steps = SqliteStepStore(database=namespace_scoped_step_db_path(str(config.location), config.namespace))
@@ -208,6 +205,7 @@ async def _open_resources(
 
 
 def namespace_scoped_step_db_path(runtime_path: str, namespace: str) -> Path:
+    validate_persistence_namespace(namespace)
     path = Path(runtime_path).expanduser().resolve()
     return path.with_name(f"{path.name}.steps.{hashlib.sha256(namespace.encode('utf-8')).hexdigest()}.db")
 
@@ -245,18 +243,18 @@ def build_workspace_asset_repository(
 async def open_workspace_runtime(
     workspace: Workspace,
     *,
-    config: RuntimePersistenceConfig | None = None,
-    model: str | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
+    config: "RuntimePersistenceConfig | None" = None,
+    model: "str | None" = None,
+    base_url: "str | None" = None,
+    api_key: "str | None" = None,
     session_factory: "async_sessionmaker[AsyncSession] | None" = None,
     mcp_runtime: "MCPRuntimeProvider | None" = None,
     extra_asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
     capability_provider_factories: "Sequence[Callable[[AssetRepository], CapabilityProvider]]" = (),
     capability_grants: "Sequence[CapabilityBinding]" = (),
     task_node_runner: "TaskNodeRunner | None" = None,
-) -> AsyncIterator[Runtime]:
-    persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.root), workspace_id=workspace.workspace_id)
+) -> "AsyncIterator[Runtime]":
+    persistence_config = config or RuntimePersistenceConfig.filesystem(str(workspace.root), namespace=workspace.workspace_id)
     registry = _build_asset_registry(extra_asset_bindings)
     phase_a_store, phase_a_assets = await _create_workspace_repository(workspace.root / ".linktools", registry)
     phase_a_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
@@ -303,11 +301,12 @@ async def open_workspace_runtime(
             resources.steps,
             executor,
             definitions,
+            tenant_id=workspace.workspace_id,
             execution_root=workspace.root,
             memory_store_factory=lambda tenant_id, namespace: RuntimeMemoryStore(resources.domain, tenant_id=tenant_id, namespace=namespace),
         )
         history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", _grant_key(workspace)))
-        authorization = TenantAuthorizationPolicy()
+        authorization = TenantAuthorizationPolicy(workspace.workspace_id)
         execution = DefaultExecutionService(resources.domain, authorization, backend=backend, history_reader=history)
         session = DefaultSessionService(resources.domain, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)))
         task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)

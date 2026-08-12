@@ -2,9 +2,6 @@
 # -*- coding: utf-8 -*-
 """Runtime service protocols and transport-neutral request values."""
 
-import secrets
-import time
-import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -19,10 +16,11 @@ from ..core import (
     Page,
     Principal,
     SessionStatus,
-    canonical_sha256,
     validate_idempotency_key,
+    validate_memory_namespace,
     validate_prompt,
     validate_resource_id,
+    validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
@@ -33,38 +31,7 @@ from ..task import (
     TaskGraphResult,
     TaskGraphView,
 )
-from ._persistence import BlobRef, BlobStore, RuntimeBackend
-
-
-@dataclass(frozen=True, slots=True)
-class RuntimeServiceIdentity:
-    service_id: str
-    persistence_digest: str
-    backend: RuntimeBackend
-
-    def __post_init__(self) -> None:
-        if not self.service_id.strip() or not self.persistence_digest.strip():
-            raise ValueError("runtime service identity is incomplete")
-
-
-def new_runtime_service_identity(
-    *,
-    backend: RuntimeBackend = RuntimeBackend.IN_MEMORY,
-    namespace: str = "default",
-    atomic_domain_id: str = "default",
-    schema_digest: str = "memory",
-) -> RuntimeServiceIdentity:
-    persistence_digest = canonical_sha256({"backend": backend.value, "namespace": namespace, "atomic_domain_id": atomic_domain_id, "schema_digest": schema_digest, "blob_schema_version": 1})
-    return RuntimeServiceIdentity(_uuid7(), persistence_digest, backend)
-
-
-def _uuid7() -> str:
-    timestamp = int(time.time() * 1000) & ((1 << 48) - 1)
-    random_bits = secrets.randbits(76)
-    value = (timestamp << 80) | (0x7 << 76) | (random_bits & ((1 << 76) - 1))
-    value &= ~(0x3 << 62)
-    value |= 0x2 << 62
-    return str(uuid.UUID(int=value))
+from ._persistence import BlobRef, BlobStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +46,8 @@ class ExecutionRequest:
         if self.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         validate_idempotency_key(self.idempotency_key)
+        if self.memory_namespace is not None:
+            validate_memory_namespace(self.memory_namespace)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +110,7 @@ class ExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
-class TraceItem:
+class ExecutionTraceItem:
     execution_id: str
     sequence: int
     payload: JsonValue
@@ -185,7 +154,7 @@ class ExecutionHistoryReader(Protocol):
         tenant_id: str,
         cursor: str | None,
         limit: int,
-    ) -> Page[TraceItem]: ...
+    ) -> "Page[ExecutionTraceItem]": ...
 
     async def transcript(
         self,
@@ -226,8 +195,8 @@ class ResumeSessionRequest:
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
-        if self.memory_namespace is not None and (not isinstance(self.memory_namespace, str) or not self.memory_namespace.strip()):
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        if self.memory_namespace is not None:
+            validate_memory_namespace(self.memory_namespace)
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,8 +261,7 @@ class RunEvaluationRequest:
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        validate_memory_namespace(self.memory_namespace)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -320,8 +288,7 @@ class ReplayEvaluationRequest:
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.memory_namespace, str) or self.memory_namespace == "":
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        validate_memory_namespace(self.memory_namespace)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -511,7 +478,7 @@ class ExecutionService(Protocol):
     async def retry(self, binding_digest: str, execution_id: str, request: RetryExecutionRequest) -> ExecutionHandle: ...
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle: ...
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult: ...
-    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TraceItem]': ...
+    async def trace(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionTraceItem]': ...
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[TranscriptItem]': ...
     async def history(self, execution_id: str, *, principal: Principal, cursor: 'str | None' = None, limit: int = 100) -> 'Page[ExecutionHistoryItem]': ...
 
@@ -571,8 +538,10 @@ class BlobPayloadService:
     """Payload facade backed by the RuntimePersistence blob store."""
 
     def __init__(self, blobs: BlobStore, *, tenant_id: str) -> None:
-        if not tenant_id.strip():
-            raise ValueError("payload tenant is required")
+        try:
+            validate_tenant_id(tenant_id)
+        except AIError as error:
+            raise ValueError("payload tenant is invalid") from error
         self._blobs = blobs
         self._tenant_id = tenant_id
 
@@ -609,6 +578,6 @@ __all__ = [
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
     "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "SessionService", "SessionView",
-    "TaskService", "TraceItem", "TranscriptItem", "UpdateSessionRequest",
-    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult", "RuntimeServiceIdentity", "new_runtime_service_identity",
+    "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
+    "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",
 ]

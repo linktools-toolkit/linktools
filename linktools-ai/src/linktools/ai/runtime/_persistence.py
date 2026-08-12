@@ -32,7 +32,9 @@ from ..core import (
     SessionStatus,
     StopReason,
     ToolOperationStatus,
+    validate_persistence_namespace,
 )
+from ..errors import AIError
 from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
 from ._tool import ToolStateStore
 
@@ -190,8 +192,7 @@ class ResultRecord:
 class MemoryRecord:
     memory_id: str
     tenant_id: str
-    owner_id: str
-    kind: str
+    memory_namespace_key: str
     content_ref: str
     content_digest: str
     metadata: Mapping[str, JsonValue]
@@ -425,7 +426,7 @@ class MemoryRepository(RuntimeRepository, Protocol):
     async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord: ...
     async def put_with_operation(self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[MemoryRecord | None, bool]": ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
-    async def list(self, *, tenant_id: str, owner_id: str, cursor: str | None, limit: int) -> Page[MemoryRecord]: ...
+    async def list(self, *, tenant_id: str, memory_namespace_key: str, cursor: "str | None", limit: int) -> "Page[MemoryRecord]": ...
     async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None: ...
     async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[bool, bool]": ...
 
@@ -463,17 +464,16 @@ class RuntimePersistence:
     operations: OperationLedgerRepository
     tools: ToolStateStore
     blobs: BlobStore
-    local_tenant_id: "str | None" = None
 
     @property
     def atomic_domain_id(self) -> str:
         return self.sessions.atomic_domain_id
 
     def __post_init__(self) -> None:
-        if not self.namespace.strip():
-            raise ValueError("runtime persistence namespace is required")
-        if self.mode is RuntimePersistenceMode.FILESYSTEM and not self.local_tenant_id:
-            raise ValueError("filesystem runtime requires local_tenant_id")
+        try:
+            validate_persistence_namespace(self.namespace)
+        except AIError as error:
+            raise ValueError("runtime persistence namespace is invalid") from error
         components = (
             self.sessions, self.executions, self.results, self.idempotency, self.events,
             self.tasks, self.evaluations, self.memories, self.artifacts,

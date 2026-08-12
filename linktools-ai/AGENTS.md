@@ -40,7 +40,7 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 
 ## 3. Composition and lifecycle
 
-Keep common construction paths short. Callers should pass domain inputs such as a session factory, backend selection, namespace, and deployment ID; they should not assemble registries, table collections, manifests, or internal storage bundles.
+Keep common construction paths short. Callers should pass domain inputs such as a session factory, backend selection, and namespace; they should not assemble registries, table collections, manifests, atomic-domain identities, or internal storage bundles.
 
 The current SQL entry points follow this rule:
 
@@ -49,13 +49,26 @@ domain = await open_sql_runtime(
     session_factory,
     backend=backend,
     namespace=namespace,
-    deployment_id=deployment_id,
 )
 steps = SqlStepStore(session_factory, namespace)
 assets = SqlAssetBackend(session_factory, namespace=namespace)
 ```
 
 Schema owners expose public schema contributors for migration and evidence generation. Runtime constructors register and freeze their own schema; normal callers do not pass tables around.
+
+Keep classification identities distinct:
+
+- Persistence `namespace` partitions Runtime records inside a backend.
+- `tenant_id` is the authorization and resource ownership boundary within a persistence namespace.
+- `memory_namespace` selects a memory collection within a tenant; persistence stores only its derived `memory_namespace_key`.
+- Asset `namespace` partitions raw Asset storage independently from Runtime persistence; Asset `kind` selects the logical representation.
+- Task and tool lease records use `owner`; schema registries and storage overlays also use `owner` because each declaring type makes the role explicit.
+- `atomic_domain_id` is composed by the backend and is never accepted as deployment identity from application callers.
+- Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
+- Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
+- Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
+
+Workspace composition is single-tenant: bind authorization, local execution admission, and recovery to `workspace.workspace_id`. Do not infer a tenant from the persistence namespace. Lower-level Runtime persistence remains multi-tenant.
 
 All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. `StorageDatabase.initialize()` validates a frozen schema manifest. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
 

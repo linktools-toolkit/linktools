@@ -3,6 +3,7 @@
 """Boundary size and identifier validation shared by Entries and Services."""
 
 import re
+import unicodedata
 from enum import Enum
 
 from ..errors import AIError, ErrorCode
@@ -11,6 +12,34 @@ from ._json import JsonValue, canonical_json_bytes
 
 def validate_tenant_id(value: str) -> str:
     return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_persistence_namespace(value: str) -> str:
+    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_asset_namespace(value: str) -> str:
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_memory_namespace(value: str) -> str:
+    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_asset_kind(value: str) -> str:
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_capability_provider(value: str) -> str:
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_principal_kind(value: str) -> str:
+    return _text(value, 64, ErrorCode.REQUEST_FIELD_INVALID)
+
+
+def validate_lease_owner(value: str) -> str:
+    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_principal_id(value: str) -> str:
@@ -76,13 +105,26 @@ def validate_enum(value: str, enum_type: type[Enum]) -> str:
 
 
 def _text(value: str, maximum: int, code: ErrorCode) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or any(unicodedata.category(character) == "Cc" for character in value)
+    ):
+        raise AIError(code)
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise AIError(code) from error
+    if size > maximum:
         raise AIError(code)
     return value
 
 
 __all__ = [
-    "validate_agent_id", "validate_enum", "validate_external_payload", "validate_idempotency_key",
-    "validate_observation_payload", "validate_page_limit", "validate_principal_id", "validate_prompt",
-    "validate_resource_id", "validate_shell_timeout", "validate_tenant_id", "validate_tool_arguments",
+    "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
+    "validate_external_payload", "validate_idempotency_key", "validate_lease_owner",
+    "validate_memory_namespace", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
+    "validate_principal_id", "validate_principal_kind", "validate_prompt", "validate_resource_id", "validate_shell_timeout",
+    "validate_tenant_id", "validate_tool_arguments",
 ]

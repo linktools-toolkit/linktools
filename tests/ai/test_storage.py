@@ -418,7 +418,7 @@ async def test_read_only_write_is_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
     timestamp = datetime.now(timezone.utc)
-    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime", deployment_id="test")
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "tool-state.db"), namespace="runtime")
     async with open_sql_resources(config) as runtime:
         record = ToolOperationRecord(
             "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
@@ -426,6 +426,22 @@ async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> No
         )
         await runtime.domain.tools.reserve(record)
         assert await runtime.domain.tools.get_operation("operation", tenant_id="tenant") == record
+        claimed = await runtime.domain.tools.claim(
+            "operation",
+            tenant_id="tenant",
+            owner="worker",
+            lease_seconds=30,
+        )
+        assert claimed.owner == "worker"
+        completed = await runtime.domain.tools.complete(
+            "operation",
+            tenant_id="tenant",
+            owner="worker",
+            fence=claimed.fence,
+            result_ref="result",
+            result_digest="b" * 64,
+        )
+        assert completed.status is ToolOperationStatus.COMPLETED
         with pytest.raises(AIError) as error:
             await runtime.domain.tools.reserve(
                 ToolOperationRecord(

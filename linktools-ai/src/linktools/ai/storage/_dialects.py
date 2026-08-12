@@ -36,6 +36,13 @@ class IntegrityViolationKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SqlErrorKind(StrEnum):
+    INTEGRITY = "integrity"
+    RETRYABLE_TRANSACTION = "retryable_transaction"
+    DATABASE = "database"
+    UNKNOWN = "unknown"
+
+
 @runtime_checkable
 class SqlAlchemyDialect(Protocol):
     @property
@@ -504,6 +511,29 @@ def classify_integrity_error_by_message(
     return IntegrityViolationKind.UNKNOWN
 
 
+def classify_sql_error(error: BaseException) -> SqlErrorKind:
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+
+    if isinstance(error, IntegrityError):
+        return SqlErrorKind.INTEGRITY
+    if not isinstance(error, DBAPIError):
+        return SqlErrorKind.UNKNOWN
+    original = error.orig
+    values = [str(original).lower()]
+    values.extend(str(value).lower() for value in original.args)
+    message = " ".join(values)
+    if any(token in message for token in ("40001", "40p01", "1205", "1213", "deadlock", "database is locked", "could not serialize access", "serialization failure")):
+        return SqlErrorKind.RETRYABLE_TRANSACTION
+    return SqlErrorKind.DATABASE
+
+
+def is_retryable_sql_transaction(error: BaseException) -> bool:
+    return classify_sql_error(error) in {
+        SqlErrorKind.INTEGRITY,
+        SqlErrorKind.RETRYABLE_TRANSACTION,
+    }
+
+
 def _classify_error(error: BaseException, unique_markers: "tuple[str, ...]") -> IntegrityViolationKind:
     message = str(error).lower()
     if any(marker in message for marker in unique_markers):
@@ -522,8 +552,11 @@ __all__ = [
     "PostgreSQLDialect",
     "SQLiteDialect",
     "SqlAlchemyDialect",
+    "SqlErrorKind",
     "SqlValue",
     "SqliteDialect",
     "classify_integrity_error_by_message",
+    "classify_sql_error",
+    "is_retryable_sql_transaction",
     "resolve_dialect",
 ]

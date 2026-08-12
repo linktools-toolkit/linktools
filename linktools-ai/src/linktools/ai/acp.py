@@ -17,7 +17,8 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .core import ExecutionEventType, JsonValue, Principal
+from .core import ExecutionEventType, JsonValue, Principal, validate_memory_namespace
+from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
 from .workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
 
@@ -36,8 +37,10 @@ class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
     def __init__(self, runtime: Runtime, *, principal: Principal, memory_namespace: str) -> None:
-        if not isinstance(memory_namespace, str) or not memory_namespace.strip():
-            raise ValueError("memory namespace is required")
+        try:
+            validate_memory_namespace(memory_namespace)
+        except AIError as error:
+            raise ValueError("memory namespace is invalid") from error
         self._runtime = runtime
         self._principal = principal
         self._memory_namespace = memory_namespace

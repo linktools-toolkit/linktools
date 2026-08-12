@@ -197,7 +197,7 @@ async def test_sql_task_lease_mutations_share_database_time_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace="review-fix-sql", deployment_id="test")
+    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace="review-fix-sql")
     captured: list[datetime] = []
     original_database_now = SQLiteDialect.database_now
 
@@ -212,10 +212,12 @@ async def test_sql_task_lease_mutations_share_database_time_contract(
     )
     async with open_sql_resources(config) as resources:
         await resources.domain.tasks.create_plan(TaskGraph("graph", (TaskNode("task"),)), tenant_id="tenant")
+        plan = await resources.domain.tasks.reconcile_plan("graph", tenant_id="tenant")
+        assert plan.status is TaskStatus.READY
         lease = await resources.domain.tasks.claim("graph", "task", tenant_id="tenant", owner="owner", lease_seconds=1)
-        assert len(captured) == 1
-        assert lease.lease_expires_at - captured[0] == timedelta(seconds=1)
-        assert captured[0].microsecond >= 1_000
+        assert len(captured) == 2
+        assert lease.lease_expires_at - captured[1] == timedelta(seconds=1)
+        assert captured[1].microsecond >= 1_000
         renewed = await resources.domain.tasks.renew(lease, tenant_id="tenant", lease_seconds=2)
         assert renewed.lease_expires_at > lease.lease_expires_at
         terminal = await resources.domain.tasks.complete(renewed, tenant_id="tenant", execution_id=None, result_digest="a" * 64)

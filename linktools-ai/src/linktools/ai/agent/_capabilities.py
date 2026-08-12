@@ -117,7 +117,7 @@ async def compose_platform_capabilities(
         capabilities.append(Planning())
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.debug(
-        "platform capabilities composed: agent=%s step=%s tools=%s count=%s namespace_digest=%s",
+        "platform capabilities composed: agent=%s step=%s tools=%s count=%s memory_namespace_digest=%s",
         scope.agent_name,
         scope.step_run_id,
         scope.platform_tool_names,

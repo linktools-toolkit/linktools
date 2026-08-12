@@ -66,8 +66,11 @@ from ._dialects import (
     SqlAlchemyDialect,
     SQLiteDialect,
     SqliteDialect,
+    SqlErrorKind,
     SqlValue,
     classify_integrity_error_by_message,
+    classify_sql_error,
+    is_retryable_sql_transaction,
     resolve_dialect,
 )
 from ._files import (
@@ -125,6 +128,7 @@ __all__ = [
     "SqlSchemaManifest",
     "SqlSchemaRegistry",
     "SqlTableManifest",
+    "SqlErrorKind",
     "SqlValue",
     "SqliteDialect",
     "StorageBatchFailure",
@@ -159,6 +163,8 @@ __all__ = [
     "build_storage",
     "prepare_storage_database",
     "classify_integrity_error_by_message",
+    "classify_sql_error",
+    "is_retryable_sql_transaction",
     "read_bytes",
     "read_json",
     "resolve_dialect",
