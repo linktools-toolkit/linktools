@@ -12,7 +12,6 @@ from linktools.ai import RuntimePersistenceConfig
 from linktools.ai.adapter import (
     SqlRuntimeSchema,
     SqlStepStore,
-    build_step_schema,
     open_sql_runtime,
 )
 from linktools.ai.migrate import provision_database
@@ -111,9 +110,6 @@ async def _provision_sql_schema(engine: AsyncEngine, config: RuntimePersistenceC
         SqlRuntimeSchema.register_schema(registry)
         async with engine.begin() as connection:
             await connection.run_sync(registry.metadata.create_all)
-        step_metadata = build_step_schema()
-        async with engine.begin() as connection:
-            await connection.run_sync(step_metadata.create_all)
     else:
         await provision_database(engine)
 

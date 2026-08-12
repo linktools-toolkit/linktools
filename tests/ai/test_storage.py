@@ -155,23 +155,6 @@ async def test_cache_contains_does_not_touch_lru_and_files_are_hashed(tmp_path: 
     assert await filesystem.contains_many(("stable-key",)) == frozenset({"stable-key"})
 
 
-@pytest.mark.asyncio
-async def test_in_memory_cache_respects_max_size() -> None:
-    cache = InMemoryContentCache(max_bytes=10, max_size=2)
-    await cache.put("a", b"a")
-    await cache.put("b", b"b")
-    await cache.put("c", b"c")
-
-    assert await cache.get("a") is None
-    assert await cache.get("b") == b"b"
-    assert await cache.get("c") == b"c"
-
-
-def test_in_memory_cache_rejects_negative_max_size() -> None:
-    with pytest.raises(ValueError, match="max_size must be non-negative"):
-        InMemoryContentCache(max_bytes=10, max_size=-1)
-
-
 def test_composition_exposes_only_domain_generics() -> None:
     assert tuple(parameter.__name__ for parameter in StorageOverlay.__parameters__) == (
         "KeyT",

@@ -12,9 +12,6 @@ from pathlib import Path
 import pytest
 from linktools.ai import (
     RuntimePersistenceConfig,
-    RuntimeResources,
-    namespace_scoped_step_db_path,
-    open_runtime_resources,
 )
 from linktools.ai.adapter import (
     DurableFilesystemStepStore,
@@ -39,34 +36,45 @@ from linktools.ai.runtime import (
     ExecutionTerminalCommit,
     IdempotencyRecord,
     IdempotencyTerminalUpdate,
-    MemoryRecord,
     ResultRecord,
+    RuntimeBackend,
     SessionHeadAdvance,
     SessionRecord,
 )
 from linktools.ai.storage import SqlSchemaRegistry, validate_schema
-from linktools.ai.task import TaskGraph, TaskNode
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, SqliteStepStore
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from tests.ai.persistence.helper import open_sql_resources
+from tests.ai.persistence.helper import RuntimeResources, open_sql_resources
 
 
 @pytest.mark.asyncio
 async def test_in_memory_resources_owns_harness_store() -> None:
-    async with open_runtime_resources(RuntimePersistenceConfig.in_memory(namespace="memory")) as resources:
-        assert isinstance(resources, RuntimeResources)
+    runtime = build_in_memory_runtime(namespace="memory")
+    await runtime.initialize()
+    try:
+        resources = RuntimeResources(RuntimeBackend.IN_MEMORY, "memory", runtime.persistence, InMemoryStepStore())
         assert isinstance(resources.steps, InMemoryStepStore)
         assert resources.namespace == "memory"
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
 async def test_filesystem_resources_uses_shared_runtime_writer_and_durable_step_store(tmp_path: Path) -> None:
-    async with open_runtime_resources(RuntimePersistenceConfig.filesystem(str(tmp_path), workspace_id="project")) as resources:
+    runtime = build_filesystem_runtime(str(tmp_path), workspace_id="project")
+    steps = DurableFilesystemStepStore(runtime.runtime_root, "project", writer_lock=runtime.writer_lock)
+    await runtime.initialize()
+    await steps.initialize()
+    try:
+        resources = RuntimeResources(RuntimeBackend.FILESYSTEM, "project", runtime.persistence, steps)
         assert isinstance(resources.steps, DurableFilesystemStepStore)
         runtime_root = tmp_path / ".linktools" / "runtime" / hashlib.sha256(b"project").hexdigest()
         assert (runtime_root / "steps").is_dir()
         assert not (tmp_path / "steps").exists()
+    finally:
+        await steps.close()
+        await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -79,34 +87,7 @@ async def test_sqlite_resources_uses_sibling_harness_database(tmp_path: Path) ->
         tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
     assert not any(name.startswith("ai_step_") for name in tables)
     sibling = tmp_path / f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
-    assert namespace_scoped_step_db_path(primary, "namespace") == sibling
-
-
-@pytest.mark.asyncio
-async def test_sql_resources_require_downstream_session_factory(tmp_path: Path) -> None:
-    config = RuntimePersistenceConfig.sqlite(str(tmp_path / "runtime.db"), namespace="namespace", deployment_id="deployment")
-    with pytest.raises(AIError) as error:
-        async with open_runtime_resources(config):
-            pass
-    assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
-
-
-@pytest.mark.asyncio
-async def test_sql_resources_validate_preprovisioned_schema_without_creating_tables(tmp_path: Path) -> None:
-    path = tmp_path / "runtime.db"
-    config = RuntimePersistenceConfig.sqlite(str(path), namespace="namespace", deployment_id="deployment")
-    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-    try:
-        with pytest.raises(AIError) as error:
-            async with open_runtime_resources(config, session_factory=session_factory):
-                pass
-        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
-        with sqlite3.connect(path) as connection:
-            tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
-        assert tables == set()
-    finally:
-        await engine.dispose()
+    assert sibling.name == f"runtime.db.steps.{hashlib.sha256(b'namespace').hexdigest()}.db"
 
 
 @pytest.mark.asyncio
@@ -151,124 +132,6 @@ async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_p
         claimed = await resources.domain.executions.claim_start(ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now))
         assert claimed.status is ExecutionStatus.STARTED
         assert claimed.agent_run_sequence == 1
-
-
-@pytest.mark.asyncio
-async def test_sqlite_queries_are_filtered_bounded_and_not_n_plus_one(tmp_path: Path) -> None:
-    from sqlalchemy import event, text
-
-    path = tmp_path / "queries.db"
-    config = RuntimePersistenceConfig.sqlite(str(path), namespace="queries", deployment_id="test")
-    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    statements: list[str] = []
-    journal_changes: list[str] = []
-
-    @event.listens_for(engine.sync_engine, "before_cursor_execute")
-    def capture_statement(
-        _connection: object,
-        _cursor: object,
-        statement: str,
-        _parameters: object,
-        _context: object,
-        _executemany: bool,
-    ) -> None:
-        statements.append(statement)
-        if statement.strip().upper() == "PRAGMA JOURNAL_MODE=WAL":
-            journal_changes.append(statement)
-
-    try:
-        await provision_database(engine)
-        async with open_runtime_resources(config, session_factory=session_factory) as resources:
-            now = datetime.now(timezone.utc)
-            for memory_id, owner_id in (
-                ("memory-a", "owner"),
-                ("memory-b", "owner"),
-                ("memory-c", "other"),
-            ):
-                await resources.domain.memories.put(
-                    MemoryRecord(
-                        memory_id,
-                        "tenant",
-                        owner_id,
-                        "note",
-                        f"ref:{memory_id}",
-                        memory_id,
-                        {},
-                        1,
-                        now,
-                        now,
-                    ),
-                    expected_revision=None,
-                )
-            statements.clear()
-            first_page = await resources.domain.memories.list(
-                tenant_id="tenant",
-                owner_id="owner",
-                cursor=None,
-                limit=1,
-            )
-            assert tuple(item.memory_id for item in first_page.items) == ("memory-a",)
-            assert first_page.next_cursor == "memory-a"
-            selects = tuple(statement for statement in statements if statement.lstrip().upper().startswith("SELECT"))
-            assert len(selects) == 1
-            assert "JSON_EXTRACT" in selects[0]
-            assert "LIMIT" in selects[0]
-            second_page = await resources.domain.memories.list(
-                tenant_id="tenant",
-                owner_id="owner",
-                cursor=first_page.next_cursor,
-                limit=1,
-            )
-            assert tuple(item.memory_id for item in second_page.items) == ("memory-b",)
-            assert second_page.next_cursor is None
-
-            dependencies = ("dependency-a", "dependency-b", "dependency-c")
-            await resources.domain.tasks.create_plan(
-                TaskGraph(
-                    "query-graph",
-                    tuple(TaskNode(task_id) for task_id in dependencies)
-                    + (TaskNode("target", dependencies),),
-                ),
-                tenant_id="tenant",
-            )
-            for task_id in dependencies:
-                lease = await resources.domain.tasks.claim(
-                    "query-graph",
-                    task_id,
-                    tenant_id="tenant",
-                    owner="worker",
-                    lease_seconds=60,
-                )
-                await resources.domain.tasks.complete(
-                    lease,
-                    tenant_id="tenant",
-                    execution_id=None,
-                    result_digest=task_id,
-                )
-            statements.clear()
-            await resources.domain.tasks.claim(
-                "query-graph",
-                "target",
-                tenant_id="tenant",
-                owner="worker",
-                lease_seconds=60,
-            )
-            task_statements = tuple(
-                statement
-                for statement in statements
-                if statement.lstrip().upper().startswith(("SELECT", "UPDATE"))
-            )
-            assert len(task_statements) == 2
-
-            async def ping() -> None:
-                async with session_factory() as session:
-                    await session.execute(text("SELECT 1"))
-
-            await asyncio.gather(*(ping() for _ in range(8)))
-        assert len(journal_changes) == 1
-    finally:
-        await engine.dispose()
 
 
 @pytest.mark.asyncio

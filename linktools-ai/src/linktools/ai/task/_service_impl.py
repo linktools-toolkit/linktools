@@ -173,17 +173,32 @@ class DefaultTaskService(TaskApi):
                 "force": request.force,
             }
         )
-        claimed, operation = await self._claim_cancel_operation(
-            idempotency_key_hash(request.cancel_request_id),
-            request.principal.tenant_id,
-            graph_id,
-            request_digest,
+        finalizer = asyncio.create_task(
+            self._cancel_finalizer(
+                graph_id,
+                request,
+                idempotency_key_hash(request.cancel_request_id),
+                request_digest,
+            )
         )
-        finalizer = asyncio.create_task(self._cancel_finalizer(graph_id, request, operation, claimed))
+        caller_cancelled = False
         try:
-            return await asyncio.shield(finalizer)
+            while True:
+                try:
+                    result = await asyncio.shield(finalizer)
+                    break
+                except asyncio.CancelledError:
+                    caller_cancelled = True
+                    if finalizer.done():
+                        try:
+                            result = finalizer.result()
+                        except asyncio.CancelledError:
+                            raise
+                        break
+            if caller_cancelled:
+                raise asyncio.CancelledError
+            return result
         except asyncio.CancelledError:
-            await asyncio.shield(finalizer)
             raise
 
     async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> tuple[bool, OperationLedgerRecord]:
@@ -210,40 +225,141 @@ class DefaultTaskService(TaskApi):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def _claim_cancel_operation(self, operation_id: str, tenant_id: str, graph_id: str, request_digest: str) -> tuple[bool, OperationLedgerRecord]:
-        operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
-        if operation is None:
-            now = datetime.now(timezone.utc)
-            operation = await self._persistence.operations.append(OperationLedgerInput(operation_id, tenant_id, ResourceKind.TASK_GRAPH, graph_id, None, OperationKind.TASK_CANCEL, OperationStatus.PENDING, request_digest, None, None, None, True, now, now))
-        if operation.request_digest != request_digest:
-            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-        if operation.status is OperationStatus.SUCCEEDED:
-            return False, operation
-        if operation.status is OperationStatus.FAILED:
-            raise _stable_operation_error(operation.error_code)
-        if operation.status not in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+        while True:
+            operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
+            if operation is None:
+                now = datetime.now(timezone.utc)
+                try:
+                    operation = await self._persistence.operations.append(
+                        OperationLedgerInput(
+                            operation_id,
+                            tenant_id,
+                            ResourceKind.TASK_GRAPH,
+                            graph_id,
+                            None,
+                            OperationKind.TASK_CANCEL,
+                            OperationStatus.PENDING,
+                            request_digest,
+                            None,
+                            None,
+                            None,
+                            True,
+                            now,
+                            now,
+                        )
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    continue
+            if operation.request_digest != request_digest:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+            if operation.status is OperationStatus.PENDING:
+                running = replace(operation, status=OperationStatus.RUNNING, updated_at=datetime.now(timezone.utc))
+                try:
+                    claimed = await self._persistence.operations.compare_and_swap(
+                        operation_id,
+                        tenant_id=tenant_id,
+                        expected_status=OperationStatus.PENDING,
+                        next_record=running,
+                    )
+                except AIError as error:
+                    if error.code is not ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    continue
+                return True, claimed
+            if operation.status is OperationStatus.SUCCEEDED:
+                return False, operation
+            if operation.status is OperationStatus.FAILED:
+                raise _stable_operation_error(operation.error_code)
+            if operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+                return False, operation
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        view = await self._persistence.tasks.get_plan(graph_id, tenant_id=tenant_id)
-        if view is None or not _terminal(view.status):
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return False, operation
-        running = replace(operation, status=OperationStatus.RUNNING, updated_at=datetime.now(timezone.utc))
-        return True, await self._persistence.operations.compare_and_swap(operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=running)
 
-    async def _cancel_finalizer(self, graph_id: str, request: CancelGraphRequest, operation: OperationLedgerRecord, claimed: bool) -> TaskGraphView:
-        before = await self._persistence.tasks.get_plan(graph_id, tenant_id=request.principal.tenant_id)
-        if before is None:
+    async def _cancel_finalizer(
+        self,
+        graph_id: str,
+        request: CancelGraphRequest,
+        operation_id: str,
+        request_digest: str,
+    ) -> TaskGraphView:
+        tenant_id = request.principal.tenant_id
+        claimed, operation = await self._claim_cancel_operation(operation_id, tenant_id, graph_id, request_digest)
+        try:
+            view = await self._persistence.tasks.get_plan(graph_id, tenant_id=tenant_id)
+        except BaseException as error:
+            if claimed or operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+                return await self._settle_cancel_error(operation, graph_id, request, error)
+            raise
+        if view is None:
+            if claimed or operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+                return await self._settle_cancel_error(operation, graph_id, request, AIError(ErrorCode.STORAGE_INTEGRITY_ERROR))
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        view = await self._persistence.tasks.cancel_plan(graph_id, tenant_id=request.principal.tenant_id) if claimed else before
-        if claimed and self._launcher is not None and before.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.BLOCKED}:
+        if claimed:
             try:
-                await self._launcher.cancel(graph_id, request)
-            except Exception as error:
-                _logger.warning("task launcher cleanup failed after durable cancel: graph=%s error=%s", graph_id, type(error).__name__)
-        current = await self._record_success(operation, request.principal.tenant_id, view, expected_status=operation.status)
-        if current.status is not OperationStatus.SUCCEEDED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.info("task graph cancel settled: tenant=%s graph=%s", request.principal.tenant_id, graph_id)
+                if not _terminal(view.status):
+                    view = await self._persistence.tasks.cancel_plan(graph_id, tenant_id=tenant_id)
+                view = await self._persistence.tasks.get_plan(graph_id, tenant_id=tenant_id)
+                if view is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if not _terminal(view.status):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            except BaseException as error:
+                return await self._settle_cancel_error(operation, graph_id, request, error)
+        elif operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+            if not _terminal(view.status):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        elif not _terminal(view.status):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if not _terminal(view.status):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (claimed or operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}) and view.status is TaskStatus.CANCELLED:
+            await self._cleanup_cancelled_graph(graph_id, request)
+        if claimed or operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
+            current = await self._record_success(operation, tenant_id, view, expected_status=operation.status)
+            if current.status is not OperationStatus.SUCCEEDED:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+        _logger.info("task graph cancel settled: tenant=%s graph=%s status=%s", tenant_id, graph_id, view.status.value)
         return view
+
+    async def _settle_cancel_error(
+        self,
+        operation: OperationLedgerRecord,
+        graph_id: str,
+        request: CancelGraphRequest,
+        error: BaseException,
+    ) -> TaskGraphView:
+        tenant_id = request.principal.tenant_id
+        try:
+            view = await self._persistence.tasks.get_plan(graph_id, tenant_id=tenant_id)
+        except Exception as reload_error:
+            await self._record_effect_unknown(operation, tenant_id)
+            if isinstance(error, AIError):
+                raise error
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from reload_error
+        if view is None:
+            await self._record_failure(operation, tenant_id, ErrorCode.STORAGE_INTEGRITY_ERROR.value)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if _terminal(view.status):
+            if view.status is TaskStatus.CANCELLED:
+                await self._cleanup_cancelled_graph(graph_id, request)
+            current = await self._record_success(operation, tenant_id, view, expected_status=operation.status)
+            if current.status is not OperationStatus.SUCCEEDED:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return view
+        if isinstance(error, AIError):
+            await self._record_failure(operation, tenant_id, error.code.value)
+            raise error
+        await self._record_effect_unknown(operation, tenant_id)
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    async def _cleanup_cancelled_graph(self, graph_id: str, request: CancelGraphRequest) -> None:
+        if self._launcher is None:
+            return
+        try:
+            await self._launcher.cancel(graph_id, request)
+        except Exception as error:
+            _logger.warning("task launcher cleanup failed after durable cancel: graph=%s error=%s", graph_id, type(error).__name__)
 
     async def _record_success(self, operation: OperationLedgerRecord, tenant_id: str, view: TaskGraphView, *, expected_status: OperationStatus = OperationStatus.RUNNING) -> OperationLedgerRecord:
         completed = replace(operation, status=OperationStatus.SUCCEEDED, result_ref=view.graph_id, result_digest=canonical_sha256({"graph_id": view.graph_id, "status": view.status.value}), error_code=None, updated_at=datetime.now(timezone.utc))
@@ -257,11 +373,44 @@ class DefaultTaskService(TaskApi):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.status is OperationStatus.SUCCEEDED:
                 return current
+            if current.status is OperationStatus.FAILED:
+                raise _stable_operation_error(current.error_code)
             raise
 
     async def _record_failure(self, operation: OperationLedgerRecord, tenant_id: str, error_code: str) -> OperationLedgerRecord:
         failed = replace(operation, status=OperationStatus.FAILED, error_code=error_code, updated_at=datetime.now(timezone.utc))
-        return await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=OperationStatus.RUNNING, next_record=failed)
+        try:
+            return await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=operation.status, next_record=failed)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status is OperationStatus.FAILED:
+                return current
+            raise
+
+    async def _record_effect_unknown(self, operation: OperationLedgerRecord, tenant_id: str) -> OperationLedgerRecord:
+        if operation.status is OperationStatus.EFFECT_UNKNOWN:
+            return operation
+        unknown = replace(operation, status=OperationStatus.EFFECT_UNKNOWN, error_code=None, updated_at=datetime.now(timezone.utc))
+        try:
+            return await self._persistence.operations.compare_and_swap(
+                operation.operation_id,
+                tenant_id=tenant_id,
+                expected_status=operation.status,
+                next_record=unknown,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status in {OperationStatus.EFFECT_UNKNOWN, OperationStatus.SUCCEEDED}:
+                return current
+            raise
 
     async def _abort_plan(self, request: TaskGraphRequest) -> None:
         try:

@@ -285,6 +285,16 @@ class DefaultExecutionService:
         if result.status is not execution.status or execution.result_ref != result.payload_ref or execution.result_digest != result.payload_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            if any(
+                value is not None
+                for value in (
+                    execution.result_ref,
+                    execution.result_digest,
+                    result.payload_ref,
+                    result.payload_digest,
+                )
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionResult(execution.execution_id, result.status, None, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
         if not result.payload_ref or not result.payload_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

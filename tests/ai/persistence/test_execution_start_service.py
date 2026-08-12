@@ -40,7 +40,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
     service = DefaultExecutionService(
         runtime.persistence,
         TenantAuthorizationPolicy(),
-        launcher=launcher,
+        backend=launcher,
         operation_ids=iter(("execution-a", "execution-b")).__next__,
         history_reader=_History(),
     )
@@ -59,7 +59,7 @@ async def test_execution_memory_namespace_can_be_disabled_but_not_blank() -> Non
         service = DefaultExecutionService(
             runtime.persistence,
             TenantAuthorizationPolicy(),
-            launcher=_Launcher(),
+            backend=_Launcher(),
             history_reader=_History(),
         )
         principal = Principal("owner", "tenant")

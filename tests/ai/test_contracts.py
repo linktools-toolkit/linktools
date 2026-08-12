@@ -6,7 +6,6 @@
 from datetime import datetime, timezone
 
 import pytest
-from linktools.ai.agent import AgentDeps
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry, ModelRoute
 from linktools.ai.observe import (
@@ -54,18 +53,11 @@ def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
     assert build_bundle(spec, prompt, "capabilities").digest == build_bundle(spec, prompt, "capabilities").digest
 
 
-def test_model_registry_and_serializable_agent_deps_are_instance_owned() -> None:
+def test_model_registry_snapshot_is_instance_owned() -> None:
     registry = ModelRegistry()
     snapshot = registry.prime({"route": ModelRoute("route", "openai", "model")})
     assert snapshot.routes["route"].model == "model"
-    deps = AgentDeps(
-        execution_id="execution",
-        tenant_principal_ref="tenant:principal",
-        model_plan_id="route",
-        budget_id="budget",
-        prompt_snapshot_id="prompt",
-    )
-    assert deps.model_dump()["execution_id"] == "execution"
+    assert snapshot.routes["route"].route_id == "route"
 
 
 def test_task_completion_checks_owner_fence_result_and_terminal_state() -> None:

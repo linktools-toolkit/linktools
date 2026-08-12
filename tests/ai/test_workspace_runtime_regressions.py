@@ -10,8 +10,20 @@ from linktools.ai.spec import AgentSpec
 from linktools.ai.workspace import RuntimePersistenceConfig, Workspace, open_workspace_runtime
 
 
+class _MCPRuntime:
+    fingerprint = "a" * 64
+
+    async def connect(self, server_id: str) -> object:
+        del server_id
+        raise AssertionError("MCP process startup is not part of bootstrap")
+
+    async def toolsets(self, servers: object, *, principal: object, execution: object) -> tuple[object, ...]:
+        del servers, principal, execution
+        raise AssertionError("MCP toolset materialization is not part of bootstrap")
+
+
 @pytest.mark.asyncio
-async def test_workspace_default_agent_declares_local_skills(tmp_path: Path) -> None:
+async def test_workspace_default_agent_declares_configured_mcp_servers(tmp_path: Path) -> None:
     mcp = tmp_path / ".linktools" / "mcp" / "local"
     mcp.parent.mkdir(parents=True)
     mcp.write_text('{"args":[],"command":"echo","id":"local","revision":1}', encoding="utf-8")
@@ -21,6 +33,7 @@ async def test_workspace_default_agent_declares_local_skills(tmp_path: Path) -> 
         workspace,
         config=RuntimePersistenceConfig.in_memory(namespace=workspace.workspace_id),
         model="test-model",
+        mcp_runtime=_MCPRuntime(),
     ) as runtime:
         definition = await runtime.compile_agent()
 

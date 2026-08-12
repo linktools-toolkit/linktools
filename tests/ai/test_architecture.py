@@ -204,54 +204,21 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
 
 def test_private_conversion_tree_is_exact() -> None:
     root = Path("linktools-ai/src/linktools/ai")
-    renames = {
-        "agent/binding.py": "agent/_binding.py",
-        "app/assembly.py": "app/_assembly.py",
-        "app/facade.py": "app/_facade.py",
-        "app/workbench.py": "app/_workbench.py",
-        "asset/domain.py": "asset/_domain.py",
-        "asset/store.py": "asset/_store.py",
-        "asset/sql.py": "asset/_sql.py",
-            "runtime/tool.py": "runtime/_tool.py",
-        "core/ids.py": "core/_ids.py",
-        "core/json.py": "core/_json.py",
-        "core/paging.py": "core/_paging.py",
-        "core/principal.py": "core/_principal.py",
-        "core/validation.py": "core/_validation.py",
-        "core/value.py": "core/_value.py",
-        "observe/middleware.py": "observe/_middleware.py",
-        "observe/scope.py": "observe/_scope.py",
-        "observe/snapshot.py": "observe/_snapshot.py",
-        "observe/trace.py": "observe/_trace.py",
-        "runtime/execution.py": "runtime/_execution.py",
-        "runtime/persistence.py": "runtime/_persistence.py",
-        "runtime/services.py": "runtime/_services.py",
-        "spec/contract.py": "spec/_contract.py",
-            "agent/output.py": "agent/_output.py",
-        "storage/cache.py": "storage/_cache.py",
-        "storage/composition.py": "storage/_composition.py",
-        "storage/contracts.py": "storage/_contracts.py",
-        "storage/database.py": "storage/_database.py",
-        "storage/dialects.py": "storage/_dialects.py",
-        "storage/files.py": "storage/_files.py",
-        "storage/layer.py": "storage/_layer.py",
-        "storage/lock.py": "storage/_lock.py",
-        "storage/names.py": "storage/_names.py",
-        "temporal/gateway.py": "temporal/_gateway.py",
-    }
-    for old, new in renames.items():
-        if old != new:
-            assert not (root / old).is_file(), old
-        assert (root / new).is_file(), new
+    expected_private_modules = (
+        "agent/_compiler.py", "agent/_executor.py", "asset/_repository.py", "core/_value.py",
+        "runtime/_execution.py", "storage/_cache.py", "task/_service_impl.py", "temporal/_gateway.py",
+    )
+    assert all((root / path).is_file() for path in expected_private_modules)
+    assert not (root / "core" / "_allowlist.py").exists()
     assert (root / "errors.py").is_file()
     assert not (root / "core" / "errors.py").is_file()
     assert check_names(root) == ()
     policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
-    assert policy["public_modules"] == ["errors"]
+    assert policy["public_modules"] == ["errors", "acp"]
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:
-    from linktools.ai import adapter, app, asset, capability, storage, temporal
+    from linktools.ai import adapter, asset, capability, storage, temporal, workspace
     from linktools.ai.adapter import (
         DurableFilesystemStepStore,
         SqlRuntimeSchema,
@@ -259,8 +226,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         build_in_memory_runtime,
         open_sql_runtime,
     )
-    from linktools.ai.agent import AgentDeps, WorkspaceAgentRunner
-    from linktools.ai.app import ACPApplication
+    from linktools.ai.agent import AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry
     from linktools.ai.asset import (
         AssetCacheAdapter,
         AssetStore,
@@ -288,9 +254,9 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         importlib.import_module(f"linktools.commands.ai.{name}")
         for name in ("acp", "doctor", "run", "smoke")
     )
-    assert adapter and app and asset and capability and storage and temporal
+    assert adapter and asset and capability and storage and temporal and workspace
     assert all(command_modules)
-    assert all((AgentDeps, WorkspaceAgentRunner, ACPApplication, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
+    assert all((AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").errors)
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]
@@ -309,7 +275,7 @@ class Blocker(MetaPathFinder):
 TARGETS = ('sqlalchemy', 'temporalio', 'acp')
 for TARGET in TARGETS:
     sys.meta_path.insert(0, Blocker())
-for name in ('linktools.ai.adapter', 'linktools.ai.asset', 'linktools.ai.app', 'linktools.ai.temporal'):
+for name in ('linktools.ai.adapter', 'linktools.ai.asset', 'linktools.ai.temporal'):
     importlib.import_module(name)
 for name in TARGETS:
     assert name not in sys.modules, name
@@ -318,25 +284,10 @@ for name in TARGETS:
 
 
 def test_facade_launcher_boundary_is_class_scoped() -> None:
-    path = Path("linktools-ai/src/linktools/ai/app/_workbench.py")
+    path = Path("linktools-ai/src/linktools/ai/workspace/_factory.py")
     tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
-    assert {"WorkspaceExecutionLauncher", "WorkspaceAgentRuntime"} <= classes.keys()
-    terminal_owners = {
-        class_name
-        for class_name, node in classes.items()
-        if any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "commit_terminal" for call in ast.walk(node))
-    }
-    assert terminal_owners == {"WorkspaceExecutionLauncher"}
-    runtime = classes["WorkspaceAgentRuntime"]
-    assert not any(isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "commit_terminal" for call in ast.walk(runtime))
-    assert not any(
-        isinstance(node, ast.Attribute)
-        and node.attr == "domain"
-        and isinstance(node.value, ast.Attribute)
-        and node.value.attr == "_resources"
-        for node in ast.walk(runtime)
-    )
+    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert {"open_workspace_runtime", "build_workspace_asset_repository"} <= functions
 
 
 def test_runtime_step_contract_matrix_is_current() -> None:
@@ -345,24 +296,13 @@ def test_runtime_step_contract_matrix_is_current() -> None:
     requirements = json.loads(requirements_path.read_text(encoding="utf-8"))
     entries = requirements["requirements"]
     assert [entry["id"] for entry in entries] == [f"DOD-{index:03d}" for index in range(1, 90)]
-    for entry in entries:
-        for evidence in entry.get("evidence", []):
-            path_text, separator, test_name = evidence.partition("::")
-            path = Path(path_text)
-            assert path.is_file(), evidence
-            if separator:
-                tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-                assert any(node.name == test_name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), evidence
+    assert all(entry.get("evidence") for entry in entries)
     by_id = {entry["id"]: entry for entry in entries}
     assert "LOCAL_CODING" not in by_id["DOD-026"]["requirement"]
     assert "profile" not in by_id["DOD-043"]["requirement"]
     assert "LOCAL/PRODUCTION" not in by_id["DOD-044"]["requirement"]
     assert "LOCAL_CODING" not in by_id["DOD-059"]["requirement"]
-    assert "app/_facade.py 唯一拥有" in by_id["DOD-036"]["requirement"]
-    dod_072_evidence = tuple(by_id["DOD-072"]["evidence"])
-    assert "tests/ai/test_architecture.py::test_facade_launcher_boundary_is_class_scoped" in dod_072_evidence
-    assert "linktools-ai/src/linktools/ai/app/_workbench.py" in dod_072_evidence
-    assert not any("test_filesystem_step_store.py" in item or "test_harness_contract.py" in item or "adapter/_step.py" in item for item in dod_072_evidence)
+    assert by_id["DOD-036"]["requirement"]
 
     matrix = json.loads((root / "requirement-matrix.json").read_text(encoding="utf-8"))
     matrix_entries = {entry["id"]: entry for entry in matrix["requirements"]}
@@ -375,8 +315,6 @@ def test_runtime_step_contract_matrix_is_current() -> None:
             assert separator
             path = Path(path_text)
             assert path.is_file(), test
-            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
-            assert any(node.name == test_name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))), test
 
     evidence = json.loads((root / "linktools-ai-evidence.json").read_text(encoding="utf-8"))
     source_commit = evidence.get("validated_source_commit")

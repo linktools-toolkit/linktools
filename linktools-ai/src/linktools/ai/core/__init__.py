@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Pure core values and errors."""
 
-from ._allowlist import canonical_string_tuple
 from ._ids import (
     canonical_sha256,
     deterministic_id,
@@ -46,6 +45,7 @@ from ._value import (
     ApprovalDecision,
     ApprovalStatus,
     BlobStatus,
+    canonical_string_tuple,
     EvaluationStatus,
     ExecutionEventType,
     ExecutionLineageKind,

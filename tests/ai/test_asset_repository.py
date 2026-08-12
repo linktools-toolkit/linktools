@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
-from linktools.ai.app import build_asset_repository
+from linktools.ai.workspace import build_workspace_asset_repository as build_asset_repository
 from linktools.ai.asset import (
     AssetInfo,
     AssetKey,

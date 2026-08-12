@@ -351,6 +351,7 @@ async def open_workspace_runtime(
             yield runtime
         finally:
             await runtime.close()
+
 def _build_asset_registry(extra_bindings: Sequence[AssetTypeBinding[object]]) -> AssetTypeRegistrySnapshot:
     registry = AssetTypeRegistry()
     for binding in builtin_asset_bindings():

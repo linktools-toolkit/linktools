@@ -402,92 +402,160 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
     async def _claim_task(self, graph_id: str, task_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
         if not owner.strip() or not 1 <= lease_seconds <= 3600:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        graph = await self.get_plan(graph_id, tenant_id=tenant_id)
-        if graph is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        if graph.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        table = self._owner.tables["task_nodes"]
-        graph_nodes = await self._list_records(
-            tenant_id=tenant_id,
-            table=table,
-            predicates=(table.c.record_id.startswith(f"{graph_id}:", autoescape=True),),
-        )
-        node = next(
-            (
-                item
-                for item in graph_nodes
-                if isinstance(item, TaskNodeView) and item.task_id == task_id
-            ),
-            None,
-        )
-        if not isinstance(node, TaskNodeView):
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        dependency_ids = frozenset(node.dependencies)
-        dependency_nodes = {
-            dependency.task_id: dependency
-            for dependency in graph_nodes
-            if isinstance(dependency, TaskNodeView) and dependency.task_id in dependency_ids
-        }
-        dependencies_ready = len(dependency_nodes) == len(dependency_ids) and all(
-            dependency.status is TaskStatus.SUCCEEDED
-            for dependency in dependency_nodes.values()
-        )
-        now = datetime.now(timezone.utc)
-        expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= now
-        if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
-            raise AIError(ErrorCode.TASK_NOT_READY)
-        lease = TaskLease(graph_id, task_id, tenant_id, owner, node.fence + 1, now + timedelta(seconds=lease_seconds))
-        updated = replace(node, status=TaskStatus.RUNNING, owner=owner, fence=lease.fence, lease_expires_at=lease.lease_expires_at)
-        await self._task_update(updated, tenant_id=tenant_id, expected_status=node.status, expected_owner=node.owner if expired else None, expected_fence=node.fence, expected_lease_before=now if expired else None)
-        return lease
+        from sqlalchemy import select
+
+        graph_table = self._owner.tables["task_graphs"]
+        node_table = self._owner.tables["task_nodes"]
+        async with self._owner.session_factory() as session:
+            async with session.begin():
+                graph_payload = await session.scalar(
+                    select(graph_table.c.payload).where(
+                        graph_table.c.namespace_key == self.namespace_key,
+                        graph_table.c.tenant_id == tenant_id,
+                        graph_table.c.record_id == graph_id,
+                    )
+                )
+                if graph_payload is None:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                graph = _decode_payload("task_graphs", graph_payload)
+                if not isinstance(graph, TaskGraphView):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if graph.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
+                    raise AIError(ErrorCode.TASK_NOT_READY)
+                payloads = (
+                    await session.execute(
+                        select(node_table.c.payload).where(
+                            node_table.c.namespace_key == self.namespace_key,
+                            node_table.c.tenant_id == tenant_id,
+                            node_table.c.record_id.startswith(f"{graph_id}:", autoescape=True),
+                        )
+                    )
+                ).scalars().all()
+                graph_nodes = tuple(_decode_payload("task_nodes", payload) for payload in payloads)
+                node = next(
+                    (item for item in graph_nodes if isinstance(item, TaskNodeView) and item.task_id == task_id),
+                    None,
+                )
+                if not isinstance(node, TaskNodeView):
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                dependency_ids = frozenset(node.dependencies)
+                dependency_nodes = {
+                    dependency.task_id: dependency
+                    for dependency in graph_nodes
+                    if isinstance(dependency, TaskNodeView) and dependency.task_id in dependency_ids
+                }
+                dependencies_ready = len(dependency_nodes) == len(dependency_ids) and all(
+                    dependency.status is TaskStatus.SUCCEEDED
+                    for dependency in dependency_nodes.values()
+                )
+                db_now = await _database_now(session)
+                expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= db_now
+                if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
+                    raise AIError(ErrorCode.TASK_NOT_READY)
+                lease = TaskLease(graph_id, task_id, tenant_id, owner, node.fence + 1, db_now + timedelta(seconds=lease_seconds))
+                updated = replace(node, status=TaskStatus.RUNNING, owner=owner, fence=lease.fence, lease_expires_at=lease.lease_expires_at)
+                await self._task_update(
+                    session,
+                    updated,
+                    tenant_id=tenant_id,
+                    expected_status=node.status,
+                    expected_owner=node.owner if expired else None,
+                    expected_fence=node.fence,
+                    db_now=db_now,
+                    expected_lease_before=db_now if expired else None,
+                )
+                _logger.debug("SQL task lease claimed: graph=%s task=%s owner=%s fence=%s", graph_id, task_id, owner, lease.fence)
+                return lease
 
     async def _renew_task(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
         if lease.tenant_id != tenant_id or not lease.owner.strip() or not 1 <= lease_seconds <= 3600:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        node = await self._task_node(lease, tenant_id)
-        now = datetime.now(timezone.utc)
-        renewed = replace(lease, lease_expires_at=now + timedelta(seconds=lease_seconds))
-        await self._task_update(replace(node, lease_expires_at=renewed.lease_expires_at), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=now)
-        return renewed
+        async with self._owner.session_factory() as session:
+            async with session.begin():
+                db_now = await _database_now(session)
+                node = await self._task_node(session, lease, tenant_id, db_now)
+                renewed = replace(lease, lease_expires_at=db_now + timedelta(seconds=lease_seconds))
+                await self._task_update(
+                    session,
+                    replace(node, lease_expires_at=renewed.lease_expires_at),
+                    tenant_id=tenant_id,
+                    expected_status=TaskStatus.RUNNING,
+                    expected_owner=lease.owner,
+                    expected_fence=lease.fence,
+                    db_now=db_now,
+                    expected_lease_after=db_now,
+                )
+                return renewed
 
     async def _complete_task(self, lease: TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> TaskTerminalRecord:
         if lease.tenant_id != tenant_id:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        node = await self._task_node(lease, tenant_id)
-        terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
-        await self._task_update(replace(node, status=TaskStatus.SUCCEEDED, owner=None, lease_expires_at=None, result_digest=result_digest, execution_id=execution_id), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=datetime.now(timezone.utc))
-        return terminal
+        async with self._owner.session_factory() as session:
+            async with session.begin():
+                db_now = await _database_now(session)
+                node = await self._task_node(session, lease, tenant_id, db_now)
+                terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
+                await self._task_update(
+                    session,
+                    replace(node, status=TaskStatus.SUCCEEDED, owner=None, lease_expires_at=None, result_digest=result_digest, execution_id=execution_id),
+                    tenant_id=tenant_id,
+                    expected_status=TaskStatus.RUNNING,
+                    expected_owner=lease.owner,
+                    expected_fence=lease.fence,
+                    db_now=db_now,
+                    expected_lease_after=db_now,
+                )
+                return terminal
 
     async def _fail_task(self, lease: TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> TaskTerminalRecord:
         if lease.tenant_id != tenant_id:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
-        node = await self._task_node(lease, tenant_id)
-        terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
-        await self._task_update(replace(node, status=TaskStatus.FAILED, owner=None, lease_expires_at=None, error_code=error_code, error_digest=error_digest), tenant_id=tenant_id, expected_status=TaskStatus.RUNNING, expected_owner=lease.owner, expected_fence=lease.fence, expected_lease_after=datetime.now(timezone.utc))
-        return terminal
+        async with self._owner.session_factory() as session:
+            async with session.begin():
+                db_now = await _database_now(session)
+                node = await self._task_node(session, lease, tenant_id, db_now)
+                terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
+                await self._task_update(
+                    session,
+                    replace(node, status=TaskStatus.FAILED, owner=None, lease_expires_at=None, error_code=error_code, error_digest=error_digest),
+                    tenant_id=tenant_id,
+                    expected_status=TaskStatus.RUNNING,
+                    expected_owner=lease.owner,
+                    expected_fence=lease.fence,
+                    db_now=db_now,
+                    expected_lease_after=db_now,
+                )
+                return terminal
 
-    async def _task_node(self, lease: TaskLease, tenant_id: str) -> TaskNodeView:
-        node = await self._get(f"{lease.graph_id}:{lease.task_id}", tenant_id=tenant_id, table=self._owner.tables["task_nodes"])
-        if not isinstance(node, TaskNodeView) or node.owner != lease.owner or node.fence != lease.fence or node.lease_expires_at is None or node.lease_expires_at <= datetime.now(timezone.utc):
+    async def _task_node(self, session: "AsyncSession", lease: TaskLease, tenant_id: str, db_now: datetime) -> TaskNodeView:
+        from sqlalchemy import select
+
+        table = self._owner.tables["task_nodes"]
+        payload = await session.scalar(
+            select(table.c.payload).where(
+                table.c.namespace_key == self.namespace_key,
+                table.c.tenant_id == tenant_id,
+                table.c.record_id == f"{lease.graph_id}:{lease.task_id}",
+            )
+        )
+        node = None if payload is None else _decode_payload("task_nodes", payload)
+        if not isinstance(node, TaskNodeView) or node.owner != lease.owner or node.fence != lease.fence or node.lease_expires_at is None or node.lease_expires_at <= db_now:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         return node
 
-    async def _task_update(self, record: TaskNodeView, *, tenant_id: str, expected_status: TaskStatus, expected_owner: "str | None", expected_fence: int, expected_lease_after: "datetime | None" = None, expected_lease_before: "datetime | None" = None) -> TaskNodeView:
+    async def _task_update(self, session: "AsyncSession", record: TaskNodeView, *, tenant_id: str, expected_status: TaskStatus, expected_owner: "str | None", expected_fence: int, db_now: datetime, expected_lease_after: "datetime | None" = None, expected_lease_before: "datetime | None" = None) -> TaskNodeView:
         from sqlalchemy import update
         table = self._owner.tables["task_nodes"]
         record_id = f"{record.graph_id}:{record.task_id}"
-        async with self._owner.session_factory() as session:
-            async with session.begin():
-                predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.status == expected_status.value, table.c.fence == expected_fence]
-                predicate.append(table.c.owner.is_(None) if expected_owner is None else table.c.owner == expected_owner)
-                if expected_lease_after is not None:
-                    predicate.append(table.c.lease_expires_at > expected_lease_after)
-                if expected_lease_before is not None:
-                    predicate.append(table.c.lease_expires_at <= expected_lease_before)
-                outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=table.c.revision + 1, status=record.status.value, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=_record_time(record)))
-                if outcome.rowcount != 1:
-                    raise AIError(ErrorCode.TASK_FENCE_STALE)
+        predicate = [table.c.namespace_key == self.namespace_key, table.c.tenant_id == tenant_id, table.c.record_id == record_id, table.c.status == expected_status.value, table.c.fence == expected_fence]
+        predicate.append(table.c.owner.is_(None) if expected_owner is None else table.c.owner == expected_owner)
+        if expected_lease_after is not None:
+            predicate.append(table.c.lease_expires_at > expected_lease_after)
+        if expected_lease_before is not None:
+            predicate.append(table.c.lease_expires_at <= expected_lease_before)
+        outcome = await session.execute(update(table).where(*predicate).values(payload=_encode_payload(record), revision=table.c.revision + 1, status=record.status.value, owner=record.owner, fence=record.fence, lease_expires_at=record.lease_expires_at, updated_at=db_now))
+        if outcome.rowcount != 1:
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
         return record
 
     async def _replace_status(self, record: object, *, table_name: str, tenant_id: str, record_id: str, expected_status: object) -> object:
@@ -1512,6 +1580,20 @@ def _record_id(record: object) -> str:
 
 def _composite_key(*values: str) -> str:
     return hashlib.sha256("\x00".join(values).encode("utf-8")).hexdigest()
+
+
+async def _database_now(session: "AsyncSession") -> datetime:
+    from sqlalchemy import func, select
+
+    value = await session.scalar(select(func.now()))
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    if not isinstance(value, datetime):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _record_time(record: object) -> datetime:
