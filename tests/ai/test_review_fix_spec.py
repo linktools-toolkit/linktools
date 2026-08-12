@@ -4,8 +4,9 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from linktools.ai import RuntimePersistenceConfig
@@ -28,11 +29,13 @@ from linktools.ai.runtime import (
     ExecutionRecord,
     ResultRecord,
 )
+from linktools.ai.storage import resolve_dialect
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskService,
     TaskGraph,
     TaskGraphRequest,
+    TaskGraphView,
     TaskNode,
 )
 
@@ -82,6 +85,93 @@ async def test_task_cancel_claim_replay_and_caller_cancellation() -> None:
         assert launcher.cancel_calls == 1
     finally:
         await runtime.close()
+
+
+@pytest.mark.parametrize(
+    "finalizer_error",
+    [AIError(ErrorCode.STORAGE_UNAVAILABLE), RuntimeError("finalizer failed")],
+    ids=["ai-error", "ordinary-error"],
+)
+@pytest.mark.parametrize("caller_cancelled", [False, True], ids=["complete", "cancelled"])
+@pytest.mark.asyncio
+async def test_task_cancel_finalizer_outcome_precedence(
+    finalizer_error: BaseException,
+    caller_cancelled: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = build_in_memory_runtime(namespace="review-fix-cancel-outcome")
+    await runtime.initialize()
+    service = DefaultTaskService(runtime.persistence, TenantAuthorizationPolicy(), _Launcher())
+    principal = Principal("owner", "tenant")
+    try:
+        await service.run_graph(TaskGraphRequest(TaskGraph("graph", (TaskNode("task"),)), principal, "run-key"))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def failing_finalizer(
+            graph_id: str,
+            request: CancelGraphRequest,
+            operation_id: str,
+            request_digest: str,
+        ) -> TaskGraphView:
+            del graph_id, request, operation_id, request_digest
+            entered.set()
+            await release.wait()
+            raise finalizer_error
+
+        monkeypatch.setattr(service, "_cancel_finalizer", failing_finalizer)
+        request = CancelGraphRequest(principal, "cancel-key")
+        if not caller_cancelled:
+            release.set()
+            with pytest.raises(type(finalizer_error)) as error:
+                await service.cancel_graph("graph", request)
+            assert error.value is finalizer_error
+            return
+
+        cancellation = asyncio.create_task(service.cancel_graph("graph", request))
+        await entered.wait()
+        cancellation.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await cancellation
+    finally:
+        await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_database_now_uses_utc_expression_for_mysql() -> None:
+    value = datetime(2026, 8, 12, 12, 0, 0)
+    session = SimpleNamespace(
+        bind=SimpleNamespace(dialect=SimpleNamespace(name="mysql")),
+        scalar=None,
+    )
+
+    async def scalar(statement: object) -> datetime:
+        session.statement = statement
+        return value
+
+    session.scalar = scalar
+    result = await resolve_dialect(session).database_now(session)
+    assert result == value.replace(tzinfo=timezone.utc)
+    assert "utc_timestamp" in str(session.statement).lower()
+
+
+@pytest.mark.asyncio
+async def test_sql_database_now_converts_postgresql_offset_to_utc() -> None:
+    value = datetime(2026, 8, 12, 20, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+    session = SimpleNamespace(
+        bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
+        scalar=None,
+    )
+
+    async def scalar(statement: object) -> datetime:
+        session.statement = statement
+        return value
+
+    session.scalar = scalar
+    result = await resolve_dialect(session).database_now(session)
+    assert result == datetime(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc)
+    assert "now()" in str(session.statement).lower()
 
 
 @pytest.mark.asyncio

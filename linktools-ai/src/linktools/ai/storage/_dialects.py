@@ -3,11 +3,16 @@
 """Vendor-specific SQLAlchemy statements used by storage backends."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, TypeAlias, runtime_checkable
 
+from linktools.core import environ
+
+from ..errors import AIError, ErrorCode
+
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
+_logger = environ.get_logger("ai.storage.dialects")
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -35,6 +40,8 @@ class IntegrityViolationKind(StrEnum):
 class SqlAlchemyDialect(Protocol):
     @property
     def name(self) -> str: ...
+
+    async def database_now(self, session: "AsyncSession") -> datetime: ...
 
     async def insert_ignore_conflict(
         self,
@@ -101,6 +108,25 @@ class SQLiteDialect:
     @property
     def name(self) -> str:
         return "sqlite"
+
+    async def database_now(self, session: "AsyncSession") -> datetime:
+        from sqlalchemy import select
+
+        _logger.debug("SQL authoritative time queried: dialect=%s", self.name)
+        value = await session.scalar(select(self._database_now_expression()))
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if not isinstance(value, datetime):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    def _database_now_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.now()
 
     async def insert_ignore_conflict(
         self,
@@ -216,6 +242,11 @@ class PostgreSQLDialect(SQLiteDialect):
     def name(self) -> str:
         return "postgresql"
 
+    def _database_now_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.now()
+
     async def insert_ignore_conflict(
         self,
         session: "AsyncSession",
@@ -312,6 +343,11 @@ class MySQLDialect(SQLiteDialect):
     @property
     def name(self) -> str:
         return "mysql"
+
+    def _database_now_expression(self) -> "ColumnElement[datetime]":
+        from sqlalchemy import func
+
+        return func.utc_timestamp(6)
 
     async def insert_ignore_conflict(
         self,

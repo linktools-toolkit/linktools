@@ -448,7 +448,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     dependency.status is TaskStatus.SUCCEEDED
                     for dependency in dependency_nodes.values()
                 )
-                db_now = await _database_now(session)
+                db_now = await resolve_dialect(session).database_now(session)
                 expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= db_now
                 if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
                     raise AIError(ErrorCode.TASK_NOT_READY)
@@ -472,7 +472,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await _database_now(session)
+                db_now = await resolve_dialect(session).database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 renewed = replace(lease, lease_expires_at=db_now + timedelta(seconds=lease_seconds))
                 await self._task_update(
@@ -492,7 +492,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await _database_now(session)
+                db_now = await resolve_dialect(session).database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
                 await self._task_update(
@@ -512,7 +512,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await _database_now(session)
+                db_now = await resolve_dialect(session).database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
                 await self._task_update(
@@ -1580,20 +1580,6 @@ def _record_id(record: object) -> str:
 
 def _composite_key(*values: str) -> str:
     return hashlib.sha256("\x00".join(values).encode("utf-8")).hexdigest()
-
-
-async def _database_now(session: "AsyncSession") -> datetime:
-    from sqlalchemy import func, select
-
-    value = await session.scalar(select(func.now()))
-    if isinstance(value, str):
-        try:
-            value = datetime.fromisoformat(value)
-        except ValueError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if not isinstance(value, datetime):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
 def _record_time(record: object) -> datetime:

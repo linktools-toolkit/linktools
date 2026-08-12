@@ -181,25 +181,36 @@ class DefaultTaskService(TaskApi):
                 request_digest,
             )
         )
-        caller_cancelled = False
-        try:
-            while True:
-                try:
-                    result = await asyncio.shield(finalizer)
-                    break
-                except asyncio.CancelledError:
-                    caller_cancelled = True
-                    if finalizer.done():
-                        try:
-                            result = finalizer.result()
-                        except asyncio.CancelledError:
-                            raise
-                        break
-            if caller_cancelled:
-                raise asyncio.CancelledError
-            return result
-        except asyncio.CancelledError:
-            raise
+        caller_cancellation: "asyncio.CancelledError | None" = None
+        finalizer_error: "BaseException | None" = None
+        result: "TaskGraphView | None" = None
+        while not finalizer.done():
+            try:
+                result = await asyncio.shield(finalizer)
+            except asyncio.CancelledError as error:
+                caller_cancellation = caller_cancellation or error
+                continue
+            except BaseException as error:
+                finalizer_error = error
+                break
+        if finalizer.done() and result is None:
+            try:
+                result = finalizer.result()
+            except BaseException as error:
+                finalizer_error = error
+        if caller_cancellation is not None:
+            if finalizer_error is not None:
+                _logger.warning(
+                    "task graph cancel finalizer failed after caller cancellation: graph=%s error=%s",
+                    graph_id,
+                    type(finalizer_error).__name__,
+                )
+            raise caller_cancellation
+        if finalizer_error is not None:
+            raise finalizer_error
+        if result is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return result
 
     async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> tuple[bool, OperationLedgerRecord]:
         operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)

@@ -155,6 +155,29 @@ async def test_cache_contains_does_not_touch_lru_and_files_are_hashed(tmp_path: 
     assert await filesystem.contains_many(("stable-key",)) == frozenset({"stable-key"})
 
 
+@pytest.mark.asyncio
+async def test_memory_cache_enforces_entry_count_and_replacement_accounting() -> None:
+    cache = InMemoryContentCache(max_bytes=4, max_size=2)
+    await cache.put("a", b"ab")
+    await cache.put("b", b"c")
+    assert await cache.get("a") == b"ab"
+    await cache.put("c", b"d")
+    assert await cache.contains_many(("a", "b", "c")) == frozenset({"a", "c"})
+
+    await cache.put("a", b"x")
+    await cache.put("d", b"yz")
+    assert await cache.contains_many(("a", "c", "d")) == frozenset({"a", "d"})
+    await cache.delete("a")
+    await cache.put("e", b"1234")
+    assert await cache.contains_many(("c", "d", "e")) == frozenset({"e"})
+
+
+def test_memory_cache_validates_entry_count() -> None:
+    with pytest.raises(ValueError):
+        InMemoryContentCache(max_bytes=1, max_size=-1)
+    assert InMemoryContentCache(max_bytes=1, max_size=None).max_size is None
+
+
 def test_composition_exposes_only_domain_generics() -> None:
     assert tuple(parameter.__name__ for parameter in StorageOverlay.__parameters__) == (
         "KeyT",
