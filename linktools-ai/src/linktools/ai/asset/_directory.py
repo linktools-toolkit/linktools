@@ -71,7 +71,7 @@ class LocalDirectoryAssetBackend:
 
     def __init__(
         self,
-        root: "AssetRoot | str" = ".linktools/assets",
+        root: "AssetRoot | str" = "assets",
         *,
         writable: bool = False,
         path_adapter: "AssetPathAdapter | None" = None,

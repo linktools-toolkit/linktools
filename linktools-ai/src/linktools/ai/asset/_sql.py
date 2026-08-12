@@ -16,6 +16,7 @@ from ..core import validate_asset_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
     MetadataLoad,
+    build_sql_schema_metadata,
     SqlErrorKind,
     SqlSchemaRegistry,
     StorageBatchResult,
@@ -38,7 +39,6 @@ from ..storage import (
     storage_name,
     get_sql_storage_context,
     register_sql_schema_contributor,
-    validate_schema,
 )
 from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
@@ -198,10 +198,13 @@ class SqlAssetBackend(InMemoryAssetBackend):
             raise ValueError("SQL asset namespace is invalid") from error
         digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         super().__init__(AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest))
-        registry = SqlSchemaRegistry()
-        self._tables = SqlAssetSchema.register_schema(registry)
-        registry.freeze()
-        self._engine = engine
+        self._metadata, self._schema_digest = build_sql_schema_metadata()
+        self._tables = SqlAssetTables(
+            self._metadata.tables[storage_name("asset_entries")],
+            self._metadata.tables[storage_name("asset_changes")],
+            self._metadata.tables[storage_name("asset_blobs")],
+            self._metadata.tables[storage_name("asset_revision")],
+        )
         self._context = get_sql_storage_context(engine, namespace)
         self._session_factory = self._context.sessions
         self._namespace = namespace
@@ -209,7 +212,10 @@ class SqlAssetBackend(InMemoryAssetBackend):
 
     async def initialize(self) -> None:
         if self._context.schema_manifest_digest is None:
-            await validate_schema(self._engine, self._tables.revision.metadata)
+            await self._context.initialize(
+                metadata=self._metadata,
+                schema_manifest_digest=self._schema_digest,
+            )
         await self._refresh_state()
         _logger.debug(
             "SQL asset backend initialized: namespace=%s revision=%s",

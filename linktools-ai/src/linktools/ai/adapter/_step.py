@@ -26,6 +26,7 @@ from ..core import canonical_json_bytes, validate_persistence_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemWriterLock,
+    build_sql_schema_metadata,
     SqlErrorKind,
     classify_sql_error,
     read_json,
@@ -38,7 +39,6 @@ from ..storage import (
     SqlSchemaRegistry,
     storage_name,
     sync_directory,
-    validate_schema,
     write_json_atomic,
     StorageDomain,
     get_sql_storage_context,
@@ -300,8 +300,8 @@ class RoutedStepStore:
         return self._store(StorageDomain.RECOVERY)
 
     def _snapshot_store(self, snapshot: "ContinuableSnapshot | None" = None) -> StepStore:
-        if snapshot is not None and snapshot.state == "interrupted" and StorageDomain.RECOVERY in self._persist:
-            return self._store(StorageDomain.RECOVERY)
+        if snapshot is not None and snapshot.state == "interrupted":
+            return self._store(StorageDomain.RECOVERY) if StorageDomain.RECOVERY in self._persist else self._memory
         if snapshot is None and StorageDomain.RECOVERY in self._persist:
             return self._store(StorageDomain.RECOVERY)
         if StorageDomain.CONVERSATION in self._persist:
@@ -468,8 +468,17 @@ class SqlStepStore:
         self._sessions = self._context.sessions
         self._namespace = namespace
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        self._metadata, self._tables = _build_tables()
-        self._schema_digest = _schema_digest(self._metadata)
+        self._metadata, self._schema_digest = build_sql_schema_metadata()
+        self._tables = {
+            name: self._metadata.tables[storage_name(physical_name)]
+            for name, physical_name in {
+                "runs": "step_runs",
+                "events": "step_events",
+                "snapshots": "step_snapshots",
+                "effects": "step_effects",
+                "media": "step_media",
+            }.items()
+        }
         self._media = _PromotingMediaStore(
             _MemoryMediaStore(),
             _SqlMediaStore(self._sessions, namespace, metadata=self._metadata, tables=self._tables),
@@ -482,7 +491,10 @@ class SqlStepStore:
     async def initialize(self) -> None:
         if self._context.schema_manifest_digest is not None:
             return
-        await validate_schema(self._engine, self._metadata)
+        await self._context.initialize(
+            metadata=self._metadata,
+            schema_manifest_digest=self._schema_digest,
+        )
 
     async def close(self) -> None:
         return None

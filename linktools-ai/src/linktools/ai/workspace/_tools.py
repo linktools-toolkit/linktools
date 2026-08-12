@@ -31,8 +31,9 @@ class WorkspaceTool(Protocol):
 WorkspaceToolResultValue = str | int | bool | None | list[dict[str, str]]
 
 
-def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
+def build_workspace_tools(root: 'str | Path', *, storage_root: 'str | Path | None' = None) -> 'tuple[WorkspaceTool, ...]':
     project_root = Path(root).expanduser().resolve()
+    data_root = (project_root / ".linktools" if storage_root is None else Path(storage_root).expanduser().resolve())
     shell_slots = asyncio.Semaphore(4)
 
     async def list_dir(path: str = ".", recursive: bool = False) -> 'dict[str, WorkspaceToolResultValue]':
@@ -92,7 +93,7 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
                 "-lc",
                 command,
                 cwd=str(project_root),
-                env=_shell_environment(project_root),
+                env=_shell_environment(project_root, data_root),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
@@ -152,8 +153,8 @@ def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[StaticCapabi
     )
 
 
-def build_workspace_tool_map(root: 'str | Path') -> 'Mapping[str, WorkspaceTool]':
-    tools = build_workspace_tools(root)
+def build_workspace_tool_map(root: 'str | Path', *, storage_root: 'str | Path | None' = None) -> 'Mapping[str, WorkspaceTool]':
+    tools = build_workspace_tools(root, storage_root=storage_root)
     return {
         "list_dir": tools[0],
         "read_file": tools[1],
@@ -193,9 +194,9 @@ async def _read_limited(stream: 'asyncio.StreamReader | None') -> 'tuple[bytes, 
     return b"".join(chunks), truncated
 
 
-def _shell_environment(project_root: Path) -> 'dict[str, str]':
+def _shell_environment(project_root: Path, data_root: Path) -> 'dict[str, str]':
     environment = {key: value for key, value in os.environ.items() if key in {"PATH", "LANG", "LC_ALL", "TERM"}}
-    home = project_root / ".linktools" / "home"
+    home = data_root / "home"
     home.mkdir(parents=True, exist_ok=True)
     environment["HOME"] = str(home)
     return environment

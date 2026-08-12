@@ -126,10 +126,10 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
     now = datetime.now(timezone.utc)
     try:
         for tenant_id in ("workspace-tenant", "foreign-tenant"):
-            await runtime.persistence.conversation.create(
+            await runtime.persistence.conversation.sessions.create(
                 SessionRecord("session", tenant_id, "principal", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None)
             )
-            await runtime.persistence.execution.create(
+            await runtime.persistence.execution.executions.create(
                 ExecutionRecord(
                     execution_id="execution",
                     tenant_id=tenant_id,
@@ -163,8 +163,8 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
 
         await backend.reconcile()
 
-        workspace_execution = await runtime.persistence.execution.get("execution", tenant_id="workspace-tenant")
-        foreign_execution = await runtime.persistence.execution.get("execution", tenant_id="foreign-tenant")
+        workspace_execution = await runtime.persistence.execution.executions.get("execution", tenant_id="workspace-tenant")
+        foreign_execution = await runtime.persistence.execution.executions.get("execution", tenant_id="foreign-tenant")
         assert workspace_execution.status is ExecutionStatus.STARTED
         assert foreign_execution.status is ExecutionStatus.STARTED
     finally:

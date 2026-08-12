@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..storage import build_sql_schema_metadata
+from ..storage import build_sql_schema_metadata, provision_schema_generation
 
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
@@ -20,6 +20,7 @@ async def provision_database(engine: "AsyncEngine") -> None:
     """Create all current database tables for an explicit deployment step."""
     plan = build_schema_metadata()
     await _provision_schema(engine, plan[0])
+    await provision_schema_generation(engine, plan[0], plan[1])
     _logger.info("database schema provisioned: manifest=%s table_count=%s", plan[1], len(plan[0].tables))
 
 

@@ -17,14 +17,14 @@ class DefaultExternalService:
         self._workflow_gateway = workflow_gateway
 
     async def supply(self, execution_id: str, request: ExternalResultRequest) -> ExternalResultResult:
-        call = await self._persistence.recovery_external.get(request.call_id, tenant_id=request.principal.tenant_id)
+        call = await self._persistence.recovery.externals.get(request.call_id, tenant_id=request.principal.tenant_id)
         if call is None or call.execution_id != execution_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        header = await self._persistence.recovery_external.get_header(request.call_id, tenant_id=request.principal.tenant_id)
+        header = await self._persistence.recovery.externals.get_header(request.call_id, tenant_id=request.principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXTERNAL_SUPPLY, header)
-        updated = await self._persistence.recovery_external.supply(
+        updated = await self._persistence.recovery.externals.supply(
             request.call_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ExternalCallStatus.PENDING,

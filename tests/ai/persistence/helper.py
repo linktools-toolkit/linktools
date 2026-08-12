@@ -6,10 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from linktools.ai import RuntimeStorage
-from linktools.ai.adapter import (
-    SqlStepStore,
-    open_sql_runtime,
-)
+from linktools.ai.adapter import SqlStepStore, open_sql_runtime
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStores
 from linktools.ai.storage import create_sql_storage_context

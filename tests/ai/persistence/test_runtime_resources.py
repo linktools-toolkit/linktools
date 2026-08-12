@@ -107,15 +107,15 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
     now = datetime.now(timezone.utc)
     try:
         for tenant_id, owner_principal_id in (("tenant-a", "principal-a"), ("tenant-b", "principal-b")):
-            await first.conversation.create(SessionRecord("shared", tenant_id, owner_principal_id, "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
-        await second.conversation.create(SessionRecord("shared", "tenant-a", "principal-c", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+            await first.conversation.sessions.create(SessionRecord("shared", tenant_id, owner_principal_id, "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+        await second.conversation.sessions.create(SessionRecord("shared", "tenant-a", "principal-c", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
 
-        assert (await first.conversation.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-a"
-        assert (await first.conversation.get("shared", tenant_id="tenant-b")).owner_principal_id == "principal-b"
-        assert (await second.conversation.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-c"
+        assert (await first.conversation.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-a"
+        assert (await first.conversation.sessions.get("shared", tenant_id="tenant-b")).owner_principal_id == "principal-b"
+        assert (await second.conversation.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-c"
         assert first.namespace != second.namespace
         with pytest.raises(AIError) as sql_tenant_error:
-            await first.conversation.get("shared", tenant_id=" tenant-a")
+            await first.conversation.sessions.get("shared", tenant_id=" tenant-a")
         assert sql_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
         memory_record = MemoryRecord("memory", "tenant-a", "a" * 64, "content", "digest", {}, 0, now, now)
         foreign_operation = OperationLedgerInput(
@@ -124,21 +124,21 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
             None, None, None, True, now, now,
         )
         with pytest.raises(AIError) as sql_atomic_tenant_error:
-            await first.memory.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
+            await first.memory.records.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
         assert sql_atomic_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
-        await first.conversation.close()
-        await second.conversation.close()
+        await first.conversation.sessions.close()
+        await second.conversation.sessions.close()
         await engine.dispose()
 
     memory = build_in_memory_runtime(namespace="tenant-validation")
     await memory.initialize()
     try:
         with pytest.raises(AIError) as memory_tenant_error:
-            await memory.persistence.conversation.get("shared", tenant_id="tenant-a ")
+            await memory.persistence.conversation.sessions.get("shared", tenant_id="tenant-a ")
         assert memory_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
         with pytest.raises(AIError) as memory_atomic_tenant_error:
-            await memory.persistence.memory.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
+            await memory.persistence.memory.records.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
         assert memory_atomic_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
         await memory.close()
@@ -184,12 +184,12 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     key_hash = idempotency_key_hash("request")
-    await runtime.persistence.execution.create(execution)
-    await runtime.persistence.execution_idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
+    await runtime.persistence.execution.executions.create(execution)
+    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
     claim = ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now)
-    outcomes = await asyncio.gather(runtime.persistence.execution.claim_start(claim), runtime.persistence.execution.claim_start(claim), return_exceptions=True)
+    outcomes = await asyncio.gather(runtime.persistence.execution.executions.claim_start(claim), runtime.persistence.execution.executions.claim_start(claim), return_exceptions=True)
     assert sum(isinstance(item, ExecutionRecord) for item in outcomes) == 1
-    current = await runtime.persistence.execution.get("execution", tenant_id="tenant")
+    current = await runtime.persistence.execution.executions.get("execution", tenant_id="tenant")
     assert current is not None and current.agent_run_sequence == 1 and current.event_sequence == 1
     await runtime.close()
 
@@ -201,9 +201,9 @@ async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_p
     async with open_sql_resources(storage, namespace="claim") as resources:
         execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
         key_hash = idempotency_key_hash("request")
-        await resources.domain.execution.create(execution)
-        await resources.domain.execution_idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
-        claimed = await resources.domain.execution.claim_start(ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now))
+        await resources.domain.execution.executions.create(execution)
+        await resources.domain.execution.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
+        claimed = await resources.domain.execution.executions.claim_start(ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now))
         assert claimed.status is ExecutionStatus.STARTED
         assert claimed.agent_run_sequence == 1
 
@@ -213,16 +213,16 @@ async def test_memory_terminal_aggregate_commits_event_idempotency_without_sessi
     runtime = build_in_memory_runtime(namespace="terminal")
     await runtime.initialize()
     now = datetime.now(timezone.utc)
-    await runtime.persistence.conversation.create(SessionRecord(session_id="session", tenant_id="tenant", owner_principal_id="owner", binding_digest="binding", status=SessionStatus.OPEN, revision=0, resource_generation=0, cwd=None, metadata={}, created_at=now, updated_at=now, closed_at=None, continuation=None))
+    await runtime.persistence.conversation.sessions.create(SessionRecord(session_id="session", tenant_id="tenant", owner_principal_id="owner", binding_digest="binding", status=SessionStatus.OPEN, revision=0, resource_generation=0, cwd=None, metadata={}, created_at=now, updated_at=now, closed_at=None, continuation=None))
     execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.STARTED, revision=1, event_sequence=0, agent_run_sequence=1, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
-    await runtime.persistence.execution.create(execution)
+    await runtime.persistence.execution.executions.create(execution)
     key_hash = idempotency_key_hash("terminal")
-    await runtime.persistence.execution_idempotency.reserve(IdempotencyRecord("tenant", "execution.run", key_hash, "request", "execution", IdempotencyStatus.STARTED, None, None, now, now))
+    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", "execution.run", key_hash, "request", "execution", IdempotencyStatus.STARTED, None, None, now, now))
     terminal = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=1, agent_run_sequence=1, result_ref="digest", result_digest="digest", error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     result = ResultRecord("execution", "tenant", ExecutionStatus.SUCCEEDED, "none", 1, "none", "digest", "digest", StopReason.END_TURN, 0, 0, 0, now)
-    await runtime.persistence.execution_result.commit_terminal(ExecutionTerminalCommit(1, 0, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED, {}, IdempotencyTerminalUpdate("execution.run", key_hash, IdempotencyStatus.STARTED, IdempotencyStatus.COMPLETED, "request", "digest", None), None))
-    assert (await runtime.persistence.execution_idempotency.get("execution.run", key_hash, tenant_id="tenant")).status is IdempotencyStatus.COMPLETED
-    events = await runtime.persistence.execution_events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
+    await runtime.persistence.execution.results.commit_terminal(ExecutionTerminalCommit(1, 0, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED, {}, IdempotencyTerminalUpdate("execution.run", key_hash, IdempotencyStatus.STARTED, IdempotencyStatus.COMPLETED, "request", "digest", None), None))
+    assert (await runtime.persistence.execution.idempotency.get("execution.run", key_hash, tenant_id="tenant")).status is IdempotencyStatus.COMPLETED
+    events = await runtime.persistence.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
     assert tuple(item.event_type for item in events.items) == (ExecutionEventType.EXECUTION_SUCCEEDED,)
     await runtime.close()
 
@@ -245,8 +245,8 @@ async def test_file_runtime_fault_does_not_publish_a_partial_mutation(tmp_path: 
     monkeypatch.setattr(runtime_persistence, "write_json_atomic", fail_once)
     now = datetime.now(timezone.utc)
     with pytest.raises(AIError) as error:
-        await runtime.persistence.conversation.create(SessionRecord("session", "fault", "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+        await runtime.persistence.conversation.sessions.create(SessionRecord("session", "fault", "owner", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
     assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
     monkeypatch.setattr(runtime_persistence, "write_json_atomic", original)
-    assert await runtime.persistence.conversation.get("session", tenant_id="fault") is None
+    assert await runtime.persistence.conversation.sessions.get("session", tenant_id="fault") is None
     await runtime.close()

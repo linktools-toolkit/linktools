@@ -61,7 +61,7 @@ class SqlStorageContext:
             if not schema_manifest_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await validate_schema(self.engine, metadata)
-            await _validate_schema_generation(self.engine, metadata, schema_manifest_digest)
+            await _validate_schema_generation(self.engine, metadata, schema_manifest_digest, allow_create=self.owns_engine)
             self.schema_manifest_digest = schema_manifest_digest
         _logger.debug(
             "SQL storage context initialized: dialect=%s namespace=%s owns_engine=%s schema_manifest_digest=%s",
@@ -79,8 +79,6 @@ class SqlStorageContext:
 
 _SQL_CONTEXTS: dict[tuple[int, str], SqlStorageContext] = {}
 _SQL_SCHEMA_CONTRIBUTORS: dict[str, Callable[["SqlSchemaRegistry"], "SqlSchemaContribution"]] = {}
-
-
 @dataclass(frozen=True, slots=True)
 class SqlTableManifest:
     name: str
@@ -96,17 +94,12 @@ class SqlSchemaManifest:
     digest: str
 
 
-class SqlSchemaContributor(Protocol):
-    @classmethod
-    def register_schema(cls, registry: "SqlSchemaRegistry") -> "Table": ...
+class _SqlTypeValue(Protocol):
+    def __str__(self) -> str: ...
 
 
 class SqlSchemaContribution(Protocol):
-    """Marker for the backend-specific value returned by a schema registrar."""
-
-
-class _SqlTypeValue(Protocol):
-    def __str__(self) -> str: ...
+    """Value returned by a schema contributor."""
 
 
 class SqlSchemaRegistry:
@@ -190,6 +183,7 @@ class StorageDatabase:
         if not self.schema_manifest_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await validate_schema(self.engine, self.metadata)
+        await _validate_schema_generation(self.engine, self.metadata, self.schema_manifest_digest, allow_create=False)
 
 
 def sql_constraint_signature(constraint: "Constraint") -> str:
@@ -408,6 +402,8 @@ async def _validate_schema_generation(
     engine: "AsyncEngine",
     metadata: "MetaData",
     schema_manifest_digest: str,
+    *,
+    allow_create: bool,
 ) -> None:
     from sqlalchemy import insert, select
 
@@ -417,6 +413,8 @@ async def _validate_schema_generation(
     async with engine.begin() as connection:
         row = (await connection.execute(select(table.c.generation, table.c.manifest_digest).where(table.c.id == 1))).first()
         if row is None:
+            if not allow_create:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await connection.execute(
                 insert(table).values(
                     id=1,
@@ -427,6 +425,15 @@ async def _validate_schema_generation(
             return
         if int(row.generation) != 1 or str(row.manifest_digest) != schema_manifest_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+async def provision_schema_generation(
+    engine: "AsyncEngine",
+    metadata: "MetaData",
+    schema_manifest_digest: str,
+) -> None:
+    """Write the generation marker during an explicit owned-schema provision."""
+    await _validate_schema_generation(engine, metadata, schema_manifest_digest, allow_create=True)
 
 
 def register_storage_schema(registry: SqlSchemaRegistry) -> "Table":
@@ -450,22 +457,21 @@ def register_storage_schema(registry: SqlSchemaRegistry) -> "Table":
     return table
 
 
-def register_sql_schema_contributor(
-    owner: str,
-    contributor: Callable[[SqlSchemaRegistry], "SqlSchemaContribution"],
-) -> None:
-    if not owner or owner in _SQL_SCHEMA_CONTRIBUTORS:
-        raise ValueError("SQL schema contributor is already registered")
-    _SQL_SCHEMA_CONTRIBUTORS[owner] = contributor
-
-
 def build_sql_schema_metadata() -> "tuple[MetaData, str]":
+    if set(_SQL_SCHEMA_CONTRIBUTORS) != {"adapter.sql", "adapter._step", "asset.sql"}:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "application SQL schema contributors are incomplete")
     registry = SqlSchemaRegistry()
     register_storage_schema(registry)
     for contributor in _SQL_SCHEMA_CONTRIBUTORS.values():
         contributor(registry)
     manifest = registry.freeze()
     return registry.metadata, manifest.digest
+
+
+def register_sql_schema_contributor(owner: str, contributor: Callable[[SqlSchemaRegistry], SqlSchemaContribution]) -> None:
+    if not owner or owner in _SQL_SCHEMA_CONTRIBUTORS:
+        raise ValueError("SQL schema contributor is already registered")
+    _SQL_SCHEMA_CONTRIBUTORS[owner] = contributor
 
 
 def create_sql_storage_context(
@@ -523,7 +529,6 @@ def _configure_sqlite_connection(connection: Any, connection_record: Any, _: Any
 
 __all__ = [
     "CoordinationScope",
-    "SqlSchemaContributor",
     "SqlSchemaManifest",
     "SqlSchemaRegistry",
     "SqlTableManifest",
@@ -535,6 +540,7 @@ __all__ = [
     "register_storage_schema",
     "register_sql_schema_contributor",
     "prepare_storage_database",
+    "provision_schema_generation",
     "sql_blob",
     "sql_constraint_signature",
     "sql_digest",

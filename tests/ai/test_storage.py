@@ -427,16 +427,16 @@ async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> No
             "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
             ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
         )
-        await runtime.domain.tools.reserve(record)
-        assert await runtime.domain.tools.get_operation("operation", tenant_id="tenant") == record
-        claimed = await runtime.domain.tools.claim(
+        await runtime.domain.recovery.tools.reserve(record)
+        assert await runtime.domain.recovery.tools.get_operation("operation", tenant_id="tenant") == record
+        claimed = await runtime.domain.recovery.tools.claim(
             "operation",
             tenant_id="tenant",
             owner="worker",
             lease_seconds=30,
         )
         assert claimed.owner == "worker"
-        completed = await runtime.domain.tools.complete(
+        completed = await runtime.domain.recovery.tools.complete(
             "operation",
             tenant_id="tenant",
             owner="worker",
@@ -446,7 +446,7 @@ async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> No
         )
         assert completed.status is ToolOperationStatus.COMPLETED
         with pytest.raises(AIError) as error:
-            await runtime.domain.tools.reserve(
+            await runtime.domain.recovery.tools.reserve(
                 ToolOperationRecord(
                     "operation", "tenant", "run", "other-call", "a" * 64, "tool", "arguments", "binding", True,
                     ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,

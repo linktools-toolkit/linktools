@@ -52,6 +52,7 @@ from ._database import (
     create_sql_storage_context,
     get_sql_storage_context,
     prepare_storage_database,
+    provision_schema_generation,
     register_storage_schema,
     register_sql_schema_contributor,
     sql_blob,
@@ -98,6 +99,7 @@ from ._lock import (
     Lease,
     ProcessLeaseCoordinator,
 )
+from ._metrics import StorageMetrics
 from ._names import TABLE_PREFIX, storage_name
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 from ._selection import RuntimeStorage, StorageDomain
@@ -149,6 +151,7 @@ __all__ = [
     "StorageId",
     "StorageLayer",
     "StorageLocation",
+    "StorageMetrics",
     "StorageMetadataReader",
     "StorageOperation",
     "StorageOverlay",
@@ -173,6 +176,7 @@ __all__ = [
     "build_sql_schema_metadata",
     "get_sql_storage_context",
     "prepare_storage_database",
+    "provision_schema_generation",
     "register_storage_schema",
     "register_sql_schema_contributor",
     "classify_integrity_error_by_message",

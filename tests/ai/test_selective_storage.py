@@ -37,7 +37,7 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
     )
     now = datetime.now(timezone.utc)
     await runtime.initialize()
-    await runtime.persistence.conversation.create(
+    await runtime.persistence.conversation.sessions.create(
         SessionRecord(
             session_id="session",
             tenant_id="tenant",
@@ -53,7 +53,7 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
             closed_at=None,
         )
     )
-    await runtime.persistence.execution.create(
+    await runtime.persistence.execution.executions.create(
         ExecutionRecord(
             execution_id="execution",
             tenant_id="tenant",
@@ -76,7 +76,7 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
             updated_at=now,
         )
     )
-    assert await runtime.persistence.execution.get("execution", tenant_id="tenant") is not None
+    assert await runtime.persistence.execution.executions.get("execution", tenant_id="tenant") is not None
     await runtime.close()
 
     namespace_root = next(root.iterdir())
@@ -92,8 +92,8 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
     )
     await restarted.initialize()
     try:
-        assert await restarted.persistence.conversation.get("session", tenant_id="tenant") is not None
-        assert await restarted.persistence.execution.get("execution", tenant_id="tenant") is None
+        assert await restarted.persistence.conversation.sessions.get("session", tenant_id="tenant") is not None
+        assert await restarted.persistence.execution.executions.get("execution", tenant_id="tenant") is None
     finally:
         await restarted.close()
 

@@ -43,10 +43,13 @@ from ..errors import AIError, ErrorCode
 from ..runtime import (
     ApprovalRecord,
     ArtifactRecord,
+    ArtifactStore,
     BlobRef,
     BlobStore,
     ConversationCursor,
+    ConversationStore,
     EvaluationRecord,
+    EvaluationStore,
     ExecutionCancelRequestCommit,
     ExecutionEventRecord,
     ExecutionRecord,
@@ -56,10 +59,13 @@ from ..runtime import (
     ExecutionStartUnknownCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    ExecutionStore,
     ExternalResultRecord,
     RecoveryCheckpoint,
+    RecoveryStore,
     IdempotencyRecord,
     MemoryRecord,
+    MemoryStore,
     OperationLedgerInput,
     OperationLedgerRecord,
     ResultRecord,
@@ -68,25 +74,24 @@ from ..runtime import (
     SessionRecord,
     TaskLease,
     TaskNodeView,
+    TaskStore,
     ToolOperationRecord,
     ToolStateStore,
 )
 from ..storage import (
     SqlErrorKind,
-    SqlSchemaRegistry,
     StorageDatabase,
     classify_sql_error,
-    build_sql_schema_metadata,
     is_retryable_sql_transaction,
     prepare_storage_database,
     get_sql_storage_context,
     StorageDomain,
     resolve_dialect,
+    build_sql_schema_metadata,
+    storage_name,
 )
 from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
-from ._persistence import RoutedIdempotencyRepository, RoutedOperationRepository, DomainBlobRouter
-from ._schema import SqlRuntimeSchema
-
+from ._persistence import RoutedIdempotencyRepository, RoutedOperationRepository
 if TYPE_CHECKING:
     from sqlalchemy import Table
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
@@ -1631,14 +1636,33 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
     context = get_sql_storage_context(engine, namespace)
     metadata, schema_digest = build_sql_schema_metadata()
     await context.initialize(metadata=metadata, schema_manifest_digest=schema_digest)
-    selected = frozenset(StorageDomain.durable() if persist is None else persist)
-    registry = SqlSchemaRegistry()
-    tables = SqlRuntimeSchema.register_schema(registry)
-    manifest = registry.freeze()
+    selected = frozenset({StorageDomain.CONVERSATION} if persist is None else persist)
+    runtime_table_names = {
+        "sessions": "runtime_sessions",
+        "executions": "runtime_executions",
+        "results": "runtime_results",
+        "idempotency": "runtime_idempotency",
+        "evaluation_idempotency": "runtime_evaluation_idempotency",
+        "execution_events": "runtime_events",
+        "task_graphs": "runtime_tasks",
+        "task_nodes": "runtime_task_nodes",
+        "evaluations": "runtime_evaluations",
+        "memories": "runtime_memories",
+        "artifacts": "runtime_artifacts",
+        "approvals": "runtime_approvals",
+        "external_results": "runtime_externals",
+        "operation_counters": "runtime_operation_counters",
+        "operation_ledger": "runtime_operations",
+        "tool_operations": "runtime_tools",
+        "blobs": "runtime_blobs",
+        "blob_chunks": "runtime_blob_chunks",
+        "recovery_checkpoints": "runtime_recovery_checkpoints",
+    }
+    tables = {name: metadata.tables[storage_name(physical_name)] for name, physical_name in runtime_table_names.items()}
     database = await prepare_storage_database(
         engine,
-        metadata=registry.metadata,
-        schema_manifest_digest=manifest.digest,
+        metadata=metadata,
+        schema_manifest_digest=schema_digest,
         context=context,
     )
     await database.initialize()
@@ -1649,35 +1673,58 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
     memory = build_in_memory_runtime(namespace=namespace).persistence
     def use_sql(domain: StorageDomain) -> bool:
         return domain in selected
-    operation = RoutedOperationRepository(components[11], memory.operation_ledger, selected)
-    execution_idempotency = RoutedIdempotencyRepository(components[3], memory.execution_idempotency, selected, StorageDomain.EXECUTION)
-    evaluation_idempotency = RoutedIdempotencyRepository(evaluation_component, memory.evaluation_idempotency, selected, StorageDomain.EVALUATION)
+    memory_operation_repositories = {
+        StorageDomain.CONVERSATION: memory.conversation.operations,
+        StorageDomain.EXECUTION: memory.execution.operations,
+        StorageDomain.MEMORY: memory.memory.operations,
+        StorageDomain.ARTIFACT: memory.artifact.operations,
+        StorageDomain.TASK: memory.task.operations,
+        StorageDomain.EVALUATION: memory.evaluation.operations,
+        StorageDomain.RECOVERY: memory.recovery.operations,
+    }
+    operation_repositories = {
+        domain: RoutedOperationRepository(components[11], memory_operation_repositories[domain], selected, domain)
+        for domain in memory_operation_repositories
+    }
+    execution_idempotency = RoutedIdempotencyRepository(components[3], memory.execution.idempotency, selected, StorageDomain.EXECUTION)
+    evaluation_idempotency = RoutedIdempotencyRepository(evaluation_component, memory.evaluation.idempotency, selected, StorageDomain.EVALUATION)
     sql_blobs = {
         domain: _SqlRuntimeRepository(owner, "blobs", blob_domain=domain)
         for domain in (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
     }
-    blobs = DomainBlobRouter({
-        domain: sql_blobs[domain] if use_sql(domain) else memory.blobs.for_domain(domain)
-        for domain in (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
-    })
+    memory_blobs = {
+        StorageDomain.CONVERSATION: memory.conversation.blobs,
+        StorageDomain.EXECUTION: memory.execution.blobs,
+        StorageDomain.MEMORY: memory.memory.blobs,
+        StorageDomain.ARTIFACT: memory.artifact.blobs,
+        StorageDomain.EVALUATION: memory.evaluation.blobs,
+        StorageDomain.RECOVERY: memory.recovery.blobs,
+    }
+    blobs = {
+        domain: sql_blobs[domain] if use_sql(domain) else memory_blobs[domain]
+        for domain in memory_blobs
+    }
+    conversation = components[0] if use_sql(StorageDomain.CONVERSATION) else memory.conversation.sessions
+    execution = components[1] if use_sql(StorageDomain.EXECUTION) else memory.execution.executions
+    results = components[2] if use_sql(StorageDomain.EXECUTION) else memory.execution.results
+    events = components[4] if use_sql(StorageDomain.EXECUTION) else memory.execution.events
+    task = components[5] if use_sql(StorageDomain.TASK) else memory.task.tasks
+    evaluation = components[6] if use_sql(StorageDomain.EVALUATION) else memory.evaluation.records
+    memories = components[7] if use_sql(StorageDomain.MEMORY) else memory.memory.records
+    artifacts = components[8] if use_sql(StorageDomain.ARTIFACT) else memory.artifact.records
+    approvals = components[9] if use_sql(StorageDomain.RECOVERY) else memory.recovery.approvals
+    externals = components[10] if use_sql(StorageDomain.RECOVERY) else memory.recovery.externals
+    checkpoints = recovery_checkpoint_component if use_sql(StorageDomain.RECOVERY) else memory.recovery.checkpoints
+    tools = components[12] if use_sql(StorageDomain.RECOVERY) else memory.recovery.tools
     return RuntimeStores(
         namespace=namespace,
-        conversation=components[0] if use_sql(StorageDomain.CONVERSATION) else memory.conversation,
-        execution=components[1] if use_sql(StorageDomain.EXECUTION) else memory.execution,
-        execution_result=components[2] if use_sql(StorageDomain.EXECUTION) else memory.execution_result,
-        execution_idempotency=execution_idempotency,
-        evaluation_idempotency=evaluation_idempotency,
-        execution_events=components[4] if use_sql(StorageDomain.EXECUTION) else memory.execution_events,
-        task=components[5] if use_sql(StorageDomain.TASK) else memory.task,
-        evaluation=components[6] if use_sql(StorageDomain.EVALUATION) else memory.evaluation,
-        memory=components[7] if use_sql(StorageDomain.MEMORY) else memory.memory,
-        artifact=components[8] if use_sql(StorageDomain.ARTIFACT) else memory.artifact,
-        recovery_approval=components[9] if use_sql(StorageDomain.RECOVERY) else memory.recovery_approval,
-        recovery_external=components[10] if use_sql(StorageDomain.RECOVERY) else memory.recovery_external,
-        recovery_checkpoint=recovery_checkpoint_component if use_sql(StorageDomain.RECOVERY) else memory.recovery_checkpoint,
-        operation_ledger=operation,
-        tools=components[12] if use_sql(StorageDomain.RECOVERY) else memory.tools,
-        blobs=blobs,
+        conversation=ConversationStore(conversation, operation_repositories[StorageDomain.CONVERSATION], blobs[StorageDomain.CONVERSATION]),
+        execution=ExecutionStore(execution, results, execution_idempotency, events, operation_repositories[StorageDomain.EXECUTION], blobs[StorageDomain.EXECUTION]),
+        memory=MemoryStore(memories, operation_repositories[StorageDomain.MEMORY], blobs[StorageDomain.MEMORY]),
+        artifact=ArtifactStore(artifacts, operation_repositories[StorageDomain.ARTIFACT], blobs[StorageDomain.ARTIFACT]),
+        task=TaskStore(task, operation_repositories[StorageDomain.TASK]),
+        evaluation=EvaluationStore(evaluation, evaluation_idempotency, operation_repositories[StorageDomain.EVALUATION], blobs[StorageDomain.EVALUATION]),
+        recovery=RecoveryStore(approvals, externals, checkpoints, operation_repositories[StorageDomain.RECOVERY], tools, blobs[StorageDomain.RECOVERY]),
     )
 
 

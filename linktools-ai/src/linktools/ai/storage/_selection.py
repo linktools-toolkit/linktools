@@ -43,6 +43,24 @@ class RuntimeStorage:
     engine: "AsyncEngine | None"
     persist: frozenset[StorageDomain]
 
+    def __post_init__(self) -> None:
+        if self.target_kind not in {"memory", "filesystem", "sqlite", "sql"}:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        normalized = _normalize_persist(self.persist)
+        object.__setattr__(self, "persist", normalized)
+        if self.target_kind == "memory":
+            if self.location is not None or self.engine is not None or normalized:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        elif self.target_kind in {"filesystem", "sqlite"}:
+            if self.location is None or self.engine is not None:
+                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+            object.__setattr__(self, "location", _absolute_path(self.location))
+        else:
+            from sqlalchemy.ext.asyncio import AsyncEngine
+
+            if self.location is not None or not isinstance(self.engine, AsyncEngine):
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
     @classmethod
     def memory(cls) -> "RuntimeStorage":
         return cls("memory", None, None, frozenset())

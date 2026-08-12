@@ -80,7 +80,7 @@ async def test_task_cancel_claim_replay_and_caller_cancellation() -> None:
         with pytest.raises(asyncio.CancelledError):
             await cancellation
 
-        operation = await runtime.persistence.operation_ledger.get(idempotency_key_hash("cancel-key"), tenant_id="tenant")
+        operation = await runtime.persistence.task.operations.get(idempotency_key_hash("cancel-key"), tenant_id="tenant")
         assert operation is not None and operation.status.value == "SUCCEEDED"
         view = await service.cancel_graph("graph", cancel_request)
         assert view.status is TaskStatus.CANCELLED
@@ -211,19 +211,19 @@ async def test_sql_task_lease_mutations_share_database_time_contract(
         capture_database_now,
     )
     async with open_sql_resources(storage, namespace="review-fix-sql") as resources:
-        await resources.domain.task.create_plan(TaskGraph("graph", (TaskNode("task"),)), tenant_id="tenant")
-        plan = await resources.domain.task.reconcile_plan("graph", tenant_id="tenant")
+        await resources.domain.task.tasks.create_plan(TaskGraph("graph", (TaskNode("task"),)), tenant_id="tenant")
+        plan = await resources.domain.task.tasks.reconcile_plan("graph", tenant_id="tenant")
         assert plan.status is TaskStatus.READY
-        lease = await resources.domain.task.claim("graph", "task", tenant_id="tenant", owner="owner", lease_seconds=1)
+        lease = await resources.domain.task.tasks.claim("graph", "task", tenant_id="tenant", owner="owner", lease_seconds=1)
         assert len(captured) == 2
         assert lease.lease_expires_at - captured[1] == timedelta(seconds=1)
         assert captured[1].microsecond >= 1_000
-        renewed = await resources.domain.task.renew(lease, tenant_id="tenant", lease_seconds=2)
+        renewed = await resources.domain.task.tasks.renew(lease, tenant_id="tenant", lease_seconds=2)
         assert renewed.lease_expires_at > lease.lease_expires_at
-        terminal = await resources.domain.task.complete(renewed, tenant_id="tenant", execution_id=None, result_digest="a" * 64)
+        terminal = await resources.domain.task.tasks.complete(renewed, tenant_id="tenant", execution_id=None, result_digest="a" * 64)
         assert terminal.status is TaskStatus.SUCCEEDED
         with pytest.raises(AIError) as error:
-            await resources.domain.task.renew(renewed, tenant_id="tenant", lease_seconds=1)
+            await resources.domain.task.tasks.renew(renewed, tenant_id="tenant", lease_seconds=1)
         assert error.value.code is ErrorCode.TASK_FENCE_STALE
 
 
@@ -254,8 +254,14 @@ class _ResultRepository:
 
 class _ExecutionPersistence:
     def __init__(self, execution: ExecutionRecord, result: ResultRecord) -> None:
-        self.execution = _ExecutionRepository(execution)
-        self.execution_result = _ResultRepository(result)
+        execution_repository = _ExecutionRepository(execution)
+        result_repository = _ResultRepository(result)
+        self.execution = SimpleNamespace(
+            executions=execution_repository,
+            results=result_repository,
+            idempotency=None,
+            blobs=None,
+        )
 
 
 class _History:
@@ -303,8 +309,8 @@ async def test_failed_execution_result_requires_empty_payload_identity() -> None
     response = await service.result("execution", principal=principal)
     assert response.status is ExecutionStatus.FAILED
 
-    persistence.execution.record = replace(execution, result_ref="ref", result_digest="a" * 64)
-    persistence.execution_result.record = replace(result, payload_ref="ref", payload_digest="a" * 64)
+    persistence.execution.executions.record = replace(execution, result_ref="ref", result_digest="a" * 64)
+    persistence.execution.results.record = replace(result, payload_ref="ref", payload_digest="a" * 64)
     with pytest.raises(AIError) as error:
         await service.result("execution", principal=principal)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

@@ -35,7 +35,7 @@ from ..core import (
 )
 from ..errors import AIError
 from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
-from ..storage import StorageDomain
+from ..storage import StorageDomain, StorageMetrics
 from ._tool import ToolStateStore
 
 
@@ -443,62 +443,124 @@ class DomainBlobStore(RuntimeRepository, Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationStore:
+    sessions: SessionRepository
+    operations: OperationLedgerRepository
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.sessions, self.operations, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionStore:
+    executions: ExecutionRepository
+    results: ResultRepository
+    idempotency: IdempotencyRepository
+    events: EventRepository
+    operations: OperationLedgerRepository
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.executions, self.results, self.idempotency, self.events, self.operations, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryStore:
+    records: MemoryRepository
+    operations: OperationLedgerRepository
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.records, self.operations, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactStore:
+    records: ArtifactRepository
+    operations: OperationLedgerRepository
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.records, self.operations, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStore:
+    tasks: TaskRepository
+    operations: OperationLedgerRepository
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.tasks, self.operations
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationStore:
+    records: EvaluationRepository
+    idempotency: IdempotencyRepository
+    operations: OperationLedgerRepository
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.records, self.idempotency, self.operations, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryStore:
+    approvals: ApprovalRepository
+    externals: ExternalResultRepository
+    checkpoints: RecoveryCheckpointRepository
+    operations: OperationLedgerRepository
+    tools: ToolStateStore
+    blobs: BlobStore
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return self.approvals, self.externals, self.checkpoints, self.operations, self.tools, self.blobs
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeStores:
     namespace: str
-    conversation: SessionRepository
-    execution: ExecutionRepository
-    execution_result: ResultRepository
-    execution_idempotency: IdempotencyRepository
-    evaluation_idempotency: IdempotencyRepository
-    execution_events: EventRepository
-    task: TaskRepository
-    evaluation: EvaluationRepository
-    memory: MemoryRepository
-    artifact: ArtifactRepository
-    recovery_approval: ApprovalRepository
-    recovery_external: ExternalResultRepository
-    recovery_checkpoint: RecoveryCheckpointRepository
-    operation_ledger: OperationLedgerRepository
-    tools: ToolStateStore
-    blobs: DomainBlobStore
+    conversation: ConversationStore
+    execution: ExecutionStore
+    memory: MemoryStore
+    artifact: ArtifactStore
+    task: TaskStore
+    evaluation: EvaluationStore
+    recovery: RecoveryStore
+    metrics: StorageMetrics = field(default_factory=StorageMetrics, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         try:
             validate_persistence_namespace(self.namespace)
         except AIError as error:
             raise ValueError("runtime persistence namespace is invalid") from error
-        components = (
-            self.conversation, self.execution, self.execution_result, self.execution_idempotency, self.evaluation_idempotency, self.execution_events,
-            self.task, self.evaluation, self.memory, self.artifact,
-            self.recovery_approval, self.recovery_external, self.recovery_checkpoint, self.operation_ledger, self.tools, self.blobs,
-        )
-        if any(component is None for component in components):
+        stores = (self.conversation, self.execution, self.memory, self.artifact, self.task, self.evaluation, self.recovery)
+        if any(store is None for store in stores):
             raise ValueError("runtime persistence requires every repository")
+
+    def components(self) -> tuple[RuntimeRepository, ...]:
+        return tuple(component for store in (self.conversation, self.execution, self.memory, self.artifact, self.task, self.evaluation, self.recovery) for component in store.components())
+
     async def initialize(self) -> None:
         seen: set[int] = set()
-        for component in self._components():
+        for component in self.components():
             if id(component) not in seen:
                 await component.initialize()
                 seen.add(id(component))
 
     async def close(self) -> None:
         seen: set[int] = set()
-        for component in reversed(self._components()):
+        for component in reversed(self.components()):
             if id(component) not in seen:
                 await component.close()
                 seen.add(id(component))
 
-    def _components(self) -> tuple[RuntimeRepository, ...]:
-        return (self.conversation, self.execution, self.execution_result, self.execution_idempotency, self.evaluation_idempotency, self.execution_events, self.task, self.evaluation, self.memory, self.artifact, self.recovery_approval, self.recovery_external, self.recovery_checkpoint, self.operation_ledger, self.tools, self.blobs)
-
-
-
-
 __all__ = [
     "ApprovalRecord", "ApprovalRepository", "ArtifactRecord", "ArtifactRepository", "BlobRef", "BlobStatus", "ConversationCursor",
-    "BlobStore", "DomainBlobStore", "EvaluationRecord", "EvaluationRepository", "ExecutionEventRecord", "ExecutionRecord",
+    "ArtifactStore", "BlobStore", "ConversationStore", "DomainBlobStore", "EvaluationRecord", "EvaluationRepository", "EvaluationStore", "ExecutionEventRecord", "ExecutionRecord", "ExecutionStore",
     "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalResultRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate",
-    "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository", "RecoveryCheckpoint", "RecoveryCheckpointRepository",
+    "ExternalResultRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository", "MemoryStore", "RecoveryCheckpoint", "RecoveryCheckpointRepository", "RecoveryStore",
     "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "ResultRepository", "RuntimeRepository", "RuntimeStores",
     "SessionRecord", "SessionRepository", "StorageDomain",
     "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus",

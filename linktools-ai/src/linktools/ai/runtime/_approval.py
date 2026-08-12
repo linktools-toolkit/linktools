@@ -42,19 +42,19 @@ class DefaultApprovalService:
             AuthorizationAction.APPROVAL_READ,
             ResourceRef(ResourceKind.APPROVAL, execution_id, principal.tenant_id),
         )
-        records = await self._persistence.recovery_approval.list_pending(execution_id, tenant_id=principal.tenant_id)
+        records = await self._persistence.recovery.approvals.list_pending(execution_id, tenant_id=principal.tenant_id)
         return tuple(ApprovalView(record.approval_id, record.status) for record in records)
 
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult:
-        record = await self._persistence.recovery_approval.get(request.approval_id, tenant_id=request.principal.tenant_id)
+        record = await self._persistence.recovery.approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        header = await self._persistence.recovery_approval.get_header(request.approval_id, tenant_id=request.principal.tenant_id)
+        header = await self._persistence.recovery.approvals.get_header(request.approval_id, tenant_id=request.principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.APPROVAL_DECIDE, header)
         decision_digest = _decision_digest(request)
-        updated = await self._persistence.recovery_approval.decide(
+        updated = await self._persistence.recovery.approvals.decide(
             request.approval_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ApprovalStatus.PENDING,

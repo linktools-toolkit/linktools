@@ -216,7 +216,7 @@ def build_workspace_asset_repository(
 
 
 async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], stores: RuntimeStores) -> None:
-    checkpoints = await stores.recovery_checkpoint.list(tenant_id=stores.namespace)
+    checkpoints = await stores.recovery.checkpoints.list(tenant_id=stores.namespace)
     for checkpoint in checkpoints:
         if checkpoint.phase in {"completed", "failed", "cancelled"}:
             continue
@@ -306,6 +306,7 @@ async def open_workspace_runtime(
                 tenant_id=workspace.workspace_id,
                 execution_root=workspace.root,
                 memory_store_factory=lambda tenant_id, namespace: RuntimeMemoryStore(resources.domain, tenant_id=tenant_id, namespace=namespace),
+                recovery_enabled=StorageDomain.RECOVERY in selected_storage.persist,
             )
             history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", _grant_key(workspace)))
             authorization = TenantAuthorizationPolicy(workspace.workspace_id)
@@ -313,7 +314,7 @@ async def open_workspace_runtime(
             session = DefaultSessionService(resources.domain, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)))
             task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)
             task_launcher = LocalTaskGraphLauncher(
-                resources.domain.task,
+                resources.domain.task.tasks,
                 task_runner,
                 owner=f"workspace:{workspace.workspace_id}",
             )

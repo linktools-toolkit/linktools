@@ -82,7 +82,7 @@ class DefaultEvaluationService:
         key_hash = idempotency_key_hash(request.idempotency_key)
         await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
         request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding_digest, "output_schema_fingerprint": output_schema_fingerprint})
-        existing = await self._persistence.evaluation_idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+        existing = await self._persistence.evaluation.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -94,9 +94,9 @@ class DefaultEvaluationService:
             now = existing.created_at
         else:
             now = datetime.now(timezone.utc)
-            await self._persistence.evaluation_idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
+            await self._persistence.evaluation.idempotency.reserve(IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.RESERVED, None, None, now, now))
         try:
-            record = await self._persistence.evaluation.get(evaluation_id, tenant_id=request.principal.tenant_id)
+            record = await self._persistence.evaluation.records.get(evaluation_id, tenant_id=request.principal.tenant_id)
             if record is None:
                 execution = await self._execution.run(
                     binding_digest,
@@ -108,18 +108,18 @@ class DefaultEvaluationService:
                     ),
                 )
                 record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
-                await self._persistence.evaluation.create(record)
+                await self._persistence.evaluation.records.create(record)
         except asyncio.CancelledError:
             raise
         except Exception:
             _logger.warning("evaluation reservation remains recoverable: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id, exc_info=environ.debug)
             raise
         try:
-            await self._persistence.evaluation_idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.COMPLETED, None, None, now, datetime.now(timezone.utc)))
+            await self._persistence.evaluation.idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(request.principal.tenant_id, "evaluation.run", key_hash, request_digest, evaluation_id, IdempotencyStatus.COMPLETED, None, None, now, datetime.now(timezone.utc)))
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.evaluation_idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+            current = await self._persistence.evaluation.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
             if current is None or current.status is not IdempotencyStatus.COMPLETED:
                 raise
         _logger.info("evaluation submitted: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id)
@@ -173,11 +173,11 @@ class DefaultEvaluationService:
         return record
 
     async def _authorized(self, evaluation_id: str, principal: Principal, action: AuthorizationAction) -> EvaluationRecord:
-        header = await self._persistence.evaluation.get_header(evaluation_id, tenant_id=principal.tenant_id)
+        header = await self._persistence.evaluation.records.get_header(evaluation_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._persistence.evaluation.get(evaluation_id, tenant_id=principal.tenant_id)
+        record = await self._persistence.evaluation.records.get(evaluation_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
