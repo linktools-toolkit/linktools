@@ -4,7 +4,6 @@
 
 from ._history import StepExecutionHistoryReader
 from ._identity import StaticPrincipalProvider
-from ._logfire import LogfireSink
 from ._memory import RuntimeMemoryStore
 from ._nats import NatsPublisher
 from ._persistence import (
@@ -26,7 +25,7 @@ from ._step import (
 )
 
 __all__ = [
-    "DurableFilesystemStepStore", "FilesystemBlobStore", "FilesystemRuntime", "LogfireSink", "InMemoryBlobStore", "InMemoryRuntime",
+    "DurableFilesystemStepStore", "FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime",
     "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlMediaStore", "SqlRuntimeSchema", "SqlRuntimeTables", "SqlStepStore",
     "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "open_sql_runtime",
 ]

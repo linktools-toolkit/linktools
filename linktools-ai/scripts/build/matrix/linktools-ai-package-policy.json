@@ -19,7 +19,6 @@
   "module_dependencies": {
     "adapter._sql": ["core", "storage", "runtime", "capability", "task"],
     "adapter._nats": ["core", "observe"],
-    "adapter._logfire": ["core", "observe"],
     "adapter._provider": ["core", "model"],
     "adapter._identity": ["core"],
     "adapter._schema": ["core", "storage"],
