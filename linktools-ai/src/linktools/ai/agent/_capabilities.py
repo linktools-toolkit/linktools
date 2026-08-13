@@ -69,7 +69,7 @@ class AgentRunScope:
     conversation_id: "str | None"
     step_run_id: str
     segment_sequence: "int | None"
-    memory_namespace: "str | None"
+    memory_scope: "str | None"
     step_store: StepStore
     memory_store: "SearchableMemoryStore | None"
     platform_tool_names: "tuple[str, ...]" = ()
@@ -101,12 +101,12 @@ async def compose_platform_capabilities(
     selected = frozenset(scope.platform_tool_names)
     selected_memory = tuple(name for name in MEMORY_TOOL_NAMES if name in selected)
     if selected_memory:
-        if scope.memory_store is None or scope.memory_namespace is None:
+        if scope.memory_store is None or scope.memory_scope is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         capabilities.append(
             _SelectedMemory(
                 store=scope.memory_store,
-                namespace=scope.memory_namespace,
+                namespace=scope.memory_scope,
                 agent_name="memory",
                 inject_memory=False,
                 guidance=_memory_guidance(selected_memory),
@@ -117,12 +117,12 @@ async def compose_platform_capabilities(
         capabilities.append(Planning())
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.debug(
-        "platform capabilities composed: agent=%s step=%s tools=%s count=%s memory_namespace_digest=%s",
+        "platform capabilities composed: agent=%s step=%s tools=%s count=%s memory_scope_digest=%s",
         scope.agent_name,
         scope.step_run_id,
         scope.platform_tool_names,
         len(capabilities),
-        None if scope.memory_namespace is None else canonical_sha256(scope.memory_namespace),
+        None if scope.memory_scope is None else canonical_sha256(scope.memory_scope),
     )
     return tuple(capabilities)
 
@@ -140,9 +140,9 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return "*" in allow_tools or name in allow_tools
 
 
-def select_platform_tool_names(*, allow_tools: "tuple[str, ...]", memory_namespace: "str | None") -> "tuple[str, ...]":
+def select_platform_tool_names(*, allow_tools: "tuple[str, ...]", memory_scope: "str | None") -> "tuple[str, ...]":
     candidates = list(PLANNING_TOOL_NAMES)
-    if memory_namespace is not None:
+    if memory_scope is not None:
         candidates.extend(MEMORY_TOOL_NAMES)
     return tuple(sorted(name for name in candidates if tool_name_allowed(name, allow_tools)))
 

@@ -25,11 +25,20 @@ from ..core import (
     OperationStatus,
     ResourceKind,
     canonical_sha256,
-    validate_memory_namespace,
+    validate_memory_scope,
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..runtime import BlobRef, MemoryRecord, OperationLedgerInput, RuntimeStores
+from ..runtime import (
+    MemoryRecord,
+    OperationLedgerInput,
+    RuntimeDomain,
+    RuntimeObjectKeyFactory,
+    RuntimeStores,
+    put_runtime_object,
+    read_runtime_object,
+)
+
 _logger = environ.get_logger("ai.adapter.memory")
 _MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
@@ -40,7 +49,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
     def __init__(self, persistence: RuntimeStores, *, tenant_id: str, namespace: str) -> None:
         try:
             validate_tenant_id(tenant_id)
-            validate_memory_namespace(namespace)
+            validate_memory_scope(namespace)
         except AIError as error:
             raise ValueError("memory store identity is invalid") from error
         self._persistence = persistence
@@ -85,13 +94,19 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 return replay
             current = await self._record(logical_path)
             _check_version(current, expected_version)
-            blob = await self._persistence.memory.blobs.put_bytes(tenant_id=self._tenant_id, data=content.encode("utf-8"))
+            blob = await put_runtime_object(
+                self._persistence.object_store(RuntimeDomain.MEMORY),
+                RuntimeObjectKeyFactory(self._persistence.namespace),
+                RuntimeDomain.MEMORY,
+                self._tenant_id,
+                content.encode("utf-8"),
+            )
             now = datetime.now(timezone.utc)
             next_record = MemoryRecord(
                 _memory_id(self._namespace_key, logical_path),
                 self._tenant_id,
                 self._namespace_key,
-                blob.digest,
+                blob,
                 hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 {"path": logical_path, **({} if operation is None else {"operation_id": operation.id})},
                 0 if current is None else current.revision + 1,
@@ -232,7 +247,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             page_limit = 200 if limit is None else min(200, limit - len(records))
             page = await self._persistence.memory.records.list(
                 tenant_id=self._tenant_id,
-                memory_namespace_key=self._namespace_key,
+                memory_scope_key=self._namespace_key,
                 cursor=cursor,
                 limit=page_limit,
             )
@@ -246,14 +261,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return await self._persistence.memory.records.get(_memory_id(self._namespace_key, logical_path), tenant_id=self._tenant_id)
 
     async def _content(self, record: MemoryRecord) -> str:
-        blobs = self._persistence.memory.blobs
-        blob = await blobs.stat(BlobRef(self._tenant_id, record.content_ref, 0, ""), tenant_id=self._tenant_id)
-        if blob is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        chunks = bytearray()
-        async for chunk in blobs.open(blob, tenant_id=self._tenant_id):
-            chunks.extend(chunk)
-        content = bytes(chunks).decode("utf-8")
+        content = (await read_runtime_object(self._persistence.object_store(RuntimeDomain.MEMORY), record.content_ref)).decode("utf-8")
         if hashlib.sha256(content.encode("utf-8")).hexdigest() != record.content_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return content

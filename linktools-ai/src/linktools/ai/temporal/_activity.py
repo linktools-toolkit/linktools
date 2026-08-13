@@ -118,7 +118,7 @@ class SessionActivity:
         self._operation = operation
 
     async def run(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-        _logger.debug("executing session activity: session_id=%s mutation_id=%s", request.session_id, request.mutation_id)
+        _logger.debug("executing session activity: session_id=%s idempotency_key=%s", request.session_id, request.idempotency_key)
         return await self._operation.execute(request)
 
 

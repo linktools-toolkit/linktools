@@ -6,7 +6,11 @@ import hashlib
 import uuid
 
 from ._json import JsonValue, canonical_json_bytes
-from ._validation import validate_persistence_namespace, validate_resource_id, validate_tenant_id
+from ._validation import (
+    validate_persistence_namespace,
+    validate_resource_id,
+    validate_tenant_id,
+)
 from ._value import Principal
 
 

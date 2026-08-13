@@ -224,9 +224,13 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         SqlRuntimeSchema,
         SqlStepStore,
         build_in_memory_runtime,
-        open_sql_runtime,
     )
-    from linktools.ai.agent import AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry
+    from linktools.ai.agent import (
+        AgentCompiler,
+        AgentDefinition,
+        AgentExecutor,
+        OutputTypeRegistry,
+    )
     from linktools.ai.asset import (
         AssetCacheAdapter,
         AssetStore,
@@ -256,7 +260,15 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
     )
     assert adapter and asset and capability and storage and temporal and workspace
     assert all(command_modules)
-    assert all((AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, open_sql_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
+    assert all((AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry, DurableFilesystemStepStore, SqlRuntimeSchema, SqlStepStore, build_in_memory_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
+    assert not hasattr(adapter, "open_sql_runtime")
+    assert not hasattr(adapter, "build_sql_step_store")
+    assert not hasattr(adapter, "compose_sql_runtime")
+    assert not hasattr(adapter, "compose_sql_step_store")
+    assert not hasattr(asset, "build_sql_asset_backend")
+    assert not hasattr(asset, "compose_sql_asset_backend")
+    assert not hasattr(storage, "SqlStorageContext")
+    assert not hasattr(storage, "create_sql_storage_context")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").errors)
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]

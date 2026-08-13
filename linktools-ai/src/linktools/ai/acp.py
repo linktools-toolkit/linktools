@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .core import ExecutionEventType, JsonValue, Principal, validate_memory_namespace
+from .core import ExecutionEventType, JsonValue, Principal, validate_memory_scope
 from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
 from .workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
@@ -36,14 +36,14 @@ class ACPTextContent(Protocol):
 class ACPAgent:
     """Translate ACP requests into Runtime calls and durable event reads."""
 
-    def __init__(self, runtime: Runtime, *, principal: Principal, memory_namespace: str) -> None:
+    def __init__(self, runtime: Runtime, *, principal: Principal, memory_scope: str) -> None:
         try:
-            validate_memory_namespace(memory_namespace)
+            validate_memory_scope(memory_scope)
         except AIError as error:
             raise ValueError("memory namespace is invalid") from error
         self._runtime = runtime
         self._principal = principal
-        self._memory_namespace = memory_namespace
+        self._memory_scope = memory_scope
         self._connection: ACPConnection | None = None
         self._initialized = False
 
@@ -108,7 +108,7 @@ class ACPAgent:
         self._require_initialized()
         _, schema = _require_acp()
         text = "".join(item.text for item in prompt)
-        async for event in self._runtime.stream(text, principal=self._principal, session_id=session_id, memory_namespace=self._memory_namespace):
+        async for event in self._runtime.stream(text, principal=self._principal, session_id=session_id, memory_scope=self._memory_scope):
             if self._connection is not None:
                 update = _acp_update(schema, event.event_type, event.payload)
                 if update is not None:
@@ -141,10 +141,10 @@ class ACPApplication:
     def for_workspace(cls, workspace: Workspace) -> "ACPApplication":
         return cls(workspace)
 
-    async def serve(self, *, memory_namespace: str) -> None:
+    async def serve(self, *, memory_scope: str) -> None:
         principal = trusted_workspace_principal(self.workspace.workspace_id)
         async with open_workspace_runtime(self.workspace) as runtime:
-            await serve_stdio(ACPAgent(runtime, principal=principal, memory_namespace=memory_namespace))
+            await serve_stdio(ACPAgent(runtime, principal=principal, memory_scope=memory_scope))
 
 
 async def serve_stdio(agent: ACPAgent) -> None:

@@ -34,7 +34,7 @@ async with open_workspace_runtime(workspace, model="gpt-4o-mini") as runtime:
     result = await runtime.run(
         "review this change",
         principal=principal,
-        memory_namespace=workspace.workspace_id,
+        memory_scope=workspace.workspace_id,
     )
 ```
 
@@ -47,7 +47,7 @@ async with open_workspace_runtime(workspace, model="gpt-4o-mini") as runtime:
         "hello",
         principal=principal,
         session_id=session.session_id,
-        memory_namespace=workspace.workspace_id,
+        memory_scope=workspace.workspace_id,
     ):
         print(event.event_type, event.payload)
 ```
@@ -58,15 +58,14 @@ Compile a named Agent and Prompt with `runtime.compile_agent("coding", prompt_id
 
 ### 2.1 Default workspace loader
 
-`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools/assets`. The asset directory is a read-only `LocalDirectoryAssetBackend`; generated defaults use the selected Asset writer when `StorageDomain.ASSET` is durable, otherwise they live in a writable in-memory layer.
+`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools` through `Workspace.storage_root`. The asset directory is a read-only `LocalDirectoryAssetBackend`; generated defaults use the selected Asset writer when `StorageDomain.ASSET` is durable, otherwise they live in a writable in-memory layer.
 
 ```text
 .linktools/
-├── assets/
-│   ├── agent/<id>
-│   ├── prompt/<id>
-│   ├── mcp/<id>
-│   └── skills/<id>/SKILL.md
+├── agent/<id>
+├── prompt/<id>
+├── mcp/<id>
+└── skills/<id>/SKILL.md
 ```
 
 Agent, Prompt, and MCP declarations use their JSON codecs even though the canonical filenames have no suffix. Skills default to the directory layout shown above and may also use the single-file JSON representation.

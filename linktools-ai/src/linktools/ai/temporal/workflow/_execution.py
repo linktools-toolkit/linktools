@@ -17,7 +17,13 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...core import ApprovalDecision, ExecutionStatus, JsonValue, validate_lease_owner, validate_tenant_id
+from ...core import (
+    ApprovalDecision,
+    ExecutionStatus,
+    JsonValue,
+    validate_lease_owner,
+    validate_tenant_id,
+)
 from ...errors import AIError, ErrorCode
 
 CONTINUE_EVENT_THRESHOLD = 10000
@@ -95,7 +101,7 @@ class ExecutionWorkflowState:
     last_stage: str = ""
     external_result_refs: "tuple[tuple[str, str, str], ...]" = ()
     approval_decisions: "tuple[tuple[str, ApprovalDecision], ...]" = ()
-    approval_decision_ids: "tuple[tuple[str, str], ...]" = ()
+    approval_idempotency_keys: "tuple[tuple[str, str], ...]" = ()
     last_operation_id: str = ""
 
 
@@ -215,12 +221,12 @@ class ExecutionWorkflow:
     def pending_external_calls(self) -> 'tuple[str, ...]':
         return self._require_state().pending_external_ids
 
-    def approve(self, operation_id: str, approval_id: str, decision: ApprovalDecision = ApprovalDecision.APPROVE, decision_id: str = "") -> ExecutionWorkflowState:
+    def approve(self, operation_id: str, approval_id: str, decision: ApprovalDecision = ApprovalDecision.APPROVE, idempotency_key: str = "") -> ExecutionWorkflowState:
         state = self._require_state()
         if state.status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return state
         if approval_id not in state.pending_approval_ids:
-            if any(item[0] == approval_id and (not decision_id or item[1] == decision_id) for item in state.approval_decision_ids):
+            if any(item[0] == approval_id and (not idempotency_key or item[1] == idempotency_key) for item in state.approval_idempotency_keys):
                 return state
             raise ValueError("approval is not pending")
         return self._record_operation(
@@ -228,29 +234,29 @@ class ExecutionWorkflow:
             operation_id,
             pending_approval_ids=tuple(item for item in state.pending_approval_ids if item != approval_id),
             approval_decisions=(*state.approval_decisions, (approval_id, decision)),
-            approval_decision_ids=(*state.approval_decision_ids, (approval_id, decision_id or operation_id)),
+            approval_idempotency_keys=(*state.approval_idempotency_keys, (approval_id, idempotency_key or operation_id)),
         )
 
     def supply_external_result(
         self,
         operation_id: str,
         external_id: str,
-        payload_ref: str,
+        object_ref: str,
         payload_digest: str,
     ) -> ExecutionWorkflowState:
         state = self._require_state()
         if state.status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             return state
         if external_id not in state.pending_external_ids:
-            if any(item[0] == external_id and item[1] == payload_ref and item[2] == payload_digest for item in state.external_result_refs):
+            if any(item[0] == external_id and item[1] == object_ref and item[2] == payload_digest for item in state.external_result_refs):
                 return state
             raise ValueError("external call is not pending")
-        if not payload_ref.strip() or not payload_digest.strip():
+        if not object_ref.strip() or not payload_digest.strip():
             raise ValueError("external result reference and digest are required")
         return self._record_operation(
             state,
             operation_id,
-            external_result_refs=(*state.external_result_refs, (external_id, payload_ref, payload_digest)),
+            external_result_refs=(*state.external_result_refs, (external_id, object_ref, payload_digest)),
             pending_external_ids=tuple(item for item in state.pending_external_ids if item != external_id),
         )
 
@@ -287,7 +293,7 @@ class ExecutionWorkflow:
         pending_external_ids: 'tuple[str, ...] | None' = None,
         external_result_refs: 'tuple[tuple[str, str, str], ...] | None' = None,
         approval_decisions: 'tuple[tuple[str, ApprovalDecision], ...] | None' = None,
-        approval_decision_ids: 'tuple[tuple[str, str], ...] | None' = None,
+        approval_idempotency_keys: 'tuple[tuple[str, str], ...] | None' = None,
     ) -> ExecutionWorkflowState:
         if not operation_id.strip():
             raise ValueError("operation id is required")
@@ -301,7 +307,7 @@ class ExecutionWorkflow:
             operation_ledger_ref=state.operation_ledger_ref or operation_id,
             external_result_refs=state.external_result_refs if external_result_refs is None else external_result_refs,
             approval_decisions=state.approval_decisions if approval_decisions is None else approval_decisions,
-            approval_decision_ids=state.approval_decision_ids if approval_decision_ids is None else approval_decision_ids,
+            approval_idempotency_keys=state.approval_idempotency_keys if approval_idempotency_keys is None else approval_idempotency_keys,
             last_operation_id=operation_id,
         )
         self._state = updated

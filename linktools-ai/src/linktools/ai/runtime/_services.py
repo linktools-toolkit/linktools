@@ -17,13 +17,13 @@ from ..core import (
     Principal,
     SessionStatus,
     validate_idempotency_key,
-    validate_memory_namespace,
+    validate_memory_scope,
     validate_prompt,
     validate_resource_id,
-    validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
+from ..storage import ObjectRef
 from ..task import (
     CancelGraphRequest,
     TaskGraphHandle,
@@ -31,7 +31,6 @@ from ..task import (
     TaskGraphResult,
     TaskGraphView,
 )
-from ._persistence import BlobRef, BlobStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,15 +38,15 @@ class ExecutionRequest:
     prompt: str
     principal: Principal
     idempotency_key: "str | None" = None
-    memory_namespace: "str | None" = None
+    memory_scope: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
         if self.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         validate_idempotency_key(self.idempotency_key)
-        if self.memory_namespace is not None:
-            validate_memory_namespace(self.memory_namespace)
+        if self.memory_scope is not None:
+            validate_memory_scope(self.memory_scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +74,11 @@ class ForkExecutionRequest:
 @dataclass(frozen=True, slots=True)
 class CancelExecutionRequest:
     principal: Principal
-    cancel_request_id: str
+    idempotency_key: str
     force: bool = False
 
     def __post_init__(self) -> None:
-        validate_idempotency_key(self.cancel_request_id)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,12 +169,12 @@ class ExecutionHistoryReader(Protocol):
 class CreateSessionRequest:
     principal: Principal
     session_id: str
-    create_request_id: str
+    idempotency_key: str
     cwd: "str | None" = None
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        validate_idempotency_key(self.create_request_id)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,13 +189,13 @@ class ResumeSessionRequest:
     principal: Principal
     prompt: str
     idempotency_key: str = ""
-    memory_namespace: "str | None" = None
+    memory_scope: "str | None" = None
 
     def __post_init__(self) -> None:
         validate_prompt(self.prompt)
         validate_idempotency_key(self.idempotency_key)
-        if self.memory_namespace is not None:
-            validate_memory_namespace(self.memory_namespace)
+        if self.memory_scope is not None:
+            validate_memory_scope(self.memory_scope)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,23 +213,23 @@ class ForkSessionRequest:
 class UpdateSessionRequest:
     principal: Principal
     expected_revision: int
-    mutation_id: str
+    idempotency_key: str
     metadata: "Mapping[str, JsonValue]"
     cwd: "str | None" = None
 
     def __post_init__(self) -> None:
-        validate_idempotency_key(self.mutation_id)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class CloseSessionRequest:
     principal: Principal
-    close_request_id: str
+    idempotency_key: str
     force: bool = False
     wait_timeout_seconds: int = 30
 
     def __post_init__(self) -> None:
-        validate_idempotency_key(self.close_request_id)
+        validate_idempotency_key(self.idempotency_key)
         if not 1 <= self.wait_timeout_seconds <= 300:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -257,11 +256,11 @@ class LoadedSession:
 class RunEvaluationRequest:
     principal: Principal
     dataset_digest: str
-    memory_namespace: str
+    memory_scope: str
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
-        validate_memory_namespace(self.memory_namespace)
+        validate_memory_scope(self.memory_scope)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -284,11 +283,11 @@ class CompareEvaluationRequest:
 @dataclass(frozen=True, slots=True)
 class ReplayEvaluationRequest:
     principal: Principal
-    memory_namespace: str
+    memory_scope: str
     idempotency_key: str = ""
 
     def __post_init__(self) -> None:
-        validate_memory_namespace(self.memory_namespace)
+        validate_memory_scope(self.memory_scope)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -345,41 +344,41 @@ class ApprovalView:
 class ApprovalDecisionRequest:
     principal: Principal
     approval_id: str
-    decision_id: str
+    idempotency_key: str
     decision: ApprovalDecision
 
     def __post_init__(self) -> None:
         validate_resource_id(self.approval_id)
-        validate_idempotency_key(self.decision_id)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ApprovalDecisionResult:
     approval_id: str
-    decision_id: str
+    idempotency_key: str
     decision: ApprovalDecision
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalResultRequest:
+class ExternalSupplyRequest:
     principal: Principal
     call_id: str
-    result_id: str
-    payload_ref: str
+    idempotency_key: str
+    object_ref: "ObjectRef"
     payload_digest: str
 
     def __post_init__(self) -> None:
         validate_resource_id(self.call_id)
-        validate_idempotency_key(self.result_id)
-        if not self.payload_ref.strip() or len(self.payload_digest) != 64:
+        validate_idempotency_key(self.idempotency_key)
+        if len(self.payload_digest) != 64:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 @dataclass(frozen=True, slots=True)
-class ExternalResultResult:
+class ExternalSupplyResult:
     call_id: str
-    result_id: str
-    payload_ref: str
+    idempotency_key: str
+    object_ref: "ObjectRef"
     payload_digest: str
 
 
@@ -416,15 +415,6 @@ class WorkflowQueryResult:
     workflow_id: str
     status: str
     payload: "Mapping[str, JsonValue]"
-
-
-@dataclass(frozen=True, slots=True)
-class PayloadRef:
-    value: str
-
-    def __post_init__(self) -> None:
-        if not self.value.strip():
-            raise ValueError("payload reference must not be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +456,7 @@ class WorkflowGateway(Protocol):
     async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
     async def cancel_execution(self, workflow_id: str) -> CancelExecutionResult: ...
     async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle: ...
-    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView: ...
+    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView: ...
 
 
 class ExecutionService(Protocol):
@@ -516,7 +506,7 @@ class ApprovalService(Protocol):
 
 
 class ExternalService(Protocol):
-    async def supply(self, execution_id: str, request: ExternalResultRequest) -> ExternalResultResult: ...
+    async def supply(self, execution_id: str, request: ExternalSupplyRequest) -> ExternalSupplyResult: ...
 
 
 class EventService(Protocol):
@@ -529,36 +519,6 @@ class ArtifactService(Protocol):
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload: ...
 
 
-class PayloadService(Protocol):
-    async def load(self, ref: PayloadRef) -> bytes: ...
-    async def store(self, data: bytes) -> PayloadRef: ...
-
-
-class BlobPayloadService:
-    """Payload facade backed by the runtime blob store."""
-
-    def __init__(self, blobs: BlobStore, *, tenant_id: str) -> None:
-        try:
-            validate_tenant_id(tenant_id)
-        except AIError as error:
-            raise ValueError("payload tenant is invalid") from error
-        self._blobs = blobs
-        self._tenant_id = tenant_id
-
-    async def load(self, ref: PayloadRef) -> bytes:
-        blob = await self._blobs.stat(BlobRef(self._tenant_id, ref.value, 0, ""), tenant_id=self._tenant_id)
-        if blob is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        chunks = bytearray()
-        async for chunk in self._blobs.open(blob, tenant_id=self._tenant_id):
-            chunks.extend(chunk)
-        return bytes(chunks)
-
-    async def store(self, data: bytes) -> PayloadRef:
-        ref = await self._blobs.put_bytes(tenant_id=self._tenant_id, data=data)
-        return PayloadRef(ref.digest)
-
-
 class BudgetService(Protocol):
     async def reserve(self, request: BudgetReservationRequest) -> BudgetReservation: ...
     async def settle(self, request: BudgetSettlementRequest) -> BudgetSettlement: ...
@@ -566,7 +526,7 @@ class BudgetService(Protocol):
 
 __all__ = [
     "ApprovalDecisionRequest", "ApprovalDecisionResult", "ApprovalService", "ApprovalView",
-    "ExternalResultRequest", "ExternalResultResult", "ExternalService",
+    "ExternalSupplyRequest", "ExternalSupplyResult", "ExternalService",
     "ArtifactDownload", "ArtifactService", "ArtifactView", "BudgetService", "CancelExecutionRequest",
     "BudgetReservation", "BudgetReservationRequest", "BudgetSettlement", "BudgetSettlementRequest",
     "CancelExecutionResult",
@@ -576,7 +536,7 @@ __all__ = [
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
     "ExecutionHistoryItem", "ExecutionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
-    "BlobPayloadService", "PayloadRef", "PayloadService", "ReplayEvaluationRequest", "ResumeSessionRequest",
+    "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "SessionService", "SessionView",
     "TaskService", "ExecutionTraceItem", "TranscriptItem", "UpdateSessionRequest",
     "WorkflowGateway", "WorkflowQueryResult", "WorkflowUpdateResult",

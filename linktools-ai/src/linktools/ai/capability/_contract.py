@@ -8,7 +8,13 @@ from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
+from ..core import (
+    Principal,
+    ResourceRef,
+    canonical_sha256,
+    canonical_string_tuple,
+    validate_capability_provider,
+)
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
 

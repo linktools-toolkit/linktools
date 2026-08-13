@@ -9,12 +9,13 @@ from typing import Any
 from linktools.core import environ
 
 from ..agent import AgentCompiler, AgentDefinition
-from ..core import JsonValue, Principal, SessionStatus, validate_memory_namespace
+from ..core import JsonValue, Principal, SessionStatus, validate_memory_scope
 from ..errors import AIError, ErrorCode
 from ._services import (
-    ArtifactService,
     ApprovalService,
+    ArtifactService,
     CreateSessionRequest,
+    EvaluationHandle,
     EvaluationService,
     EventService,
     ExecutionEvent,
@@ -22,7 +23,6 @@ from ._services import (
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
-    EvaluationHandle,
     ReplayEvaluationRequest,
     RunEvaluationRequest,
     SessionService,
@@ -87,13 +87,13 @@ class Runtime:
         prompt_id: "str | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_namespace: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> ExecutionHandle:
         request = ExecutionRequest(
             prompt,
             principal,
             idempotency_key or secrets.token_urlsafe(32),
-            _validate_memory_namespace(memory_namespace),
+            _validate_memory_scope(memory_scope),
         )
         if session_id is None:
             definition = await self.compile_agent(agent_id, prompt_id=prompt_id)
@@ -110,7 +110,7 @@ class Runtime:
             handle = await self.session.resume(
                 definition.digest,
                 session_id,
-                ResumeSessionRequest(principal, prompt, request.idempotency_key or "", request.memory_namespace),
+                ResumeSessionRequest(principal, prompt, request.idempotency_key or "", request.memory_scope),
             )
         _logger.debug("runtime execution admitted: execution=%s definition=%s session=%s", handle.execution_id, definition.digest, session_id)
         return handle
@@ -145,7 +145,7 @@ class Runtime:
         prompt_id: "str | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_namespace: "str | None" = None,
+        memory_scope: "str | None" = None,
         timeout_seconds: "float | None" = None,
     ) -> ExecutionResult:
         handle = await self.start(
@@ -155,7 +155,7 @@ class Runtime:
             prompt_id=prompt_id,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_namespace=memory_namespace,
+            memory_scope=memory_scope,
         )
         return await self.execution.wait(handle.execution_id, principal=principal, timeout_seconds=timeout_seconds)
 
@@ -168,7 +168,7 @@ class Runtime:
         prompt_id: "str | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
-        memory_namespace: "str | None" = None,
+        memory_scope: "str | None" = None,
     ) -> AsyncIterator[ExecutionEvent]:
         return self._stream(
             prompt,
@@ -177,7 +177,7 @@ class Runtime:
             prompt_id=prompt_id,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_namespace=memory_namespace,
+            memory_scope=memory_scope,
         )
 
     async def create_session(
@@ -217,7 +217,7 @@ class Runtime:
         prompt_id: "str | None",
         session_id: "str | None",
         idempotency_key: "str | None",
-        memory_namespace: "str | None",
+        memory_scope: "str | None",
     ) -> AsyncIterator[ExecutionEvent]:
         handle = await self.start(
             prompt,
@@ -226,7 +226,7 @@ class Runtime:
             prompt_id=prompt_id,
             session_id=session_id,
             idempotency_key=idempotency_key,
-            memory_namespace=memory_namespace,
+            memory_scope=memory_scope,
         )
         async for event in self.event.stream(handle.execution_id, principal=principal):
             yield event
@@ -274,9 +274,9 @@ class Runtime:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 
 
-def _validate_memory_namespace(value: "str | None") -> "str | None":
+def _validate_memory_scope(value: "str | None") -> "str | None":
     if value is not None:
-        validate_memory_namespace(value)
+        validate_memory_scope(value)
     return value
 
 

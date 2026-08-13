@@ -50,7 +50,7 @@ class TemporalClient(Protocol):
 
     async def cancel_workflow(self, workflow_id: str) -> CancelExecutionResult: ...
 
-    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView: ...
+    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView: ...
 
 
 class WorkflowGateway:
@@ -72,11 +72,11 @@ class WorkflowGateway:
         if not workflow_id.strip() or operation not in UPDATE_NAMES:
             raise ValueError("unsupported execution update")
         if operation == "supply_external_result":
-            required = {"call_id", "result_id", "payload_ref", "payload_digest", "principal_id"}
+            required = {"call_id", "idempotency_key", "object_ref", "payload_digest", "principal_id"}
             if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if operation == "approve":
-            required = {"approval_id", "decision_id", "decision", "principal_id", "decision_digest"}
+            required = {"approval_id", "idempotency_key", "decision", "principal_id", "decision_digest"}
             if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
@@ -97,10 +97,10 @@ class WorkflowGateway:
         _logger.debug("starting durable task workflow: workflow_id=%s", workflow_id)
         return await self._client.start_task_graph(request, workflow_id=workflow_id)
 
-    async def cancel_task_graph(self, workflow_id: str, cancel_request_id: str) -> TaskGraphView:
-        if not workflow_id.strip() or not cancel_request_id.strip():
-            raise ValueError("workflow and cancel request ids are required")
-        return await self._client.cancel_task_graph(workflow_id, cancel_request_id)
+    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView:
+        if not workflow_id.strip() or not idempotency_key.strip():
+            raise ValueError("workflow and idempotency keys are required")
+        return await self._client.cancel_task_graph(workflow_id, idempotency_key)
 
 
 __all__ = ["QUERY_NAMES", "TemporalClient", "UPDATE_NAMES", "WorkflowGateway"]

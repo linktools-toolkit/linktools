@@ -5,11 +5,12 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+
 from linktools.ai import RuntimeStorage
-from linktools.ai.adapter import SqlStepStore, open_sql_runtime
+from linktools.ai.adapter import SqlRuntimeSchema, SqlStepStore
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStores
-from linktools.ai.storage import build_sql_schema_metadata, create_sql_storage_context
+from linktools.ai.storage import build_sql_schema_metadata, create_sql_context
 from linktools.ai.workspace import Workspace, open_workspace_runtime
 from pydantic_ai_harness.step_persistence import StepStore
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -32,12 +33,12 @@ async def open_sql_resources(storage: RuntimeStorage, *, connection_url: str | N
     engine: AsyncEngine = create_async_engine(url)
     try:
         await provision_database(engine)
-        context = create_sql_storage_context(engine, namespace)
+        context = create_sql_context(engine, namespace)
         metadata, digest = build_sql_schema_metadata()
         await context.initialize(metadata=metadata, schema_manifest_digest=digest)
-        domain = await open_sql_runtime(context, persist=storage.persist)
+        domain = await SqlRuntimeSchema._open_sql_runtime(context, persist=storage.persist)
         await domain.initialize()
-        step_store = SqlStepStore(engine, namespace=namespace, context=context)
+        step_store = SqlStepStore._from_context(context)
         await step_store.initialize()
         try:
             yield RuntimeResources(storage.target_kind, namespace, domain, step_store)

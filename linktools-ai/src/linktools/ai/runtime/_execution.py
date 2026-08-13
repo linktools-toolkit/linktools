@@ -2,7 +2,6 @@
 """Execution query API and the persistence-backed default service."""
 
 import asyncio
-import hashlib
 import json
 import re
 import uuid
@@ -33,6 +32,7 @@ from ..core import (
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
+from ..storage import read_object
 from ._persistence import (
     ExecutionCancelRequestCommit,
     ExecutionRecord,
@@ -48,8 +48,8 @@ from ._persistence import (
     ResultRecord,
     RuntimeStores,
 )
+from ._plan import RuntimeDomain
 from ._services import (
-    BlobPayloadService,
     CancelExecutionRequest,
     CancelExecutionResult,
     ExecutionHandle,
@@ -57,11 +57,10 @@ from ._services import (
     ExecutionHistoryReader,
     ExecutionRequest,
     ExecutionResult,
+    ExecutionTraceItem,
     ExecutionView,
     ForkExecutionRequest,
-    PayloadRef,
     RetryExecutionRequest,
-    ExecutionTraceItem,
     TranscriptItem,
 )
 
@@ -142,7 +141,7 @@ class DefaultExecutionService:
             session = await self._persistence.conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
                 raise AIError(ErrorCode.SESSION_NOT_FOUND)
-            conversation_run_id = None if session.continuation is None else session.continuation.run_id
+            conversation_run_id = None if session.continuation is None else session.continuation.step_run_id
             base_execution_id = None
             lineage_kind = ExecutionLineageKind.SESSION_RESUME
         execution_id = self._operation_ids()
@@ -191,8 +190,6 @@ class DefaultExecutionService:
             status=ExecutionStatus.PENDING_START,
             revision=0,
             event_sequence=0,
-            result_ref=None,
-            result_digest=None,
             error_code=None,
             safe_error_details={},
             created_at=now,
@@ -201,8 +198,8 @@ class DefaultExecutionService:
             base_execution_id=base_execution_id,
             lineage_kind=lineage_kind,
             agent_run_sequence=0,
-            memory_namespace=request.memory_namespace,
-            conversation_run_id=conversation_run_id,
+            memory_scope=request.memory_scope,
+            conversation_step_run_id=conversation_run_id,
         )
         reservation = await self._persistence.execution.executions.reserve_start(
             ExecutionStartReservation(
@@ -279,35 +276,28 @@ class DefaultExecutionService:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         if execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        result = await self._persistence.execution.results.get(execution_id, tenant_id=principal.tenant_id)
+        result = await self._persistence.execution.get_result(execution_id, tenant_id=principal.tenant_id)
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if result.status is not execution.status or execution.result_ref != result.payload_ref or execution.result_digest != result.payload_digest:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if result.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            if any(
-                value is not None
-                for value in (
-                    execution.result_ref,
-                    execution.result_digest,
-                    result.payload_ref,
-                    result.payload_digest,
-                )
-            ):
+        if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            if result.object_ref is not None or any(value is not None for value in (result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return ExecutionResult(execution.execution_id, result.status, None, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
-        if not result.payload_ref or not result.payload_digest:
+            return ExecutionResult(execution.execution_id, execution.status, None, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
+        if result.object_ref is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            payload = await BlobPayloadService(self._persistence.execution.blobs, tenant_id=principal.tenant_id).load(PayloadRef(result.payload_ref))
-            if hashlib.sha256(payload).hexdigest() != result.payload_digest or canonical_sha256(json.loads(payload.decode("utf-8"))) != result.payload_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            payload = await read_object(
+                self._persistence.object_store(RuntimeDomain.EXECUTION),
+                result.object_ref.key,
+                expected_digest=result.object_ref.digest,
+                expected_size=result.object_ref.size,
+            )
             if result.output_schema_id == "text":
                 output: JsonValue = payload.decode("utf-8")
             else:
                 decoded = json.loads(payload.decode("utf-8"))
                 output = decoded
-            return ExecutionResult(execution.execution_id, result.status, output, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
+            return ExecutionResult(execution.execution_id, execution.status, output, result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)
         except AIError:
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
@@ -341,7 +331,7 @@ class DefaultExecutionService:
             prompt=request.prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
-            memory_namespace=previous.memory_namespace,
+            memory_scope=previous.memory_scope,
         )
         return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
 
@@ -353,7 +343,7 @@ class DefaultExecutionService:
             prompt=request.prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
-            memory_namespace=previous.memory_namespace,
+            memory_scope=previous.memory_scope,
         )
         return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
@@ -367,7 +357,7 @@ class DefaultExecutionService:
                 "force": request.force,
             }
         )
-        operation_id = idempotency_key_hash(request.cancel_request_id)
+        operation_id = idempotency_key_hash(request.idempotency_key)
         operation = await self._persistence.execution.operations.get(
             operation_id,
             tenant_id=request.principal.tenant_id,
@@ -474,7 +464,7 @@ class DefaultExecutionService:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             now = datetime.now(timezone.utc)
             terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
-            result = ResultRecord(execution_id, request.principal.tenant_id, ExecutionStatus.CANCELLED, "none", 1, "none", None, None, StopReason.CANCELLED, 0, 0, 0, now)
+            result = ResultRecord(execution_id, request.principal.tenant_id, None, None, None, None, StopReason.CANCELLED, 0, 0, 0, now)
             idempotency_records = await self._persistence.execution.idempotency.list_by_execution(execution_id, tenant_id=request.principal.tenant_id)
             if len(idempotency_records) > 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -492,9 +482,9 @@ class DefaultExecutionService:
                 raise _stable_operation_error(current_operation.error_code)
             if current_operation.status not in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            operation_update = OperationTerminalUpdate(operation.operation_id, current_operation.status, OperationStatus.SUCCEEDED, execution_id, cancelling_current.result_digest, None)
+            operation_update = OperationTerminalUpdate(operation.operation_id, current_operation.status, OperationStatus.SUCCEEDED, execution_id, None, None)
             try:
-                await self._persistence.execution.results.commit_terminal(
+                await self._persistence.execution.commit_terminal(
                     ExecutionTerminalCommit(
                         expected_revision=cancelling_current.revision,
                         expected_event_sequence=cancelling_current.event_sequence,
@@ -561,12 +551,14 @@ class DefaultExecutionService:
                 raise _stable_operation_error(current_operation.error_code)
             if current_operation.status not in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            result = await self._persistence.execution.get_result(execution_id, tenant_id=tenant_id)
+            result_digest = None if result is None or result.object_ref is None else result.object_ref.digest
             try:
                 current_operation = await self._persistence.execution.operations.compare_and_swap(
                     operation.operation_id,
                     tenant_id=tenant_id,
                     expected_status=current_operation.status,
-                    next_record=_operation_result(current_operation, current.execution_id, current.result_digest),
+                    next_record=_operation_result(current_operation, current.execution_id, result_digest),
                 )
                 break
             except AIError as error:
@@ -633,7 +625,7 @@ def _request_digest(
             "parent_execution_id": parent_execution_id,
             "root_identity": root_execution_id or "$self",
             "lineage_kind": lineage_kind.value,
-            "memory_namespace_digest": None if request.memory_namespace is None else canonical_sha256(request.memory_namespace),
+            "memory_scope_digest": None if request.memory_scope is None else canonical_sha256(request.memory_scope),
         }
     )
 
@@ -717,13 +709,12 @@ def _next_execution(record: ExecutionRecord, status: ExecutionStatus, now: datet
         revision=record.revision + 1,
         event_sequence=record.event_sequence + (1 if terminal_event else 0),
         agent_run_sequence=record.agent_run_sequence if agent_run_sequence is None else agent_run_sequence,
-        result_ref=record.result_ref,
-        result_digest=record.result_digest,
         error_code=error_code,
         safe_error_details=record.safe_error_details,
         created_at=record.created_at,
         updated_at=now,
-        memory_namespace=record.memory_namespace,
+        memory_scope=record.memory_scope,
+        conversation_step_run_id=record.conversation_step_run_id,
     )
 
 

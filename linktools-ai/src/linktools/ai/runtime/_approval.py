@@ -2,12 +2,20 @@
 # -*- coding: utf-8 -*-
 """Approval decision API and durable default implementation."""
 
+import hashlib
 from datetime import datetime, timezone
 from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import ApprovalStatus, AuthorizationAction, AuthorizationPolicy, Principal, ResourceKind, ResourceRef
+from ..core import (
+    ApprovalStatus,
+    AuthorizationAction,
+    AuthorizationPolicy,
+    Principal,
+    ResourceKind,
+    ResourceRef,
+)
 from ..errors import AIError, ErrorCode
 from ._persistence import RuntimeStores
 from ._services import (
@@ -58,7 +66,7 @@ class DefaultApprovalService:
             request.approval_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ApprovalStatus.PENDING,
-            decision_id=request.decision_id,
+            idempotency_key_hash=hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest(),
             decision=request.decision,
             principal_id=request.principal.principal_id,
             decision_digest=decision_digest,
@@ -68,14 +76,14 @@ class DefaultApprovalService:
             await self._workflow_gateway.update_execution(
                 execution_id,
                 "approve",
-                {"approval_id": updated.approval_id, "decision_id": updated.decision_id or request.decision_id, "decision": (updated.decision or request.decision).value, "principal_id": request.principal.principal_id, "decision_digest": updated.decision_digest or decision_digest},
+                {"approval_id": updated.approval_id, "idempotency_key": request.idempotency_key, "decision": (updated.decision or request.decision).value, "principal_id": request.principal.principal_id, "decision_digest": updated.decision_digest or decision_digest},
             )
         _logger.info("approval decided: execution=%s approval=%s", execution_id, updated.approval_id)
-        return ApprovalDecisionResult(updated.approval_id, updated.decision_id or request.decision_id, updated.decision or request.decision)
+        return ApprovalDecisionResult(updated.approval_id, request.idempotency_key, updated.decision or request.decision)
 
 def _decision_digest(request: ApprovalDecisionRequest) -> str:
     from ..core import canonical_sha256
-    return canonical_sha256({"approval_id": request.approval_id, "decision_id": request.decision_id, "decision": request.decision.value, "principal_id": request.principal.principal_id})
+    return canonical_sha256({"approval_id": request.approval_id, "idempotency_key": request.idempotency_key, "decision": request.decision.value, "principal_id": request.principal.principal_id})
 
 
 __all__ = ["ApprovalApi", "ApprovalQueryApi", "DefaultApprovalService"]

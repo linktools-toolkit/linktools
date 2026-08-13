@@ -30,13 +30,13 @@ class SwarmLimits:
 
 @dataclass(frozen=True, slots=True)
 class TaskNode:
-    task_id: str
+    node_id: str
     dependencies: "tuple[str, ...]" = ()
     binding_digest: "str | None" = None
     budget_cost: int = 1
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies) or self.budget_cost < 1:
+        if not self.node_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies) or self.budget_cost < 1:
             raise ValueError("task node identity is invalid")
         if self.binding_digest is not None and re.fullmatch(r"[0-9a-f]{64}", self.binding_digest) is None:
             raise ValueError("task node binding digest is invalid")
@@ -46,7 +46,7 @@ class TaskNode:
 @dataclass(frozen=True, slots=True)
 class TaskLease:
     graph_id: str
-    task_id: str
+    node_id: str
     tenant_id: str
     owner: str
     fence: int
@@ -58,14 +58,14 @@ class TaskLease:
             validate_lease_owner(self.owner)
         except AIError as error:
             raise ValueError("task lease identity is invalid") from error
-        if not self.graph_id.strip() or not self.task_id.strip() or self.fence < 1 or self.lease_expires_at.tzinfo is None:
+        if not self.graph_id.strip() or not self.node_id.strip() or self.fence < 1 or self.lease_expires_at.tzinfo is None:
             raise ValueError("task lease is invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeView:
     graph_id: str
-    task_id: str
+    node_id: str
     dependencies: "tuple[str, ...]"
     status: TaskStatus
     owner: "str | None"
@@ -93,21 +93,21 @@ class TaskGraph:
         if not self.graph_id.strip():
             raise ValueError("task graph id is required")
         object.__setattr__(self, "nodes", tuple(self.nodes))
-        ids = {node.task_id for node in self.nodes}
+        ids = {node.node_id for node in self.nodes}
         if len(ids) != len(self.nodes) or any(dependency not in ids for node in self.nodes for dependency in node.dependencies):
             raise TaskGraphValidationError(ErrorCode.TASK_DEPENDENCY_UNKNOWN, "task graph contains an unknown dependency")
         self._topological_order()
 
     def _topological_order(self) -> 'tuple[str, ...]':
-        remaining = {node.task_id: set(node.dependencies) for node in self.nodes}
+        remaining = {node.node_id: set(node.dependencies) for node in self.nodes}
         order: list[str] = []
         while remaining:
-            ready = tuple(sorted(task_id for task_id, dependencies in remaining.items() if not dependencies))
+            ready = tuple(sorted(node_id for node_id, dependencies in remaining.items() if not dependencies))
             if not ready:
                 raise TaskGraphValidationError(ErrorCode.TASK_GRAPH_CYCLE, "task graph contains a cycle")
             order.extend(ready)
-            for task_id in ready:
-                remaining.pop(task_id)
+            for node_id in ready:
+                remaining.pop(node_id)
             for dependencies in remaining.values():
                 dependencies.difference_update(ready)
         return tuple(order)
@@ -116,9 +116,9 @@ class TaskGraph:
         if len(self.nodes) > limits.max_nodes:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
         depths: dict[str, int] = {}
-        for task_id in self._topological_order():
-            node = next(node for node in self.nodes if node.task_id == task_id)
-            depths[task_id] = 1 + max((depths[item] for item in node.dependencies), default=0)
+        for node_id in self._topological_order():
+            node = next(node for node in self.nodes if node.node_id == node_id)
+            depths[node_id] = 1 + max((depths[item] for item in node.dependencies), default=0)
         if max(depths.values(), default=0) > limits.max_depth:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds depth limit")
         if sum(node.budget_cost for node in self.nodes) > limits.max_budget:
@@ -133,7 +133,7 @@ class TaskGraphValidationError(AIError, ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TaskTerminalRecord:
-    task_id: str
+    node_id: str
     owner: str
     fence: int
     status: TaskStatus
@@ -158,31 +158,31 @@ class TaskCompletionLedger:
     def __init__(self) -> None:
         self._records: dict[str, TaskTerminalRecord] = {}
 
-    def complete(self, task_id: str, owner: str, fence: int, result_digest: str, execution_id: "str | None" = None) -> TaskTerminalRecord:
+    def complete(self, node_id: str, owner: str, fence: int, result_digest: str, execution_id: "str | None" = None) -> TaskTerminalRecord:
         if not result_digest:
             raise ValueError("result digest is required")
         return self._apply(
-            TaskTerminalRecord(task_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
+            TaskTerminalRecord(node_id, owner, fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
         )
 
-    def fail(self, task_id: str, owner: str, fence: int, error_code: str, error_digest: str) -> TaskTerminalRecord:
+    def fail(self, node_id: str, owner: str, fence: int, error_code: str, error_digest: str) -> TaskTerminalRecord:
         if not error_code or not error_digest:
             raise ValueError("failure code and digest are required")
         return self._apply(
-            TaskTerminalRecord(task_id, owner, fence, TaskStatus.FAILED, None, error_code, error_digest)
+            TaskTerminalRecord(node_id, owner, fence, TaskStatus.FAILED, None, error_code, error_digest)
         )
 
-    def get(self, task_id: str) -> 'TaskTerminalRecord | None':
-        return self._records.get(task_id)
+    def get(self, node_id: str) -> 'TaskTerminalRecord | None':
+        return self._records.get(node_id)
 
     def _apply(self, candidate: TaskTerminalRecord) -> TaskTerminalRecord:
-        if candidate.fence < 1 or not candidate.task_id or not candidate.owner:
-            if candidate.fence < 1 and candidate.task_id and candidate.owner and candidate.task_id in self._records:
+        if candidate.fence < 1 or not candidate.node_id or not candidate.owner:
+            if candidate.fence < 1 and candidate.node_id and candidate.owner and candidate.node_id in self._records:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             raise ValueError("task terminal identity is invalid")
-        previous = self._records.get(candidate.task_id)
+        previous = self._records.get(candidate.node_id)
         if previous is None:
-            self._records[candidate.task_id] = candidate
+            self._records[candidate.node_id] = candidate
             return candidate
         if candidate.fence < previous.fence:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
@@ -201,7 +201,7 @@ class TaskCompletionLedger:
 
 def _same_terminal_result(left: TaskTerminalRecord, right: TaskTerminalRecord) -> bool:
     return (
-        left.task_id == right.task_id
+        left.node_id == right.node_id
         and left.owner == right.owner
         and left.fence == right.fence
         and left.status is right.status
@@ -234,7 +234,7 @@ class TaskGraphResult:
 
 @dataclass(frozen=True, slots=True)
 class TaskNodeResult:
-    task_id: str
+    node_id: str
     status: TaskStatus
     result_digest: "str | None"
     execution_id: "str | None"
@@ -268,11 +268,11 @@ class TaskGraphView:
 @dataclass(frozen=True, slots=True)
 class CancelGraphRequest:
     principal: Principal
-    cancel_request_id: str
+    idempotency_key: str
     force: bool = False
 
     def __post_init__(self) -> None:
-        validate_idempotency_key(self.cancel_request_id)
+        validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,7 +291,7 @@ class Swarm:
 
 def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":
     return tuple(
-        node for node in graph.nodes if node.task_id not in completed and all(dependency in completed for dependency in node.dependencies)
+        node for node in graph.nodes if node.node_id not in completed and all(dependency in completed for dependency in node.dependencies)
     )
 
 

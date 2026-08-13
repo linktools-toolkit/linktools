@@ -15,7 +15,6 @@ from pathlib import Path
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
-
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
@@ -202,6 +201,10 @@ class FilesystemWriterLock:
     def __init__(self, path: "str | Path") -> None:
         self.path = Path(path)
         self._lock: FileLock | None = None
+
+    @property
+    def acquired(self) -> bool:
+        return self._lock is not None
 
     async def acquire(self) -> None:
         if self._lock is not None:

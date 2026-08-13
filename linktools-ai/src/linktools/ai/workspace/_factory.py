@@ -3,26 +3,22 @@
 """Workspace composition root for the public Runtime."""
 
 import hashlib
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import (
-    InMemoryStepStore,
-    StepStore,
-)
+from pydantic_ai_harness.step_persistence import StepStore
 
 from ..adapter import (
-    DurableFilesystemStepStore,
-    RoutedStepStore,
     RuntimeMemoryStore,
-    build_sql_step_store,
     StepExecutionHistoryReader,
-    build_filesystem_runtime,
-    build_in_memory_runtime,
-    open_sql_runtime,
+    open_runtime_persistence,
+    runtime_durable_domains,
+    runtime_storage_engine,
+    runtime_storage_kind,
+    runtime_storage_path,
 )
 from ..agent import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
@@ -34,19 +30,18 @@ from ..agent import (
     OutputTypeRegistry,
 )
 from ..asset import (
-    AssetRef,
+    AssetCacheAdapter,
     AssetInfo,
     AssetKey,
+    AssetRef,
     AssetRepository,
     AssetStore,
     AssetTypeBinding,
     AssetTypeRegistry,
     AssetTypeRegistrySnapshot,
-    FilesystemAssetBackend,
     InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     PrefixAssetPathAdapter,
-    build_sql_asset_backend,
 )
 from ..capability import (
     CapabilityBinding,
@@ -81,7 +76,11 @@ from ..runtime import (
     DefaultSessionService,
     DefaultTaskService,
     LocalExecutionBackend,
+    RecoveryCheckpointState,
     Runtime,
+    RuntimeDomain,
+    RuntimeRetention,
+    RuntimeStorage,
     RuntimeStores,
     RuntimeTaskNodeRunner,
 )
@@ -92,13 +91,13 @@ from ..spec import (
     builtin_asset_bindings,
 )
 from ..storage import (
-    RuntimeStorage,
-    StorageDomain,
+    ContentCache,
+    SqlContext,
     StorageLayer,
     StorageOverlay,
     StorageWriter,
-    SqlStorageContext,
-    create_sql_storage_context,
+    create_sql_context,
+    provision_sql,
 )
 from ..task import LocalTaskGraphLauncher, TaskNodeRunner
 from ._root import Workspace
@@ -113,7 +112,10 @@ class _RuntimeResources:
     namespace: str
     domain: RuntimeStores
     steps: StepStore
-    sql_context: "SqlStorageContext | None" = None
+    promote_steps: Callable[[RuntimeDomain, str], "Awaitable[None]"]
+    promote_archive: Callable[[RuntimeDomain, RuntimeDomain, str], "Awaitable[None]"]
+    release_transient: Callable[[str], "Awaitable[None]"]
+    sql_context: "SqlContext | None" = None
 
 
 @asynccontextmanager
@@ -121,82 +123,79 @@ async def _open_resources(
     storage: RuntimeStorage,
     *,
     namespace: str,
-    sql_context: "SqlStorageContext | None" = None,
+    sql_context: "SqlContext | None" = None,
 ) -> "AsyncIterator[_RuntimeResources]":
-    if storage.target_kind == "memory":
-        runtime = build_in_memory_runtime(namespace=namespace)
-        steps = InMemoryStepStore()
-        await runtime.initialize()
-        try:
-            yield _RuntimeResources(storage, namespace, runtime.persistence, steps)
-        finally:
-            await runtime.close()
-        return
-    if storage.target_kind == "filesystem":
-        runtime = build_filesystem_runtime(str(storage.location), namespace=namespace, persist=storage.persist)
-        durable_steps = DurableFilesystemStepStore(runtime.runtime_root, namespace, writer_lock=runtime.writer_lock)
-        steps = RoutedStepStore(InMemoryStepStore(), durable_steps, storage.persist)
-        await runtime.initialize()
-        await steps.initialize()
-        try:
-            yield _RuntimeResources(storage, namespace, runtime.persistence, steps)
-        finally:
-            await steps.close()
-            await runtime.close()
-        return
-    if sql_context is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQL resources require a prepared context")
-    domain = await open_sql_runtime(sql_context, persist=storage.persist)
-    durable_steps = build_sql_step_store(sql_context)
-    steps = RoutedStepStore(InMemoryStepStore(), durable_steps, storage.persist)
-    await steps.initialize()
-    try:
-        await domain.initialize()
-        yield _RuntimeResources(storage, namespace, domain, steps, sql_context)
-    finally:
-        await steps.close()
-        await domain.close()
+    async with open_runtime_persistence(storage, namespace=namespace, tenant_id=namespace, sql_context=sql_context) as persistence:
+        yield _RuntimeResources(storage, namespace, persistence.domain, persistence.steps, persistence.promote, persistence.promote_from, persistence.release_transient, sql_context)
 
 
-async def build_asset_store(root: str | Path) -> AssetStore:
-    """Build the read-only workspace asset layer."""
+async def build_asset_store(
+    root: str | Path,
+    *,
+    writer: "StorageWriter[AssetKey, bytes, AssetInfo] | None" = None,
+    layers: "Sequence[StorageLayer[AssetKey, bytes, AssetInfo]]" = (),
+    cache: "ContentCache | None" = None,
+) -> AssetStore:
+    """Build a Workspace AssetStore with source-first precedence."""
     workspace_root = Path(root).expanduser().resolve()
     local = LocalDirectoryAssetBackend(
         str(workspace_root),
         writable=False,
         path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
     )
-    defaults = InMemoryAssetBackend()
-    store = AssetStore(StorageOverlay(local, writer=defaults, layers=(StorageLayer("defaults", defaults),)))
+    selected_writer = writer or InMemoryAssetBackend()
+    layer_values = tuple(layers)
+    layer_ids = {layer.id for layer in layer_values}
+    if writer is None:
+        if "workspace-defaults" in layer_ids:
+            raise ValueError("workspace-defaults conflicts with an Asset layer")
+        layer_values = (*layer_values, StorageLayer("workspace-defaults", selected_writer))
+    elif all(layer.backend is not selected_writer for layer in layer_values):
+        if "workspace-writer" in layer_ids:
+            raise ValueError("workspace-writer conflicts with an Asset layer")
+        layer_values = (*layer_values, StorageLayer("workspace-writer", selected_writer))
+    store = AssetStore(
+        StorageOverlay(
+            local,
+            writer=selected_writer,
+            layers=layer_values,
+            cache=cache,
+            cache_adapter=AssetCacheAdapter() if cache is not None else None,
+        )
+    )
     await store.initialize()
     repository = build_workspace_asset_repository(store)
     await _put_default_asset(repository, AssetRef("prompt", "default"), PromptSpec("default", 1, "", ()))
     return store
 
 
-async def _prepare_sql_context(storage: RuntimeStorage, namespace: str) -> SqlStorageContext:
+async def _prepare_sql_context(storage: RuntimeStorage, namespace: str) -> SqlContext:
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    if storage.target_kind == "sqlite":
-        from ..migrate import build_schema_metadata, provision_database
-
-        engine = create_async_engine(f"sqlite+aiosqlite:///{storage.location}")
-        context = create_sql_storage_context(engine, namespace, owns_engine=True)
+    target_kind = runtime_storage_kind(storage)
+    if target_kind == "sqlite":
+        path = runtime_storage_path(storage)
+        if path is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+        context = create_sql_context(engine, owns_engine=True)
         try:
-            await provision_database(engine)
-            metadata, digest = build_schema_metadata()
-            await context.initialize(metadata=metadata, schema_manifest_digest=digest)
+            from ..adapter import build_runtime_sql_metadata
+            metadata = build_runtime_sql_metadata(storage.plan)
+            await provision_sql(engine, metadata)
+            await context.initialize(metadata=metadata)
         except Exception:
             await context.close()
             raise
         return context
-    if storage.engine is None:
+    engine = runtime_storage_engine(storage)
+    if target_kind != "sql" or engine is None:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime engine is required")
-    from ..migrate import build_schema_metadata
+    from ..adapter import build_runtime_sql_metadata
 
-    context = create_sql_storage_context(storage.engine, namespace)
-    metadata, digest = build_schema_metadata()
-    await context.initialize(metadata=metadata, schema_manifest_digest=digest)
+    context = create_sql_context(engine)
+    metadata = build_runtime_sql_metadata(storage.plan)
+    await context.initialize(metadata=metadata)
     return context
 
 
@@ -216,19 +215,15 @@ def build_workspace_asset_repository(
 async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], stores: RuntimeStores) -> None:
     checkpoints = await stores.recovery.checkpoints.list(tenant_id=stores.namespace)
     for checkpoint in checkpoints:
-        if checkpoint.phase in {"completed", "failed", "cancelled"}:
+        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
             continue
-        agent_id = checkpoint.payload.get("agent_id")
-        prompt_id = checkpoint.payload.get("prompt_id")
-        if not isinstance(agent_id, str) or not isinstance(prompt_id, str) or not agent_id.strip() or not prompt_id.strip():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        definition = await compiler.compile(agent_id=agent_id, prompt_id=prompt_id)
+        definition = await compiler.compile(agent_id=checkpoint.input.agent_id, prompt_id=checkpoint.input.prompt_id)
         definitions[definition.digest] = definition
         _logger.debug(
-            "recovery definition compiled: checkpoint=%s agent=%s prompt=%s",
-            checkpoint.checkpoint_id,
-            agent_id,
-            prompt_id,
+            "recovery definition compiled: execution=%s agent=%s prompt=%s",
+            checkpoint.execution_id,
+            checkpoint.input.agent_id,
+            checkpoint.input.prompt_id,
         )
 
 
@@ -236,7 +231,7 @@ async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: di
 async def open_workspace_runtime(
     workspace: Workspace,
     *,
-    storage: "RuntimeStorage | None" = None,
+    runtime_storage: "RuntimeStorage | None" = None,
     model: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
@@ -246,27 +241,29 @@ async def open_workspace_runtime(
     capability_grants: "Sequence[CapabilityBinding]" = (),
     task_node_runner: "TaskNodeRunner | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    selected_storage = storage or RuntimeStorage.filesystem(workspace.storage_root / "runtime")
+    selected_storage = runtime_storage or RuntimeStorage.filesystem(workspace.storage_root / "runtime")
     namespace = workspace.workspace_id
+    tenant_id = workspace.workspace_id
+    target_kind = runtime_storage_kind(selected_storage)
+    durable_domains = runtime_durable_domains(selected_storage)
     registry = _build_asset_registry(extra_asset_bindings)
     sql_context = None
-    if selected_storage.target_kind in {"sqlite", "sql"}:
+    if target_kind in {"sqlite", "sql"}:
         sql_context = await _prepare_sql_context(selected_storage, namespace)
     try:
-        writer = _asset_writer(selected_storage, namespace, sql_context)
-        phase_a_store, phase_a_assets = await _create_workspace_repository(workspace.storage_root / "assets", registry, writer=writer)
+        selected_assets = await build_asset_store(workspace.storage_root)
+        await selected_assets.initialize()
+        phase_a_assets = AssetRepository(selected_assets, registry)
         phase_a_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
         phase_a_refs = await _bootstrap_refs(phase_a_providers)
         _logger.debug("workspace capability bootstrap phase A complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_a_refs))
-        del phase_a_store
-        final_store, assets = await _create_workspace_repository(workspace.storage_root / "assets", registry, generated_refs=phase_a_refs, writer=writer)
-        final_providers = _build_capability_providers(assets, mcp_runtime, capability_provider_factories)
+        await _put_default_asset(phase_a_assets, AssetRef("agent", "default"), AgentSpec("default", 1, "default", phase_a_refs, "assistant-text", 1))
+        final_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
         phase_b_refs = await _bootstrap_refs(final_providers)
         if phase_a_refs != phase_b_refs:
             _logger.error("workspace capability bootstrap changed between phases: workspace=%s", workspace.workspace_id)
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         _logger.debug("workspace capability bootstrap phase B complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_b_refs))
-        del final_store
         output_types = OutputTypeRegistry()
         output_types.register(ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AssistantTextOutput)
         output_types.freeze()
@@ -283,7 +280,7 @@ async def open_workspace_runtime(
         profile = canonical_sha256({"workspace": workspace.root.as_posix(), "grants": 2, "version": 2})
         grants = (*build_workspace_capability_grants(workspace.root), *capability_grants)
         compiler = AgentCompiler(
-            assets,
+            phase_a_assets,
             model_resolver=resolver,
             model_connections=connections,
             output_types=output_types,
@@ -293,21 +290,27 @@ async def open_workspace_runtime(
         )
         async with _open_resources(selected_storage, namespace=namespace, sql_context=sql_context) as resources:
             definitions: dict[str, AgentDefinition] = {}
-            if StorageDomain.RECOVERY in selected_storage.persist:
+            if RuntimeDomain.RECOVERY in durable_domains:
                 await _compile_recovery_definitions(compiler, definitions, resources.domain)
             executor = AgentExecutor(materializer, execution_root=workspace.root)
             backend = LocalExecutionBackend(
                 resources.domain,
-                resources.steps,
+                resources.steps.writer(RuntimeDomain.EXECUTION),
                 executor,
                 definitions,
-                tenant_id=workspace.workspace_id,
+                tenant_id=tenant_id,
                 execution_root=workspace.root,
+                promote_steps=resources.promote_steps,
+                promote_archive=resources.promote_archive,
+                release_transient=resources.release_transient,
                 memory_store_factory=lambda tenant_id, namespace: RuntimeMemoryStore(resources.domain, tenant_id=tenant_id, namespace=namespace),
-                recovery_enabled=StorageDomain.RECOVERY in selected_storage.persist,
+                recovery_enabled=RuntimeDomain.RECOVERY in durable_domains,
+                conversation_durable=selected_storage.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetention.DURABLE,
+                handoff_contract_digest=_handoff_contract_digest(selected_storage),
+                archive_steps={domain: resources.steps.archive(domain) for domain in resources.steps.archives},
             )
-            history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps, HmacCursorSigner("execution-history", _grant_key(workspace)))
-            authorization = TenantAuthorizationPolicy(workspace.workspace_id)
+            history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps.archives.get(RuntimeDomain.EXECUTION, resources.steps), HmacCursorSigner("execution-history", _grant_key(workspace)))
+            authorization = TenantAuthorizationPolicy(tenant_id)
             execution = DefaultExecutionService(resources.domain, authorization, backend=backend, history_reader=history)
             session = DefaultSessionService(resources.domain, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)))
             task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)
@@ -327,24 +330,24 @@ async def open_workspace_runtime(
                 await backend.close()
 
             runtime = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=close_runtime)
-            if StorageDomain.RECOVERY in selected_storage.persist:
+            if RuntimeDomain.RECOVERY in durable_domains:
                 await backend.reconcile()
             sql_dialect = None if sql_context is None else sql_context.dialect.name
             engine_ownership = (
                 "linktools"
-                if selected_storage.owns_engine
+                if target_kind == "sqlite"
                 else "caller"
-                if selected_storage.target_kind == "sql"
+                if target_kind == "sql"
                 else "none"
             )
             _logger.info(
                 "workspace runtime opened: namespace=%s target_kind=%s storage_root=%s location=%s selected_domains=%s recovery_enabled=%s sql_dialect=%s engine_ownership=%s",
                 namespace,
-                selected_storage.target_kind,
+                target_kind,
                 workspace.storage_root,
-                selected_storage.location,
-                sorted(domain.value for domain in selected_storage.persist),
-                StorageDomain.RECOVERY in selected_storage.persist,
+                _target_location(selected_storage),
+                sorted(domain.value for domain in durable_domains),
+                RuntimeDomain.RECOVERY in durable_domains,
                 sql_dialect,
                 engine_ownership,
             )
@@ -363,30 +366,6 @@ def _build_asset_registry(extra_bindings: Sequence[AssetTypeBinding[object]]) ->
     for binding in extra_bindings:
         registry.register(binding)
     return registry.freeze()
-
-
-async def _create_workspace_repository(
-    root: Path,
-    registry: AssetTypeRegistrySnapshot,
-    *,
-    generated_refs: "tuple[AgentCapabilityRef, ...] | None" = None,
-    writer: "StorageWriter[AssetKey, bytes, AssetInfo] | None" = None,
-) -> "tuple[AssetStore, AssetRepository]":
-    local = LocalDirectoryAssetBackend(
-        str(root),
-        writable=False,
-        path_adapter=PrefixAssetPathAdapter({"skill": "skills"}),
-    )
-    writer_backend: StorageWriter[AssetKey, bytes, AssetInfo] = InMemoryAssetBackend()
-    if writer is not None:
-        writer_backend = writer
-    store = AssetStore(StorageOverlay(local, writer=writer_backend, layers=(StorageLayer("defaults", writer_backend),)))
-    await store.initialize()
-    repository = AssetRepository(store, registry)
-    await _put_default_asset(repository, AssetRef("prompt", "default"), PromptSpec("default", 1, "", ()))
-    if generated_refs is not None:
-        await _put_default_asset(repository, AssetRef("agent", "default"), AgentSpec("default", 1, "default", generated_refs, "assistant-text", 1))
-    return store, repository
 
 
 async def _put_default_asset(repository: AssetRepository, ref: AssetRef, value: object) -> None:
@@ -431,19 +410,24 @@ def _grant_key(workspace: Workspace) -> bytes:
     return hashlib.sha256(f"workspace:{workspace.workspace_id}".encode("utf-8")).digest()
 
 
-def _asset_writer(
-    storage: RuntimeStorage,
-    namespace: str,
-    sql_context: "SqlStorageContext | None",
-) -> "StorageWriter[AssetKey, bytes, AssetInfo]":
-    if StorageDomain.ASSET not in storage.persist:
-        return InMemoryAssetBackend()
-    if storage.target_kind == "filesystem" and storage.location is not None:
-        namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        return FilesystemAssetBackend(str(storage.location / namespace_key / "asset"))
-    if storage.target_kind in {"sqlite", "sql"} and sql_context is not None:
-        return build_sql_asset_backend(sql_context)
-    return InMemoryAssetBackend()
+def _handoff_contract_digest(storage: RuntimeStorage) -> str:
+    routes: dict[str, dict[str, str]] = {}
+    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+        route = storage.plan.route(domain)
+        if route.object_store is not None:
+            store_id = route.object_store.store_id
+        elif route.retention is RuntimeRetention.DURABLE:
+            store_id = "builtin"
+        elif route.retention is RuntimeRetention.TRANSIENT:
+            store_id = "transient"
+        else:
+            store_id = "memory"
+        routes[domain.value] = {"retention": route.retention.value, "object_store_id": store_id}
+    return canonical_sha256({"version": 1, **routes})
 
 
-__all__ = ["RuntimeStorage", "StorageDomain", "build_asset_store", "build_workspace_asset_repository", "open_workspace_runtime"]
+def _target_location(storage: RuntimeStorage) -> object:
+    return runtime_storage_path(storage)
+
+
+__all__ = ["RuntimeStorage", "RuntimeDomain", "build_asset_store", "build_workspace_asset_repository", "open_workspace_runtime"]

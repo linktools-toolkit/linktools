@@ -65,8 +65,8 @@ class RuntimeTaskNodeRunner:
         request = ExecutionRequest(
             prompt=prompt,
             principal=principal,
-            idempotency_key=canonical_sha256({"graph_id": graph_id, "task_id": node.task_id, "definition": node.binding_digest, "principal": principal_identity_payload(principal)}),
-            memory_namespace=None,
+            idempotency_key=canonical_sha256({"graph_id": graph_id, "node_id": node.node_id, "definition": node.binding_digest, "principal": principal_identity_payload(principal)}),
+            memory_scope=None,
         )
         launch_task = asyncio.create_task(self._execution.run(node.binding_digest, request))
         try:
@@ -75,15 +75,15 @@ class RuntimeTaskNodeRunner:
             try:
                 handle = await asyncio.shield(launch_task)
             except BaseException as error:
-                _logger.warning("task execution launch failed during cancellation: graph=%s task=%s error=%s", graph_id, node.task_id, type(error).__name__)
+                _logger.warning("task execution launch failed during cancellation: graph=%s task=%s error=%s", graph_id, node.node_id, type(error).__name__)
                 raise cancellation
-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.task_id)
+            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
             raise cancellation
         wait_task = asyncio.create_task(self._execution.wait(handle.execution_id, principal=principal))
         try:
             result = await asyncio.shield(wait_task)
         except asyncio.CancelledError as cancellation:
-            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.task_id)
+            await _cancel_execution(self._execution, handle.execution_id, principal, graph_id, node.node_id)
             if not wait_task.done():
                 wait_task.cancel()
                 await asyncio.gather(wait_task, return_exceptions=True)
@@ -103,12 +103,12 @@ class WorkflowTaskGraphLauncher:
         return await self._gateway.start_task_graph(request.graph.graph_id, request)
 
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
-        return await self._gateway.cancel_task_graph(graph_id, request.cancel_request_id)
+        return await self._gateway.cancel_task_graph(graph_id, request.idempotency_key)
 
 
 def _default_task_prompt(node: TaskNode, dependency_results: Mapping[str, TaskDependencyResult]) -> str:
     del dependency_results
-    return node.task_id
+    return node.node_id
 
 
 async def _cancel_execution(
@@ -116,17 +116,17 @@ async def _cancel_execution(
     execution_id: str,
     principal: Principal,
     graph_id: str,
-    task_id: str,
+    node_id: str,
 ) -> None:
     request = CancelExecutionRequest(
         principal,
-        canonical_sha256({"task_graph": graph_id, "task_id": task_id, "execution_id": execution_id}),
+        canonical_sha256({"task_graph": graph_id, "node_id": node_id, "execution_id": execution_id}),
     )
     cleanup = asyncio.create_task(execution.cancel(execution_id, request))
     try:
         await asyncio.shield(cleanup)
     except BaseException:
-        _logger.warning("task execution cancellation cleanup failed: graph=%s task=%s execution=%s", graph_id, task_id, execution_id)
+        _logger.warning("task execution cancellation cleanup failed: graph=%s task=%s execution=%s", graph_id, node_id, execution_id)
 
 
 __all__ = ["DefaultTaskService", "RuntimeTaskNodeRunner", "WorkflowTaskGraphLauncher"]

@@ -96,17 +96,11 @@
       "core",
       "storage",
       "asset",
-      "adapter"
+      "adapter",
+      "runtime"
     ]
   },
   "module_dependencies": {
-    "adapter._sql": [
-      "core",
-      "storage",
-      "runtime",
-      "capability",
-      "task"
-    ],
     "adapter._nats": [
       "core",
       "observe"
@@ -120,7 +114,8 @@
     ],
     "adapter._schema": [
       "core",
-      "storage"
+      "storage",
+      "runtime"
     ],
     "agent._compiler": [
       "core",

@@ -34,12 +34,11 @@ from ._logical import (
     ResolvedAsset,
     SingleFileLayout,
 )
+from ._object import AssetObjectKeyFactory
 from ._repository import AssetRepository, AssetScope
 from ._sql import (
     SqlAssetBackend,
-    SqlAssetSchema,
-    SqlAssetTables,
-    build_sql_asset_backend,
+    build_asset_sql_metadata,
 )
 from ._store import AssetCacheAdapter, AssetStore
 
@@ -53,6 +52,7 @@ __all__ = [
     "AssetError",
     "AssetInfo",
     "AssetKey",
+    "AssetObjectKeyFactory",
     "AssetNotFoundError",
     "AssetParseError",
     "AssetPathAdapter",
@@ -75,9 +75,8 @@ __all__ = [
     "PrefixAssetPathAdapter",
     "ResolvedAsset",
     "SingleFileLayout",
-    "SqlAssetBackend", "build_sql_asset_backend",
-    "SqlAssetSchema",
-    "SqlAssetTables",
+    "SqlAssetBackend",
+    "build_asset_sql_metadata",
     "StrictConfigReader",
     "filesystem_root",
     "local_directory_root",

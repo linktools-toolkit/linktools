@@ -5,7 +5,12 @@
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
-from ..core import Principal, validate_principal_id, validate_resource_id, validate_tenant_id
+from ..core import (
+    Principal,
+    validate_principal_id,
+    validate_resource_id,
+    validate_tenant_id,
+)
 from ..errors import AIError
 
 

@@ -80,11 +80,11 @@ class DefaultArtifactService:
         nonce = secrets.token_hex(16)
         request_digest = canonical_sha256({"action": "artifact.download", "tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest})
         now = datetime.now(timezone.utc)
-        operation = await self._persistence.artifact.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.blob_ref, record.digest, None, True, now, now))
+        operation = await self._persistence.artifact.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.object_ref.key, record.digest, None, True, now, now))
         payload = {"tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest, "expires_at": expires_at, "nonce": nonce}
         signature = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
         token = _encode_grant({**payload, "hmac": signature})
-        await self._persistence.artifact.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, record.blob_ref, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
+        await self._persistence.artifact.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
         _logger.info("artifact grant issued: artifact=%s tenant=%s", artifact_id, principal.tenant_id)
         return ArtifactDownload(artifact_id, f"{self._entry_path}/{artifact_id}/download?grant={token}", str(expires_at))
 
@@ -101,7 +101,7 @@ class DefaultArtifactService:
             record = await self._persistence.artifact.records.get_metadata(str(payload["artifact_id"]), tenant_id=principal.tenant_id)
             if record is None or record.digest != str(payload["artifact_digest"]):
                 raise ValueError("artifact grant target mismatch")
-            return record.blob_ref
+            return record.object_ref.key
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED) from error
 

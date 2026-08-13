@@ -36,10 +36,10 @@ from ._validation import (
     validate_external_payload,
     validate_idempotency_key,
     validate_lease_owner,
-    validate_memory_namespace,
-    validate_persistence_namespace,
+    validate_memory_scope,
     validate_observation_payload,
     validate_page_limit,
+    validate_persistence_namespace,
     validate_principal_id,
     validate_principal_kind,
     validate_prompt,
@@ -51,8 +51,6 @@ from ._validation import (
 from ._value import (
     ApprovalDecision,
     ApprovalStatus,
-    BlobStatus,
-    canonical_string_tuple,
     EvaluationStatus,
     ExecutionEventType,
     ExecutionLineageKind,
@@ -68,6 +66,7 @@ from ._value import (
     StopReason,
     TaskStatus,
     ToolOperationStatus,
+    canonical_string_tuple,
 )
 
 __all__ = [
@@ -91,13 +90,13 @@ __all__ = [
     "OperationLedgerInput", "OperationLedgerRecord",
     "canonical_string_tuple",
     "deterministic_id",
-    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
+    "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",
     "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus", "IdempotencyStatus",
     "OperationKind", "OperationStatus", "ResourceKind", "SessionStatus", "StopReason",
     "TaskStatus", "ToolOperationStatus",
     "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
     "validate_external_payload", "validate_idempotency_key", "validate_lease_owner",
-    "validate_memory_namespace", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
+    "validate_memory_scope", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
     "validate_principal_id", "validate_principal_kind", "validate_prompt", "validate_resource_id", "validate_shell_timeout",
     "validate_tenant_id", "validate_tool_arguments",
 ]

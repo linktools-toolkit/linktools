@@ -1,921 +1,1033 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""SQL adapters for the public Pydantic AI Harness StepStore contract."""
+"""Runtime Step staging, promotion, and explicit archive implementations."""
 
 import asyncio
+import base64
 import hashlib
 import json
-from collections.abc import Collection, Mapping
-from dataclasses import asdict
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
 from pydantic_ai import ModelMessagesTypeAdapter
-from pydantic_ai_harness.media import DiskMediaStore, MediaContext, MediaStore, externalize_media, media_uri_for, parse_media_uri, restore_media
+from pydantic_ai_harness.media import MediaContext
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
-    StepStore,
     StepEvent,
+    StepStore,
     ToolEffectRecord,
 )
 
-from ..core import canonical_json_bytes, validate_persistence_namespace
+from ..core import validate_persistence_namespace, validate_tenant_id
 from ..errors import AIError, ErrorCode
+from ..runtime import RuntimeDomain
 from ..storage import (
+    FilesystemMutationLock,
+    FilesystemObjectStore,
     FilesystemWriterLock,
-    build_sql_schema_metadata,
-    create_sql_storage_context,
-    SqlErrorKind,
-    SqlAlchemyDialect,
-    classify_sql_error,
-    read_json,
-    sql_blob,
-    sql_digest,
-    sql_index,
-    sql_integer_id,
-    sql_table_options,
-    SqlSchemaRegistry,
-    SqlStorageContext,
-    storage_name,
-    sync_directory,
+    ObjectStore,
+    SqlObjectStore,
+    create_sql_context,
+    provision_sql,
+    read_object,
+    validate_sql,
     write_json_atomic,
-    StorageDomain,
-    register_sql_schema_contributor,
 )
-from ._schema import new_step_metadata
+from ._schema import build_step_sql_metadata
 
 if TYPE_CHECKING:
-    from sqlalchemy import MetaData, Table
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from ..storage import SqlContext
 
 
 _logger = environ.get_logger("ai.adapter.step")
+_ARCHIVE_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY})
 
 
-class _MemoryMediaStore:
+class StagingStepStore(StepStore):
+    """Process-local Step facts used before explicit promotion."""
+
     def __init__(self) -> None:
-        self._items: dict[str, tuple[bytes, MediaContext]] = {}
+        self._runs: dict[str, RunRecord] = {}
+        self._events: dict[str, list[StepEvent]] = {}
+        self._snapshots: dict[str, list[ContinuableSnapshot]] = {}
+        self._effects: dict[str, list[ToolEffectRecord]] = {}
+        self._lock = asyncio.Lock()
+        self._closed = False
+
+    async def initialize(self) -> None:
+        self._closed = False
+
+    async def close(self) -> None:
+        self._closed = True
+
+    async def register_run(self, record: RunRecord) -> None:
+        async with self._lock:
+            if record.run_id in self._runs and self._runs[record.run_id] != record:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            self._runs[record.run_id] = record
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        return self._runs.get(run_id)
+
+    async def list_runs(self, *, parent_run_id: str | None = None, conversation_id: str | None = None) -> list[RunRecord]:
+        values = [item for item in self._runs.values() if (parent_run_id is None or item.parent_run_id == parent_run_id) and (conversation_id is None or item.conversation_id == conversation_id)]
+        return sorted(values, key=lambda item: (item.started_at, item.run_id))
+
+    async def append_event(self, event: StepEvent) -> None:
+        async with self._lock:
+            values = self._events.setdefault(event.run_id, [])
+            if event in values:
+                return
+            values.append(event)
+
+    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+        return list(self._events.get(run_id, ()))
+
+    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        async with self._lock:
+            values = self._snapshots.setdefault(snapshot.run_id, [])
+            if snapshot in values:
+                return
+            if values and values[-1] == snapshot:
+                return
+            values.append(snapshot)
+
+    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
+        values = [item for item in self._snapshots.get(run_id, ()) if include_interrupted or item.state == "complete"]
+        return values[-1] if values else None
+
+    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        async with self._lock:
+            values = self._effects.setdefault(record.run_id, [])
+            if record in values:
+                return
+            if values and values[-1] == record:
+                return
+            values.append(record)
+
+    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        values = [item for item in self._effects.get(run_id, ()) if item.tool_call_id == tool_call_id]
+        return values[-1] if values else None
+
+    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
+        latest: dict[str, ToolEffectRecord] = {}
+        for item in self._effects.get(run_id, ()):
+            latest[item.tool_call_id] = item
+        return [item for item in latest.values() if item.status == "started"]
+
+
+class FilesystemStepArchive(StagingStepStore):
+    """Generation-two append-only Step archive with fixed owner domain."""
+
+    def __init__(self, root: str | Path, *, namespace: str, tenant_id: str, runtime_domain: RuntimeDomain, object_store: ObjectStore | None = None) -> None:
+        validate_persistence_namespace(namespace)
+        validate_tenant_id(tenant_id)
+        if runtime_domain not in _ARCHIVE_DOMAINS:
+            raise ValueError("Step archive owner is invalid")
+        super().__init__()
+        self._root = Path(root).expanduser().resolve() / _namespace_key(namespace) / "steps" / runtime_domain.value / _scope_key(tenant_id)
+        self._namespace = namespace
+        self._tenant_id = tenant_id
+        self._runtime_domain = runtime_domain
+        physical_root = Path(root).expanduser().resolve()
+        self._object_store = object_store if object_store is not None else FilesystemObjectStore(physical_root / _namespace_key(namespace) / "objects")
+        self._mutation_lock = FilesystemMutationLock(self._root / "mutation.lock")
+        self._lifetime_lock = FilesystemWriterLock(physical_root / _namespace_key(namespace) / "steps" / "step.lock")
+        self._manage_writer_lock = True
+        self._counters: dict[str, dict[str, int]] = {}
+        self._ready = False
+
+    @classmethod
+    def _runtime(
+        cls,
+        root: str | Path,
+        *,
+        namespace: str,
+        tenant_id: str,
+        runtime_domain: RuntimeDomain,
+        object_store: ObjectStore,
+        writer_lock: FilesystemWriterLock,
+    ) -> "FilesystemStepArchive":
+        archive = cls(
+            root,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            runtime_domain=runtime_domain,
+            object_store=object_store,
+        )
+        archive._lifetime_lock = writer_lock
+        archive._manage_writer_lock = False
+        return archive
+
+    async def initialize(self) -> None:
+        if self._manage_writer_lock:
+            await self._lifetime_lock.acquire()
+        try:
+            async with self._mutation_lock:
+                self._root.mkdir(parents=True, exist_ok=True)
+                for run_path in self._root.glob("runs/*"):
+                    await self._load_run(run_path)
+            self._ready = True
+        except BaseException:
+            if self._manage_writer_lock:
+                await self._lifetime_lock.release()
+            raise
+        _logger.debug("step archive initialized: domain=%s tenant_scope=%s", self._runtime_domain.value, _scope_key(self._tenant_id))
+
+    async def close(self) -> None:
+        self._ready = False
+        if self._manage_writer_lock and self._lifetime_lock.acquired:
+            await self._lifetime_lock.release()
+
+    async def register_run(self, record: RunRecord) -> None:
+        await self._ensure_ready()
+        async with self._mutation_lock:
+            previous = self._runs.get(record.run_id)
+            await super().register_run(record)
+            directory = self._run_dir(record.run_id)
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                counters = self._counters.setdefault(record.run_id, {"last_event_index": 0, "last_snapshot_index": 0, "last_effect_index": 0})
+                await asyncio.to_thread(write_json_atomic, directory / "run.json", _run_json(record, counters), fsync=True)
+            except BaseException as error:
+                if previous is None:
+                    self._runs.pop(record.run_id, None)
+                    self._counters.pop(record.run_id, None)
+                else:
+                    self._runs[record.run_id] = previous
+                _raise_filesystem_storage_error(error)
+
+    async def append_event(self, event: StepEvent) -> None:
+        await self._ensure_ready()
+        if self._runtime_domain is not RuntimeDomain.EXECUTION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if event.run_id not in self._runs:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        async with self._mutation_lock:
+            before = len(self._events.get(event.run_id, ()))
+            previous_counter = self._counters[event.run_id]["last_event_index"]
+            await super().append_event(event)
+            if len(self._events.get(event.run_id, ())) == before:
+                return
+            counters = self._counters[event.run_id]
+            index = counters["last_event_index"] + 1
+            try:
+                await asyncio.to_thread(write_json_atomic, self._run_dir(event.run_id) / "events" / f"event-{index:020d}.json", _event_json(event), fsync=True)
+                counters["last_event_index"] = index
+                await asyncio.to_thread(write_json_atomic, self._run_dir(event.run_id) / "run.json", _run_json(self._runs[event.run_id], counters), fsync=True)
+            except BaseException as error:
+                self._events[event.run_id] = self._events[event.run_id][:before]
+                counters["last_event_index"] = previous_counter
+                _raise_filesystem_storage_error(error)
+
+    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        await self._ensure_ready()
+        if snapshot.run_id not in self._runs:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        async with self._mutation_lock:
+            before = len(self._snapshots.get(snapshot.run_id, ()))
+            previous_counter = self._counters[snapshot.run_id]["last_snapshot_index"]
+            await super().save_snapshot(snapshot)
+            if len(self._snapshots.get(snapshot.run_id, ())) == before:
+                return
+            counters = self._counters[snapshot.run_id]
+            index = counters["last_snapshot_index"] + 1
+            try:
+                payload = await _snapshot_json(snapshot, self._object_store, self._media_prefix())
+                await asyncio.to_thread(write_json_atomic, self._run_dir(snapshot.run_id) / "snapshots" / f"snapshot-{index:020d}.json", payload, fsync=True)
+                counters["last_snapshot_index"] = index
+                await asyncio.to_thread(write_json_atomic, self._run_dir(snapshot.run_id) / "run.json", _run_json(self._runs[snapshot.run_id], counters), fsync=True)
+            except BaseException as error:
+                self._snapshots[snapshot.run_id] = self._snapshots[snapshot.run_id][:before]
+                counters["last_snapshot_index"] = previous_counter
+                _raise_filesystem_storage_error(error)
+
+    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        await self._ensure_ready()
+        if self._runtime_domain is not RuntimeDomain.RECOVERY:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record.run_id not in self._runs:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        async with self._mutation_lock:
+            before = len(self._effects.get(record.run_id, ()))
+            previous_counter = self._counters[record.run_id]["last_effect_index"]
+            await super().record_tool_effect(record)
+            if len(self._effects.get(record.run_id, ())) == before:
+                return
+            counters = self._counters[record.run_id]
+            index = counters["last_effect_index"] + 1
+            try:
+                await asyncio.to_thread(write_json_atomic, self._run_dir(record.run_id) / "effects" / f"effect-{index:020d}.json", _effect_json(record), fsync=True)
+                counters["last_effect_index"] = index
+                await asyncio.to_thread(write_json_atomic, self._run_dir(record.run_id) / "run.json", _run_json(self._runs[record.run_id], counters), fsync=True)
+            except BaseException as error:
+                self._effects[record.run_id] = self._effects[record.run_id][:before]
+                counters["last_effect_index"] = previous_counter
+                _raise_filesystem_storage_error(error)
+
+    async def _load_run(self, directory: Path) -> None:
+        run_path = directory / "run.json"
+        if not run_path.is_file():
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        value = await _read_json(run_path)
+        try:
+            record = _run_from_json(value)
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+        if directory.name != _digest(record.run_id):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        try:
+            counters = {name: int(value.get(name, 0)) for name in ("last_event_index", "last_snapshot_index", "last_effect_index")}
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+        if any(number < 0 for number in counters.values()):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        original_counters = dict(counters)
+        self._counters[record.run_id] = counters
+        await super().register_run(record)
+        event_paths = sorted((directory / "events").glob("event-*.json"))
+        snapshot_paths = sorted((directory / "snapshots").glob("snapshot-*.json"))
+        effect_paths = sorted((directory / "effects").glob("effect-*.json"))
+        if (event_paths and self._runtime_domain is not RuntimeDomain.EXECUTION) or (effect_paths and self._runtime_domain is not RuntimeDomain.RECOVERY):
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        for paths, counter_name in ((event_paths, "last_event_index"), (snapshot_paths, "last_snapshot_index"), (effect_paths, "last_effect_index")):
+            indexes = [_fact_index(path) for path in paths]
+            if indexes != list(range(1, len(indexes) + 1)) or counters[counter_name] not in {len(indexes), len(indexes) - 1 if indexes else 0}:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            counters[counter_name] = len(indexes)
+        for path in event_paths:
+            try:
+                event = _event_from_json(await _read_json(path))
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if event.run_id != record.run_id:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await super().append_event(event)
+        for path in snapshot_paths:
+            try:
+                snapshot = await _snapshot_from_json(await _read_json(path), self._object_store)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if snapshot.run_id != record.run_id:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await super().save_snapshot(snapshot)
+        for path in effect_paths:
+            try:
+                effect = _effect_from_json(await _read_json(path))
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+            if effect.run_id != record.run_id:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            await super().record_tool_effect(effect)
+        if original_counters != counters:
+            await asyncio.to_thread(write_json_atomic, run_path, _run_json(record, counters), fsync=True)
+
+    def _run_dir(self, run_id: str) -> Path:
+        if not run_id or any(character in run_id for character in "/\\\x00"):
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return self._root / "runs" / _digest(run_id)
+
+    def _media_prefix(self) -> str:
+        return f"v1/step/{self._runtime_domain.value}/{_namespace_key(self._namespace)}/{_scope_key(self._tenant_id)}"
+
+    async def _ensure_ready(self) -> None:
+        if not self._ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+class SqlStepArchive(StagingStepStore):
+    """Explicit SQL Step archive boundary; schema is owned by the Runtime adapter."""
+
+    def __init__(self, engine: "AsyncEngine", *, namespace: str, tenant_id: str, runtime_domain: RuntimeDomain, object_store: ObjectStore | None = None) -> None:
+        from sqlalchemy.ext.asyncio import AsyncEngine
+
+        if not isinstance(engine, AsyncEngine):
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        validate_persistence_namespace(namespace)
+        validate_tenant_id(tenant_id)
+        if runtime_domain not in _ARCHIVE_DOMAINS:
+            raise ValueError("Step archive owner is invalid")
+        super().__init__()
+        self.engine = engine
+        self.namespace = namespace
+        self.tenant_id = tenant_id
+        self.runtime_domain = runtime_domain
+        self.object_store = object_store or SqlObjectStore(engine)
+        self._provision = True
+        self._context = create_sql_context(engine)
+        self._owns_context = True
+        self._metadata = build_step_sql_metadata(
+            runtime_domain,
+            object_store=None if self.object_store.store_id == "builtin" else self.object_store,
+        )
+        self._ready = False
+
+    @classmethod
+    def _runtime(
+        cls,
+        engine: "AsyncEngine",
+        *,
+        namespace: str,
+        tenant_id: str,
+        runtime_domain: RuntimeDomain,
+        object_store: ObjectStore,
+        context: "SqlContext",
+    ) -> "SqlStepArchive":
+        validate_persistence_namespace(namespace)
+        validate_tenant_id(tenant_id)
+        if runtime_domain not in _ARCHIVE_DOMAINS:
+            raise ValueError("Step archive owner is invalid")
+        archive = cls.__new__(cls)
+        StagingStepStore.__init__(archive)
+        archive.engine = engine
+        archive.namespace = namespace
+        archive.tenant_id = tenant_id
+        archive.runtime_domain = runtime_domain
+        archive.object_store = object_store
+        archive._provision = False
+        archive._context = context
+        archive._owns_context = False
+        archive._metadata = build_step_sql_metadata(
+            runtime_domain,
+            object_store=None if object_store.store_id == "builtin" else object_store,
+        )
+        archive._ready = False
+        return archive
+
+    async def initialize(self) -> None:
+        if self._provision:
+            await provision_sql(self.engine, self._metadata)
+        else:
+            await validate_sql(self.engine, self._metadata)
+        await self._context.initialize()
+        await self._load()
+        self._ready = True
+        _logger.debug("SQL step archive initialized: domain=%s", self.runtime_domain.value)
+
+    async def register_run(self, record: RunRecord) -> None:
+        await self._ensure_ready()
+        from sqlalchemy import insert, select
+
+        table = self._metadata.tables["step_runs"]
+        key = _namespace_key(self.namespace)
+        async with self._begin() as connection:
+            current = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self.runtime_domain.value, table.c.step_run_id == record.run_id))).mappings().first()
+            if current is not None:
+                if _run_from_sql(current) != record:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+            else:
+                await connection.execute(insert(table).values(namespace_key=key, tenant_id=self.tenant_id, runtime_domain=self.runtime_domain.value, step_run_id=record.run_id, harness_conversation_id=record.conversation_id, parent_step_run_id=record.parent_run_id, agent_name=record.agent_name, metadata_json=dict(record.metadata), last_event_index=0, last_snapshot_index=0, last_effect_index=0, started_at=record.started_at))
+        await super().register_run(record)
+
+    async def append_event(self, event: StepEvent) -> None:
+        await self._ensure_ready()
+        if self.runtime_domain is not RuntimeDomain.EXECUTION:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if event in self._events.get(event.run_id, ()):
+            return
+        from sqlalchemy import insert, select, update
+
+        key = _namespace_key(self.namespace)
+        runs = self._metadata.tables["step_runs"]
+        events = self._metadata.tables["step_events"]
+        async with self._begin() as connection:
+            row = (await connection.execute(select(runs.c.last_event_index).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == event.run_id).with_for_update())).first()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            index = int(row[0]) + 1
+            await connection.execute(insert(events).values(namespace_key=key, tenant_id=self.tenant_id, step_run_id=event.run_id, event_index=index, event_kind=event.kind, step_index=event.step_index, timestamp=event.timestamp, harness_conversation_id=event.conversation_id, parent_step_run_id=event.parent_run_id, agent_name=event.agent_name, tool_call_id=event.tool_call_id, tool_name=event.tool_name, error=event.error, metadata_json=dict(event.metadata)))
+            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == event.run_id).values(last_event_index=index))
+        await super().append_event(event)
+
+    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        await self._ensure_ready()
+        if snapshot in self._snapshots.get(snapshot.run_id, ()):
+            return
+        from sqlalchemy import insert, select, update
+
+        key = _namespace_key(self.namespace)
+        runs = self._metadata.tables["step_runs"]
+        snapshots = self._metadata.tables["step_snapshots"]
+        payload = await _snapshot_json(snapshot, self.object_store, self._media_prefix())
+        async with self._begin() as connection:
+            row = (await connection.execute(select(runs.c.last_snapshot_index).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == snapshot.run_id).with_for_update())).first()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            index = int(row[0]) + 1
+            previous_row = (await connection.execute(select(snapshots).where(snapshots.c.namespace_key == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self.runtime_domain.value, snapshots.c.step_run_id == snapshot.run_id).order_by(snapshots.c.snapshot_index.desc()).limit(1))).mappings().first()
+            if previous_row is not None and await _snapshot_from_sql(previous_row, self.object_store) == snapshot:
+                return
+            await connection.execute(insert(snapshots).values(namespace_key=key, tenant_id=self.tenant_id, runtime_domain=self.runtime_domain.value, step_run_id=snapshot.run_id, snapshot_index=index, step_index=snapshot.step_index, state=snapshot.state, harness_conversation_id=snapshot.conversation_id, parent_step_run_id=snapshot.parent_run_id, agent_name=snapshot.agent_name, timestamp=snapshot.timestamp, object_store_id=self.object_store.store_id, messages_json=payload["messages"]))
+            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == snapshot.run_id).values(last_snapshot_index=index))
+        await super().save_snapshot(snapshot)
+
+    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        await self._ensure_ready()
+        if self.runtime_domain is not RuntimeDomain.RECOVERY:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if record in self._effects.get(record.run_id, ()):
+            return
+        from sqlalchemy import insert, select, update
+
+        key = _namespace_key(self.namespace)
+        runs = self._metadata.tables["step_runs"]
+        effects = self._metadata.tables["step_effects"]
+        async with self._begin() as connection:
+            row = (await connection.execute(select(runs.c.last_effect_index).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == record.run_id).with_for_update())).first()
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            index = int(row[0]) + 1
+            previous_row = (await connection.execute(select(effects).where(effects.c.namespace_key == key, effects.c.tenant_id == self.tenant_id, effects.c.step_run_id == record.run_id).order_by(effects.c.effect_index.desc()).limit(1))).mappings().first()
+            if previous_row is not None and _effect_from_sql(previous_row) == record:
+                return
+            await connection.execute(insert(effects).values(namespace_key=key, tenant_id=self.tenant_id, step_run_id=record.run_id, effect_index=index, tool_call_id=record.tool_call_id, tool_name=record.tool_name, status=record.status, started_at=record.started_at, ended_at=record.ended_at, idempotency_key=record.idempotency_key, effect_summary=json.dumps(record.effect_summary, sort_keys=True, separators=(",", ":"))))
+            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self.runtime_domain.value, runs.c.step_run_id == record.run_id).values(last_effect_index=index))
+        await super().record_tool_effect(record)
+
+    async def _load(self) -> None:
+        from sqlalchemy import select
+
+        key = _namespace_key(self.namespace)
+        async with self._connect() as connection:
+            runs_table = self._metadata.tables["step_runs"]
+            runs = (await connection.execute(select(runs_table).where(runs_table.c.namespace_key == key, runs_table.c.tenant_id == self.tenant_id, runs_table.c.runtime_domain == self.runtime_domain.value))).mappings().all()
+            events = ()
+            snapshots = ()
+            effects = ()
+            if "step_events" in self._metadata.tables:
+                table = self._metadata.tables["step_events"]
+                query = select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id)
+                events = (await connection.execute(query.order_by(table.c.step_run_id, table.c.event_index))).mappings().all()
+            if "step_snapshots" in self._metadata.tables:
+                table = self._metadata.tables["step_snapshots"]
+                snapshots = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self.runtime_domain.value).order_by(table.c.step_run_id, table.c.snapshot_index))).mappings().all()
+            if "step_effects" in self._metadata.tables:
+                table = self._metadata.tables["step_effects"]
+                query = select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id)
+                effects = (await connection.execute(query.order_by(table.c.step_run_id, table.c.effect_index))).mappings().all()
+        run_by_id = {str(row["step_run_id"]): row for row in runs}
+        if any(str(row["step_run_id"]) not in run_by_id for row in (*events, *snapshots, *effects)):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.runtime_domain is not RuntimeDomain.EXECUTION and events:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self.runtime_domain is not RuntimeDomain.RECOVERY and effects:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        event_groups = _group_step_rows(events)
+        snapshot_groups = _group_step_rows(snapshots)
+        effect_groups = _group_step_rows(effects)
+        for row in runs:
+            run_id = str(row["step_run_id"])
+            try:
+                record = _run_from_sql(row)
+                _validate_step_indexes(
+                    int(row["last_event_index"]),
+                    event_groups.get(run_id, ()),
+                    "event_index",
+                )
+                _validate_step_indexes(
+                    int(row["last_snapshot_index"]),
+                    snapshot_groups.get(run_id, ()),
+                    "snapshot_index",
+                )
+                _validate_step_indexes(
+                    int(row["last_effect_index"]),
+                    effect_groups.get(run_id, ()),
+                    "effect_index",
+                )
+            except AIError:
+                raise
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            await super().register_run(record)
+        for row in events:
+            try:
+                event = _event_from_sql(row)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            await super().append_event(event)
+        for row in snapshots:
+            try:
+                snapshot = await _snapshot_from_sql(row, self.object_store)
+            except AIError:
+                raise
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            await super().save_snapshot(snapshot)
+        for row in effects:
+            try:
+                effect = _effect_from_sql(row)
+            except (KeyError, TypeError, ValueError) as error:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            await super().record_tool_effect(effect)
+
+    async def close(self) -> None:
+        self._ready = False
+        if self._owns_context:
+            await self._context.close()
+
+    async def _ensure_ready(self) -> None:
+        if not self._ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    def _media_prefix(self) -> str:
+        return f"v1/step/{self.runtime_domain.value}/{_namespace_key(self.namespace)}/{_scope_key(self.tenant_id)}"
+
+    @asynccontextmanager
+    async def _begin(self) -> AsyncIterator[object]:
+        async with self._context.sessions.begin() as session:
+            yield session
+
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[object]:
+        async with self._context.sessions() as session:
+            yield session
+
+
+class StepPromoter:
+    """Promote staged facts once, preserving their original append order."""
+
+    def __init__(self, archive: StepStore) -> None:
+        self._archive = archive
+
+    async def promote(self, staging: StagingStepStore, *, run_id: str) -> None:
+        run = await staging.get_run(run_id=run_id)
+        if run is not None:
+            await self._archive.register_run(run)
+        for event in await staging.list_events(run_id=run_id):
+            await self._archive.append_event(event)
+        for snapshot in staging._snapshots.get(run_id, ()):
+            await self._archive.save_snapshot(snapshot)
+        for effect in staging._effects.get(run_id, ()):
+            await self._archive.record_tool_effect(effect)
+
+
+class ArchiveStepPromoter:
+    """Copy the terminal facts of one archive into another archive."""
+
+    def __init__(self, source: StepStore, target: StepStore) -> None:
+        self._source = source
+        self._target = target
+
+    async def promote(self, *, run_id: str) -> None:
+        run = await self._source.get_run(run_id=run_id)
+        if run is None:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        await self._target.register_run(run)
+        snapshot = await self._source.latest_snapshot(run_id=run_id)
+        if snapshot is None or snapshot.state != "complete":
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        await self._target.save_snapshot(snapshot)
+
+
+class RuntimeStepPersistence(StagingStepStore):
+    """Runtime-owned staging surface with explicit per-domain promotion."""
+
+    def __init__(self, staging: StagingStepStore, archives: Mapping[RuntimeDomain, StepStore]) -> None:
+        super().__init__()
+        self._runs = staging._runs
+        self._events = staging._events
+        self._snapshots = staging._snapshots
+        self._effects = staging._effects
+        self._lock = staging._lock
+        self.archives = dict(archives)
+        self._event_domains: dict[str, set[RuntimeDomain]] = {}
+        self._snapshot_domains: dict[str, list[set[RuntimeDomain]]] = {}
+        self._effect_domains: dict[str, set[RuntimeDomain]] = {}
+
+    async def initialize(self) -> None:
+        await super().initialize()
+        initialized: list[StepStore] = []
+        try:
+            for archive in self.archives.values():
+                await archive.initialize()
+                initialized.append(archive)
+        except BaseException:
+            for archive in reversed(initialized):
+                await archive.close()
+            await super().close()
+            raise
+
+    async def close(self) -> None:
+        for archive in reversed(tuple(self.archives.values())):
+            await archive.close()
+        await super().close()
+
+    async def release(self, run_id: str, runtime_domains: frozenset[RuntimeDomain]) -> None:
+        async with self._lock:
+            event_owners = self._event_domains.get(run_id, set())
+            if not event_owners or event_owners <= runtime_domains:
+                self._events.pop(run_id, None)
+                self._event_domains.pop(run_id, None)
+            effect_owners = self._effect_domains.get(run_id, set())
+            if not effect_owners or effect_owners <= runtime_domains:
+                self._effects.pop(run_id, None)
+                self._effect_domains.pop(run_id, None)
+            snapshots = self._snapshots.get(run_id, [])
+            snapshot_domains = self._snapshot_domains.get(run_id, [])
+            kept_snapshots: list[ContinuableSnapshot] = []
+            kept_domains: list[set[RuntimeDomain]] = []
+            for snapshot, owners in zip(snapshots, snapshot_domains, strict=False):
+                if not owners or owners <= runtime_domains:
+                    continue
+                kept_snapshots.append(snapshot)
+                kept_domains.append(owners)
+            if kept_snapshots:
+                self._snapshots[run_id] = kept_snapshots
+                self._snapshot_domains[run_id] = kept_domains
+            else:
+                self._snapshots.pop(run_id, None)
+                self._snapshot_domains.pop(run_id, None)
+            if not self._events.get(run_id) and not self._snapshots.get(run_id) and not self._effects.get(run_id):
+                self._runs.pop(run_id, None)
+        _logger.debug("transient step staging released: run=%s", run_id)
+
+    def mark_snapshot_owner(self, run_id: str, runtime_domain: RuntimeDomain) -> None:
+        owners = self._snapshot_domains.setdefault(run_id, [])
+        snapshots = self._snapshots.get(run_id, [])
+        while len(owners) < len(snapshots):
+            owners.append(set())
+        if snapshots:
+            owners[len(snapshots) - 1].add(runtime_domain)
+
+    def mark_event_owner(self, run_id: str, runtime_domain: RuntimeDomain) -> None:
+        self._event_domains.setdefault(run_id, set()).add(runtime_domain)
+
+    def mark_effect_owner(self, run_id: str, runtime_domain: RuntimeDomain) -> None:
+        self._effect_domains.setdefault(run_id, set()).add(runtime_domain)
+
+    async def promote(self, runtime_domain: RuntimeDomain, run_id: str) -> None:
+        archive = self.archives.get(runtime_domain)
+        if archive is None:
+            return
+        await StepPromoter(archive).promote(self, run_id=run_id)
+        _logger.debug("runtime step facts promoted: domain=%s run=%s", runtime_domain.value, run_id)
+
+    async def promote_from(self, source_domain: RuntimeDomain, target_domain: RuntimeDomain, run_id: str) -> None:
+        source = self.archives.get(source_domain)
+        target = self.archives.get(target_domain)
+        if source is None or target is None:
+            return
+        await ArchiveStepPromoter(source, target).promote(run_id=run_id)
+        _logger.debug(
+            "runtime archive facts promoted: source=%s target=%s run=%s",
+            source_domain.value,
+            target_domain.value,
+            run_id,
+        )
+
+    def writer(self, runtime_domain: RuntimeDomain) -> StepStore:
+        """Return the staging writer that promotes finalized facts for one owner."""
+        return _PromotingStepStore(self, runtime_domain)
+
+    def archive(self, runtime_domain: RuntimeDomain) -> StepStore:
+        archive = self.archives.get(runtime_domain)
+        if archive is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return archive
+
+
+class _PromotingStepStore:
+    def __init__(self, staging: RuntimeStepPersistence, runtime_domain: RuntimeDomain) -> None:
+        self._staging = staging
+        self._runtime_domain = runtime_domain
+
+    async def register_run(self, record: RunRecord) -> None:
+        await self._staging.register_run(record)
+        await self._staging.promote(self._runtime_domain, run_id=record.run_id)
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        return await self._staging.get_run(run_id=run_id)
+
+    async def list_runs(self, *, parent_run_id: str | None = None, conversation_id: str | None = None) -> list[RunRecord]:
+        return await self._staging.list_runs(parent_run_id=parent_run_id, conversation_id=conversation_id)
+
+    async def append_event(self, event: StepEvent) -> None:
+        await self._staging.append_event(event)
+        self._staging.mark_event_owner(event.run_id, self._runtime_domain)
+        await self._staging.promote(self._runtime_domain, run_id=event.run_id)
+
+    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+        return await self._staging.list_events(run_id=run_id)
+
+    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
+        before = len(self._staging._snapshots.get(snapshot.run_id, ()))
+        await self._staging.save_snapshot(snapshot)
+        if len(self._staging._snapshots.get(snapshot.run_id, ())) > before:
+            self._staging.mark_snapshot_owner(snapshot.run_id, self._runtime_domain)
+        await self._staging.promote(self._runtime_domain, run_id=snapshot.run_id)
+
+    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
+        return await self._staging.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)
+
+    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
+        await self._staging.record_tool_effect(record)
+        self._staging.mark_effect_owner(record.run_id, self._runtime_domain)
+        await self._staging.promote(self._runtime_domain, run_id=record.run_id)
+
+    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
+        return await self._staging.get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
+
+    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
+        return await self._staging.list_unresolved_tool_effects(run_id=run_id)
+
+
+class ObjectMediaAdapter:
+    """Harness media protocol backed by the generic ObjectStore."""
+
+    def __init__(self, object_store: ObjectStore, *, prefix: str = "v1/runtime/media") -> None:
+        self._store = object_store
+        self._prefix = prefix.rstrip("/")
 
     async def put(self, data: bytes, *, context: MediaContext = MediaContext()) -> str:
-        uri = media_uri_for(data)
-        self._items[uri] = (bytes(data), context)
-        return uri
+        del context
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"{self._prefix}/{digest}"
+        await self._store.put(key, _bytes(data), expected_size=len(data), expected_digest=digest)
+        return f"object://{self._store.store_id}/{key}"
 
     async def get(self, uri: str, *, context: MediaContext = MediaContext()) -> bytes:
         del context
-        try:
-            return self._items[uri][0]
-        except KeyError as error:
-            raise FileNotFoundError(uri) from error
+        store_id, key = _parse_uri(uri)
+        if store_id != self._store.store_id:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        stat = await self._store.stat(key)
+        if stat is None:
+            raise FileNotFoundError(uri)
+        return await read_object(self._store, key, expected_digest=stat.digest, expected_size=stat.size)
 
     async def exists(self, uri: str, *, context: MediaContext = MediaContext()) -> bool:
         del context
-        return uri in self._items
+        _, key = _parse_uri(uri)
+        return await self._store.stat(key) is not None
 
     async def public_url(self, uri: str, *, context: MediaContext = MediaContext()) -> str | None:
         del uri, context
         return None
 
     async def get_metadata(self, uri: str, *, context: MediaContext = MediaContext()) -> Mapping[str, str]:
-        del context
-        try:
-            return self._items[uri][1].metadata
-        except KeyError as error:
-            raise FileNotFoundError(uri) from error
+        del uri, context
+        return {}
 
 
-class _PromotingMediaStore:
-    def __init__(self, staging: MediaStore, durable: MediaStore) -> None:
-        self._staging = staging
-        self._durable = durable
-        self._pending: dict[str, tuple[bytes, MediaContext]] = {}
-        self._lock = asyncio.Lock()
-
-    async def put(self, data: bytes, *, context: MediaContext = MediaContext()) -> str:
-        uri = await self._staging.put(data, context=context)
-        async with self._lock:
-            self._pending[uri] = (bytes(data), context)
-        return uri
-
-    async def promote(self, reachable: Collection[str]) -> None:
-        async with self._lock:
-            pending = tuple((uri, item) for uri, item in self._pending.items() if uri in reachable)
-            for uri, (data, context) in pending:
-                durable_uri = await self._durable.put(data, context=context)
-                if durable_uri != uri:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._pending.pop(uri, None)
-
-    async def get(self, uri: str, *, context: MediaContext = MediaContext()) -> bytes:
-        try:
-            return await self._durable.get(uri, context=context)
-        except FileNotFoundError:
-            return await self._staging.get(uri, context=context)
-
-    async def exists(self, uri: str, *, context: MediaContext = MediaContext()) -> bool:
-        return await self._durable.exists(uri, context=context)
-
-    async def public_url(self, uri: str, *, context: MediaContext = MediaContext()) -> str | None:
-        return await self._durable.public_url(uri, context=context)
-
-    async def get_metadata(self, uri: str, *, context: MediaContext = MediaContext()) -> Mapping[str, str]:
-        return await self._durable.get_metadata(uri, context=context)
+async def _bytes(value: bytes):
+    yield value
 
 
-class DurableFilesystemStepStore:
-    """Immutable-file StepStore with crash recovery checks and fsync barriers."""
-
-    def __init__(self, root: str | Path, namespace: str, *, writer_lock: FilesystemWriterLock | None = None) -> None:
-        try:
-            validate_persistence_namespace(namespace)
-        except AIError as error:
-            raise ValueError("StepStore namespace is invalid") from error
-        runtime_root = Path(root).expanduser().resolve()
-        self._namespace = namespace
-        self._root = runtime_root / "step" / _file_digest(namespace)
-        self._lock = asyncio.Lock()
-        self._writer_lock = writer_lock or FilesystemWriterLock(runtime_root / "step.lock")
-        self._owns_writer_lock = writer_lock is None
-        self._media_store = _PromotingMediaStore(_MemoryMediaStore(), DiskMediaStore(self._root / "media"))
-        self._closed = True
-
-    async def initialize(self) -> None:
-        async with self._lock:
-            self._root.mkdir(parents=True, exist_ok=True)
-            if any(path.name.endswith(".tmp") for path in self._root.rglob("*")):
-                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            if self._owns_writer_lock:
-                await self._writer_lock.acquire()
-            self._closed = False
-            _logger.debug("filesystem step store initialized: root=%s namespace=%s", self._root, self._namespace)
-
-    async def close(self) -> None:
-        if self._owns_writer_lock:
-            await self._writer_lock.release()
-        self._closed = True
-
-    async def register_run(self, record: RunRecord) -> None:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(record.run_id).parent
-            try:
-                directory.mkdir(parents=True, exist_ok=False)
-            except FileExistsError as error:
-                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-            write_json_atomic(directory / "run.json", _file_run_json(record), fsync=True)
-            sync_directory(directory)
-
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        async with self._lock:
-            self._ensure_open()
-            path = self._run_path(run_id)
-            return None if not path.is_file() else _file_run_from_json(_file_read(path))
-
-    async def list_runs(self, *, parent_run_id: str | None = None, conversation_id: str | None = None) -> list[RunRecord]:
-        async with self._lock:
-            self._ensure_open()
-            values: list[RunRecord] = []
-            for path in self._root.glob("runs/*/run.json"):
-                record = _file_run_from_json(_file_read(path))
-                if parent_run_id is not None and record.parent_run_id != parent_run_id:
-                    continue
-                if conversation_id is not None and record.conversation_id != conversation_id:
-                    continue
-                values.append(record)
-            return sorted(values, key=lambda item: (item.started_at, item.run_id))
-
-    async def append_event(self, event: StepEvent) -> None:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(event.run_id).parent / "events"
-            directory.mkdir(parents=True, exist_ok=True)
-            sequence = len(tuple(directory.glob("event-*.json")))
-            path = directory / f"event-{sequence:020d}.json"
-            write_json_atomic(path, _file_event_json(event), fsync=True)
-            sync_directory(directory)
-
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(run_id).parent / "events"
-            return [_file_event_from_json(_file_read(path)) for path in sorted(directory.glob("event-*.json"))]
-
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(snapshot.run_id).parent / "snapshots"
-            directory.mkdir(parents=True, exist_ok=True)
-            index = len(tuple(directory.glob("snapshot-*.json")))
-            payload = {
-                "run_id": snapshot.run_id,
-                "step_index": snapshot.step_index,
-                "conversation_id": snapshot.conversation_id,
-                "parent_run_id": snapshot.parent_run_id,
-                "agent_name": snapshot.agent_name,
-                "timestamp": _file_time_json(snapshot.timestamp),
-                "state": snapshot.state,
-                "messages": await _externalize_messages(snapshot.messages, self._media_store),
-            }
-            await self._media_store.promote(_media_references(payload["messages"]))
-            write_json_atomic(directory / f"snapshot-{index:020d}.json", payload, fsync=True)
-            sync_directory(directory)
-
-    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
-        async with self._lock:
-            self._ensure_open()
-            paths = sorted((self._run_path(run_id).parent / "snapshots").glob("snapshot-*.json"))
-            for path in reversed(paths):
-                value = _file_read(path)
-                if include_interrupted or value.get("state", "complete") == "complete":
-                    return await _file_snapshot_from_json(value, self._media_store)
-            return None
-
-    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(run_id).parent / "snapshots"
-            snapshots = [
-                await _file_snapshot_from_json(value, self._media_store)
-                for path in sorted(directory.glob("snapshot-*.json"))
-                if (value := _file_read(path)).get("state", "complete") == "complete"
-            ]
-            return snapshots
-
-    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(record.run_id).parent / "effects"
-            directory.mkdir(parents=True, exist_ok=True)
-            index = len(tuple(directory.glob("effect-*.json")))
-            write_json_atomic(directory / f"effect-{index:020d}.json", _file_effect_json(record), fsync=True)
-            sync_directory(directory)
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
-        values = await self._effects(run_id)
-        matching = [item for item in values if item.tool_call_id == tool_call_id]
-        return matching[-1] if matching else None
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        values = await self._effects(run_id)
-        latest: dict[str, ToolEffectRecord] = {}
-        for item in values:
-            latest[item.tool_call_id] = item
-        return [item for item in latest.values() if item.status == "started"]
-
-    async def _effects(self, run_id: str) -> list[ToolEffectRecord]:
-        async with self._lock:
-            self._ensure_open()
-            directory = self._run_path(run_id).parent / "effects"
-            return [_file_effect_from_json(_file_read(path)) for path in sorted(directory.glob("effect-*.json"))]
-
-    def _run_path(self, run_id: str) -> Path:
-        _validate_file_id(run_id)
-        return self._root / "runs" / _file_digest(run_id) / "run.json"
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise AIError(ErrorCode.STORAGE_CLOSED)
+async def _read_json(path: Path) -> dict[str, object]:
+    try:
+        value = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        parsed = json.loads(value)
+    except OSError as error:
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    if not isinstance(parsed, dict):
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return parsed
 
 
-class RoutedStepStore:
-    """Route Step facts by lifecycle owner while keeping one public store."""
-
-    def __init__(self, memory: StepStore, durable: "StepStore | None", persist: frozenset[StorageDomain]) -> None:
-        self._memory = memory
-        self._durable = durable
-        self._persist = persist
-
-    def _store(self, domain: StorageDomain) -> StepStore:
-        if domain in self._persist and self._durable is not None:
-            return self._durable
-        return self._memory
-
-    def _run_store(self) -> StepStore:
-        if StorageDomain.CONVERSATION in self._persist:
-            return self._store(StorageDomain.CONVERSATION)
-        if StorageDomain.EXECUTION in self._persist:
-            return self._store(StorageDomain.EXECUTION)
-        return self._store(StorageDomain.RECOVERY)
-
-    def _snapshot_store(self, snapshot: "ContinuableSnapshot | None" = None) -> StepStore:
-        if snapshot is not None and snapshot.state == "interrupted":
-            return self._store(StorageDomain.RECOVERY) if StorageDomain.RECOVERY in self._persist else self._memory
-        if snapshot is None and StorageDomain.RECOVERY in self._persist:
-            return self._store(StorageDomain.RECOVERY)
-        if StorageDomain.CONVERSATION in self._persist:
-            return self._store(StorageDomain.CONVERSATION)
-        if StorageDomain.EXECUTION in self._persist:
-            return self._store(StorageDomain.EXECUTION)
-        return self._store(StorageDomain.RECOVERY)
-
-    async def initialize(self) -> None:
-        if self._durable is not None:
-            await self._durable.initialize()
-
-    async def close(self) -> None:
-        if self._durable is not None:
-            await self._durable.close()
-
-    async def register_run(self, record: RunRecord) -> None:
-        await self._run_store().register_run(record)
-
-    async def get_run(self, *, run_id: str) -> "RunRecord | None":
-        return await self._run_store().get_run(run_id=run_id)
-
-    async def list_runs(self, *, parent_run_id: "str | None" = None, conversation_id: "str | None" = None) -> list[RunRecord]:
-        return await self._run_store().list_runs(parent_run_id=parent_run_id, conversation_id=conversation_id)
-
-    async def append_event(self, event: StepEvent) -> None:
-        await self._store(StorageDomain.EXECUTION).append_event(event)
-
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        return await self._store(StorageDomain.EXECUTION).list_events(run_id=run_id)
-
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        await self._snapshot_store(snapshot).save_snapshot(snapshot)
-
-    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> "ContinuableSnapshot | None":
-        stores: list[StepStore] = []
-        if include_interrupted and StorageDomain.RECOVERY in self._persist:
-            stores.append(self._store(StorageDomain.RECOVERY))
-        if StorageDomain.CONVERSATION in self._persist:
-            stores.append(self._store(StorageDomain.CONVERSATION))
-        elif StorageDomain.EXECUTION in self._persist:
-            stores.append(self._store(StorageDomain.EXECUTION))
-        elif not stores:
-            stores.append(self._store(StorageDomain.RECOVERY))
-        values = [
-            item
-            for store in dict.fromkeys(stores)
-            if (item := await store.latest_snapshot(run_id=run_id, include_interrupted=include_interrupted)) is not None
-        ]
-        return max(values, key=lambda item: (item.timestamp, item.step_index)) if values else None
-
-    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
-        return await self._snapshot_store().list_snapshots(run_id=run_id)
-
-    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        await self._store(StorageDomain.RECOVERY).record_tool_effect(record)
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> "ToolEffectRecord | None":
-        return await self._store(StorageDomain.RECOVERY).get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        return await self._store(StorageDomain.RECOVERY).list_unresolved_tool_effects(run_id=run_id)
+def _raise_filesystem_storage_error(error: BaseException) -> None:
+    if isinstance(error, AIError):
+        raise error
+    if isinstance(error, OSError):
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+    raise error
 
 
-def _file_digest(value: str) -> str:
+def _namespace_key(namespace: str) -> str:
+    return _digest(namespace)
+
+
+def _scope_key(tenant_id: str) -> str:
+    return _digest("tenant:" + tenant_id)
+
+
+def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _validate_file_id(value: str) -> None:
-    if not value or len(value) > 200 or value in {".", ".."} or any(char in value for char in "/\\\x00"):
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-
-
-def _file_read(path: Path) -> dict[str, object]:
-    try:
-        value = read_json(path)
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-    if not isinstance(value, dict):
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+def _run_json(record: RunRecord, counters: Mapping[str, int] | None = None) -> dict[str, object]:
+    value = {"run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata": dict(record.metadata), "started_at": record.started_at.astimezone(timezone.utc).isoformat()}
+    if counters is not None:
+        value.update(counters)
     return value
 
 
-def _file_time_json(value: datetime) -> str:
-    if value.tzinfo is None:
+def _group_step_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, tuple[Mapping[str, object], ...]]:
+    grouped: dict[str, list[Mapping[str, object]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["step_run_id"]), []).append(row)
+    return {run_id: tuple(values) for run_id, values in grouped.items()}
+
+
+def _validate_step_indexes(counter: int, rows: Sequence[Mapping[str, object]], index_name: str) -> None:
+    indexes = [int(row[index_name]) for row in rows]
+    if counter < 0 or indexes != list(range(1, len(indexes) + 1)) or counter != len(indexes):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value.astimezone(timezone.utc).isoformat()
 
 
-def _file_datetime(value: object) -> datetime:
+def _fact_index(path: Path) -> int:
     try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError as error:
+        return int(path.stem.rsplit("-", 1)[1])
+    except (IndexError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+
+
+def _run_from_json(value: dict[str, object]) -> RunRecord:
+    return RunRecord(run_id=str(value["run_id"]), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), metadata=dict(value.get("metadata", {})), started_at=_datetime(value["started_at"]))
+
+
+def _run_from_sql(value: Mapping[str, object]) -> RunRecord:
+    return RunRecord(run_id=str(value["step_run_id"]), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), metadata=dict(value.get("metadata_json") or {}), started_at=_datetime(value["started_at"]))
+
+
+def _event_json(event: StepEvent) -> dict[str, object]:
+    return {"run_id": event.run_id, "kind": event.kind, "step_index": event.step_index, "timestamp": event.timestamp.astimezone(timezone.utc).isoformat(), "conversation_id": event.conversation_id, "parent_run_id": event.parent_run_id, "agent_name": event.agent_name, "tool_call_id": event.tool_call_id, "tool_name": event.tool_name, "error": event.error, "metadata": dict(event.metadata)}
+
+
+def _event_from_json(value: dict[str, object]) -> StepEvent:
+    return StepEvent(run_id=str(value["run_id"]), kind=value["kind"], step_index=int(value["step_index"]), timestamp=_datetime(value["timestamp"]), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), tool_call_id=value.get("tool_call_id"), tool_name=value.get("tool_name"), error=value.get("error"), metadata=dict(value.get("metadata", {})))
+
+
+def _event_from_sql(value: Mapping[str, object]) -> StepEvent:
+    return StepEvent(run_id=str(value["step_run_id"]), kind=str(value["event_kind"]), step_index=int(value["step_index"]), timestamp=_datetime(value["timestamp"]), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), tool_call_id=value.get("tool_call_id"), tool_name=value.get("tool_name"), error=value.get("error"), metadata=dict(value.get("metadata_json") or {}))
+
+
+async def _snapshot_json(snapshot: ContinuableSnapshot, object_store: ObjectStore, media_prefix: str) -> dict[str, object]:
+    messages = json.loads(ModelMessagesTypeAdapter.dump_json(snapshot.messages))
+    await _externalize_media(messages, object_store, media_prefix)
+    return {"run_id": snapshot.run_id, "step_index": snapshot.step_index, "messages": messages, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": snapshot.timestamp.astimezone(timezone.utc).isoformat(), "state": snapshot.state, "object_store_id": object_store.store_id}
+
+
+async def _snapshot_from_json(value: dict[str, object], object_store: ObjectStore) -> ContinuableSnapshot:
+    object_store_id = value.get("object_store_id")
+    if not isinstance(object_store_id, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if object_store_id != object_store.store_id:
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    messages = value.get("messages", [])
+    await _materialize_media(messages, object_store)
+    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=value.get("state", "complete"))
+
+
+async def _snapshot_from_sql(value: Mapping[str, object], object_store: ObjectStore) -> ContinuableSnapshot:
+    object_store_id = value.get("object_store_id")
+    if not isinstance(object_store_id, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if object_store_id != object_store.store_id:
+        raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    messages = value.get("messages_json") or []
+    await _materialize_media(messages, object_store)
+    return ContinuableSnapshot(run_id=str(value["step_run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=value.get("state", "complete"))
+
+
+async def _externalize_media(value: object, object_store: ObjectStore, media_prefix: str) -> None:
+    if isinstance(value, list):
+        for item in value:
+            await _externalize_media(item, object_store, media_prefix)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("kind") == "binary":
+        encoded = value.get("data")
+        if not isinstance(encoded, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, base64.binascii.Error) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        digest = hashlib.sha256(data).hexdigest()
+        key = f"{media_prefix}/{digest}"
+
+        async def chunks() -> AsyncIterator[bytes]:
+            yield data
+
+        await object_store.put(key, chunks(), expected_size=len(data), expected_digest=digest)
+        value.pop("data", None)
+        value["object_store_id"] = object_store.store_id
+        value["object_key"] = key
+        value["object_digest"] = digest
+        value["object_size"] = len(data)
+        return
+    for item in value.values():
+        await _externalize_media(item, object_store, media_prefix)
+
+
+async def _materialize_media(value: object, object_store: ObjectStore) -> None:
+    if isinstance(value, list):
+        for item in value:
+            await _materialize_media(item, object_store)
+        return
+    if not isinstance(value, dict):
+        return
+    if value.get("kind") == "binary":
+        store_id = value.get("object_store_id")
+        key = value.get("object_key")
+        digest = value.get("object_digest")
+        size = value.get("object_size")
+        if not isinstance(store_id, str) or not isinstance(key, str) or not isinstance(digest, str) or not isinstance(size, int):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if store_id != object_store.store_id:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        try:
+            data = await read_object(object_store, key, expected_digest=digest, expected_size=size)
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_NOT_FOUND:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise
+        value["data"] = base64.b64encode(data).decode("ascii")
+        for field in ("object_store_id", "object_key", "object_digest", "object_size"):
+            value.pop(field, None)
+        return
+    for item in value.values():
+        await _materialize_media(item, object_store)
+
+
+def _effect_json(record: ToolEffectRecord) -> dict[str, object]:
+    return {"tool_call_id": record.tool_call_id, "tool_name": record.tool_name, "run_id": record.run_id, "status": record.status, "started_at": record.started_at.astimezone(timezone.utc).isoformat(), "ended_at": None if record.ended_at is None else record.ended_at.astimezone(timezone.utc).isoformat(), "idempotency_key": record.idempotency_key, "effect_summary": record.effect_summary}
+
+
+def _effect_from_json(value: dict[str, object]) -> ToolEffectRecord:
+    return ToolEffectRecord(tool_call_id=str(value["tool_call_id"]), tool_name=str(value["tool_name"]), run_id=str(value["run_id"]), status=value["status"], started_at=_datetime(value["started_at"]), ended_at=None if value.get("ended_at") is None else _datetime(value["ended_at"]), idempotency_key=value.get("idempotency_key"), effect_summary=value.get("effect_summary"))
+
+
+def _effect_from_sql(value: Mapping[str, object]) -> ToolEffectRecord:
+    summary = value.get("effect_summary")
+    if isinstance(summary, str):
+        try:
+            summary = json.loads(summary)
+        except json.JSONDecodeError as error:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
+    return ToolEffectRecord(tool_call_id=str(value["tool_call_id"]), tool_name=str(value["tool_name"]), run_id=str(value["step_run_id"]), status=str(value["status"]), started_at=_datetime(value["started_at"]), ended_at=None if value.get("ended_at") is None else _datetime(value["ended_at"]), idempotency_key=value.get("idempotency_key"), effect_summary=summary)
+
+
+def _datetime(value: object) -> datetime:
+    parsed = datetime.fromisoformat(str(value))
     if parsed.tzinfo is None:
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
 
 
-def _file_run_json(record: RunRecord) -> dict[str, object]:
-    return {"run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata": dict(record.metadata), "started_at": _file_time_json(record.started_at)}
-
-
-def _file_run_from_json(value: dict[str, object]) -> RunRecord:
-    metadata = value.get("metadata", {})
-    if not isinstance(metadata, dict) or any(not isinstance(key, str) or not isinstance(item, str) for key, item in metadata.items()):
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-    return RunRecord(run_id=str(value["run_id"]), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), metadata=metadata, started_at=_file_datetime(value["started_at"]))
-
-
-def _file_event_json(event: StepEvent) -> dict[str, object]:
-    return {**asdict(event), "timestamp": _file_time_json(event.timestamp), "metadata": dict(event.metadata)}
-
-
-def _file_event_from_json(value: dict[str, object]) -> StepEvent:
-    return StepEvent(run_id=str(value["run_id"]), kind=value["kind"], step_index=int(value["step_index"]), timestamp=_file_datetime(value["timestamp"]), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), tool_call_id=_file_optional(value.get("tool_call_id")), tool_name=_file_optional(value.get("tool_name")), error=_file_optional(value.get("error")), metadata=_file_string_map(value.get("metadata", {})))
-
-
-async def _file_snapshot_from_json(value: dict[str, object], media_store: MediaStore) -> ContinuableSnapshot:
-    state = str(value.get("state", "complete"))
-    if state not in {"complete", "interrupted"}:
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-    messages = await restore_media(value.get("messages", []), media_store=media_store)
-    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=_file_optional(value.get("conversation_id")), parent_run_id=_file_optional(value.get("parent_run_id")), agent_name=_file_optional(value.get("agent_name")), timestamp=_file_datetime(value["timestamp"]), state=state)
-
-
-async def _externalize_messages(messages: object, media_store: MediaStore) -> object:
-    encoded = json.loads(ModelMessagesTypeAdapter.dump_json(messages))
-    return await externalize_media(encoded, media_store=media_store, threshold_bytes=64 * 1024)
-
-
-def _file_effect_json(record: ToolEffectRecord) -> dict[str, object]:
-    return {**asdict(record), "started_at": _file_time_json(record.started_at), "ended_at": None if record.ended_at is None else _file_time_json(record.ended_at)}
-
-
-def _file_effect_from_json(value: dict[str, object]) -> ToolEffectRecord:
-    return ToolEffectRecord(tool_call_id=str(value["tool_call_id"]), tool_name=str(value["tool_name"]), run_id=str(value["run_id"]), status=value["status"], started_at=_file_datetime(value["started_at"]), ended_at=None if value.get("ended_at") is None else _file_datetime(value["ended_at"]), idempotency_key=_file_optional(value.get("idempotency_key")), effect_summary=_file_optional(value.get("effect_summary")))
-
-
-def _file_optional(value: object) -> str | None:
-    return None if value is None else str(value)
-
-
-def _file_string_map(value: object) -> dict[str, str]:
-    if not isinstance(value, dict) or any(not isinstance(key, str) or not isinstance(item, str) for key, item in value.items()):
-        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-    return dict(value)
-
-
-class SqlStepStore:
-    """Namespace-bound SQL StepStore implementation."""
-
-    def __init__(self, engine: "AsyncEngine", *, namespace: str, context: "SqlStorageContext | None" = None) -> None:
-        from sqlalchemy.ext.asyncio import AsyncEngine
-
-        if not isinstance(engine, AsyncEngine):
-            raise ValueError("SqlStepStore requires an AsyncEngine")
-        try:
-            validate_persistence_namespace(namespace)
-        except AIError as error:
-            raise ValueError("StepStore namespace is invalid") from error
-        if context is not None:
-            if context.engine is not engine or context.namespace != namespace:
-                raise ValueError("StepStore context identity mismatch")
-        self._engine = engine
-        self._context = context or create_sql_storage_context(engine, namespace)
-        self._owns_context = context is None
-        self._sessions = self._context.sessions
-        self._namespace = namespace
-        self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        self._metadata, self._schema_digest = build_sql_schema_metadata()
-        self._tables = {
-            name: self._metadata.tables[storage_name(physical_name)]
-            for name, physical_name in {
-                "runs": "step_runs",
-                "events": "step_events",
-                "snapshots": "step_snapshots",
-                "effects": "step_effects",
-                "media": "step_media",
-            }.items()
-        }
-        self._media = _PromotingMediaStore(
-            _MemoryMediaStore(),
-            _SqlMediaStore(self._sessions, namespace, self._context.dialect, metadata=self._metadata, tables=self._tables),
-        )
-
-    @property
-    def schema_digest(self) -> str:
-        return self._schema_digest
-
-    async def initialize(self) -> None:
-        if self._context.schema_manifest_digest is not None:
-            return
-        if not self._owns_context:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await self._context.initialize(
-            metadata=self._metadata,
-            schema_manifest_digest=self._schema_digest,
-        )
-
-    async def close(self) -> None:
-        return None
-
-    async def register_run(self, record: RunRecord) -> None:
-        from sqlalchemy import insert
-        table = self._tables["runs"]
-        try:
-            async with self._sessions() as session:
-                async with session.begin():
-                    await session.execute(insert(table).values(_run_values(self._namespace_key, record)))
-        except Exception as error:
-            if classify_sql_error(error) is SqlErrorKind.INTEGRITY:
-                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        from sqlalchemy import select
-        table = self._tables["runs"]
-        async with self._sessions() as session:
-            row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id))).mappings().first()
-        return None if row is None else _run_from_row(row)
-
-    async def list_runs(self, *, parent_run_id: "str | None" = None, conversation_id: "str | None" = None) -> "list[RunRecord]":
-        from sqlalchemy import select
-        table = self._tables["runs"]
-        predicates = [table.c.namespace_key == self._namespace_key]
-        if parent_run_id is not None:
-            predicates.append(table.c.parent_run_id == parent_run_id)
-        if conversation_id is not None:
-            predicates.append(table.c.conversation_id == conversation_id)
-        async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(*predicates).order_by(table.c.started_at, table.c.run_id))).mappings().all()
-        return [_run_from_row(row) for row in rows]
-
-    async def append_event(self, event: StepEvent) -> None:
-        from sqlalchemy import insert
-        table = self._tables["events"]
-        async with self._sessions() as session:
-            async with session.begin():
-                await session.execute(insert(table).values(_event_values(self._namespace_key, event)))
-
-    async def list_events(self, *, run_id: str) -> list[StepEvent]:
-        from sqlalchemy import select
-        table = self._tables["events"]
-        async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id).order_by(table.c.id))).mappings().all()
-        return [_event_from_row(row) for row in rows]
-
-    async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        from sqlalchemy import insert
-        table = self._tables["snapshots"]
-        async with self._sessions() as session:
-            async with session.begin():
-                await session.execute(insert(table).values(await _snapshot_values(self._namespace_key, snapshot, self._media)))
-
-    async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
-        from sqlalchemy import select
-        table = self._tables["snapshots"]
-        async with self._sessions() as session:
-            statement = select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id)
-            if not include_interrupted:
-                statement = statement.where(table.c.state == "complete")
-            row = (await session.execute(statement.order_by(table.c.id.desc()).limit(1))).mappings().first()
-        return None if row is None else await _snapshot_from_row(row, self._media)
-
-    async def list_snapshots(self, *, run_id: str) -> list[ContinuableSnapshot]:
-        from sqlalchemy import select
-        table = self._tables["snapshots"]
-        async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.state == "complete").order_by(table.c.id))).mappings().all()
-        snapshots = [await _snapshot_from_row(row, self._media) for row in rows]
-        return snapshots
-
-    async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        values = _effect_values(self._namespace_key, record)
-        table = self._tables["effects"]
-        async with self._sessions() as session:
-            async with session.begin():
-                await self._dialect.upsert(
-                    session,
-                    table=table,
-                    values=values,
-                    set_values={
-                        "tool_name": values["tool_name"],
-                        "status": values["status"],
-                        "started_at": values["started_at"],
-                        "ended_at": values["ended_at"],
-                        "idempotency_key": values["idempotency_key"],
-                        "effect_summary": values["effect_summary"],
-                        "updated_at": values["updated_at"],
-                    },
-                    index_elements=("namespace_key", "run_id", "tool_call_id"),
-                )
-
-    async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
-        from sqlalchemy import select
-        table = self._tables["effects"]
-        async with self._sessions() as session:
-            row = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.tool_call_id == tool_call_id))).mappings().first()
-        return None if row is None else _effect_from_row(row)
-
-    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
-        from sqlalchemy import select
-        table = self._tables["effects"]
-        async with self._sessions() as session:
-            rows = (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.run_id == run_id, table.c.status == "started"))).mappings().all()
-        return [_effect_from_row(row) for row in rows]
-
-
-class _SqlMediaStore:
-    """Content-addressed SQL media store used by Harness snapshots."""
-
-    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, dialect: SqlAlchemyDialect, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
-        try:
-            validate_persistence_namespace(namespace)
-        except AIError as error:
-            raise ValueError("media namespace is invalid") from error
-        self._sessions = session_factory
-        self._dialect = dialect
-        self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        if metadata is None or tables is None:
-            self._metadata, self._tables = _build_tables()
-        else:
-            self._metadata, self._tables = metadata, tables
-        self._schema_digest = _schema_digest(self._metadata)
-
-    @property
-    def schema_digest(self) -> str:
-        return self._schema_digest
-
-    async def put(self, data: bytes, *, context: MediaContext = MediaContext()) -> str:
-        from sqlalchemy import insert
-        uri = media_uri_for(data)
-        digest = parse_media_uri(uri)
-        table = self._tables["media"]
-        values = {"namespace_key": self._namespace_key, "sha256": digest, "media_type": context.media_type, "bytes": data, "size_bytes": len(data), "metadata_json": dict(context.metadata)}
-        async with self._sessions() as session:
-            async with session.begin():
-                try:
-                    await session.execute(insert(table).values(values))
-                except Exception as error:
-                    if classify_sql_error(error) is not SqlErrorKind.INTEGRITY:
-                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-        return uri
-
-    async def get(self, uri: str, *, context: MediaContext = MediaContext()) -> bytes:
-        row = await self._media_row(uri)
-        if row is None:
-            raise FileNotFoundError(uri)
-        data = bytes(row["bytes"])
-        _validate_media(row, data)
-        return data
-
-    async def exists(self, uri: str, *, context: MediaContext = MediaContext()) -> bool:
-        from sqlalchemy import select
-        digest = parse_media_uri(uri)
-        table = self._tables["media"]
-        async with self._sessions() as session:
-            row_id = await session.scalar(
-                select(table.c.id).where(
-                    table.c.namespace_key == self._namespace_key,
-                    table.c.sha256 == digest,
-                )
-            )
-        return row_id is not None
-
-    async def public_url(self, uri: str, *, context: MediaContext = MediaContext()) -> str | None:
-        return None
-
-    async def get_metadata(self, uri: str, *, context: MediaContext = MediaContext()) -> Mapping[str, str]:
-        row = await self._media_row(uri)
-        if row is None:
-            raise FileNotFoundError(uri)
-        data = bytes(row["bytes"])
-        _validate_media(row, data)
-        metadata = row["metadata_json"]
-        if not isinstance(metadata, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in metadata.items()):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return metadata
-
-    async def _media_row(self, uri: str) -> object | None:
-        from sqlalchemy import select
-        digest = parse_media_uri(uri)
-        table = self._tables["media"]
-        async with self._sessions() as session:
-            return (await session.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.sha256 == digest))).mappings().first()
-
-
-def _build_tables(metadata: "MetaData | None" = None) -> tuple[object, dict[str, object]]:
-    from sqlalchemy import (
-        JSON,
-        BigInteger,
-        Column,
-        DateTime,
-        Index,
-        Integer,
-        String,
-        Table,
-        Text,
-        UniqueConstraint,
-    )
-    from sqlalchemy.sql import func
-
-    metadata = new_step_metadata() if metadata is None else metadata
-    key = sql_digest()
-    integer_id = sql_integer_id()
-    tables = {
-        "runs": Table(
-            storage_name("step_runs"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_key", key, nullable=False),
-            Column("run_id", String(200), nullable=False),
-            Column("conversation_id", String(200), nullable=False),
-            Column("parent_run_id", String(200)),
-            Column("agent_name", String(256)),
-            Column("metadata_json", JSON, nullable=False),
-            Column("started_at", DateTime(timezone=True), nullable=False),
-            Column("run_key", key, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
-            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            UniqueConstraint("namespace_key", "run_id", name="uk_namespace_key_run_id"),
-            UniqueConstraint("namespace_key", "run_key", name="uk_namespace_key_run_key"),
-            **sql_table_options(),
-        ),
-        "events": Table(
-            storage_name("step_events"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_key", key, nullable=False),
-            Column("run_id", String(200), nullable=False),
-            Column("kind", String(64), nullable=False),
-            Column("step_index", Integer, nullable=False),
-            Column("timestamp", DateTime(timezone=True), nullable=False),
-            Column("conversation_id", String(200)),
-            Column("parent_run_id", String(200)),
-            Column("agent_name", String(256)),
-            Column("tool_call_id", String(256)),
-            Column("tool_name", String(256)),
-            Column("error", Text),
-            Column("metadata_json", JSON, nullable=False),
-            sql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
-            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
-            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            **sql_table_options(),
-        ),
-        "snapshots": Table(
-            storage_name("step_snapshots"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_key", key, nullable=False),
-            Column("run_id", String(200), nullable=False),
-            Column("step_index", Integer, nullable=False),
-            Column("conversation_id", String(200)),
-            Column("parent_run_id", String(200)),
-            Column("agent_name", String(256)),
-            Column("timestamp", DateTime(timezone=True), nullable=False),
-            Column("state", String(16), nullable=False, server_default="complete"),
-            Column("messages_json", JSON, nullable=False),
-            sql_index(Index("ix_namespace_key_run_id", "namespace_key", "run_id")),
-            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
-            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            **sql_table_options(),
-        ),
-        "effects": Table(
-            storage_name("step_effects"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_key", key, nullable=False),
-            Column("run_id", String(200), nullable=False),
-            Column("tool_call_id", String(256), nullable=False),
-            Column("tool_name", String(256), nullable=False),
-            Column("status", String(64), nullable=False),
-            Column("started_at", DateTime(timezone=True), nullable=False),
-            Column("ended_at", DateTime(timezone=True)),
-            Column("idempotency_key", String(256)),
-            Column("effect_summary", Text),
-            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
-            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            UniqueConstraint("namespace_key", "run_id", "tool_call_id", name="uk_namespace_key_run_id_tool_call_id"),
-            **sql_table_options(),
-        ),
-        "media": Table(
-            storage_name("step_media"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_key", key, nullable=False),
-            Column("sha256", key, nullable=False),
-            Column("media_type", String(256)),
-            Column("bytes", sql_blob(), nullable=False),
-            Column("size_bytes", BigInteger, nullable=False),
-            Column("metadata_json", JSON, nullable=False),
-            Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp()),
-            Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-            UniqueConstraint("namespace_key", "sha256", name="uk_namespace_key_sha256"),
-            **sql_table_options(),
-        ),
-    }
-    for name, table in tables.items():
-        sql_index(Index("ix_updated_at", table.c.updated_at))
-        sql_index(Index("ix_created_at", table.c.created_at))
-    return metadata, tables
-
-
-def build_step_schema() -> "MetaData":
-    """Build StepStore metadata for explicit deployment schema provisioning."""
-    metadata, _ = _build_tables()
-    return metadata
-
-
-def register_step_schema(registry: "SqlSchemaRegistry") -> "dict[str, Table]":
-    """Register Step and Media tables in the shared SQL schema manifest."""
-    _, tables = _build_tables(registry.metadata)
-    for table in tables.values():
-        registry.add_table(table, owner="adapter._step")
-    return tables
-
-
-register_sql_schema_contributor("adapter._step", register_step_schema)
-
-
-def build_sql_step_store(context: "SqlStorageContext") -> SqlStepStore:
-    """Build a StepStore from the workspace-owned SQL context."""
-    if context.schema_manifest_digest is None:
+def _parse_uri(uri: str) -> tuple[str, str]:
+    prefix, separator, value = uri.partition("://")
+    if separator != "://" or "/" not in value:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return SqlStepStore(context.engine, namespace=context.namespace, context=context)
+    store_id, key = value.split("/", 1)
+    return store_id, key
 
 
-def _run_values(namespace_key: str, record: RunRecord) -> dict[str, object]:
-    if record.conversation_id is None:
-        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-    started_at = _utc(record.started_at)
-    return {"namespace_key": namespace_key, "run_id": record.run_id, "conversation_id": record.conversation_id, "parent_run_id": record.parent_run_id, "agent_name": record.agent_name, "metadata_json": dict(record.metadata), "started_at": started_at, "run_key": _file_digest(f"{record.conversation_id}\x00{started_at.isoformat()}\x00{record.run_id}")}
-
-
-def _event_values(namespace_key: str, event: StepEvent) -> dict[str, object]:
-    return {"namespace_key": namespace_key, "run_id": event.run_id, "kind": event.kind, "step_index": event.step_index, "timestamp": _utc(event.timestamp), "conversation_id": event.conversation_id, "parent_run_id": event.parent_run_id, "agent_name": event.agent_name, "tool_call_id": event.tool_call_id, "tool_name": event.tool_name, "error": event.error, "metadata_json": dict(event.metadata)}
-
-
-async def _snapshot_values(namespace_key: str, snapshot: ContinuableSnapshot, media_store: MediaStore) -> dict[str, object]:
-    messages = await _externalize_messages(snapshot.messages, media_store)
-    if isinstance(media_store, _PromotingMediaStore):
-        await media_store.promote(_media_references(messages))
-    return {"namespace_key": namespace_key, "run_id": snapshot.run_id, "step_index": snapshot.step_index, "conversation_id": snapshot.conversation_id, "parent_run_id": snapshot.parent_run_id, "agent_name": snapshot.agent_name, "timestamp": _utc(snapshot.timestamp), "state": snapshot.state, "messages_json": messages}
-
-
-def _media_references(value: object) -> set[str]:
-    if isinstance(value, list):
-        references: set[str] = set()
-        for item in value:
-            references.update(_media_references(item))
-        return references
-    if not isinstance(value, dict):
-        return set()
-    references: set[str] = set()
-    if value.get("__harness_external_media__") is True and isinstance(value.get("uri"), str):
-        references.add(value["uri"])
-    for item in value.values():
-        references.update(_media_references(item))
-    return references
-
-
-def _effect_values(namespace_key: str, record: ToolEffectRecord) -> dict[str, object]:
-    return {"namespace_key": namespace_key, "run_id": record.run_id, "tool_call_id": record.tool_call_id, "tool_name": record.tool_name, "status": record.status, "started_at": _utc(record.started_at), "ended_at": None if record.ended_at is None else _utc(record.ended_at), "idempotency_key": record.idempotency_key, "effect_summary": record.effect_summary}
-
-
-def _run_from_row(row: Mapping[str, object]) -> RunRecord:
-    return RunRecord(run_id=str(row["run_id"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), metadata=_string_map(row["metadata_json"]), started_at=_utc(row["started_at"]))
-
-
-def _event_from_row(row: Mapping[str, object]) -> StepEvent:
-    return StepEvent(run_id=str(row["run_id"]), kind=row["kind"], step_index=int(row["step_index"]), timestamp=_utc(row["timestamp"]), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), tool_call_id=_optional(row["tool_call_id"]), tool_name=_optional(row["tool_name"]), error=_optional(row["error"]), metadata=_string_map(row["metadata_json"]))
-
-
-async def _snapshot_from_row(row: Mapping[str, object], media_store: MediaStore) -> ContinuableSnapshot:
-    state = str(row.get("state", "complete"))
-    if state not in {"complete", "interrupted"}:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    messages = await restore_media(row["messages_json"], media_store=media_store)
-    return ContinuableSnapshot(run_id=str(row["run_id"]), step_index=int(row["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=_optional(row["conversation_id"]), parent_run_id=_optional(row["parent_run_id"]), agent_name=_optional(row["agent_name"]), timestamp=_utc(row["timestamp"]), state=state)
-
-
-def _effect_from_row(row: Mapping[str, object]) -> ToolEffectRecord:
-    return ToolEffectRecord(tool_call_id=str(row["tool_call_id"]), tool_name=str(row["tool_name"]), run_id=str(row["run_id"]), status=row["status"], started_at=_utc(row["started_at"]), ended_at=None if row["ended_at"] is None else _utc(row["ended_at"]), idempotency_key=_optional(row["idempotency_key"]), effect_summary=_optional(row["effect_summary"]))
-
-
-def _optional(value: object) -> str | None:
-    return None if value is None else str(value)
-
-
-def _string_map(value: object) -> dict[str, str]:
-    if not isinstance(value, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return dict(value)
-
-
-def _utc(value: object) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return value.astimezone(timezone.utc)
-
-
-def _validate_media(row: Mapping[str, object], data: bytes) -> None:
-    if len(data) != int(row["size_bytes"]) or hashlib.sha256(data).hexdigest() != str(row["sha256"]):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _schema_digest(metadata: "MetaData") -> str:
-    manifest = {
-        str(name): [str(column.name) + ":" + str(column.type) for column in table.columns]
-        for name, table in sorted(metadata.tables.items())
-    }
-    return hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
-
-
-__all__ = ["DurableFilesystemStepStore", "SqlStepStore", "build_sql_step_store", "build_step_schema", "register_step_schema"]
+__all__ = [
+    "FilesystemStepArchive",
+    "ObjectMediaAdapter",
+    "RuntimeStepPersistence",
+    "SqlStepArchive",
+    "StagingStepStore",
+    "StepPromoter",
+]

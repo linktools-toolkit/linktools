@@ -17,7 +17,6 @@ from linktools.ai.adapter import (
     SqlStepStore,
     build_filesystem_runtime,
     build_in_memory_runtime,
-    open_sql_runtime,
 )
 from linktools.ai.core import (
     ExecutionEventType,
@@ -45,10 +44,10 @@ from linktools.ai.runtime import (
     SessionRecord,
 )
 from linktools.ai.storage import (
-    build_sql_schema_metadata,
     CoordinationScope,
-    create_sql_storage_context,
     SqlSchemaRegistry,
+    build_sql_schema_metadata,
+    create_sql_context,
     prepare_storage_database,
     validate_schema,
 )
@@ -105,12 +104,12 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
 
     await provision_database(engine)
     metadata, digest = build_sql_schema_metadata()
-    first_context = create_sql_storage_context(engine, "runtime-a")
-    second_context = create_sql_storage_context(engine, "runtime-b")
+    first_context = create_sql_context(engine, "runtime-a")
+    second_context = create_sql_context(engine, "runtime-b")
     await first_context.initialize(metadata=metadata, schema_manifest_digest=digest)
     await second_context.initialize(metadata=metadata, schema_manifest_digest=digest)
-    first = await open_sql_runtime(first_context, persist=frozenset({StorageDomain.CONVERSATION}))
-    second = await open_sql_runtime(second_context, persist=frozenset({StorageDomain.CONVERSATION}))
+    first = await SqlRuntimeSchema._open_sql_runtime(first_context, persist=frozenset({StorageDomain.CONVERSATION}))
+    second = await SqlRuntimeSchema._open_sql_runtime(second_context, persist=frozenset({StorageDomain.CONVERSATION}))
     now = datetime.now(timezone.utc)
     try:
         for tenant_id, owner_principal_id in (("tenant-a", "principal-a"), ("tenant-b", "principal-b")):

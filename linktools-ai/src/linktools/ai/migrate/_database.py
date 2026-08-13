@@ -1,37 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build and provision the database schema owned by linktools-ai."""
+"""Explicit Runtime and Asset SQL provisioning orchestration."""
 
 from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..storage import build_sql_schema_metadata, provision_schema_generation
+from ..adapter import build_runtime_sql_metadata
+from ..asset import build_asset_sql_metadata
+from ..runtime import RuntimeStoragePlan
+from ..storage import ObjectStore, provision_sql
 
 if TYPE_CHECKING:
-    from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 _logger = environ.get_logger("ai.migrate")
 
 
-async def provision_database(engine: "AsyncEngine") -> None:
-    """Create all current database tables for an explicit deployment step."""
-    plan = build_schema_metadata()
-    await _provision_schema(engine, plan[0])
-    await provision_schema_generation(engine, plan[0], plan[1])
-    _logger.info("database schema provisioned: manifest=%s table_count=%s", plan[1], len(plan[0].tables))
+async def provision_runtime_database(engine: "AsyncEngine", *, plan: RuntimeStoragePlan = RuntimeStoragePlan.all()) -> None:
+    metadata = build_runtime_sql_metadata(plan)
+    await provision_sql(engine, metadata)
+    _logger.info("Runtime SQL schema provisioned: tables=%s", len(metadata.tables))
 
 
-def build_schema_metadata() -> "tuple[MetaData, str]":
-    """Build the complete SQL metadata and its frozen manifest digest."""
-    return build_sql_schema_metadata()
+async def provision_asset_database(engine: "AsyncEngine", *, object_store: ObjectStore | None = None) -> None:
+    metadata = build_asset_sql_metadata(object_store=object_store)
+    await provision_sql(engine, metadata)
+    _logger.info("Asset SQL schema provisioned: tables=%s", len(metadata.tables))
 
 
-async def _provision_schema(engine: "AsyncEngine", metadata: "MetaData") -> None:
-    async with engine.begin() as connection:
-        await connection.run_sync(metadata.create_all)
-
-
-__all__ = ["build_schema_metadata", "provision_database"]
+__all__ = ["provision_asset_database", "provision_runtime_database"]

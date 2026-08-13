@@ -27,7 +27,7 @@ from ._execution import (
 
 @dataclass(frozen=True, slots=True)
 class TaskWorkflowNode:
-    task_id: str
+    node_id: str
     dependencies: "tuple[str, ...]"
     binding_digest: str
     budget_cost: int = 1
@@ -41,7 +41,7 @@ class TaskWorkflowNode:
                 validate_lease_owner(self.owner)
             except AIError as error:
                 raise AIError(ErrorCode.TASK_DAG_INVALID) from error
-        if not self.task_id.strip() or not self.binding_digest.strip() or len(self.dependencies) > 256 or len(set(self.dependencies)) != len(self.dependencies) or any(not dependency.strip() for dependency in self.dependencies) or self.budget_cost < 1 or self.fence < 0 or (self.fence and not self.owner.strip()) or (self.operation_id and not self.owner.strip()):
+        if not self.node_id.strip() or not self.binding_digest.strip() or len(self.dependencies) > 256 or len(set(self.dependencies)) != len(self.dependencies) or any(not dependency.strip() for dependency in self.dependencies) or self.budget_cost < 1 or self.fence < 0 or (self.fence and not self.owner.strip()) or (self.operation_id and not self.owner.strip()):
             raise AIError(ErrorCode.TASK_DAG_INVALID)
 
 
@@ -68,7 +68,7 @@ class TaskWorkflowInput:
 class TaskWorkflowResult:
     graph_id: str
     status: str
-    completed_task_ids: "tuple[str, ...]"
+    completed_node_ids: "tuple[str, ...]"
 
 
 class TaskActivity(Protocol):
@@ -90,8 +90,8 @@ class TaskWorkflow:
 
     async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
         self._graph_id = request.graph_id
-        if len(set(node.task_id for node in request.nodes)) != len(request.nodes):
-            raise ValueError("task workflow contains duplicate task ids")
+        if len(set(node.node_id for node in request.nodes)) != len(request.nodes):
+            raise ValueError("task workflow contains duplicate node ids")
         _validate_graph(request.nodes, request.limits)
         if self._cancelled:
             return TaskWorkflowResult(request.graph_id, "CANCELLED", ())
@@ -105,8 +105,8 @@ class TaskWorkflow:
             raise ValueError("task activity returned mismatched graph identity")
         return result
 
-    def cancel(self, cancel_request_id: str) -> TaskWorkflowResult:
-        if not cancel_request_id.strip():
+    def cancel(self, idempotency_key: str) -> TaskWorkflowResult:
+        if not idempotency_key.strip():
             raise ValueError("cancel request id is required")
         self._cancelled = True
         for child in tuple(self._active_children):
@@ -127,15 +127,15 @@ async def _run_task_children(
     nodes = request.nodes
     completed: set[str] = set()
     failed: set[str] = set()
-    pending = {node.task_id: node for node in nodes}
+    pending = {node.node_id: node for node in nodes}
     while pending:
         if is_cancelled():
             return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed)))
-        blocked = {task_id for task_id, node in pending.items() if any(dependency in failed for dependency in node.dependencies)}
+        blocked = {node_id for node_id, node in pending.items() if any(dependency in failed for dependency in node.dependencies)}
         failed.update(blocked)
-        for task_id in blocked:
-            pending.pop(task_id)
-        ready = tuple(sorted((node for node in pending.values() if all(dependency in completed for dependency in node.dependencies)), key=lambda node: node.task_id))
+        for node_id in blocked:
+            pending.pop(node_id)
+        ready = tuple(sorted((node for node in pending.values() if all(dependency in completed for dependency in node.dependencies)), key=lambda node: node.node_id))
         if not ready:
             if pending:
                 raise AIError(ErrorCode.TASK_GRAPH_DEADLOCK)
@@ -148,17 +148,17 @@ async def _run_task_children(
             handles = tuple(_temporal_workflow.start_child_workflow(
                 ExecutionWorkflow,
                 ExecutionWorkflowInput(
-                    execution_id=f"{request.graph_id}:{node.task_id}",
+                    execution_id=f"{request.graph_id}:{node.node_id}",
                     tenant_id=request.tenant_id or "task",
                     binding_digest=node.binding_digest,
                     bundle_digest=node.binding_digest,
-                    request_ref=request.request_ref or f"task:{request.graph_id}:{node.task_id}",
+                    request_ref=request.request_ref or f"task:{request.graph_id}:{node.node_id}",
                     worker_build=request.worker_build,
                     owner=node.owner or f"task-workflow:{request.graph_id}",
                     fence=node.fence or 1,
-                    operation_id=node.operation_id or f"task:{request.graph_id}:{node.task_id}",
+                    operation_id=node.operation_id or f"task:{request.graph_id}:{node.node_id}",
                 ),
-                id=f"{request.graph_id}:{node.task_id}",
+                id=f"{request.graph_id}:{node.node_id}",
                 retry_policy=_TemporalRetryPolicy(maximum_attempts=1),
             ) for node in batch)
             active_children.extend(handles)
@@ -176,10 +176,10 @@ async def _run_task_children(
             results = tuple(results_list)
             for node, result in zip(batch, results):
                 if result.status == "SUCCEEDED":
-                    completed.add(node.task_id)
+                    completed.add(node.node_id)
                 else:
-                    failed.add(node.task_id)
-                pending.pop(node.task_id)
+                    failed.add(node.node_id)
+                pending.pop(node.node_id)
     status = "SUCCEEDED" if len(completed) == len(nodes) else "FAILED"
     return TaskWorkflowResult(request.graph_id, status, tuple(sorted(completed)))
 
@@ -187,19 +187,19 @@ async def _run_task_children(
 def _validate_graph(nodes: tuple[TaskWorkflowNode, ...], limits: SwarmLimits) -> None:
     if len(nodes) > limits.max_nodes or sum(node.budget_cost for node in nodes) > limits.max_budget:
         raise AIError(ErrorCode.TASK_DAG_INVALID)
-    identifiers = {node.task_id for node in nodes}
+    identifiers = {node.node_id for node in nodes}
     if len(identifiers) != len(nodes) or any(dependency not in identifiers for node in nodes for dependency in node.dependencies):
         raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
-    remaining = {node.task_id: set(node.dependencies) for node in nodes}
+    remaining = {node.node_id: set(node.dependencies) for node in nodes}
     depth: dict[str, int] = {}
     while remaining:
-        ready = tuple(sorted(task_id for task_id, dependencies in remaining.items() if not dependencies))
+        ready = tuple(sorted(node_id for node_id, dependencies in remaining.items() if not dependencies))
         if not ready:
             raise AIError(ErrorCode.TASK_GRAPH_CYCLE)
-        for task_id in ready:
-            node = next(node for node in nodes if node.task_id == task_id)
-            depth[task_id] = 1 + max((depth[item] for item in node.dependencies), default=0)
-            remaining.pop(task_id)
+        for node_id in ready:
+            node = next(node for node in nodes if node.node_id == node_id)
+            depth[node_id] = 1 + max((depth[item] for item in node.dependencies), default=0)
+            remaining.pop(node_id)
         for dependencies in remaining.values():
             dependencies.difference_update(ready)
     if max(depth.values(), default=0) > limits.max_depth:
@@ -213,8 +213,8 @@ def _validate_child_results(
     if len(results) != len(request.nodes):
         raise ValueError("task child workflow count does not match the graph")
     for result, node in zip(results, request.nodes):
-        task_id = node.task_id
-        if result.execution_id != f"{request.graph_id}:{task_id}":
+        node_id = node.node_id
+        if result.execution_id != f"{request.graph_id}:{node_id}":
             raise ValueError("task child workflow returned mismatched identity")
         if result.status not in {"SUCCEEDED", "FAILED", "CANCELLED", "WAITING"}:
             raise ValueError("task child workflow returned an invalid status")

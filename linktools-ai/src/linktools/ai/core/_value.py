@@ -7,8 +7,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ..errors import AIError, ErrorCode
-from ._validation import validate_principal_id, validate_principal_kind, validate_tenant_id
 from ._paging import Page
+from ._validation import (
+    validate_principal_id,
+    validate_principal_kind,
+    validate_tenant_id,
+)
 
 
 def canonical_string_tuple(value: Sequence[str], *, field: str) -> "tuple[str, ...]":
@@ -141,12 +145,6 @@ class ExternalCallStatus(StrEnum):
     EXPIRED = "EXPIRED"
 
 
-class BlobStatus(StrEnum):
-    UPLOADING = "UPLOADING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-
-
 class OperationKind(StrEnum):
     EXECUTION_START = "EXECUTION_START"
     MODEL = "MODEL"
@@ -190,7 +188,7 @@ class StopReason(StrEnum):
 class PrincipalKind(StrEnum):
     USER = "user"
     SERVICE = "service"
-    LOCAL_TRUSTED = "LOCAL_TRUSTED"
+    LOCAL_TRUSTED = "local_trusted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,7 +207,7 @@ class Principal:
 
 
 __all__ = [
-    "ApprovalDecision", "ApprovalStatus", "BlobStatus", "EvaluationStatus",
+    "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",
     "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",

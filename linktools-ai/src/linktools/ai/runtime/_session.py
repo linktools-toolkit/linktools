@@ -80,7 +80,7 @@ class DefaultSessionService:
         resource = ResourceRef(ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
         digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest, "metadata": dict(request.metadata)})
-        operation = await self._begin_operation(request.create_request_id, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
+        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
         if operation.result_ref:
             current = await self._persistence.conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
             if current is not None:
@@ -148,7 +148,7 @@ class DefaultSessionService:
         return await self._execution.run_for_session(
             binding_digest,
             session_id,
-            ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key, memory_namespace=request.memory_namespace),
+            ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key, memory_scope=request.memory_scope),
         )
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
@@ -208,7 +208,7 @@ class DefaultSessionService:
         if any(key.startswith("linktools.ai.") for key in current.metadata if key not in request.metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
-        operation = await self._begin_operation(request.mutation_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
+        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
         if operation.result_ref:
             updated = await self._persistence.conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if updated is not None:
@@ -239,7 +239,7 @@ class DefaultSessionService:
     async def close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
         digest = canonical_sha256({"action": "session.close", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "force": request.force, "wait_timeout_seconds": request.wait_timeout_seconds})
-        operation = await self._begin_operation(request.close_request_id, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
+        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
         if operation.result_ref:
             closed = await self._persistence.conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if closed is not None:
@@ -267,7 +267,7 @@ class DefaultSessionService:
                     execution.execution_id,
                     CancelExecutionRequest(
                         request.principal,
-                        f"{request.close_request_id}/{execution.execution_id}",
+                        f"{request.idempotency_key}/{execution.execution_id}",
                         True,
                     ),
                 )

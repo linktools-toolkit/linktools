@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Normalized SQL backend for versioned raw Asset files."""
+"""SQL Asset backend and the Asset-owned SQL metadata builder."""
 
-import base64
-import binascii
+import asyncio
 import hashlib
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
 from ..core import validate_asset_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
+    MetadataChange,
     MetadataLoad,
-    build_sql_schema_metadata,
-    create_sql_storage_context,
-    SqlErrorKind,
-    SqlSchemaRegistry,
+    MetadataLoadMode,
+    ObjectStore,
+    SqlObjectStore,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
@@ -29,625 +28,510 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
-    classify_sql_error,
-    sql_blob,
+    create_sql_context,
+    provision_sql,
+    read_object,
     sql_digest,
-    sql_index,
     sql_integer_id,
     sql_table_options,
     sql_text_key,
-    storage_name,
-    SqlStorageContext,
-    register_sql_schema_contributor,
 )
-from ._backend import InMemoryAssetBackend
 from ._domain import AssetInfo, AssetKey, AssetRoot
+from ._object import AssetObjectKeyFactory
 
 if TYPE_CHECKING:
-    from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy import MetaData
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 _logger = environ.get_logger("ai.asset.sql")
-_ResultT = TypeVar("_ResultT")
-_SQL_BATCH_ROWS = 64
+_EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
-class SqlAssetTables:
-    entry: "Table"
-    change: "Table"
-    blob: "Table"
-    revision: "Table"
+def build_asset_sql_metadata(*, object_store: ObjectStore | None = None) -> "MetaData":
+    """Build only Asset tables, adding generic object tables for the built-in store."""
+
+    from sqlalchemy import (
+        Column,
+        DateTime,
+        Index,
+        MetaData,
+        String,
+        Table,
+        UniqueConstraint,
+        func,
+    )
+
+    metadata = MetaData()
+    digest = sql_digest()
+    integer_id = sql_integer_id()
+    _revision = Table(
+        "asset_revision",
+        metadata,
+        Column("id", integer_id, primary_key=True, autoincrement=True),
+        Column("namespace_key", digest, nullable=False),
+        Column("store_revision", integer_id, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+        UniqueConstraint("namespace_key", name="uk_asset_revision_namespace_key"),
+        **sql_table_options(),
+    )
+    columns = (
+        Column("id", integer_id, primary_key=True, autoincrement=True),
+        Column("namespace_key", digest, nullable=False),
+        Column("asset_key_hash", digest, nullable=False),
+        Column("asset_kind", sql_text_key(128), nullable=False),
+        Column("asset_id", sql_text_key(512), nullable=False),
+        Column("entry_revision", integer_id, nullable=False),
+        Column("store_revision", integer_id, nullable=False),
+        Column("etag", digest, nullable=False),
+        Column("size", integer_id, nullable=False),
+        Column("status", String(32), nullable=False),
+        Column("object_store_id", sql_text_key(128), nullable=True),
+        Column("object_key", sql_text_key(1024), nullable=True),
+        Column("object_digest", digest, nullable=True),
+        Column("object_size", integer_id, nullable=True),
+        Column("modified_at", DateTime(timezone=True), nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
+    )
+    _entry = Table(
+        "asset_entries",
+        metadata,
+        *columns,
+        UniqueConstraint("namespace_key", "asset_key_hash", name="uk_asset_entries_identity"),
+        Index("ix_asset_entries_revision", "namespace_key", "store_revision"),
+        **sql_table_options(),
+    )
+    history_columns = [column.copy() for column in columns]
+    _change = Table(
+        "asset_changes",
+        metadata,
+        *history_columns,
+        UniqueConstraint("namespace_key", "asset_key_hash", "entry_revision", name="uk_asset_changes_revision"),
+        Index("ix_asset_changes_revision", "namespace_key", "store_revision"),
+        Index("ix_asset_changes_history", "namespace_key", "asset_key_hash", "entry_revision"),
+        **sql_table_options(),
+    )
+    if object_store is None:
+        from ..storage import build_object_sql_metadata
+
+        object_metadata = build_object_sql_metadata()
+        for table in object_metadata.tables.values():
+            table.to_metadata(metadata)
+    return metadata
 
 
-class SqlAssetSchema:
-    """Register the SQL tables owned by Asset storage."""
-
-    @classmethod
-    def register_schema(cls, registry: SqlSchemaRegistry) -> SqlAssetTables:
-        from sqlalchemy import (
-            BigInteger,
-            Column,
-            DateTime,
-            Index,
-            String,
-            Table,
-            UniqueConstraint,
-        )
-        from sqlalchemy.sql import func
-
-        metadata = registry.metadata
-        integer_id = sql_integer_id()
-        key_hash = sql_digest()
-        namespace = sql_text_key(128)
-        asset_kind = sql_text_key(128)
-        asset_id = sql_text_key(512)
-
-        def timestamps() -> tuple[Column, Column]:
-            return (
-                Column(
-                    "updated_at",
-                    DateTime(timezone=True),
-                    nullable=False,
-                    server_default=func.current_timestamp(),
-                    onupdate=func.current_timestamp(),
-                    comment="Last update timestamp",
-                ),
-                Column(
-                    "created_at",
-                    DateTime(timezone=True),
-                    nullable=False,
-                    server_default=func.current_timestamp(),
-                    comment="Creation timestamp",
-                ),
-            )
-
-        revision = Table(
-            storage_name("asset_revision"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True, comment="Surrogate primary key"),
-            Column("namespace", namespace, nullable=False, comment="Asset namespace"),
-            Column("store_revision", BigInteger, nullable=False, comment="Asset store revision"),
-            *timestamps(),
-            UniqueConstraint("namespace", name="uk_namespace"),
-            **sql_table_options(),
-            comment="Asset store revision counters",
-        )
-        entry = Table(
-            storage_name("asset_entries"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True, comment="Surrogate primary key"),
-            Column("namespace", namespace, nullable=False, comment="Asset namespace"),
-            Column("asset_key_hash", key_hash, nullable=False, comment="Asset key digest"),
-            Column("asset_kind", asset_kind, nullable=False, comment="Asset kind"),
-            Column("asset_id", asset_id, nullable=False, comment="Asset file identifier"),
-            Column("entry_revision", BigInteger, nullable=False, comment="File entry revision"),
-            Column("store_revision", BigInteger, nullable=False, comment="Store revision at file update"),
-            Column("etag", key_hash, nullable=False, comment="File content digest"),
-            Column("size", BigInteger, nullable=False, comment="File content size"),
-            Column("status", String(16), nullable=False, comment="Current file status"),
-            Column("blob_digest", key_hash, nullable=True, comment="Content blob digest"),
-            Column("modified_at", DateTime(timezone=True), nullable=False, comment="File modification timestamp"),
-            *timestamps(),
-            UniqueConstraint("namespace", "asset_key_hash", name="uk_namespace_asset_key_hash"),
-            sql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
-            **sql_table_options(),
-            comment="Current Asset file entries",
-        )
-        change = Table(
-            storage_name("asset_changes"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True, comment="Surrogate primary key"),
-            Column("namespace", namespace, nullable=False, comment="Asset namespace"),
-            Column("asset_key_hash", key_hash, nullable=False, comment="Asset key digest"),
-            Column("asset_kind", asset_kind, nullable=False, comment="Asset kind"),
-            Column("asset_id", asset_id, nullable=False, comment="Asset file identifier"),
-            Column("entry_revision", BigInteger, nullable=False, comment="File entry revision"),
-            Column("store_revision", BigInteger, nullable=False, comment="Store revision at file update"),
-            Column("etag", key_hash, nullable=False, comment="File content digest"),
-            Column("size", BigInteger, nullable=False, comment="File content size"),
-            Column("status", String(16), nullable=False, comment="File status at this history revision"),
-            Column("blob_digest", key_hash, nullable=True, comment="Content blob digest"),
-            Column("modified_at", DateTime(timezone=True), nullable=False, comment="File modification timestamp"),
-            *timestamps(),
-            sql_index(Index("ix_namespace_asset_key_hash_entry_revision", "namespace", "asset_key_hash", "entry_revision")),
-            sql_index(Index("ix_namespace_store_revision", "namespace", "store_revision")),
-            sql_index(Index("ix_blob_digest", "blob_digest")),
-            **sql_table_options(),
-            comment="Asset file change history",
-        )
-        blob = Table(
-            storage_name("asset_blobs"),
-            metadata,
-            Column("id", integer_id, primary_key=True, autoincrement=True, comment="Surrogate primary key"),
-            Column("digest", key_hash, nullable=False, comment="Content digest"),
-            Column("content", sql_blob(), nullable=False, comment="File content"),
-            *timestamps(),
-            UniqueConstraint("digest", name="uk_digest"),
-            **sql_table_options(),
-            comment="Content-addressed Asset file blobs",
-        )
-        tables = SqlAssetTables(entry, change, blob, revision)
-        for table in (entry, change, blob, revision):
-            sql_index(Index("ix_updated_at", table.c.updated_at))
-            sql_index(Index("ix_created_at", table.c.created_at))
-            registry.add_table(table, owner="asset.sql")
-        return tables
-
-
-register_sql_schema_contributor("asset.sql", SqlAssetSchema.register_schema)
-
-
-def build_sql_asset_backend(context: "SqlStorageContext") -> "SqlAssetBackend":
-    """Build an Asset backend from the workspace-owned SQL context."""
-    if context.schema_manifest_digest is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return SqlAssetBackend(context.engine, namespace=context.namespace, context=context)
-
-
-class SqlAssetBackend(InMemoryAssetBackend):
-    """Persist current files, history, content blobs, and revisions separately."""
+class SqlAssetBackend:
+    """Direct SQL Asset backend with CAS and immutable change history."""
 
     def __init__(
         self,
         engine: "AsyncEngine",
         *,
         namespace: str,
-        context: "SqlStorageContext | None" = None,
+        object_store: ObjectStore | None = None,
     ) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         if not isinstance(engine, AsyncEngine):
-            raise ValueError("SqlAssetBackend requires an AsyncEngine")
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
             validate_asset_namespace(namespace)
         except AIError as error:
             raise ValueError("SQL asset namespace is invalid") from error
         digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-        super().__init__(AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest))
-        self._metadata, self._schema_digest = build_sql_schema_metadata()
-        self._tables = SqlAssetTables(
-            self._metadata.tables[storage_name("asset_entries")],
-            self._metadata.tables[storage_name("asset_changes")],
-            self._metadata.tables[storage_name("asset_blobs")],
-            self._metadata.tables[storage_name("asset_revision")],
-        )
-        if context is not None and (context.engine is not engine or context.namespace != namespace):
-            raise ValueError("Asset context identity mismatch")
-        self._context = context or create_sql_storage_context(engine, namespace)
-        self._owns_context = context is None
-        self._session_factory = self._context.sessions
+        self._root = AssetRoot(f"sql:{digest[:16]}", "sql", namespace, digest)
+        self._engine = engine
         self._namespace = namespace
-        self._state_loaded = False
+        self._namespace_key = digest
+        self._object_keys = AssetObjectKeyFactory(namespace)
+        self._object_store = object_store if object_store is not None else SqlObjectStore(engine)
+        self._metadata = build_asset_sql_metadata(object_store=object_store)
+        self._context = create_sql_context(engine)
+        self._lock = asyncio.Lock()
+        self._ready = False
+
+    @property
+    def root(self) -> AssetRoot:
+        return self._root
+
+    @property
+    def writable(self) -> bool:
+        return True
+
+    @property
+    def atomic_batch(self) -> bool:
+        return True
 
     async def initialize(self) -> None:
-        if self._context.schema_manifest_digest is None:
-            if not self._owns_context:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._context.initialize(
-                metadata=self._metadata,
-                schema_manifest_digest=self._schema_digest,
-            )
-        await self._refresh_state()
-        _logger.debug(
-            "SQL asset backend initialized: namespace=%s revision=%s",
-            self._namespace,
-            self._revision,
-        )
+        await provision_sql(self._engine, self._metadata)
+        await self._context.initialize()
+        from sqlalchemy import insert, select
+        from sqlalchemy.exc import IntegrityError
+
+        table = self._metadata.tables["asset_revision"]
+        try:
+            async with self._begin() as connection:
+                row = (await connection.execute(select(table.c.id).where(table.c.namespace_key == self._namespace_key))).first()
+                if row is None:
+                    await connection.execute(insert(table).values(namespace_key=self._namespace_key, store_revision=0))
+        except IntegrityError:
+            async with self._connect() as connection:
+                row = await connection.scalar(select(table.c.id).where(table.c.namespace_key == self._namespace_key))
+                if row is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+        await self._validate_persisted_objects()
+        self._ready = True
+        _logger.debug("SQL Asset backend initialized: namespace_key=%s", self._namespace_key)
+
+    async def close(self) -> None:
+        self._ready = False
+        await self._context.close()
 
     async def head_revision(self) -> StorageRevision:
-        session = self._session_factory()
-        async with session:
-            revision = await self._load_revision(session)
-        return StorageRevision(str(0 if revision is None else revision))
-
-    async def load_metadata(
-        self,
-        after_revision: "StorageRevision | None",
-    ) -> "MetadataLoad[AssetKey, AssetInfo]":
-        await self._refresh_state()
-        return await super().load_metadata(after_revision)
-
-    async def get(self, key: AssetKey) -> "bytes | None":
-        await self._refresh_state()
-        return await super().get(key)
-
-    async def get_many(self, keys: "Sequence[AssetKey]") -> "dict[AssetKey, bytes]":
-        await self._refresh_state()
-        return await super().get_many(keys)
-
-    async def stat(self, key: AssetKey) -> "AssetInfo | None":
-        await self._refresh_state()
-        return await super().stat(key)
-
-    async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
-        await self._refresh_state()
-        return await super().list_versions(key)
-
-    async def get_at_revision(
-        self,
-        key: AssetKey,
-        entry_revision: StorageEntryRevision,
-    ) -> "bytes | None":
-        await self._refresh_state()
-        return await super().get_at_revision(key, entry_revision)
-
-    async def get_at_version(self, key: AssetKey, version: int) -> "bytes | None":
-        await self._refresh_state()
-        return await super().get_at_version(key, version)
-
-    async def put(
-        self,
-        key: AssetKey,
-        value: bytes,
-        *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
-    ) -> "StoragePutResult[AssetInfo]":
-        return await self._mutate(
-            lambda backend: backend.put(
-                key,
-                value,
-                expected_entry_revision=expected_entry_revision,
-            )
-        )
-
-    async def delete(
-        self,
-        key: AssetKey,
-        *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
-    ) -> "StorageDeleteResult[AssetKey]":
-        return await self._mutate(
-            lambda backend: backend.delete(
-                key,
-                expected_entry_revision=expected_entry_revision,
-            )
-        )
-
-    async def reset(
-        self,
-        key: AssetKey,
-        *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
-    ) -> "StorageResetResult[AssetKey]":
-        return await self._mutate(
-            lambda backend: backend.reset(
-                key,
-                expected_entry_revision=expected_entry_revision,
-            )
-        )
-
-    async def apply_batch(
-        self,
-        changes: "Sequence[StorageChange[AssetKey, bytes]]",
-        *,
-        expected_revision: "StorageRevision | None" = None,
-    ) -> "StorageBatchResult[AssetInfo, AssetKey]":
-        return await self._mutate(
-            lambda backend: backend.apply_batch(
-                changes,
-                expected_revision=expected_revision,
-            )
-        )
-
-    async def _refresh_state(self) -> None:
-        session = self._session_factory()
-        async with session:
-            for _ in range(3):
-                revision = await self._load_revision(session)
-                resolved_revision = 0 if revision is None else revision
-                if self._state_loaded and resolved_revision == self._revision:
-                    return
-                raw = await self._load_state_for_revision(session, revision)
-                if await self._load_revision(session) == revision:
-                    break
-            else:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        self.import_state(raw)
-        self._state_loaded = True
-
-    async def _mutate(
-        self,
-        mutation: "Callable[[InMemoryAssetBackend], Awaitable[_ResultT]]",
-    ) -> _ResultT:
+        await self._ensure_ready()
         from sqlalchemy import select
+        table = self._metadata.tables["asset_revision"]
+        async with self._connect() as connection:
+            value = await connection.scalar(select(table.c.store_revision).where(table.c.namespace_key == self._namespace_key))
+        if value is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return StorageRevision(str(int(value)))
 
-        session = self._session_factory()
-        result: _ResultT
-        next_state: dict[str, object]
-        try:
-            async with session:
-                async with session.begin():
-                    state_row = (
-                        await session.execute(
-                            select(self._tables.revision.c.store_revision)
-                            .where(self._tables.revision.c.namespace == self._namespace)
-                            .with_for_update()
-                        )
-                    ).first()
-                    expected_revision = 0 if state_row is None else int(state_row[0])
-                    previous_state = await self._load_state_for_revision(
-                        session,
-                        None if state_row is None else int(state_row[0]),
-                    )
-                    previous_versions = previous_state["versions"]
-                    if not isinstance(previous_versions, list):
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    backend = InMemoryAssetBackend(self.root)
-                    backend.import_state(previous_state)
-                    result = await mutation(backend)
-                    next_state = backend.export_state()
-                    next_revision = int(next_state["store_revision"])
-                    if next_revision != expected_revision:
-                        next_versions = next_state["versions"]
-                        next_entries = next_state["entries"]
-                        if (
-                            not isinstance(next_versions, list)
-                            or len(next_versions) < len(previous_versions)
-                            or not isinstance(next_entries, list)
-                        ):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                        await self._persist_changes(
-                            session,
-                            next_versions[len(previous_versions) :],
-                            next_entries,
-                        )
-                        stored_revision = await self._context.dialect.upsert_increment(
-                            session,
-                            table=self._tables.revision,
-                            values={"namespace": self._namespace},
-                            column="store_revision",
-                            index_elements=("namespace",),
-                        )
-                        if stored_revision != next_revision:
-                            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        except AIError:
-            raise
-        except Exception as error:
-            kind = classify_sql_error(error)
-            if kind in {SqlErrorKind.INTEGRITY, SqlErrorKind.RETRYABLE_TRANSACTION}:
-                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
-            if kind is SqlErrorKind.DATABASE:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            raise
-        self.import_state(next_state)
-        self._state_loaded = True
-        _logger.debug(
-            "SQL asset mutation committed: namespace=%s revision=%s",
-            self._namespace,
-            next_state["store_revision"],
-        )
+    async def load_metadata(self, after_revision: StorageRevision | None) -> MetadataLoad[AssetKey, AssetInfo]:
+        await self._ensure_ready()
+        from sqlalchemy import select
+        revision_table = self._metadata.tables["asset_revision"]
+        entries_table = self._metadata.tables["asset_entries"]
+        async with self._connect() as connection:
+            value = await connection.scalar(select(revision_table.c.store_revision).where(revision_table.c.namespace_key == self._namespace_key))
+            if value is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current = int(value)
+            if after_revision is not None and int(after_revision) == current:
+                return MetadataLoad(MetadataLoadMode.PATCH, StorageRevision(str(current)), ())
+            rows = (await connection.execute(select(entries_table).where(entries_table.c.namespace_key == self._namespace_key))).mappings().all()
+        return MetadataLoad(MetadataLoadMode.REPLACE, StorageRevision(str(current)), tuple(MetadataChange(AssetKey(str(row["asset_kind"]), str(row["asset_id"])), self._info_from_row(row)) for row in rows))
+
+    async def get(self, key: AssetKey) -> bytes | None:
+        await self._ensure_ready()
+        row = await self._current_row(key)
+        if row is None:
+            return None
+        info = self._info_from_row(row)
+        if info.status is not StorageEntryStatus.NORMAL:
+            return None
+        return await read_object(self._object_store, self._object_key_from_row(row), expected_digest=info.etag, expected_size=info.size)
+
+    async def get_many(self, keys: Sequence[AssetKey]) -> dict[AssetKey, bytes]:
+        await self._ensure_ready()
+        result: dict[AssetKey, bytes] = {}
+        for key in keys:
+            value = await self.get(key)
+            if value is not None:
+                result[key] = value
         return result
 
-    async def _load_revision(self, session: "AsyncSession") -> "int | None":
+    async def stat(self, key: AssetKey) -> AssetInfo | None:
+        await self._ensure_ready()
+        row = await self._current_row(key)
+        return None if row is None else self._info_from_row(row)
+
+    async def put(self, key: AssetKey, value: bytes, *, expected_entry_revision: StorageEntryRevision | None = None) -> StoragePutResult[AssetInfo]:
+        return await self._mutate("put", key, value, expected_entry_revision=expected_entry_revision)
+
+    async def delete(self, key: AssetKey, *, expected_entry_revision: StorageEntryRevision | None = None) -> StorageDeleteResult[AssetKey]:
+        return await self._mutate("delete", key, None, expected_entry_revision=expected_entry_revision)
+
+    async def reset(self, key: AssetKey, *, expected_entry_revision: StorageEntryRevision | None = None) -> StorageResetResult[AssetKey]:
+        return await self._mutate("reset", key, None, expected_entry_revision=expected_entry_revision)
+
+    async def apply_batch(self, changes: Sequence[StorageChange[AssetKey, bytes]], *, expected_revision: StorageRevision | None = None) -> StorageBatchResult[AssetInfo, AssetKey]:
+        await self._ensure_ready()
+        async with self._lock:
+            return await self._apply_batch_direct(changes, expected_revision=expected_revision)
+
+    async def list_versions(self, key: AssetKey) -> tuple[VersionSummary, ...]:
+        await self._ensure_ready()
+        from sqlalchemy import select
+        table = self._metadata.tables["asset_changes"]
+        async with self._connect() as connection:
+            rows = (await connection.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.asset_key_hash == _asset_key_hash(key)).order_by(table.c.entry_revision))).mappings().all()
+        summaries = []
+        for row in rows:
+            info = self._info_from_row(row)
+            summaries.append(VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status))
+        return tuple(summaries)
+
+    async def get_at_revision(self, key: AssetKey, entry_revision: StorageEntryRevision) -> bytes | None:
+        await self._ensure_ready()
+        from sqlalchemy import select
+        table = self._metadata.tables["asset_changes"]
+        async with self._connect() as connection:
+            row = (await connection.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.asset_key_hash == _asset_key_hash(key), table.c.entry_revision == entry_revision.value))).mappings().first()
+        if row is None:
+            return None
+        info = self._info_from_row(row)
+        if info.status is not StorageEntryStatus.NORMAL:
+            return None
+        return await read_object(self._object_store, self._object_key_from_row(row), expected_digest=info.etag, expected_size=info.size)
+
+    async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
+        return await self.get_at_revision(key, StorageEntryRevision(version))
+
+    async def _mutate(self, operation: str, key: AssetKey, value: bytes | None, *, expected_entry_revision: StorageEntryRevision | None) -> object:
+        await self._ensure_ready()
+        if operation == "put" and value is None:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        async with self._lock:
+            from sqlalchemy import delete, insert, select, update
+
+            revision_table = self._metadata.tables["asset_revision"]
+            entry_table = self._metadata.tables["asset_entries"]
+            change_table = self._metadata.tables["asset_changes"]
+            content = bytes(value or b"")
+            object_key = self._object_keys.key(_etag(content)) if operation == "put" else None
+            if operation == "put":
+                await self._object_store.put(object_key, _one(content), expected_size=len(content), expected_digest=_etag(content))
+            async with self._begin() as connection:
+                revision_row = (await connection.execute(select(revision_table.c.store_revision).where(revision_table.c.namespace_key == self._namespace_key).with_for_update())).first()
+                if revision_row is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                current_row = (await connection.execute(select(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash == _asset_key_hash(key)).with_for_update())).mappings().first()
+                current = None if current_row is None else self._info_from_row(current_row)
+                _check_entry_revision(current, expected_entry_revision)
+                if not _operation_mutates(operation, current, _etag(content)):
+                    return _mutation_result(operation, key, current, StorageRevision(str(int(revision_row[0]))), changed=False)
+                store_revision = StorageRevision(str(int(revision_row[0]) + 1))
+                info = _next_info(self._root, key, content, current, operation, store_revision)
+                row = _row_for_info(info, self._object_store.store_id, object_key)
+                reservation = await connection.execute(
+                    update(revision_table)
+                    .where(
+                        revision_table.c.namespace_key == self._namespace_key,
+                        revision_table.c.store_revision == int(revision_row[0]),
+                    )
+                    .values(store_revision=int(store_revision.value), updated_at=datetime.now(timezone.utc))
+                )
+                if reservation.rowcount != 1:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await connection.execute(insert(change_table).values(**row))
+                await connection.execute(delete(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash == _asset_key_hash(key)))
+                await connection.execute(insert(entry_table).values(**row))
+            _logger.debug("SQL Asset mutation committed: namespace_key=%s revision=%s", self._namespace_key, store_revision)
+            return _mutation_result(operation, key, info, store_revision, changed=True)
+
+    async def _apply_batch_direct(self, changes: Sequence[StorageChange[AssetKey, bytes]], *, expected_revision: StorageRevision | None) -> StorageBatchResult[AssetInfo, AssetKey]:
+        from sqlalchemy import delete, insert, select, update
+
+        if len({change.key for change in changes}) != len(changes):
+            raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
+        revision_table = self._metadata.tables["asset_revision"]
+        entry_table = self._metadata.tables["asset_entries"]
+        change_table = self._metadata.tables["asset_changes"]
+        prepared: dict[AssetKey, bytes] = {}
+        for change in changes:
+            if change.operation.name == "PUT":
+                prepared[change.key] = bytes(change.value or b"")
+                digest = _etag(prepared[change.key])
+                await self._object_store.put(self._object_keys.key(digest), _one(prepared[change.key]), expected_size=len(prepared[change.key]), expected_digest=digest)
+        async with self._begin() as connection:
+            revision_row = (await connection.execute(select(revision_table.c.store_revision).where(revision_table.c.namespace_key == self._namespace_key).with_for_update())).first()
+            if revision_row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current_revision = StorageRevision(str(int(revision_row[0])))
+            if expected_revision is not None and expected_revision != current_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            rows = (await connection.execute(select(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash.in_([_asset_key_hash(change.key) for change in changes])))).mappings().all()
+            current = {AssetKey(str(row["asset_kind"]), str(row["asset_id"])): self._info_from_row(row) for row in rows}
+            for change in changes:
+                _check_entry_revision(current.get(change.key), change.expected_entry_revision)
+            mutates = tuple(_operation_mutates(change.operation.name.lower(), current.get(change.key), _etag(prepared.get(change.key, b""))) for change in changes)
+            if not any(mutates):
+                return StorageBatchResult(current_revision, True, tuple(_mutation_result(change.operation.name.lower(), change.key, current.get(change.key), current_revision, changed=False) for change in changes))
+            next_revision = StorageRevision(str(int(current_revision.value) + 1))
+            reservation = await connection.execute(
+                update(revision_table)
+                .where(
+                    revision_table.c.namespace_key == self._namespace_key,
+                    revision_table.c.store_revision == int(current_revision.value),
+                )
+                .values(store_revision=int(next_revision.value), updated_at=datetime.now(timezone.utc))
+            )
+            if reservation.rowcount != 1:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            results = []
+            for change, mutates_change in zip(changes, mutates, strict=True):
+                previous = current.get(change.key)
+                if not mutates_change:
+                    results.append(_mutation_result(change.operation.name.lower(), change.key, previous, next_revision, changed=False))
+                    continue
+                content = prepared.get(change.key, b"")
+                operation = change.operation.name.lower()
+                info = _next_info(self._root, change.key, content, previous, operation, next_revision)
+                row = _row_for_info(info, self._object_store.store_id, None if operation != "put" else self._object_keys.key(info.etag))
+                await connection.execute(insert(change_table).values(**row))
+                await connection.execute(delete(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash == _asset_key_hash(change.key)))
+                await connection.execute(insert(entry_table).values(**row))
+                results.append(_mutation_result(operation, change.key, info, next_revision, changed=True))
+        _logger.debug("SQL Asset batch committed: namespace_key=%s revision=%s", self._namespace_key, next_revision)
+        return StorageBatchResult(next_revision, True, tuple(results))
+
+    async def _validate_persisted_objects(self) -> None:
         from sqlalchemy import select
 
-        revision = await session.scalar(
-            select(self._tables.revision.c.store_revision).where(
-                self._tables.revision.c.namespace == self._namespace
-            )
-        )
-        return None if revision is None else int(revision)
-
-    async def _load_state_for_revision(
-        self,
-        session: "AsyncSession",
-        revision: "int | None",
-    ) -> dict[str, object]:
-        from sqlalchemy import literal, select, union_all
-
-        def record_select(table: "Table", source: str) -> object:
-            return select(
-                literal(source).label("_source"),
-                table.c.id.label("_record_id"),
-                table.c.asset_kind,
-                table.c.asset_id,
-                table.c.entry_revision,
-                table.c.store_revision,
-                table.c.etag,
-                table.c.size,
-                table.c.status,
-                table.c.modified_at,
-                self._tables.blob.c.content.label("content"),
-            ).select_from(
-                table.outerjoin(
-                    self._tables.blob,
-                    table.c.blob_digest == self._tables.blob.c.digest,
-                )
-            ).where(table.c.namespace == self._namespace)
-
-        rows = (
-            await session.execute(
-                union_all(
-                    record_select(self._tables.change, "change"),
-                    record_select(self._tables.entry, "entry"),
-                )
-            )
-        ).mappings().all()
-        change_rows = sorted(
-            (row for row in rows if row["_source"] == "change"),
-            key=lambda row: int(row["_record_id"]),
-        )
-        entry_rows = sorted(
-            (row for row in rows if row["_source"] == "entry"),
-            key=lambda row: int(row["_record_id"]),
-        )
-        if revision is None:
-            if change_rows or entry_rows:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset revision counter is missing")
-            return {"store_revision": 0, "entries": [], "versions": []}
-        return {
-            "store_revision": int(revision),
-            "entries": [_version_state(row) for row in entry_rows],
-            "versions": [_version_state(row) for row in change_rows],
-        }
-
-    async def _persist_changes(
-        self,
-        session: "AsyncSession",
-        changes: "Sequence[object]",
-        entries: "Sequence[object]",
-    ) -> None:
-        from sqlalchemy import insert, select
-
-        change_values: list[dict[str, object]] = []
-        entry_values: list[dict[str, object]] = []
-        blob_contents: dict[str, bytes] = {}
-        changed_hashes: set[str] = set()
-        for raw in changes:
-            values, content = _change_values(raw, self._namespace)
-            change_values.append(values)
-            changed_hashes.add(str(values["asset_key_hash"]))
-            digest = values["blob_digest"]
-            if digest is not None:
-                blob_contents[str(digest)] = content
-        for raw in entries:
-            values, content = _change_values(raw, self._namespace)
-            if str(values["asset_key_hash"]) not in changed_hashes:
-                continue
-            entry_values.append(values)
-            digest = values["blob_digest"]
-            if digest is not None:
-                blob_contents[str(digest)] = content
-        dialect = self._context.dialect
-        if blob_contents:
-            blob_values = tuple(
-                {"digest": digest, "content": content}
-                for digest, content in blob_contents.items()
-            )
-            blob_rows = []
-            for offset in range(0, len(blob_values), _SQL_BATCH_ROWS):
-                batch = blob_values[offset:offset + _SQL_BATCH_ROWS]
-                await dialect.insert_ignore_conflict_many(
-                    session,
-                    table=self._tables.blob,
-                    rows=batch,
-                    index_elements=("digest",),
-                )
-                digests = tuple(str(values["digest"]) for values in batch)
-                blob_rows.extend(
-                    (
-                        await session.execute(
-                            select(self._tables.blob.c.digest, self._tables.blob.c.content).where(
-                                self._tables.blob.c.digest.in_(digests)
-                            )
-                        )
+        entry_table = self._metadata.tables["asset_entries"]
+        change_table = self._metadata.tables["asset_changes"]
+        async with self._connect() as connection:
+            rows = list(
+                (
+                    await connection.execute(
+                        select(entry_table).where(entry_table.c.namespace_key == self._namespace_key)
                     )
-                    .all()
-                )
-            if len(blob_rows) != len(blob_contents):
+                ).mappings().all()
+            )
+            rows.extend(
+                (
+                    await connection.execute(
+                        select(change_table).where(change_table.c.namespace_key == self._namespace_key)
+                    )
+                ).mappings().all()
+            )
+        for row in rows:
+            info = self._info_from_row(row)
+            if info.status is not StorageEntryStatus.NORMAL:
+                continue
+            object_key = self._object_key_from_row(row)
+            stat = await self._object_store.stat(object_key)
+            if stat is None or stat.digest != info.etag or stat.size != info.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for digest, content in blob_rows:
-                if hashlib.sha256(bytes(content)).hexdigest() != str(digest):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        for offset in range(0, len(change_values), _SQL_BATCH_ROWS):
-            await session.execute(
-                insert(self._tables.change).values(
-                    change_values[offset:offset + _SQL_BATCH_ROWS]
-                )
+
+    async def _current_row(self, key: AssetKey) -> Mapping[str, object] | None:
+        from sqlalchemy import select
+        table = self._metadata.tables["asset_entries"]
+        async with self._connect() as connection:
+            return (await connection.execute(select(table).where(table.c.namespace_key == self._namespace_key, table.c.asset_key_hash == _asset_key_hash(key)))).mappings().first()
+
+    def _info_from_row(self, row: Mapping[str, object]) -> AssetInfo:
+        try:
+            status = StorageEntryStatus(str(row["status"]))
+            self._validate_object_columns(row, status)
+            return AssetInfo(
+                AssetKey(str(row["asset_kind"]), str(row["asset_id"])),
+                StorageEntryRevision(int(row["entry_revision"])),
+                StorageRevision(str(row["store_revision"])),
+                str(row["etag"]),
+                int(row["size"]),
+                status,
+                self._root.root_id,
+                self._root.digest,
+                _utc(row["modified_at"]),
             )
-        for offset in range(0, len(entry_values), _SQL_BATCH_ROWS):
-            await dialect.upsert_many(
-                session,
-                table=self._tables.entry,
-                rows=entry_values[offset:offset + _SQL_BATCH_ROWS],
-                set_columns=(
-                    "asset_kind",
-                    "asset_id",
-                    "entry_revision",
-                    "store_revision",
-                    "etag",
-                    "size",
-                    "status",
-                    "blob_digest",
-                    "modified_at",
-                ),
-                index_elements=("namespace", "asset_key_hash"),
-            )
+        except AIError:
+            raise
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+    def _validate_object_columns(self, row: Mapping[str, object], status: StorageEntryStatus) -> None:
+        fields = tuple(row.get(name) for name in ("object_store_id", "object_key", "object_digest", "object_size"))
+        if status is StorageEntryStatus.NORMAL:
+            if any(value is None for value in fields):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if str(row["object_store_id"]) != self._object_store.store_id:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            if str(row["object_key"]) != self._object_keys.key(str(row["etag"])):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if str(row["object_digest"]) != str(row["etag"]) or int(row["object_size"]) != int(row["size"]):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif any(value is not None for value in fields):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    def _object_key_from_row(self, row: Mapping[str, object]) -> str:
+        status = StorageEntryStatus(str(row["status"]))
+        self._validate_object_columns(row, status)
+        return str(row["object_key"])
+
+    async def _ensure_ready(self) -> None:
+        if not self._ready:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "asset store is not initialized")
+
+    @asynccontextmanager
+    async def _begin(self):
+        async with self._context.sessions.begin() as session:
+            yield session
+
+    @asynccontextmanager
+    async def _connect(self):
+        async with self._context.sessions() as session:
+            yield session
+
+async def _one(value: bytes):
+    yield value
 
 
-def _version_state(row: object) -> dict[str, object]:
-    values = row
-    content = values["content"]
-    try:
-        status = StorageEntryStatus(str(values["status"]))
-    except ValueError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset status is invalid") from error
-    if status is not StorageEntryStatus.NORMAL:
-        content_bytes = b""
-    elif content is None:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset content blob is missing")
-    else:
-        content_bytes = bytes(content)
-    etag = str(values["etag"])
-    if len(content_bytes) != int(values["size"]) or hashlib.sha256(content_bytes).hexdigest() != etag:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset content blob is invalid")
-    modified_at = values["modified_at"]
-    if not isinstance(modified_at, datetime):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "asset modification timestamp is invalid")
-    if modified_at.tzinfo is None:
-        modified_at = modified_at.replace(tzinfo=timezone.utc)
+def _check_entry_revision(current: AssetInfo | None, expected: StorageEntryRevision | None) -> None:
+    if expected is not None and (current is None or current.revision != expected):
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+
+def _operation_mutates(operation: str, current: AssetInfo | None, digest: str) -> bool:
+    if operation == "delete":
+        return current is not None and current.status is not StorageEntryStatus.DELETED
+    if operation == "reset":
+        return current is not None and current.status is not StorageEntryStatus.RESET
+    return current is None or current.status is not StorageEntryStatus.NORMAL or current.etag != digest
+
+
+def _next_info(root: AssetRoot, key: AssetKey, content: bytes, previous: AssetInfo | None, operation: str, store_revision: StorageRevision) -> AssetInfo:
+    status = StorageEntryStatus.NORMAL if operation == "put" else StorageEntryStatus.DELETED if operation == "delete" else StorageEntryStatus.RESET
+    value = content if status is StorageEntryStatus.NORMAL else b""
+    entry_revision = 1 if previous is None else previous.revision.value + 1
+    return AssetInfo(key, StorageEntryRevision(entry_revision), store_revision, _etag(value), len(value), status, root.root_id, root.digest, datetime.now(timezone.utc))
+
+
+def _row_for_info(info: AssetInfo, store_id: str, object_key: str | None) -> dict[str, object]:
+    normal = info.status is StorageEntryStatus.NORMAL
     return {
-        "kind": str(values["asset_kind"]),
-        "id": str(values["asset_id"]),
-        "revision": int(values["entry_revision"]),
-        "store_revision": str(values["store_revision"]),
-        "etag": etag,
-        "size": int(values["size"]),
-        "status": status.value,
-        "modified_at": modified_at.astimezone(timezone.utc).isoformat(),
-        "content": base64.b64encode(content_bytes).decode("ascii"),
+        "namespace_key": info.root_digest,
+        "asset_key_hash": _asset_key_hash(info.key),
+        "asset_kind": info.key.kind,
+        "asset_id": info.key.id,
+        "entry_revision": info.revision.value,
+        "store_revision": info.store_revision.value,
+        "etag": info.etag,
+        "size": info.size,
+        "status": info.status.value,
+        "object_store_id": store_id if normal else None,
+        "object_key": object_key if normal else None,
+        "object_digest": info.etag if normal else None,
+        "object_size": info.size if normal else None,
+        "modified_at": info.modified_at,
     }
 
 
-def _change_values(raw: object, namespace: str) -> tuple[dict[str, object], bytes]:
-    if not isinstance(raw, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    try:
-        kind = str(raw["kind"])
-        asset_id = str(raw["id"])
-        content = base64.b64decode(str(raw["content"]), validate=True)
-        etag = str(raw["etag"])
-        size = int(raw["size"])
-        status = StorageEntryStatus(str(raw["status"]))
-        modified_at = datetime.fromisoformat(str(raw["modified_at"]))
-        entry_revision = int(raw["revision"])
-        store_revision = int(str(raw["store_revision"]))
-    except (KeyError, TypeError, ValueError, binascii.Error) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-    if modified_at.tzinfo is None:
-        modified_at = modified_at.replace(tzinfo=timezone.utc)
-    if status is not StorageEntryStatus.NORMAL:
-        content = b""
-    if size != len(content) or hashlib.sha256(content).hexdigest() != etag:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    if status is not StorageEntryStatus.NORMAL and (size != 0 or etag != hashlib.sha256(b"").hexdigest()):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    key_hash = _asset_key_hash(AssetKey(kind, asset_id))
-    values = {
-        "namespace": namespace,
-        "asset_key_hash": key_hash,
-        "asset_kind": kind,
-        "asset_id": asset_id,
-        "entry_revision": entry_revision,
-        "store_revision": store_revision,
-        "etag": etag,
-        "size": size,
-        "status": status.value,
-        "blob_digest": None if status is not StorageEntryStatus.NORMAL else etag,
-        "modified_at": modified_at.astimezone(timezone.utc),
-    }
-    return values, content
+def _mutation_result(operation: str, key: AssetKey, info: AssetInfo | None, store_revision: StorageRevision, *, changed: bool) -> object:
+    if operation == "put":
+        if info is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return StoragePutResult(info, info.revision, store_revision, changed)
+    if operation == "delete":
+        return StorageDeleteResult(key, changed, info.revision if changed and info is not None else None, store_revision)
+    return StorageResetResult(key, changed, store_revision)
 
 
 def _asset_key_hash(key: AssetKey) -> str:
     return hashlib.sha256(f"{key.kind}\0{key.id}".encode("utf-8")).hexdigest()
 
 
-__all__ = [
-    "SqlAssetBackend",
-    "SqlAssetSchema",
-    "SqlAssetTables",
-    "build_sql_asset_backend",
-]
+def _etag(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _utc(value: object) -> datetime:
+    if not isinstance(value, datetime):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+__all__ = ["SqlAssetBackend", "build_asset_sql_metadata"]

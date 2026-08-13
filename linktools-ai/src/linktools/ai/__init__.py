@@ -4,8 +4,13 @@
 
 from .agent import AgentCompiler, AgentDefinition, AgentExecutor
 from .errors import AIError, ErrorCode, SafeError
-from .runtime import Runtime
-from .storage import RuntimeStorage, StorageDomain
+from .runtime import (
+    Runtime,
+    RuntimeDomain,
+    RuntimeStorage,
+    RuntimeStoragePlan,
+    RuntimeStorageRoute,
+)
 from .workspace import Workspace, open_workspace_runtime
 
 __all__ = [
@@ -15,8 +20,10 @@ __all__ = [
     "AgentExecutor",
     "ErrorCode",
     "Runtime",
+    "RuntimeDomain",
     "RuntimeStorage",
-    "StorageDomain",
+    "RuntimeStoragePlan",
+    "RuntimeStorageRoute",
     "SafeError",
     "Workspace",
     "open_workspace_runtime",
