@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""User/uid/gid/shell helpers (spec §14.1)."""
+"""User/uid/gid/shell helpers."""
 
 import os
 

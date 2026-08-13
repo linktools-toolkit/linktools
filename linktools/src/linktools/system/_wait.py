@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Wait helpers built on monotonic Timeout (spec §14.5 SYS-004)."""
+"""Wait helpers built on monotonic Timeout."""
 
 import subprocess
 import threading

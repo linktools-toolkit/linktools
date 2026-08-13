@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Event dispatch (spec §15.2).
+"""Event dispatch.
 
 :class:`EventBus` is the canonical dispatcher: ``on`` returns a cancellable
 subscription, ``emit`` honors a configurable exception policy, and callbacks run
@@ -13,9 +13,9 @@ import threading as _threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from typing import Callable
+    from typing import Any, Callable
 
-# Exception policies (spec  RUN-EVT-002).
+# Exception policies.
 LOG_AND_CONTINUE = "log_and_continue"  # default; CLI-friendly
 RAISE_FIRST = "raise_first"
 COLLECT = "collect"
@@ -36,7 +36,7 @@ def _get_logger():
 class Subscription(object):
     """A cancellable event subscription returned by :meth:`EventBus.on`."""
 
-    def __init__(self, bus, event, callback):
+    def __init__(self, bus: "EventBus", event: str, callback: "Callable") -> None:
         self._bus = bus
         self._event = event
         self._callback = callback
@@ -55,7 +55,7 @@ class Subscription(object):
 
 
 class EventBus(object):
-    """A thread-safe named-event dispatcher (spec §15.2)."""
+    """A thread-safe named-event dispatcher."""
 
     def __init__(self, exception_policy: str = LOG_AND_CONTINUE) -> None:
         if exception_policy not in _ALL_POLICIES:
@@ -90,7 +90,7 @@ class EventBus(object):
 
     # -- dispatch ----------------------------------------------------------
 
-    def emit(self, event: str, *args, **kwargs) -> None:
+    def emit(self, event: str, *args: "Any", **kwargs: "Any") -> None:
         logger = _get_logger()
         # Snapshot under the lock; invoke outside it so callbacks may
         # cancel themselves or register new handlers ( RUN-EVT-004).

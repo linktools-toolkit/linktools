@@ -38,7 +38,7 @@ def join_path(root_path: "PathType", *paths: str) -> "Path":
 
 
 def ensure_within(path: "PathType", root: "PathType") -> Path:
-    """Raise Error if ``path`` does not resolve within ``root`` (spec §17.2).
+    """Raise Error if ``path`` does not resolve within ``root``.
 
     Unlike ``is_sub_path`` (which returns a bool), this raises on violation and
     returns the resolved absolute Path on success.
@@ -92,7 +92,7 @@ def write_file(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_EN
 
 
 def atomic_write(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_ENCODING) -> None:
-    """Write ``data`` to ``path`` atomically (spec §3.7/§17.1 UTL-001).
+    """Write ``data`` to ``path`` atomically.
 
     temp-in-same-dir -> write -> flush -> fsync -> os.replace. A crash mid-write
     leaves the previous version (if any) intact and no partial file at ``path``.
@@ -120,7 +120,7 @@ def atomic_write(path: "PathType", data: "str | bytes", encoding: str = DEFAULT_
 
 
 def atomic_replace(source: "PathType", target: "PathType") -> None:
-    """Atomically replace ``target`` with ``source`` (spec §17.1 UTL-001)."""
+    """Atomically replace ``target`` with ``source``."""
     os.replace(str(source), str(target))
 
 
@@ -158,7 +158,7 @@ def clear_directory(path: "PathType") -> None:
 
 
 def safe_remove(path: "PathType", root: "PathType | None" = None) -> bool:
-    """Remove a file or directory after verifying it is within ``root`` (§17.5).
+    """Remove a file or directory after verifying it is within ``root``.
 
     ``root`` defaults to the parent directory of ``path``. A target resolving
     outside ``root`` raises :class:`linktools.errors.Error` and is left
@@ -183,5 +183,5 @@ def safe_remove(path: "PathType", root: "PathType | None" = None) -> bool:
 
 
 def safe_rmtree(path: "PathType", root: "PathType | None" = None) -> bool:
-    """Remove a directory tree after verifying it is within ``root`` (§17.5)."""
+    """Remove a directory tree after verifying it is within ``root``."""
     return safe_remove(path, root=root)

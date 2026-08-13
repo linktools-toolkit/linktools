@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Git progress parsing (spec §12.2 GitProgress)."""
+"""Git progress parsing."""
 
 import re
+from typing import TYPE_CHECKING
 
 from linktools import utils
+
+if TYPE_CHECKING:
+    from typing import Any
 
 _PROGRESS_RE = re.compile(rb'^(.+?):\s+(?:\s*\d+%\s+\((\d+)/(\d+)\))?')
 
@@ -13,7 +17,7 @@ _PROGRESS_RE = re.compile(rb'^(.+?):\s+(?:\s*\d+%\s+\((\d+)/(\d+)\))?')
 class GitProgressStream(object):
     """Writable stream that parses git progress output and updates rich bars."""
 
-    def __init__(self, progress_ctx):
+    def __init__(self, progress_ctx: "Any") -> None:
         self._progress = progress_ctx
         self._tasks = {}
         self._buf = b""

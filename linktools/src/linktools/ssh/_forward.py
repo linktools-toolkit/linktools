@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SSH local and reverse port forwarding (spec §13.7/§13.8).
+"""SSH local and reverse port forwarding.
 
 Both forwarders are :class:`~linktools.types.Stoppable`: ``stop()`` is
 idempotent, closes channels before the transport, and joins the server thread.
@@ -36,7 +36,7 @@ class SSHForward(Stoppable):
     forward_host = property(lambda self: self._forward_host)
     forward_port = property(lambda self: self._forward_port)
 
-    def __init__(self, client, local_host, local_port, forward_host, forward_port):
+    def __init__(self, client: "paramiko.SSHClient", local_host: str, local_port: int, forward_host: str, forward_port: int) -> None:
         self._local_host = local_host
         self._local_port = local_port
         self._forward_host = forward_host
@@ -136,7 +136,7 @@ class SSHReverse(Stoppable):
     forward_host = property(lambda self: self._forward_host)
     forward_port = property(lambda self: self._forward_port)
 
-    def __init__(self, client, forward_host, forward_port, remote_host, remote_port):
+    def __init__(self, client: "paramiko.SSHClient", forward_host: str, forward_port: int, remote_host: str, remote_port: "int | None") -> None:
         self._remote_host = remote_host
         self._remote_port = None
         self._forward_host = forward_host

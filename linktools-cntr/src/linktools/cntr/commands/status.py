@@ -156,8 +156,8 @@ def collect_status(
     services_by_container: "dict[str, list[Any]]" = {}
     if state is not None:
         for svc in state.services:
-            if svc.logical_container:
-                services_by_container.setdefault(svc.logical_container, []).append(svc)
+            for owner in svc.logical_containers:
+                services_by_container.setdefault(owner, []).append(svc)
 
     containers_payload = []
     for container in target:
@@ -196,7 +196,7 @@ def collect_status(
     orphans = []
     if all_services and state is not None:
         for svc in state.services:
-            if svc.logical_container is None:
+            if not svc.logical_containers:
                 orphans.append(dict(service=svc.service, runtime_name=svc.runtime_name,
                                     state=svc.state, health=svc.health, observed=True))
 

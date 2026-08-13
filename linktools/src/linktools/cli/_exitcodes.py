@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Unified CLI exit codes (spec §16.4 CLI-003).
+"""Unified CLI exit codes.
 
 Maps an exception to a process exit code by its domain, so callers get a stable
 contract::

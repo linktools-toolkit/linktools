@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Network helpers: LAN/WAN IP (spec §14.1, §14.4 SYS-003)."""
+"""Network helpers: LAN/WAN IP."""
 
 import re
 from typing import TYPE_CHECKING
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from typing import Any
 
 # Basic IPv4 shape check -- the WAN-IP service must return an address, not an
-# HTML error page (spec  do not silently return a wrong-page body).
+# HTML error page (do not silently return a wrong-page body).
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 
@@ -40,7 +40,7 @@ def get_wan_ip(url: "str | None" = None, timeout: float = 10.0,
                transport: "Any" = None) -> "str | None":
     """Return the public WAN IP via the configured service, or None on failure.
 
-    Spec §14.4 SYS-003: the URL comes from Environment config (DEFAULT_WAN_IP_URL)
+    The URL comes from Environment config (DEFAULT_WAN_IP_URL)
     unless overridden. The response is validated as an IPv4 address so a captive
     portal / error page is never returned as the IP. ``transport`` is injectable
     for tests (a callable ``(url, timeout) -> context manager yielding a response

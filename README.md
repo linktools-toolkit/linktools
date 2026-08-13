@@ -9,7 +9,7 @@ Linktools 是一套面向移动安全研究、逆向分析、合规检测工具�
 | [linktools](linktools/) | 核心框架：CLI 基础设施、环境管理、配置、工具管理 | [README](linktools/README.md) |
 | [linktools-common](linktools-common/) | 通用工具：`ct-env`、`ct-grep`、`ct-tools` | [README](linktools-common/README.md) |
 | [linktools-mobile](linktools-mobile/) | 移动设备：Android（`at-*`）和 iOS（`it-*`）工具 | [README](linktools-mobile/README.md) |
-| [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Podman 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
+| [linktools-cntr](linktools-cntr/) | 容器管理：Docker/Compose 部署工具（`ct-cntr`） | [README](linktools-cntr/README.md) |
 | [linktools-ai](linktools-ai/) | AI agent 运行时：session/execution/swarm，基于 pydantic-ai（纯库，无 CLI） | [README](linktools-ai/README.md) |
 
 ## 快速开始
@@ -71,7 +71,7 @@ $ python3 -m linktools
 /_/_/_/ /_/_/|_|\__/\____/\____/_/____/
 📎 All commands
 ├── 📖 ct: Common scripts
-│   ├── 📘 cntr: Deploy and manage Docker/Podman containers with ease
+│   ├── 📘 cntr: Deploy and manage Docker/Compose containers with ease
 │   ├── 📘 env: Manage and configure the Linktools environment
 │   ├── 👉 grep: Search and match files using regular expressions
 │   └── 👉 tools: Execute tools directly from remote URLs
@@ -173,7 +173,7 @@ $ ct-tools --set version=2.5.0 apktool
 
 ### 👉 ct-cntr
 
-Docker / Podman 容器部署和管理工具，详见 [linktools-cntr README](linktools-cntr/README.md)。（**依赖：** `linktools-cntr`）
+Docker / Compose 容器部署和管理工具，详见 [linktools-cntr README](linktools-cntr/README.md)。（**依赖：** `linktools-cntr`）
 
 <details>
 <summary>常用命令</summary>

@@ -158,7 +158,7 @@ class GitRepository(object):
 
     # -- writes (all serialised) ------------------------------------------
 
-    def add(self, *paths) -> None:
+    def add(self, *paths: "Any") -> None:
         with self._write_lock():
             porcelain.add(self._path, list(paths) or None)
 

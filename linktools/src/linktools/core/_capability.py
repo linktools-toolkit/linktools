@@ -9,6 +9,7 @@ from .. import metadata
 from ..errors import ModuleError
 
 if TYPE_CHECKING:
+    from typing import Any
     from collections.abc import Iterable
     from ..types import PathType
 
@@ -44,7 +45,7 @@ class Updater(metaclass=abc.ABCMeta):
 class DevelopUpdater(Updater):
 
     """Updater that operates against a local development checkout."""
-    def __init__(self, project_path: "PathType", max_depth: int = 2, **kwargs):
+    def __init__(self, project_path: "PathType", max_depth: int = 2, **kwargs: "Any") -> None:
         super().__init__(**kwargs)
         self._project_path = project_path
         self._max_depth = max_depth
@@ -93,7 +94,7 @@ class DevelopUpdater(Updater):
 class GitUpdater(Updater):
 
     """Updater that installs capability code from a Git repository."""
-    def __init__(self, repository_url: str = None, **kwargs):
+    def __init__(self, repository_url: "str | None" = None, **kwargs: "Any") -> None:
         super().__init__(**kwargs)
         self._repository_url = repository_url
 
@@ -143,7 +144,7 @@ class GitUpdater(Updater):
 class PypiUpdater(Updater):
 
     """Updater that installs capability code from a Python package."""
-    def __init__(self, **kwargs):
+    def __init__(self, **kwargs: "Any") -> None:
         super().__init__(**kwargs)
 
     def get_packages(self, name: str, deps: str) -> "Iterable[str]":

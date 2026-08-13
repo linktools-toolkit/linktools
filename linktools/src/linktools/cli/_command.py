@@ -1,32 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : entry.py
-@time    : 2022/12/18
-@site    :
-@software: PyCharm
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
-
 import abc
 import functools
 import inspect
@@ -45,7 +19,7 @@ from .argparse import BooleanOptionalAction, ArgParseComplete, ConfigAction, Con
 from ..core import environ, BaseCapability, ConfigField
 from ..decorator import cached_property
 from ..types import MISSING
-from ..rich import get_log_handler, init_logging, _is_rich_available
+from ..rich import is_rich_available
 from ..errors import CliError, ConfigCastError
 from ..runtime import import_module
 
@@ -69,9 +43,9 @@ def _debug_enabled(target: "BaseEnviron") -> bool:
 
 
 class CommandError(CliError):
-    """Base exception for command-line failures (spec §18.1 CliError domain).
+    """Base exception for command-line failures.
 
-    Reparented from ``Error`` so the CLI exit-code mapper (spec §16.4) treats
+    Reparented from ``Error`` so the CLI exit-code mapper treats
     command/user-input errors as exit 2 rather than internal (10).
     """
     pass
@@ -90,7 +64,7 @@ class NotFoundSubCommand(SubCommandError):
 class CommandParser(ArgumentParser):
 
     """ArgumentParser subclass that applies deferred config actions."""
-    def __init__(self, *args, command: "BaseCommand" = None, **kwargs):
+    def __init__(self, *args: "Any", command: "BaseCommand" = None, **kwargs: "Any") -> None:
         super().__init__(*args, **kwargs)
         self._command = command
 
@@ -134,7 +108,7 @@ class _CommandInfo:
 
 
 def _iter_entry_points(group: str, *, onerror: "ERROR_HANDLER" = "error"):
-    from ..core._entrypoint import select_entry_points
+    from ..core import select_entry_points
 
     eps = select_entry_points(group)
     for ep in eps:
@@ -279,6 +253,15 @@ class _SubCommandActionInfo:
 
 _subcommand_index: int = 0
 _subcommand_map: "dict[str, set[str]]" = {}
+_subcommand_method_infos: "dict[Callable[..., Any], _SubCommandMethodInfo]" = {}
+
+
+def _get_subcommand_method_info(func: "Callable[..., Any]") -> "_SubCommandMethodInfo":
+    info = _subcommand_method_infos.get(func)
+    if info is None:
+        info = _SubCommandMethodInfo()
+        _subcommand_method_infos[func] = info
+    return info
 
 
 class _SubCommandMethodInfo:
@@ -364,10 +347,7 @@ def subcommand(
     """
 
     def decorator(func: "Callable[..., int | None]") -> "Callable[..., int | None]":
-        if not hasattr(func, "__subcommand_info__"):
-            setattr(func, "__subcommand_info__", _SubCommandMethodInfo())
-
-        subcommand_info = func.__subcommand_info__
+        subcommand_info = _get_subcommand_method_info(func)
         subcommand_info.func = func
         subcommand_info.pass_args = pass_args
         subcommand_info.order = order
@@ -464,10 +444,7 @@ def subcommand_argument(
             **kwargs
         )
 
-        if not hasattr(func, "__subcommand_info__"):
-            setattr(func, "__subcommand_info__", _SubCommandMethodInfo())
-
-        subcommand_info = func.__subcommand_info__
+        subcommand_info = _get_subcommand_method_info(func)
         subcommand_info.arguments.append(subcommand_argument_info)
 
         return func
@@ -502,6 +479,8 @@ class SubCommand(metaclass=abc.ABCMeta):
         self.name = name
         self.description = description
         self.order = order or self.name
+        self._actions = None
+        self._print_help = None
 
     @property
     def has_parent(self) -> bool:
@@ -567,7 +546,7 @@ class SubCommandGroup(SubCommand):
             CommandParser: The operation result.
         """
         parser = type(self.name, help=self.description)
-        parser.set_defaults(**{f"__subcommand_help_{id(self):x}__": parser.print_help})
+        self._print_help = parser.print_help
         return parser
 
     def run(self, args: "Namespace") -> None:
@@ -579,11 +558,9 @@ class SubCommandGroup(SubCommand):
         Returns:
             Any: The operation result.
         """
-        attr_name = f"__subcommand_help_{id(self):x}__"
-        if not hasattr(args, attr_name):
-            raise CommandError("subcommand help not available")
-        func = getattr(args, attr_name)
-        return func()
+        if self._print_help is None:
+            raise CommandError("subcommand parser is not initialized")
+        return self._print_help()
 
 
 class CommandGroupRef(object):
@@ -601,12 +578,12 @@ class CommandGroupRef(object):
 
     def __init__(
         self,
-        id,
-        name=None,
-        description="",
-        parent=None,
-        order=None,
-    ):
+        id: "str | None",
+        name: str = None,
+        description: str = "",
+        parent: "str | None" = None,
+        order: "str | None" = None,
+    ) -> None:
         self.id = id
         self.name = name or id
         self.description = description or ""
@@ -745,9 +722,9 @@ class _SubCommandMethod(SubCommand):
     def create_parser(self, type: "Callable[..., CommandParser]") -> "CommandParser":
 
         actions = []
+        self._actions = actions
         method = getattr(self.target, self.info.func.__name__)
         parser = type(self.name, **self.info.kwargs)
-        parser.set_defaults(**{f"__subcommand_actions_{id(self):x}__": actions})
 
         for argument in reversed(self.info.arguments):
             argument_args = argument.args
@@ -762,6 +739,11 @@ class _SubCommandMethod(SubCommand):
                 if not argument_args or len(argument_args) == 1 and argument_args[0][0] not in prefix_chars:
                     dest = argument_args[0]
                     argument_kwargs["required"] = MISSING  # Positional arguments cannot set required here.
+                    # Positional + choices + no explicit metavar: Python 3.6's
+                    # argparse emits "argument None" for invalid-choice errors.
+                    # Setting metavar=DEST.upper() gives the error a stable name.
+                    if "choices" in argument_kwargs and "metavar" not in argument_kwargs:
+                        argument_kwargs["metavar"] = dest.replace("-", "_").upper()
                 else:
                     option_strings = []
                     long_option_strings = []
@@ -840,10 +822,9 @@ class _SubCommandMethod(SubCommand):
     def run(self, args: "Namespace") -> "int | None":
         method = getattr(self.target, self.info.func.__name__)
 
-        attr_name = f"__subcommand_actions_{id(self):x}__"
-        if not hasattr(args, attr_name):
-            raise CommandError("subcommand actions not available")
-        actions = getattr(args, attr_name)
+        actions = getattr(self, "_actions", None)
+        if actions is None:
+            raise CommandError("subcommand parser is not initialized")
 
         method_args = []
         if self.info.pass_args:
@@ -965,9 +946,9 @@ class SubCommandMixin:
                     if not hasattr(clazz, func_name):
                         continue
                     func = getattr(clazz, func_name)
-                    if not hasattr(func, "__subcommand_info__"):
+                    if func not in _subcommand_method_infos:
                         continue
-                    info: "_SubCommandMethodInfo" = func.__subcommand_info__
+                    info: "_SubCommandMethodInfo" = _subcommand_method_infos[func]
                     subcommand = _SubCommandMethod(info, target, parent_id=parent_id, order=info.order)
                     subcommand_map.setdefault(subcommand.name, list())
                     subcommand_map[info.name].append(subcommand)
@@ -1036,7 +1017,7 @@ class SubCommandMixin:
                     raise SubCommandError(f"{subcommand} has no parent subparser")
 
             parser = subcommand.create_parser(type=functools.partial(parent_parser.add_parser, command=self))
-            parser.set_defaults(**{f"__subcommand_{id(self):x}__": subcommand})
+            parser.set_defaults(**{f"linktools_subcommand_{id(self):x}": subcommand})
             self.init_global_arguments(parser)
 
             if subcommand.is_group:
@@ -1046,13 +1027,13 @@ class SubCommandMixin:
 
             # Handle BaseCommand separately because init_arguments may add subcommands.
             if isinstance(subcommand, SubCommandWrapper):
-                sub_subcommand_infos = parser.get_default(f"__subcommands_{id(subcommand.command):x}__")
+                sub_subcommand_infos = parser.get_default(f"linktools_subcommands_{id(subcommand.command):x}")
                 if sub_subcommand_infos:
                     subcommand_info.children.extend(
                         sub_subcommand_infos
                     )
 
-        target_parser.set_defaults(**{f"__subcommands_{id(self):x}__": subcommand_infos})
+        target_parser.set_defaults(**{f"linktools_subcommands_{id(self):x}": subcommand_infos})
 
         return subcommand_infos
 
@@ -1065,7 +1046,7 @@ class SubCommandMixin:
         Returns:
             Optional[SubCommand]: The operation result.
         """
-        name = f"__subcommand_{id(self):x}__"
+        name = f"linktools_subcommand_{id(self):x}"
         if hasattr(args, name):
             subcommand = getattr(args, name)
             if isinstance(subcommand, SubCommand):
@@ -1106,7 +1087,7 @@ class SubCommandMixin:
         Raises:
             Exception: Propagates errors raised while completing the operation.
         """
-        name = f"__subcommands_{id(self):x}__"
+        name = f"linktools_subcommands_{id(self):x}"
         if not hasattr(args, name):
             raise SubCommandError("No subcommand has been added yet")
 
@@ -1119,7 +1100,7 @@ class SubCommandMixin:
         elif self.description:
             description = self.description
 
-        if _is_rich_available():
+        if is_rich_available():
             from rich import get_console
             from rich.tree import Tree
 
@@ -1414,18 +1395,14 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    handler = get_log_handler()
-                    if handler:
-                        handler.show_time = value
+                    self.command.environ.logging.set_show_time(value)
 
         class LogLevelAction(BooleanOptionalAction):
 
             def __call__(self, parser, namespace, values, option_string=None):
                 if option_string in self.option_strings:
                     value = not option_string.startswith("--no-")
-                    handler = get_log_handler()
-                    if handler:
-                        handler.show_level = value
+                    self.command.environ.logging.set_show_level(value)
 
         group = parser.add_argument_group(title="log options")
         group.add_argument(f"{prefix}{prefix}verbose", action=VerboseAction, nargs=0, const=True, dest=SUPPRESS,
@@ -1438,7 +1415,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
         group.add_argument(f"{prefix}{prefix}yes", action=NoInputAction, nargs=0, const=True, dest=SUPPRESS,
                            help="answer yes/accept defaults to all prompts")
 
-        if get_log_handler():
+        if self.environ.logging.get_handler() is not None:
             group.add_argument(f"{prefix}{prefix}time", action=LogTimeAction, dest=SUPPRESS,
                                help="show log time")
             group.add_argument(f"{prefix}{prefix}level", action=LogLevelAction, dest=SUPPRESS,
@@ -1560,12 +1537,14 @@ class CommandMain:
         level: int = logging.INFO,
         log_file: "str | None" = None,
     ) -> None:
-        """Initialize logging for command execution."""
-        init_logging(
+        """Initialize logging for command execution through the command's
+        own LoggingManager."""
+        self.command.environ.logging.configure(
             level=level,
+            log_file=log_file,
+            rich=is_rich_available(),
             show_time=self.show_log_time,
             show_level=self.show_log_level,
-            log_file=log_file,
         )
 
     def __call__(self, args: "list[str]" = None) -> int:
@@ -1597,7 +1576,7 @@ class CommandMain:
             )
             result = 130  # https://tldp.org/LDP/abs/html/exitcodes.html#EXITCODESREF
         except Exception:
-            if _debug_enabled(self.command.environ) and _is_rich_available():
+            if _debug_enabled(self.command.environ) and is_rich_available():
                 from rich import get_console
                 get_console().print_exception(show_locals=True)
             else:

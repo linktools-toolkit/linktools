@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from ._cache import CacheStore, CacheNamespace, CacheCodec, JsonCodec, BytesCodec
-from ._config_store import ConfigStore
+from ._config_store import ConfigStore, ConfigNamespace
 from ._config import (
     Config,
     ConfigField,
@@ -43,6 +43,7 @@ from ._capability import Updater, DevelopUpdater, GitUpdater, PypiUpdater, BaseC
 from ._profile import (
     ProjectProfile,
 )
+from ._entrypoint import select_entry_points
 
 __all__ = [
     # environ
@@ -56,7 +57,7 @@ __all__ = [
     "EnvironmentSource", "RuntimeOverrideSource", "PersistentSource", "FileSource", "DictSource",
     "DefaultSource", "ConfigProvider", "AliasProvider", "LazyProvider", "PromptProvider",
     "ConfirmProvider", "ErrorProvider", "ChainProvider", "ResolvedConfig",
-    "ConfigStore", "redact_config_value",
+    "ConfigStore", "ConfigNamespace", "redact_config_value",
     # download
     "DownloadRequest", "DownloadResult", "DownloadManager", "DownloadValidator",
     "SizeValidator", "HashValidator", "CompositeValidator", "FileTransport",
@@ -66,4 +67,6 @@ __all__ = [
     # capability
     "BaseCapability", "Capability", "Updater", "DevelopUpdater", "GitUpdater",
     "PypiUpdater",
+    # entrypoint
+    "select_entry_points",
 ]

@@ -44,7 +44,7 @@ def get_file_md5(path: "PathType") -> str:
 
 
 def verify_file(path: "PathType", digest: str, algorithm: "Literal['md5', 'sha1', 'sha256']" = "sha256") -> bool:
-    """Return True if the file's digest matches (spec §17.3 UTL-003).
+    """Return True if the file's digest matches.
 
     Constant-time comparison so a timing oracle cannot leak the expected digest.
     """

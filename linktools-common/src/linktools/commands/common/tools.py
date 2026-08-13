@@ -1,34 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : TTools.py
-@time    : 2018/12/11
-@site    :  
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
-from typing import TYPE_CHECKING
 import json
 import subprocess
+from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandMain
 from linktools.cli.argparse import KeyValueAction
@@ -39,11 +14,8 @@ if TYPE_CHECKING:
     from linktools.cli import CommandParser
 
 
-
 class Command(BaseCommand):
-    """
-    Execute tools directly from remote URLs
-    """
+    """Execute tools directly from remote URLs."""
 
     @property
     def main(self) -> "CommandMain":
@@ -76,11 +48,11 @@ class Command(BaseCommand):
             tool_parser.set_defaults(tool_name=tool_name)
 
     def run(self, args: "Namespace") -> "int | None":
-
         tool_name, tool_args = args.tool_name, args.tool_args
-        if args.configs:
-            raise TypeError("tool configuration overrides must be stored in tools.json")
-        tool = self.environ.get_tool(tool_name)
+        tool = self.environ.get_tool(
+            tool_name,
+            **(args.configs or {}),
+        )
 
         if args.config:
             self.logger.info(json.dumps({

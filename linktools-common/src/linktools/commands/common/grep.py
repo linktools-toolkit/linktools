@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : TGrep.py
-@time    : 2018/12/25
-@site    :  
-@software: PyCharm 
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
 import functools
 import os
 import re
@@ -42,6 +17,7 @@ from linktools.core import environ
 from linktools.cli import BaseCommand, CommandError
 
 if TYPE_CHECKING:
+    from typing import Any
     from argparse import Namespace
     from collections.abc import Callable
     from linktools.cli import CommandParser
@@ -49,7 +25,7 @@ if TYPE_CHECKING:
 pprint = functools.partial(get_console().print, sep="", markup=False, highlight=NullHighlighter)
 
 
-def _load_grep_optional_deps():
+def _load_grep_optional_deps() -> "tuple[Any, Any]":
     """Load the optional ``lief``/``python-magic`` deps at use time.
 
     They are optional (``linktools-common[lief]``); importing them at module
@@ -84,7 +60,7 @@ class GrepHandler:
                     return True
                 except (KeyboardInterrupt, EOFError):
                     raise
-                except:
+                except Exception:
                     return False
 
             for mimetype in mimetypes:
@@ -119,7 +95,7 @@ class GrepHandler:
 
 class GrepMatcher:
 
-    def __init__(self, pattern: "re.Pattern", lief=None, magic=None):
+    def __init__(self, pattern: "re.Pattern", lief: "Any" = None, magic: "Any" = None):
         self.pattern = pattern
         if lief is None or magic is None:
             lief, magic = _load_grep_optional_deps()
@@ -170,8 +146,8 @@ class GrepMatcher:
         while os.path.exists(dirname):
             dirname = dirname + " "
         try:
-            zip_file = zipfile.ZipFile(filename, "r")
-            zip_file.extractall(dirname)
+            with zipfile.ZipFile(filename, "r") as zip_file:
+                zip_file.extractall(dirname)
             self.match(dirname)
         finally:
             shutil.rmtree(dirname, ignore_errors=True)

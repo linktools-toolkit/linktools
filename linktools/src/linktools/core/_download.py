@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Download subsystem: DownloadManager + UrlFile thin adapter (compact-layout spec §2.2).
+"""Download subsystem: DownloadManager + UrlFile thin adapter.
 
 Merged from the former linktools/_download.py and core/_url.py. UrlFile is a
 thin adapter over DownloadManager (atomic landing / resume / hash validation).
@@ -38,7 +38,7 @@ _CHUNK = 1 << 16  # 64 KiB
 # ---------------------------------------------------------------------------
 
 class DownloadRequest(object):
-    """A download target (spec §9.2)."""
+    """A download target."""
 
     def __init__(self, url: str, destination: "PathLike", sha256: "str | None" = None, size: "int | None" = None,
                  timeout: "float | None" = None, resume: bool = True, headers: "dict[str, str] | None" = None, max_retries: int = 3) -> None:
@@ -144,7 +144,7 @@ class FileTransport(DownloadTransport):
 
 
 class HttpTransport(DownloadTransport):
-    """HTTP fetch with optional resume (Range + If-Range, spec §9.5)."""
+    """HTTP fetch with optional resume (Range + If-Range)."""
 
     def __init__(self, headers: "dict[str, str] | None" = None) -> None:
         self._base_headers = dict(headers or {})
@@ -387,7 +387,7 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @cached_property(lock=True)
     def _lock(self):
-        # Per-download lock via the unified LockManager (spec 
+        # Per-download lock via the unified LockManager (spec
         from linktools.utils import get_hash_ident
         ident = "%s_%s" % (get_hash_ident(self._url), guess_file_name(self._url)[-100:])
         return self._environ.locks.process_lock("download:" + ident)
@@ -398,7 +398,7 @@ class UrlFile(metaclass=abc.ABCMeta):
     def save(self,
              dest_dir: "PathType" = None, dest_name: str = None,
              timeout: "TimeoutType" = None, max_retries: int = 3,
-             validators: "UrlFileValidatorType" = None, **kwargs) -> str:
+             validators: "UrlFileValidatorType" = None, **kwargs: "Any") -> str:
         """Download (or copy) the file and return its local path.
 
         With ``dest_dir`` the file lands at ``dest_dir/(dest_name or url name)``;
@@ -535,7 +535,7 @@ def _adapt_validators(validators):
     many = list(validators) if isinstance(validators, Iterable) and single is None else None
 
     class _Adapted(DownloadValidator):
-        def __init__(self, inner):
+        def __init__(self, inner: "Any") -> None:
             self._inner = inner  # UrlFile.Validator or list thereof
 
         def validate(self, path: "PathLike") -> None:

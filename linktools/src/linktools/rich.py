@@ -1,46 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : logging.py
-@time    : 2020/03/22
-@site    :
-@software: PyCharm
+"""Terminal UI: prompt/confirm/choose, progress bars, and logging delegates.
 
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
+Logging handler ownership lives in ``core/_logging.py``; this module provides
+UI helpers and thin compatibility wrappers (``init_logging``,
+``get_log_handler``, ``is_rich_available``) that delegate there.
 """
 import getpass
-import logging
 import os
 import re
 import sys
-from abc import ABCMeta, abstractmethod
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from linktools.types import MISSING
 from linktools.errors import CliError
 
 #  CLI-006: when True, prompt/confirm/choose never block for input.
-# Set by the CLI framework when --no-input / --yes is passed. prompt/choose
-# without a default raise CliError; confirm defaults to True.
 _no_input = False
 
 
@@ -56,7 +33,6 @@ def is_no_input() -> bool:
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from typing import Any, Dict, TextIO, TypeVar
     from rich.console import ConsoleRenderable, Console
     from rich.prompt import PromptBase
     from rich.text import Text, TextType
@@ -70,7 +46,8 @@ if TYPE_CHECKING:
 _rich_available: "bool | None" = None
 
 
-def _is_rich_available() -> bool:
+def is_rich_available() -> bool:
+    """Return whether rich is importable and not suppressed (argcomplete)."""
     global _rich_available
     if _rich_available is None:
         from linktools.cli.argparse import ArgParseComplete
@@ -85,305 +62,31 @@ def _is_rich_available() -> bool:
     return _rich_available
 
 
-class _FakeText:
-    """Minimal Text substitute for when rich is not installed."""
-
-    def __init__(self, text="", style=None):
-        self._text = str(text)
-
-    def __len__(self):
-        return len(self._text)
-
-    def __str__(self):
-        return self._text
-
-    def __add__(self, other):
-        return _FakeText(self._text + str(other))
-
-    @property
-    def cell_len(self) -> int:
-        return len(self._text)
-
-    @classmethod
-    def from_markup(cls, text: str, style: "str | None" = None) -> "_FakeText":
-        clean = re.sub(r'\[/?[^\]]*\]', '', str(text))
-        return cls(clean)
-
-    def append(self, text: str, style: "str | None" = None) -> "_FakeText":
-        self._text += str(text)
-        return self
-
-    def split(self, separator: "str | None" = None, include_separator: bool = False, allow_blank: bool = False) -> "list[_FakeText]":
-        parts = self._text.split('\n')
-        return [_FakeText(p) for p in parts]
-
-    def pad_left(self, n: int) -> "_FakeText":
-        self._text = " " * n + self._text
-        return self
-
-
-class _LogHandlerMixin(metaclass=ABCMeta):
-
-    @property
-    @abstractmethod
-    def show_level(self) -> bool:
-        ...
-
-    @show_level.setter
-    @abstractmethod
-    def show_level(self, value: bool) -> None:
-        ...
-
-    @property
-    @abstractmethod
-    def show_time(self) -> bool:
-        ...
-
-    @show_time.setter
-    @abstractmethod
-    def show_time(self, value: bool) -> None:
-        ...
-
-    @abstractmethod
-    def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
-        ...
-
-    @abstractmethod
-    def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
-        ...
-
-
-def _get_rich_log_handler_class():
-    from rich.logging import RichHandler
-    from rich.text import Text
-
-    class LogHandler(RichHandler, _LogHandlerMixin):
-
-        def __init__(self, show_level: bool, show_time: bool):
-            super().__init__(
-                show_path=False,
-                show_level=show_level,
-                show_time=show_time,
-                omit_repeated_times=False,
-                log_time_format=self.make_time_text
-                # markup=True,
-                # highlighter=NullHighlighter()
-            )
-
-            self._styles = {
-                logging.DEBUG: {
-                    "level": "black on blue",
-                    "message": "deep_sky_blue1",
-                },
-                logging.INFO: {
-                    "level": "black on green",
-                    "message": None,
-                },
-                logging.WARNING: {
-                    "level": "black on yellow",
-                    "message": "magenta1",
-                },
-                logging.ERROR: {
-                    "level": "black on red1",
-                    "message": "red1",
-                },
-                logging.CRITICAL: {
-                    "level": "black on red1",
-                    "message": "red1",
-                },
-            }
-
-        @property
-        def show_level(self) -> bool:
-            return self._log_render.show_level
-
-        @show_level.setter
-        def show_level(self, value: bool) -> None:
-            self._log_render.show_level = value
-
-        @property
-        def show_time(self) -> bool:
-            return self._log_render.show_time
-
-        @show_time.setter
-        def show_time(self, value: bool) -> None:
-            self._log_render.show_time = value
-
-        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> "Text":
-            if not time:
-                time = datetime.now()
-            elif isinstance(time, (int, float)):
-                time = datetime.fromtimestamp(time)
-            if not style:
-                style = "log.time"
-            if not format:
-                if self.formatter:
-                    format = self.formatter.datefmt
-                if not format:
-                    format = "[%x %X]"
-            return Text(time.strftime(format), style=style)
-
-        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> "Text":
-            if not level_name:
-                level_name = logging.getLevelName(level_no)
-            if not style:
-                style = self.get_level_style(level_no)
-                if not style:
-                    style = "log.level"
-            return Text(f" {level_name[:1].upper()} ", style=style)
-
-        def get_time_style(self, level_no: int) -> "str | None":
-            style = self._styles.get(level_no)
-            if style:
-                return style.get("time")
-            return None
-
-        def get_level_style(self, level_no: int) -> "str | None":
-            style = self._styles.get(level_no)
-            if style:
-                return style.get("level")
-            return None
-
-        def get_message_style(self, level_no: int) -> "str | None":
-            style = self._styles.get(level_no)
-            if style:
-                return style.get("message")
-            return None
-
-        def get_level_text(self, record: "logging.LogRecord") -> "Text":
-            level_name = record.levelname
-            level_no = record.levelno
-            return self.make_level_text(level_no, level_name)
-
-        def render_message(self, record: "logging.LogRecord", message: str) -> "ConsoleRenderable":
-            indent = getattr(record, "indent", 0)
-            if indent > 0:
-                message = " " * indent + message
-                message = message.replace(os.linesep, os.linesep + " " * indent)
-
-            use_markup = getattr(record, "markup", self.markup)
-            style = getattr(record, "style", self.get_message_style(record.levelno))
-            message_text = Text.from_markup(message, style=style) if use_markup else Text(message, style=style)
-
-            highlighter = getattr(record, "highlighter", False)
-            if highlighter and self.highlighter:
-                message_text = self.highlighter(message_text)
-
-            return message_text
-
-    return LogHandler
-
-
-def _get_plain_log_handler_class():
-    class LogHandler(logging.StreamHandler, _LogHandlerMixin):
-
-        def __init__(self, show_level: bool, show_time: bool):
-            super().__init__()
-            self._show_level = show_level
-            self._show_time = show_time
-
-        @property
-        def show_level(self) -> bool:
-            return self._show_level
-
-        @show_level.setter
-        def show_level(self, value: bool) -> None:
-            self._show_level = value
-
-        @property
-        def show_time(self) -> bool:
-            return self._show_time
-
-        @show_time.setter
-        def show_time(self, value: bool) -> None:
-            self._show_time = value
-
-        def make_time_text(self, time: "float | datetime | None" = None, format: str = None, style: str = None) -> _FakeText:
-            if not time:
-                time = datetime.now()
-            elif isinstance(time, (int, float)):
-                time = datetime.fromtimestamp(time)
-            if not format:
-                format = "[%x %X]"
-            return _FakeText(time.strftime(format))
-
-        def make_level_text(self, level_no: int, level_name: str = None, style: str = None) -> _FakeText:
-            if not level_name:
-                level_name = logging.getLevelName(level_no)
-            return _FakeText(f" {level_name[:1].upper()} ")
-
-    return LogHandler
-
-
 def init_logging(
-    level: int = logging.INFO,
+    level: int = 20,
     show_level: bool = False,
     show_time: bool = False,
     log_file: "str | None" = None,
 ) -> None:
-    """Initialize root logging with rich output when available.
+    """Initialize root logging through the LoggingManager.
 
-    Args:
-        level (int): The level value.
-        show_level (bool): The show_level value.
-        show_time (bool): The show_time value.
-        log_file (str | None): Optional file receiving all configured log records.
+    Delegates to ``environ.logging.configure``; the 20 default matches
+    ``logging.INFO`` without importing ``logging`` at module scope.
     """
-    if log_file is not None:
-        logging.basicConfig(
-            level=level,
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
-            filename=str(log_file),
-            encoding="utf-8",
-        )
-        return
-
-    if not _is_rich_available():
-        items = []
-        if show_time:
-            items.append("[%(asctime)s]")
-        if show_level:
-            items.append("%(levelname)s")
-        items.extend(["%(module)s", "%(funcName)s", "%(message)s"])
-        log_handler_class = _get_plain_log_handler_class()
-        logging.basicConfig(
-            level=level,
-            format=" ".join(items),
-            datefmt="%H:%M:%S",
-            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-        )
-
-        return
-
-    from rich import get_console
-
-    if get_console().is_terminal:
-        log_handler_class = _get_rich_log_handler_class()
-        logging.basicConfig(
-            level=level,
-            format="%(message)s",
-            datefmt="[%X]",
-            handlers=[log_handler_class(show_level=show_level, show_time=show_time)],
-        )
+    from linktools.core import environ
+    environ.logging.configure(
+        level=level,
+        log_file=log_file,
+        rich=is_rich_available(),
+        show_level=show_level,
+        show_time=show_time,
+    )
 
 
-def get_log_handler() -> "_LogHandlerMixin | None":
-    """Return the active linktools log handler, if one is installed.
-
-    Returns:
-        Optional[_LogHandlerMixin]: The operation result.
-    """
-    c = logging.getLogger()
-    while c:
-        if c.handlers:
-            for handler in c.handlers:
-                if isinstance(handler, _LogHandlerMixin):
-                    return handler
-        if not c.propagate:
-            return None
-        else:
-            c = c.parent
-    return None
+def get_log_handler() -> "Any | None":
+    """Return the active linktools log handler, if one is installed."""
+    from linktools.core import environ
+    return environ.logging.get_handler()
 
 
 class _FakeProgress:
@@ -415,7 +118,7 @@ class _FakeProgress:
             sys.stderr.flush()
             self._last_line_len = 0
 
-    def add_task(self, description: str = "", total: "float | None" = None, **kwargs) -> int:
+    def add_task(self, description: str = "", total: "float | None" = None, **kwargs: "Any") -> int:
         task_id = self._next_id
         self._next_id += 1
         self._tasks[task_id] = {
@@ -427,7 +130,7 @@ class _FakeProgress:
         self._render(task_id)
         return task_id
 
-    def update(self, task_id: int, **kwargs) -> None:
+    def update(self, task_id: int, **kwargs: "Any") -> None:
         task = self._tasks.get(task_id)
         if task is None:
             return
@@ -522,7 +225,7 @@ def _get_log_column():
             if handler and handler.show_level:
                 if len(result) > 0:
                     result.append(" ")
-                result.append(handler.make_level_text(logging.INFO))
+                result.append(handler.make_level_text(20))
 
             return result
 
@@ -541,7 +244,7 @@ def create_progress(*fields: str, transfer: bool = False) -> "_FakeProgress | Pr
     Returns:
         Any: The operation result.
     """
-    if not _is_rich_available():
+    if not is_rich_available():
         return _FakeProgress()
 
     from rich.progress import Progress, TextColumn, BarColumn
@@ -603,7 +306,7 @@ def _create_prompt_class(type: "type[PromptResultType]", allow_empty: bool) -> "
                 prefix.append(time)
                 prefix_len += time.cell_len + 1
             if handler and handler.show_level:
-                level = handler.make_level_text(logging.WARNING, ">")
+                level = handler.make_level_text(30, ">")
                 prefix.append(level)
                 prefix_len += level.cell_len + 1
 
@@ -621,7 +324,7 @@ def _create_prompt_class(type: "type[PromptResultType]", allow_empty: bool) -> "
             if handler and handler.show_time:
                 prefix = prefix + handler.make_time_text() + " "
             if handler and handler.show_level:
-                prefix = prefix + handler.make_level_text(logging.ERROR, ">") + " "
+                prefix = prefix + handler.make_level_text(40, ">") + " "
             self.console.print(prefix, error, sep="")
 
         def process_response(self, value: str) -> "PromptType":
@@ -782,7 +485,7 @@ def prompt(
         if default is not MISSING:
             return default
         raise CliError("prompt requires interaction but no-input mode is active: " + prompt)
-    if not _is_rich_available():
+    if not is_rich_available():
         return _plain_prompt(
             prompt, type=type, default=default, allow_empty=allow_empty,
             choices=choices, password=password, show_default=show_default,
@@ -823,7 +526,7 @@ def choose(
         if default is not MISSING:
             return default
         raise CliError("choose requires interaction but no-input mode is active: " + prompt)
-    if not _is_rich_available():
+    if not is_rich_available():
         return _plain_choose(
             prompt, choices, title=title, default=default,
             show_default=show_default, show_choices=show_choices,
@@ -885,7 +588,7 @@ def confirm(
     """
     if _no_input:
         return default if default is not MISSING else True
-    if not _is_rich_available():
+    if not is_rich_available():
         return _plain_confirm(prompt, default=default, show_default=show_default)
     return _create_prompt_class(bool, allow_empty=False).ask(
         prompt,

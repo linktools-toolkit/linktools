@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Port helpers (spec §14.1, §14.3 SYS-002)."""
+"""Port helpers."""
 
 from typing import Iterator
 
@@ -35,7 +35,7 @@ def bind(port: int, socket_type: int, socket_proto: int) -> "int | None":
 def is_port_free(port: int) -> bool:
     """Return whether ``port`` is free for both TCP and UDP binding.
 
-    Note (§14.3): there is an inherent TOCTOU race between this check and an
+    Note: there is an inherent TOCTOU race between this check and an
     actual bind; prefer :func:`reserve_tcp_port` when the port is needed
     immediately. ``is_port_free`` is for advisory/hint scenarios.
     """
@@ -45,7 +45,7 @@ def is_port_free(port: int) -> bool:
 
 
 def get_free_port() -> int:
-    """Return a likely-free port (advisory only, spec §14.3)."""
+    """Return a likely-free port (advisory only)."""
     import socket
 
     try:
@@ -70,7 +70,7 @@ import contextlib
 
 @contextlib.contextmanager
 def reserve_tcp_port(host: str = "127.0.0.1", port: int = 0) -> "Iterator[tuple[str, int]]":
-    """Bind a TCP socket and yield (host, port) without closing it (§14.3).
+    """Bind a TCP socket and yield (host, port) without closing it.
 
     Unlike :func:`get_free_port`, the socket stays bound for the duration of the
     context, eliminating the TOCTOU race before the caller binds the same port.

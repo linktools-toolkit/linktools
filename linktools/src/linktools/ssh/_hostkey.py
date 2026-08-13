@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SSH host-key verification policy (spec §13.4 SSH-002).
+"""SSH host-key verification policy.
 
 Mapping from a linktools policy value to a paramiko ``MissingHostKeyPolicy``
 is centralised here so callers do not reach for ``AutoAddPolicy`` directly.
 
-Security posture (spec §13.4):
+Security posture:
 
 * ``STRICT`` (intended default) -- reject unknown/changed hosts; load
   ``known_hosts``.
@@ -27,7 +27,7 @@ INSECURE = "insecure"
 
 
 class SSHHostKeyPolicy(object):
-    """Symbolic host-key policy values (spec §13.4)."""
+    """Symbolic host-key policy values."""
     STRICT = STRICT
     ACCEPT_NEW = ACCEPT_NEW
     INSECURE = INSECURE

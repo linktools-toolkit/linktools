@@ -87,9 +87,9 @@ class RuntimeProcessFactory:
 
     def create_process(
             self,
-            *args,
+            *args: "Any",
             privilege: bool = None,
-            **kwargs,
+            **kwargs: "Any",
     ) -> "Process":
         # sudo is always interactive: if the sudo policy needs a password,
         # this blocks on the prompt rather than failing fast. Callers that
@@ -102,7 +102,7 @@ class RuntimeProcessFactory:
                 return popen(*prefix, *args, **kwargs)
         return popen(*args, **kwargs)
 
-    def docker_args(self, *args, privilege: bool = None) -> CommandSpec:
+    def docker_args(self, *args: "Any", privilege: bool = None) -> CommandSpec:
         """Build the full ``docker ...`` argv (no sudo) without executing
         it -- the single source of truth ``create_docker_process`` and
         ``ExecutionPlanner`` both build on."""
@@ -148,9 +148,9 @@ class RuntimeProcessFactory:
 
     def create_docker_process(
             self,
-            *args,
+            *args: "Any",
             privilege: bool = None,
-            **kwargs,
+            **kwargs: "Any",
     ) -> "Process":
         spec = self.docker_args(*args, privilege=privilege)
         return self.create_process(*spec.args, privilege=spec.privilege, **kwargs)

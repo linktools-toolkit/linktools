@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""SSH client (spec §13): paramiko-backed, never a system ``ssh`` wrapper.
+"""SSH client: paramiko-backed, never a system ``ssh`` wrapper.
 
 Public API (``SSHClient``) is stable -- linktools-mobile subclasses it. This
 module owns the connection, interactive shell, SCP transfer, and forward/reverse
@@ -42,7 +42,7 @@ environ.logging.set_level("ssh.channel", logging.CRITICAL)
 class SSHClient(paramiko.SSHClient):
     """Paramiko SSH client with shell, transfer, and forwarding helpers.
 
-    Default host-key policy is STRICT (RejectPolicy) per v2 §11.3. Callers
+    Default host-key policy is STRICT (RejectPolicy) . Callers
     that need to accept unknown keys (e.g. iOS USB-forwarded loopback
     connections) must explicitly set INSECURE/AutoAddPolicy.
     """

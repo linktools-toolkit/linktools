@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Resolved filesystem layout for an Environment (spec §5.3).
+"""Resolved filesystem layout for an Environment.
 
 ``EnvironmentPaths`` owns every directory linktools touches. Getters return
 absolute, normalised :class:`~pathlib.Path` objects and **never create
@@ -154,8 +154,7 @@ class EnvironmentPaths(object):
         """Remove a file or directory after verifying it is within ``root``.
 
         ``root`` defaults to the storage tree. A target that resolves outside
-        the root raises :class:`EnvironmentError` and is left untouched (spec
-        §3.7 / §22.2: deletes must never escape the expected root).
+        the root raises :class:`EnvironmentError` and is left untouched.
         """
         target = _norm(path)
         boundary = _norm(root) if root is not None else self._storage

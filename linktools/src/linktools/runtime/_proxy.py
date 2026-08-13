@@ -43,7 +43,7 @@ class Proxy(object):
     __slots__ = ("__fn", "__object", "__dict__")
     __missing__ = object()
 
-    def __init__(self, fn=__missing__, name=None, doc=None):
+    def __init__(self, fn: "Callable" = __missing__, name: "str | None" = None, doc: "str | None" = None) -> None:
         object.__setattr__(self, _proxy_fn, fn)
         object.__setattr__(self, _proxy_object, Proxy.__missing__)
         if name is not None:

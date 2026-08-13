@@ -7,7 +7,7 @@ Architecture guidance for the container-management sub-package. Shared concerns
 
 ## Container Sub-package (`linktools-cntr/src/linktools/cntr/`)
 
-Docker/Podman container lifecycle management (prefix `ct-cntr`). Built on the core
+Docker/Compose container lifecycle management (prefix `ct-cntr`). Built on the core
 CLI framework.
 
 - **`commands/`** — CLI surface: `root.py` (the `ct-cntr` command group + help-order

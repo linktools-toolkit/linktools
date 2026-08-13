@@ -31,7 +31,7 @@ class _ReactorEvent:
         self.when = when
         self.interval = interval
 
-    def copy(self, **kwargs) -> "_ReactorEvent":
+    def copy(self, **kwargs: "_t.Any") -> "_ReactorEvent":
         return _ReactorEvent(
             kwargs.get("fn", self.fn),
             kwargs.get("when", self.when),
@@ -41,7 +41,7 @@ class _ReactorEvent:
 
 class Reactor:
 
-    def __init__(self, on_stop=None, on_error=None):
+    def __init__(self, on_stop: "_t.Callable | None" = None, on_error: "_t.Callable[..., _t.Any] | None" = None) -> None:
         self._running = False
         self._on_stop = on_stop
         self._on_error = on_error

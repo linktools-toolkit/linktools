@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Pure-Python (paramiko) SSH support (spec §13).
+"""Pure-Python (paramiko) SSH support.
 
 Public API (stable -- linktools-mobile subclasses it)::
 

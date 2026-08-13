@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Platform/arch identification (spec §14.2 SYS-001)."""
+"""Platform/arch identification."""
 
 import sys
 
@@ -70,12 +70,12 @@ def is_windows(system: "str | None" = None) -> bool:
 
 
 def normalize_platform(value: str) -> str:
-    """Normalise an OS name to lowercase (spec §14.2)."""
+    """Normalise an OS name to lowercase."""
     return (value or "").strip().lower()
 
 
 def normalize_arch(value: str) -> str:
-    """Normalise an architecture alias to the canonical value (spec §14.2).
+    """Normalise an architecture alias to the canonical value.
 
     ``amd64`` -> ``x86_64``, ``aarch64`` -> ``arm64``, ``armv7l`` -> ``arm`` ...
     Unknown values are returned lowercased unchanged.

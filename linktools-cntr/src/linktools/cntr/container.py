@@ -355,7 +355,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
-    def _make_exec_context(self, commands) -> "EventContext":
+    def make_exec_context(self, commands: "str | Iterable[str]") -> "EventContext":
         from .context import EventContext
 
         containers = self.manager.installed_state.get(resolve=True)
@@ -492,7 +492,7 @@ class SourceContainer(BaseContainer):
                 os.makedirs(dest_path, exist_ok=True)
                 try:
                     self._handle_source_file(source_path, dest_path)
-                except:
+                except BaseException:
                     utils.remove_file(source_path)
                     utils.remove_file(dest_path)
                     raise

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""System / platform helpers (spec §14).
+"""System / platform helpers.
 
 Splits the legacy ``platform.py`` into focused submodules (platform, user,
-network, ports, wait, interpreter) and adds the §14.2 platform/arch
+network, ports, wait, interpreter) and adds the platform/arch
 normalisation API. Consumers import from ``linktools.system``.
 """
 

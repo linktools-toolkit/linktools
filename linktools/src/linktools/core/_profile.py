@@ -56,7 +56,7 @@ class ProjectProfile(object):
             paths.append(cls.global_path())
         return cls(*paths)
 
-    def __init__(self, *paths):
+    def __init__(self, *paths: "Any") -> None:
         if not paths or paths[0] is None or isinstance(paths[0], dict):
             self._data = copy.deepcopy((paths[0] if paths else {}) or {})
             return
@@ -112,7 +112,7 @@ class ProjectProfile(object):
         """Return a top-level profile value, or ``default`` if absent."""
         return copy.deepcopy(self._data.get(key, default))
 
-    def get_path(self, *keys, **kwargs) -> "Any":
+    def get_path(self, *keys: "Any", **kwargs: "Any") -> "Any":
         default = kwargs.pop("default", None)
         if kwargs:
             raise TypeError("get_path() got unexpected keyword argument(s): %s" % ", ".join(sorted(kwargs)))
@@ -124,7 +124,7 @@ class ProjectProfile(object):
                 return default
         return copy.deepcopy(node)
 
-    def require_path(self, *keys) -> "Any":
+    def require_path(self, *keys: "Any") -> "Any":
         node = self._data
         for index, key in enumerate(keys):
             if isinstance(node, dict) and key in node:

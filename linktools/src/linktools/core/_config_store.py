@@ -180,6 +180,31 @@ class ConfigStore(object):
         """A namespaced view over this store -- see :class:`ConfigNamespace`."""
         return ConfigNamespace(self, name)
 
+    @contextlib.contextmanager
+    def edit(self, key: str, default: "Any" = None) -> "Iterator[Any]":
+        """Yield a deep-copy snapshot of ``key``'s value for in-place editing,
+        committing atomically on a clean exit.
+
+        The cross-process lock spans the entire read-edit-commit lifecycle.
+        On any exception the in-memory state is untouched and nothing is
+        flushed. A value equal to the pre-edit snapshot (deep equality) is a
+        no-op: no flush, no revision bump.
+        """
+        with self._locked():
+            if key in self._data:
+                value = copy.deepcopy(self._data[key])
+            else:
+                value = copy.deepcopy(default)
+            previous = copy.deepcopy(value)
+            yield value
+            if value != previous:
+                previous_all = self._data
+                new_all = dict(self._data)
+                new_all[key] = value
+                self._data = new_all
+                self._flush_or_rollback(previous_all)
+                self._touch()
+
     def __repr__(self) -> str:
         return "ConfigStore(path=%r, keys=%d)" % (str(self._path), len(self._data))
 
@@ -235,23 +260,15 @@ class ConfigNamespace(object):
     @contextlib.contextmanager
     def transaction(self) -> "Iterator[ConfigNamespace]":
         """Run a batch of get/set/pop against a consistent snapshot,
-        flushing once on exit. Refuses to nest -- see ``ConfigStore._locked``."""
-        with self._store._locked():
-            self._tx_data = copy.deepcopy(self._store._data.get(self._name, {}) or {})
-            previous = copy.deepcopy(self._tx_data)
+        flushing once on exit. Refuses to nest."""
+        if self._tx_data is not None:
+            raise ConfigError("config namespace transactions cannot be nested")
+        with self._store.edit(self._name, {}) as data:
+            self._tx_data = data
             try:
                 yield self
-            except Exception:
+            finally:
                 self._tx_data = None
-                raise
-            if self._tx_data != previous:
-                previous_all = self._store._data
-                new_all = dict(self._store._data)
-                new_all[self._name] = self._tx_data
-                self._store._data = new_all
-                self._store._flush_or_rollback(previous_all)
-                self._store._touch()
-            self._tx_data = None
 
     def __repr__(self) -> str:
         return "ConfigNamespace(store=%r, name=%r)" % (self._store, self._name)

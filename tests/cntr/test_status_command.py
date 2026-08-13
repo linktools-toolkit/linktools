@@ -26,7 +26,7 @@ def test_status_is_read_only(fresh_manager, monkeypatch, with_nginx_services):
     monkeypatch.setattr(
         fresh_manager.docker_inspector, "get_project_state",
         lambda *a, **k: _state([
-            ServiceRuntimeState(logical_container="nginx", service="nginx", runtime_name="aio-nginx",
+            ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name="aio-nginx",
                                 state="running", health="healthy", image=None, exit_code=0, labels={}),
         ]),
     )
@@ -82,11 +82,11 @@ def test_status_aggregation_running_degraded_exited(fresh_manager, monkeypatch):
     authelia.__dict__["services"] = {"authelia": {}, "redis": {}}
 
     services = [
-        ServiceRuntimeState(logical_container="nginx", service="nginx", runtime_name="aio-nginx",
+        ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name="aio-nginx",
                             state="running", health="healthy", image=None, exit_code=0, labels={}),
-        ServiceRuntimeState(logical_container="authelia", service="authelia", runtime_name="aio-authelia",
+        ServiceRuntimeState(logical_containers=("authelia",), service="authelia", runtime_name="aio-authelia",
                             state="running", health="unhealthy", image=None, exit_code=0, labels={}),
-        ServiceRuntimeState(logical_container="authelia", service="redis", runtime_name="aio-redis",
+        ServiceRuntimeState(logical_containers=("authelia",), service="redis", runtime_name="aio-redis",
                             state="exited", health=None, image=None, exit_code=1, labels={}),
     ]
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: _state(services))
@@ -109,9 +109,9 @@ def test_orphan_service_excluded_by_default_included_with_all_services(fresh_man
     nginx = fresh_manager.containers["nginx"]
     nginx.__dict__["services"] = {"nginx": {}}
     services = [
-        ServiceRuntimeState(logical_container="nginx", service="nginx", runtime_name="aio-nginx",
+        ServiceRuntimeState(logical_containers=("nginx",), service="nginx", runtime_name="aio-nginx",
                             state="running", health=None, image=None, exit_code=0, labels={}),
-        ServiceRuntimeState(logical_container=None, service="orphan", runtime_name="orphan-1",
+        ServiceRuntimeState(logical_containers=(), service="orphan", runtime_name="orphan-1",
                             state="running", health=None, image=None, exit_code=0, labels={}),
     ]
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: _state(services))
@@ -167,8 +167,8 @@ def test_select_status_containers_unit(fresh_manager):
 
 # -- richer aggregation rules -------------------------------------
 
-def _svc(state, health=None, service="nginx", logical_container="nginx"):
-    return ServiceRuntimeState(logical_container=logical_container, service=service, runtime_name="rt",
+def _svc(state, health=None, service="nginx", logical_containers=("nginx",)):
+    return ServiceRuntimeState(logical_containers=logical_containers, service=service, runtime_name="rt",
                                state=state, health=health, image=None, exit_code=0, labels={})
 
 
@@ -183,8 +183,8 @@ def test_all_exited_is_exited(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
     authelia.__dict__["services"] = {"authelia": {}, "redis": {}}
     services = [
-        _svc("exited", service="authelia", logical_container="authelia"),
-        _svc("dead", service="redis", logical_container="authelia"),
+        _svc("exited", service="authelia", logical_containers=("authelia",)),
+        _svc("dead", service="redis", logical_containers=("authelia",)),
     ]
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: _state(services))
     payload = collect_status(fresh_manager, names=["authelia"])
@@ -209,7 +209,7 @@ def test_partial_missing_service_is_degraded(fresh_manager, monkeypatch):
     authelia = fresh_manager.containers["authelia"]
     authelia.__dict__["services"] = {"authelia": {}, "redis": {}}
     # Only "authelia" observed; "redis" is declared but never appears.
-    services = [_svc("running", service="authelia", logical_container="authelia")]
+    services = [_svc("running", service="authelia", logical_containers=("authelia",))]
     monkeypatch.setattr(fresh_manager.docker_inspector, "get_project_state", lambda *a, **k: _state(services))
     payload = collect_status(fresh_manager, names=["authelia"])
     entry = payload["containers"][0]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Safe archive extraction (spec §10.7 TOL-007).
+"""Safe archive extraction.
 
 Extracts zip/tar archives while refusing anything that could escape the
 destination or exhaust resources:
@@ -149,9 +149,9 @@ def safe_extract(archive_path: "Any", dest: "Any", *,
                  max_files: int = _DEFAULT_MAX_FILES,
                  max_total_size: int = _DEFAULT_MAX_TOTAL,
                  max_file_size: int = _DEFAULT_MAX_FILE) -> None:
-    """Extract ``archive_path`` (zip or tar) into ``dest`` safely (§10.7).
+    """Extract ``archive_path`` (zip or tar) into ``dest`` safely.
 
-    v4 §9.10: ``dest`` must be empty (no existing files). This prevents
+    ``dest`` must be empty (no existing files). This prevents
     accidental overwrite of existing tool installations.
     Refuses path traversal, absolute/drive paths, symlink/hardlink/device/fifo
     entries, and enforces file-count / per-file / total-size caps.

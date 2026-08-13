@@ -53,7 +53,7 @@ class DockerEngineVersion:
 
 @dataclass(frozen=True)
 class ServiceRuntimeState:
-    logical_container: "str | None"
+    logical_containers: "tuple[str, ...]"
     service: "str | None"
     runtime_name: str
     state: str
@@ -77,15 +77,13 @@ class ProjectRuntimeState:
     def running_container_names(self) -> "list[str]":
         """Logical container names with >=1 service running/restarting.
 
-        Kept binary on purpose, to back the pre-existing two-valued
-        list/get_actual contract; ``ct-cntr status`` shows the full
-        running/degraded/exited/missing/unknown aggregation instead.
+        A shared service contributes all of its owners to the running set.
         """
-        names = {
-            service.logical_container
-            for service in self.services
-            if service.logical_container and service.state.lower() in _RUNNING_STATES
-        }
+        names = set()
+        for service in self.services:
+            if service.state.lower() in _RUNNING_STATES:
+                for owner in service.logical_containers:
+                    names.add(owner)
         return sorted(names)
 
 
@@ -169,7 +167,7 @@ def _normalize_exit_code(value) -> "int | None":
 
 
 def _map_inspect_item(
-        item: dict, service_owners: "dict[str, str]", project_name: str,
+        item: dict, service_owners: "dict[str, list[str]]", project_name: str,
 ) -> "ServiceRuntimeState | None":
     """None means "not this project" -- filtered out by the caller."""
     config = item.get("Config")
@@ -194,7 +192,11 @@ def _map_inspect_item(
         name = name[1:]
 
     return ServiceRuntimeState(
-        logical_container=service_owners.get(service) if service else None,
+        logical_containers=(
+            tuple(service_owners.get(service, ()))
+            if service
+            else ()
+        ),
         service=service,
         runtime_name=name,
         state=_normalize_state(state_data),
@@ -305,13 +307,12 @@ class DockerInspector:
                 project=self.manager.project_name, services=(), backend=self.manager.container_type,
             )
 
-        service_owners: "dict[str, str]" = {}
+        service_owners: "dict[str, list[str]]" = {}
         for container in containers:
             for service_name in container.services.keys():
-                # Duplicate service names across containers are a deferred
-                # issue; first-registered container wins, matching the
-                # existing Compose-merge-dependent behavior.
-                service_owners.setdefault(service_name, container.name)
+                owners = service_owners.setdefault(service_name, [])
+                if container.name not in owners:
+                    owners.append(container.name)
 
         try:
             container_ids = self._list_project_container_ids(containers)

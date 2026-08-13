@@ -20,7 +20,7 @@ def get_entry_points() -> "Any":
     return metadata.entry_points()
 
 
-def select_entry_points(group: str) -> "tuple":
+def select_entry_points(group: str) -> "tuple[Any, ...]":
     entries = get_entry_points()
     if isinstance(entries, dict):
         return tuple(entries.get(group, ()))

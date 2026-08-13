@@ -222,7 +222,7 @@ else:
 
 
 class ProcessResult(object):
-    """Result of a completed process (v2 §12.1 RUN-PROC-002)."""
+    """Result of a completed process ."""
 
     def __init__(self, args: "Any", returncode: int, stdout: "Any" = None,
                  stderr: "Any" = None, duration: float = None,
@@ -244,7 +244,7 @@ class ProcessResult(object):
 
 
 class Process(object):
-    """Composition wrapper around subprocess.Popen (v2 §12.1 RUN-PROC-001).
+    """Composition wrapper around subprocess.Popen.
 
     No longer inherits Popen; instead wraps it and delegates all attribute
     access via __getattr__. This means callers that used Popen methods/attrs
@@ -253,7 +253,7 @@ class Process(object):
     fetch, exec, recursive_kill, wait_for_result).
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: "Any", **kwargs: "Any") -> None:
         self._popen = subprocess.Popen(*args, **kwargs)
         self._started_at = _time.monotonic()
 
@@ -293,11 +293,11 @@ class Process(object):
 
     @classmethod
     def start(cls, *args: "Any", **kwargs: "Any") -> "Process":
-        """Create and start a Process (v2 §12.1)."""
+        """Create and start a Process ."""
         return cls(*args, **kwargs)
 
     def wait_for_result(self, timeout: "TimeoutType" = None) -> "ProcessResult":
-        """Wait for the process and return a ProcessResult (v2 §12.1)."""
+        """Wait for the process and return a ProcessResult ."""
         from ..types import Timeout
         timed_out = False
         wall = None
@@ -444,7 +444,7 @@ def popen(
         stdin: "int | IO" = None, stdout: "int | IO" = None, stderr: "int | IO" = None,
         shell: bool = False, cwd: "PathType" = None,
         env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
-        **kwargs
+        **kwargs: "Any"
 ) -> "Process":
     args = [str(arg) for arg in args]
 

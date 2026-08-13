@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""Python interpreter identification (spec §14.1)."""
+"""Python interpreter identification."""
 
 import sys
 

@@ -1,36 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : argparse.py
-@time    : 2023/8/25
-@site    : https://github.com/ice-black-tea
-@software: PyCharm
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
-
 import abc
 import argparse
 import os
-import sys
 import typing
 
 from .. import utils
@@ -38,23 +11,11 @@ from ..decorator import cached_classproperty
 from ..types import MISSING
 
 if typing.TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+    from typing import Any
 
-if typing.TYPE_CHECKING:
+    from ..core import ConfigField
     from ._command import CommandParser
-
-if sys.version_info < (3, 10):
-    _orig_get_action_name = getattr(argparse, "_get_action_name", None)
-    if _orig_get_action_name is not None and callable(_orig_get_action_name):
-
-        def _get_action_name(argument):
-            result = _orig_get_action_name(argument)
-            if result is None:
-                if argument.choices:
-                    return "{" + ",".join(argument.choices) + "}"
-            return result
-
-        setattr(argparse, "_get_action_name", _get_action_name)
 
 
 ##############################
@@ -141,7 +102,7 @@ class ConfigLoader:
             # No CLI value — resolve via config (env → cache → prompt).
             key = field if field is not None else action.dest
             value = config.get(key, type=action.type, default=MISSING)
-        # CLI values are one-shot (spec §10): they do NOT overwrite the cache.
+        # CLI values are one-shot: they do NOT overwrite the cache.
         # Secret values are never persisted regardless of source.
         setattr(namespace, action.dest, value)
 
@@ -151,17 +112,17 @@ class ConfigAction(argparse.Action):
 
     def __init__(
         self,
-        option_strings,
-        dest,
-        default=MISSING,
-        type=None,
-        choices=None,
-        required=False,
-        help=None,
-        metavar=None,
-        nargs=None,
-        config=None,
-    ):
+        option_strings: "list[str]",
+        dest: str,
+        default: "Any" = MISSING,
+        type: "Callable[[str], Any] | type | None" = None,
+        choices: "Iterable[Any] | None" = None,
+        required: bool = False,
+        help: "str | None" = None,
+        metavar: "str | tuple[str, ...] | None" = None,
+        nargs: "int | str | None" = None,
+        config: "ConfigField | None" = None,
+    ) -> None:
         super().__init__(
             option_strings=option_strings,
             dest=dest,
@@ -197,15 +158,15 @@ if not hasattr(argparse, "BooleanOptionalAction"):
     class BooleanOptionalAction(argparse.Action):
         def __init__(
             self,
-            option_strings,
-            dest,
-            default=None,
-            type=None,
-            choices=None,
-            required=False,
-            help=None,
-            metavar=None,
-        ):
+            option_strings: "list[str]",
+            dest: str,
+            default: "Any" = None,
+            type: "Callable[[str], Any] | type | None" = None,
+            choices: "Iterable[Any] | None" = None,
+            required: bool = False,
+            help: "str | None" = None,
+            metavar: "str | tuple[str, ...] | None" = None,
+        ) -> None:
 
             _option_strings = []
             for option_string in option_strings:
@@ -243,14 +204,14 @@ class KeyValueAction(argparse.Action):
 
     def __init__(
         self,
-        option_strings,
-        dest,
-        nargs=None,
-        default=None,
-        required=False,
-        help=None,
-        metavar="KEY=VALUE",
-    ):
+        option_strings: "list[str]",
+        dest: str,
+        nargs: "int | str | None" = None,
+        default: "Any" = None,
+        required: bool = False,
+        help: "str | None" = None,
+        metavar: str = "KEY=VALUE",
+    ) -> None:
 
         super().__init__(
             option_strings=option_strings,
@@ -312,7 +273,7 @@ class ArgParseComplete:
 
     @classmethod
     def autocomplete(
-        cls, argument_parser: "argparse.ArgumentParser", **kwargs
+        cls, argument_parser: "argparse.ArgumentParser", **kwargs: "Any"
     ) -> "argparse.ArgumentParser":
         """Enable argcomplete for an argument parser when available.
 
@@ -330,7 +291,7 @@ class ArgParseComplete:
 
     @classmethod
     def shellcode(
-        cls, executables: "typing.Iterable[str]", shell: str, **kwargs
+        cls, executables: "typing.Iterable[str]", shell: str, **kwargs: "Any"
     ) -> str:
         """Return shell completion setup code when argcomplete is available.
 
@@ -354,7 +315,7 @@ class ArgParseComplete:
 
         @abc.abstractmethod
         def get_args(
-            self, parsed_args: "argparse.Namespace", **kwargs
+            self, parsed_args: "argparse.Namespace", **kwargs: "Any"
         ) -> "typing.typing.list[str] | None":
             pass
 

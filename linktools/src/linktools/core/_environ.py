@@ -35,7 +35,7 @@ def _normalize_path(value: "Any") -> str:
 class ConfigDict(dict):
     """Minimal dict subclass for tool config loading (v2: replaces old _config.ConfigDict)."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: "Any", **kwargs: "Any") -> None:
         self._revision = 0
         super().__init__(*args, **kwargs)
 
@@ -47,7 +47,7 @@ class ConfigDict(dict):
         super().__setitem__(key, value)
         self._revision += 1
 
-    def update(self, *args, **kwargs) -> None:
+    def update(self, *args: "Any", **kwargs: "Any") -> None:
         values = dict(*args, **kwargs)
         if values:
             super().update(values)
@@ -508,7 +508,7 @@ class BaseEnviron(abc.ABC):
         """
         return self._create_tools()
 
-    def get_tool(self, name: str, **kwargs) -> "Tool":
+    def get_tool(self, name: str, **kwargs: "Any") -> "Tool":
         """Return a configured tool by name.
 
         Args:
@@ -606,71 +606,9 @@ class Environ(BaseEnviron):
 
         return config
 
-    def _create_tools(self):
-        """Load capability-owned definitions only when Tools is requested."""
-        import json
-        from ._entrypoint import select_entry_points
-        from ._tools import (Tools, _deep_merge, _merge_tool_payload,
-                             _tool_payload, _validate_user_tool_payload)
-        from linktools.errors import ToolDefinitionError
-
-        def definition_error(message: str) -> None:
-            raise ToolDefinitionError("tool configuration: %s" % message)
-
-        definitions = {}
-        sources = {}
-        capability_group = metadata.__capability_group__
-        capabilities = []
-        for ep in select_entry_points(capability_group):
-            try:
-                capability = ep.load()
-                if isinstance(capability, type):
-                    capability = capability()
-            except Exception as exc:
-                raise ToolDefinitionError(
-                    "tool configuration: failed to load capability entry point "
-                    "group %r name %r value %r: %s: %s" %
-                    (capability_group, ep.name, ep.value,
-                     type(exc).__name__, exc)
-                ) from exc
-            capabilities.append((ep, capability))
-        capabilities.sort(key=lambda item: item[1].name)
-        seen_capabilities = {}
-        for ep, capability in capabilities:
-            if capability.name in seen_capabilities:
-                previous_ep = seen_capabilities[capability.name]
-                definition_error(
-                    "duplicate capability %s from entry points "
-                    "group %r name %r value %r and group %r name %r value %r" %
-                    (capability.name, capability_group, previous_ep.name,
-                     previous_ep.value, capability_group, ep.name, ep.value))
-            seen_capabilities[capability.name] = ep
-            develop = capability.get_asset_path("develop", "tools", "%s.yml" % capability.name)
-            release = capability.get_asset_path("tools", "%s.json" % capability.name)
-            path = develop if capability.develop and develop.exists() else release
-            if not path.exists():
-                continue
-            try:
-                if path.suffix == ".yml":
-                    import yaml
-                    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-                else:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError) as exc:
-                definition_error("cannot read tools schema for capability %s at %s: %s" %
-                                 (capability.name, path, exc))
-            source = "%s: %s" % (capability.name, path)
-            _merge_tool_payload(definitions, sources, _tool_payload(payload, "capability %s" % capability.name, path), source)
-        user_path = self.get_data_path("tools", "tools.json")
-        if user_path.exists():
-            try:
-                user = json.loads(user_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError, TypeError) as exc:
-                definition_error("cannot read user tools schema at %s: %s" % (user_path, exc))
-            user_tools = _validate_user_tool_payload(user, user_path, definitions)
-            definitions = _deep_merge(definitions, user_tools)
-            sources.update({name: "user: %s" % user_path for name in user_tools})
-        return Tools(self, definitions, sources=sources)
+    def _create_tools(self) -> "Tools":
+        from ._tools import Tools
+        return Tools.from_environment(self)
 
 
 environ = Environ()

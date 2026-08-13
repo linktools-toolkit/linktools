@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""linktools exception hierarchy (spec §18).
+"""linktools exception hierarchy.
 
 ``Error`` is the single root. Each direct child is a *domain root*
 matching one subsystem. Specific exceptions live under their domain root so
@@ -75,7 +75,7 @@ class Error(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Domain roots (spec 
+# Domain roots (spec
 # ---------------------------------------------------------------------------
 
 class EnvironmentError(Error):
@@ -255,7 +255,7 @@ def missing_optional_class(name: str, extra: str, exc: BaseException) -> type:
     ``ModuleError``) so git/ssh/... share one implementation.
     """
     class _MissingOptional(object):
-        def __init__(self, *args, **kwargs):
+        def __init__(self, *args: "Any", **kwargs: "Any") -> None:
             raise ModuleError(
                 "%s requires optional dependency extra `%s`: %s" % (name, extra, exc))
     _MissingOptional.__name__ = name

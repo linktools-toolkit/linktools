@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : types.py
-@time    : 2024/7/21
-@site    : https://github.com/ice-black-tea
-@software: PyCharm
-"""
-
 import abc as _abc
 import time as _time
 import types as _types
@@ -88,7 +80,7 @@ class Timeout:
     """Track a monotonic deadline for an in-process operation.
 
     Uses :func:`time.monotonic` so wall-clock adjustments (NTP jumps, DST,
-    manual changes) never affect correctness -- see spec §3.6 and §6.2.
+    manual changes) never affect correctness
 
     Semantics:
     * ``None`` means wait forever (infinite).

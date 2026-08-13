@@ -1,31 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-@author  : Hu Ji
-@file    : decorator.py
-@time    : 2019/01/15
-@site    :
-@software: PyCharm
-
-              ,----------------,              ,---------,
-         ,-----------------------,          ,"        ,"|
-       ,"                      ,"|        ,"        ,"  |
-      +-----------------------+  |      ,"        ,"    |
-      |  .-----------------.  |  |     +---------+      |
-      |  |                 |  |  |     | -==----'|      |
-      |  | $ sudo rm -rf / |  |  |     |         |      |
-      |  |                 |  |  |/----|`---=    |      |
-      |  |                 |  |  |   ,/|==== ooo |      ;
-      |  |                 |  |  |  // |(((( [33]|    ,"
-      |  `-----------------'  |," .;'| |((((     |  ,"
-      +-----------------------+  ;;  | |         |,"
-         /_)______________(_/  //'   | +---------+
-    ___________________________/___  `,
-   /  oooooooooooooooo  .o.  oooo /,   `,"-----------
-  / ==ooooooooooooooo==.o.  ooo= //   ,``--{)B     ,"
- /_==__==========__==_ooo__ooo=_/'   /___________,"
-"""
 import functools
 import inspect
 import threading
@@ -53,7 +28,7 @@ def singleton(cls: "type[T]") -> "Callable[P, T]":
     lock = threading.RLock()
 
     @functools.wraps(cls)
-    def wrapper(*args, **kwargs) -> "T":
+    def wrapper(*args: "Any", **kwargs: "Any") -> "T":
         nonlocal instance
         if instance is MISSING:
             with lock:
@@ -92,11 +67,12 @@ def try_except(
 
 class _CachedProperty:
 
-    def __init__(self, func: "Callable[P, T]", lock):
+    def __init__(self, func: "Callable[P, T]", lock: "Any"):
         self.func = func
         self.attrname = None
         self.__doc__ = func.__doc__
         self.lock = lock
+        self._probe = threading.local()
 
     def __set_name__(self, owner, name):
         if self.attrname is None:
@@ -107,6 +83,13 @@ class _CachedProperty:
                 f"({self.attrname!r} and {name!r})."
             )
 
+    def _get_cached(self, instance: "Any") -> "Any":
+        self._probe.active = True
+        try:
+            return getattr(instance, self.attrname, MISSING)
+        finally:
+            self._probe.active = False
+
     def __get__(self, instance, owner=None):
         if instance is None:
             return self
@@ -114,41 +97,32 @@ class _CachedProperty:
             raise TypeError(
                 "Cannot use cached_property instance without calling __set_name__ on it.")
 
-        try:
-            cache = instance.__dict__
-        except AttributeError:  # not all objects have __dict__ (e.g. class defines slots)
-            msg = (
-                f"No '__dict__' attribute on {type(instance).__name__!r} "
-                f"instance to cache {self.attrname!r} property."
-            )
-            raise TypeError(msg) from None
+        if getattr(self._probe, "active", False):
+            return MISSING
 
-        val = cache.get(self.attrname, MISSING)
+        val = self._get_cached(instance)
         if val is MISSING:
             if self.lock is not None:
                 with self.lock:
-                    # check if another thread filled cache while we awaited lock
-                    val = cache.get(self.attrname, MISSING)
+                    val = self._get_cached(instance)
                     if val is MISSING:
                         val = self.func(instance)
                         try:
-                            cache[self.attrname] = val
-                        except TypeError:
-                            msg = (
-                                f"The '__dict__' attribute on {type(instance).__name__!r} instance "
-                                f"does not support item assignment for caching {self.attrname!r} property."
-                            )
-                            raise TypeError(msg) from None
+                            setattr(instance, self.attrname, val)
+                        except (AttributeError, TypeError):
+                            raise TypeError(
+                                "instance does not support caching property %r" %
+                                (self.attrname,)
+                            ) from None
             else:
                 val = self.func(instance)
                 try:
-                    cache[self.attrname] = val
-                except TypeError:
-                    msg = (
-                        f"The '__dict__' attribute on {type(instance).__name__!r} instance "
-                        f"does not support item assignment for caching {self.attrname!r} property."
-                    )
-                    raise TypeError(msg) from None
+                    setattr(instance, self.attrname, val)
+                except (AttributeError, TypeError):
+                    raise TypeError(
+                        "instance does not support caching property %r" %
+                        (self.attrname,)
+                    ) from None
 
         return val
 
@@ -177,16 +151,16 @@ def cached_property(
 class classproperty:
     """Decorator that converts a method with a single cls argument into a property"""
 
-    def __init__(self, func=None):
+    def __init__(self, func: "Callable[..., Any] | None" = None) -> None:
         self.func = func
 
-    def __get__(self, instance, owner=None):
+    def __get__(self, instance: "Any", owner: "type | None" = None) -> "Any":
         return self.func(owner)
 
 
 class _CachedClassproperty:
 
-    def __init__(self, func: "Callable[P, T]", lock):
+    def __init__(self, func: "Callable[P, T]", lock: "Any"):
         self.func = func
         self.__doc__ = func.__doc__
         self.lock = lock

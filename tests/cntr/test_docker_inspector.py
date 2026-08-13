@@ -389,19 +389,17 @@ def test_unknown_service_has_no_logical_container(inspector, fresh_manager, monk
     _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
     _stub_inspect(monkeypatch, fresh_manager, [_item(name="/orphan-1", service="orphan")])
     state = inspector.get_project_state([nginx])
-    assert state.services[0].logical_container is None
-    # An orphan/unknown service must not count toward any logical container's
-    # running set.
+    assert state.services[0].logical_containers == ()
     assert state.running_container_names == []
 
 
-def test_duplicate_service_across_containers_is_first_wins(inspector, fresh_manager, monkeypatch):
+def test_duplicate_service_across_containers_is_one_to_many(inspector, fresh_manager, monkeypatch):
     nginx = _service_container(fresh_manager, "nginx", ["shared"])
     authelia = _service_container(fresh_manager, "authelia", ["shared"])
     _stub_ids(monkeypatch, fresh_manager, "abc123abc123\n")
     _stub_inspect(monkeypatch, fresh_manager, [_item(service="shared")])
     state = inspector.get_project_state([nginx, authelia])
-    assert state.services[0].logical_container == "nginx"
+    assert state.services[0].logical_containers == ("nginx", "authelia")
 
 
 def test_running_container_names_requires_running_or_restarting(inspector, fresh_manager, monkeypatch):

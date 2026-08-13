@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def up(container: "BaseContainer", pull: bool = False) -> None:
-    context = container._make_exec_context(["up", pull and "pull"])
+    context = container.make_exec_context(["up", pull and "pull"])
     services = container.compose_runner.collect_services(context)
     # exec never emitted default --pull flags -> emit_default_pull=False.
     with container.lifecycle.notify_start(context):
@@ -35,7 +35,7 @@ def up(container: "BaseContainer", pull: bool = False) -> None:
 
 
 def restart(container: "BaseContainer", pull: bool = False) -> None:
-    context = container._make_exec_context(["restart", pull and "pull"])
+    context = container.make_exec_context(["restart", pull and "pull"])
     services = container.compose_runner.collect_services(context)
     with container.lifecycle.notify_stop(context):
         container.compose_runner.stop(context, services)
@@ -52,7 +52,7 @@ def restart(container: "BaseContainer", pull: bool = False) -> None:
 
 
 def down(container: "BaseContainer") -> None:
-    context = container._make_exec_context("down")
+    context = container.make_exec_context("down")
     services = container.compose_runner.collect_services(context)
 
     with container.lifecycle.notify_stop(context):
@@ -61,7 +61,7 @@ def down(container: "BaseContainer") -> None:
 
 
 def config(container: "BaseContainer") -> "dict[str, Any] | None":
-    context = container._make_exec_context("config")
+    context = container.make_exec_context("config")
     services = container.compose_runner.collect_services(context)
     return container.compose_runner.config(context, services)
 
