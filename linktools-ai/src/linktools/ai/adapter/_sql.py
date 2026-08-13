@@ -84,9 +84,9 @@ from ..storage import (
     classify_sql_error,
     is_retryable_sql_transaction,
     prepare_storage_database,
-    get_sql_storage_context,
+    SqlStorageContext,
+    SqlAlchemyDialect,
     StorageDomain,
-    resolve_dialect,
     build_sql_schema_metadata,
     storage_name,
 )
@@ -94,7 +94,7 @@ from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._persistence import RoutedIdempotencyRepository, RoutedOperationRepository
 if TYPE_CHECKING:
     from sqlalchemy import Table
-    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.sql.elements import ColumnElement
 
 
@@ -388,7 +388,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                 updated = replace(node, status=next_status, error_code=error_code, error_digest=error_digest)
                 async with self._owner.session_factory() as session:
                     async with session.begin():
-                        db_now = await resolve_dialect(session).database_now(session)
+                        db_now = await self._owner.dialect.database_now(session)
                         await self._task_update(
                             session,
                             updated,
@@ -495,7 +495,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                     dependency.status is TaskStatus.SUCCEEDED
                     for dependency in dependency_nodes.values()
                 )
-                db_now = await resolve_dialect(session).database_now(session)
+                db_now = await self._owner.dialect.database_now(session)
                 expired = node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= db_now
                 if (node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired) or not dependencies_ready:
                     raise AIError(ErrorCode.TASK_NOT_READY)
@@ -520,7 +520,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await resolve_dialect(session).database_now(session)
+                db_now = await self._owner.dialect.database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 renewed = replace(lease, lease_expires_at=db_now + timedelta(seconds=lease_seconds))
                 await self._task_update(
@@ -540,7 +540,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await resolve_dialect(session).database_now(session)
+                db_now = await self._owner.dialect.database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
                 await self._task_update(
@@ -560,7 +560,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
             raise AIError(ErrorCode.TASK_FENCE_STALE)
         async with self._owner.session_factory() as session:
             async with session.begin():
-                db_now = await resolve_dialect(session).database_now(session)
+                db_now = await self._owner.dialect.database_now(session)
                 node = await self._task_node(session, lease, tenant_id, db_now)
                 terminal = TaskTerminalRecord(lease.task_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
                 await self._task_update(
@@ -739,7 +739,7 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
                                 raise AIError(ErrorCode.STORAGE_CONFLICT)
                             deleted = False
                         else:
-                            rows = await resolve_dialect(session).delete_returning(
+                            rows = await self._owner.dialect.delete_returning(
                                 session,
                                 table=memory_table,
                                 where=and_(
@@ -1476,9 +1476,10 @@ class _SqlRuntimeRepository(ToolStateStore, BlobStore, RuntimeRepository):
 
 
 class _SqlRuntimeOwner:
-    def __init__(self, database: StorageDatabase, tables: "dict[str, Table]", *, context: object, namespace: str) -> None:
+    def __init__(self, database: StorageDatabase, tables: "dict[str, Table]", *, context: SqlStorageContext, namespace: str) -> None:
         self.database = database
         self.context = context
+        self.dialect: SqlAlchemyDialect = context.dialect
         self.session_factory = context.sessions
         self.tables = tables
         self.namespace = namespace
@@ -1630,13 +1631,17 @@ def _blob_ref(value: "dict[str, JsonValue]") -> BlobRef:
     return BlobRef(str(value["tenant_id"]), str(value["digest"]), int(value["size"]), str(value["locator"]))
 
 
-async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: frozenset[StorageDomain] | None = None) -> RuntimeStores:
+async def open_sql_runtime(context: "SqlStorageContext", *, persist: frozenset[StorageDomain]) -> RuntimeStores:
     from ._persistence import build_in_memory_runtime
 
-    context = get_sql_storage_context(engine, namespace)
+    if context.schema_manifest_digest is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    engine = context.engine
+    namespace = context.namespace
     metadata, schema_digest = build_sql_schema_metadata()
-    await context.initialize(metadata=metadata, schema_manifest_digest=schema_digest)
-    selected = frozenset({StorageDomain.CONVERSATION} if persist is None else persist)
+    if context.schema_manifest_digest != schema_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    selected = frozenset(persist)
     runtime_table_names = {
         "sessions": "runtime_sessions",
         "executions": "runtime_executions",
@@ -1665,7 +1670,6 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
         schema_manifest_digest=schema_digest,
         context=context,
     )
-    await database.initialize()
     owner = _SqlRuntimeOwner(database, tables, context=context, namespace=namespace)
     components = tuple(_SqlRuntimeRepository(owner, name) for name in ("sessions", "executions", "results", "idempotency", "execution_events", "task_graphs", "evaluations", "memories", "artifacts", "approvals", "external_results", "operation_ledger", "tool_operations", "blobs"))
     evaluation_component = _SqlRuntimeRepository(owner, "evaluation_idempotency")
@@ -1688,9 +1692,11 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
     }
     execution_idempotency = RoutedIdempotencyRepository(components[3], memory.execution.idempotency, selected, StorageDomain.EXECUTION)
     evaluation_idempotency = RoutedIdempotencyRepository(evaluation_component, memory.evaluation.idempotency, selected, StorageDomain.EVALUATION)
+    full_persistence = StorageDomain.durable() <= selected
     sql_blobs = {
         domain: _SqlRuntimeRepository(owner, "blobs", blob_domain=domain)
         for domain in (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
+        if domain is not StorageDomain.CONVERSATION or full_persistence
     }
     memory_blobs = {
         StorageDomain.CONVERSATION: memory.conversation.blobs,
@@ -1701,10 +1707,12 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
         StorageDomain.RECOVERY: memory.recovery.blobs,
     }
     blobs = {
-        domain: sql_blobs[domain] if use_sql(domain) else memory_blobs[domain]
+        domain: sql_blobs[domain] if domain in sql_blobs else memory_blobs[domain]
         for domain in memory_blobs
     }
     conversation = components[0] if use_sql(StorageDomain.CONVERSATION) else memory.conversation.sessions
+    conversation_operations = operation_repositories[StorageDomain.CONVERSATION] if full_persistence else memory.conversation.operations
+    conversation_blobs = blobs[StorageDomain.CONVERSATION] if full_persistence else memory.conversation.blobs
     execution = components[1] if use_sql(StorageDomain.EXECUTION) else memory.execution.executions
     results = components[2] if use_sql(StorageDomain.EXECUTION) else memory.execution.results
     events = components[4] if use_sql(StorageDomain.EXECUTION) else memory.execution.events
@@ -1718,7 +1726,7 @@ async def open_sql_runtime(engine: "AsyncEngine", *, namespace: str, persist: fr
     tools = components[12] if use_sql(StorageDomain.RECOVERY) else memory.recovery.tools
     return RuntimeStores(
         namespace=namespace,
-        conversation=ConversationStore(conversation, operation_repositories[StorageDomain.CONVERSATION], blobs[StorageDomain.CONVERSATION]),
+        conversation=ConversationStore(conversation, conversation_operations, conversation_blobs),
         execution=ExecutionStore(execution, results, execution_idempotency, events, operation_repositories[StorageDomain.EXECUTION], blobs[StorageDomain.EXECUTION]),
         memory=MemoryStore(memories, operation_repositories[StorageDomain.MEMORY], blobs[StorageDomain.MEMORY]),
         artifact=ArtifactStore(artifacts, operation_repositories[StorageDomain.ARTIFACT], blobs[StorageDomain.ARTIFACT]),

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeStorage
+from linktools.ai import RuntimeStorage, StorageDomain
 from linktools.ai.adapter import (
     DurableFilesystemStepStore,
     SqlRuntimeSchema,
@@ -45,7 +45,9 @@ from linktools.ai.runtime import (
     SessionRecord,
 )
 from linktools.ai.storage import (
+    build_sql_schema_metadata,
     CoordinationScope,
+    create_sql_storage_context,
     SqlSchemaRegistry,
     prepare_storage_database,
     validate_schema,
@@ -102,8 +104,13 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
     from linktools.ai.migrate import provision_database
 
     await provision_database(engine)
-    first = await open_sql_runtime(engine, namespace="runtime-a")
-    second = await open_sql_runtime(engine, namespace="runtime-b")
+    metadata, digest = build_sql_schema_metadata()
+    first_context = create_sql_storage_context(engine, "runtime-a")
+    second_context = create_sql_storage_context(engine, "runtime-b")
+    await first_context.initialize(metadata=metadata, schema_manifest_digest=digest)
+    await second_context.initialize(metadata=metadata, schema_manifest_digest=digest)
+    first = await open_sql_runtime(first_context, persist=frozenset({StorageDomain.CONVERSATION}))
+    second = await open_sql_runtime(second_context, persist=frozenset({StorageDomain.CONVERSATION}))
     now = datetime.now(timezone.utc)
     try:
         for tenant_id, owner_principal_id in (("tenant-a", "principal-a"), ("tenant-b", "principal-b")):
@@ -129,6 +136,8 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
     finally:
         await first.conversation.sessions.close()
         await second.conversation.sessions.close()
+        await first_context.close()
+        await second_context.close()
         await engine.dispose()
 
     memory = build_in_memory_runtime(namespace="tenant-validation")
@@ -237,7 +246,7 @@ async def test_file_runtime_fault_does_not_publish_a_partial_mutation(tmp_path: 
 
     def fail_once(path: object, value: object, *, fsync: bool = False) -> None:
         nonlocal failed
-        if not failed and str(path).endswith("manifest.json"):
+        if not failed and str(path).endswith("conversation/records.json"):
             failed = True
             raise OSError("injected write failure")
         original(path, value, fsync=fsync)

@@ -224,6 +224,49 @@ class FilesystemWriterLock:
         _logger.debug("runtime writer lock released: path=%s", self.path)
 
 
+class FilesystemMutationLock:
+    """Acquire a short-lived filesystem mutation lock without blocking cancellation."""
+
+    def __init__(self, path: "str | Path", *, poll_interval: float = 0.01) -> None:
+        if poll_interval <= 0:
+            raise ValueError("poll_interval must be positive")
+        self.path = Path(path)
+        self.poll_interval = poll_interval
+        self._lock = FileLock(str(self.path), thread_local=False)
+        self._acquired = False
+
+    async def __aenter__(self) -> "FilesystemMutationLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            while not self._try_acquire():
+                await asyncio.sleep(self.poll_interval)
+        except BaseException:
+            if self._acquired:
+                self._release()
+                self._acquired = False
+            raise
+        _logger.debug("filesystem mutation lock acquired: path=%s", self.path)
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        if not self._acquired:
+            return
+        self._acquired = False
+        self._release()
+        _logger.debug("filesystem mutation lock released: path=%s", self.path)
+
+    def _try_acquire(self) -> bool:
+        try:
+            self._lock.acquire(timeout=0)
+        except Timeout:
+            return False
+        self._acquired = True
+        return True
+
+    def _release(self) -> None:
+        self._lock.release()
+
+
 def _read_record(path: Path) -> 'dict[str, str | int | float]':
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -271,4 +314,11 @@ def _write_record(path: Path, record: 'dict[str, str | int | float]') -> None:
     os.replace(temporary, path)
 
 
-__all__ = ["FilesystemLeaseCoordinator", "FilesystemWriterLock", "KeyedAsyncLock", "Lease", "ProcessLeaseCoordinator"]
+__all__ = [
+    "FilesystemLeaseCoordinator",
+    "FilesystemMutationLock",
+    "FilesystemWriterLock",
+    "KeyedAsyncLock",
+    "Lease",
+    "ProcessLeaseCoordinator",
+]

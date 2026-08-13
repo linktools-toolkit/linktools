@@ -4,7 +4,7 @@
 
 import hashlib
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -48,6 +48,7 @@ class SqlStorageContext:
     namespace: str
     owns_engine: bool = False
     schema_manifest_digest: "str | None" = None
+    _closed: bool = field(default=False, init=False, repr=False)
 
     async def initialize(
         self,
@@ -72,12 +73,13 @@ class SqlStorageContext:
         )
 
     async def close(self) -> None:
-        _SQL_CONTEXTS.pop((id(self.engine), self.namespace), None)
+        if self._closed:
+            return
+        self._closed = True
         if self.owns_engine:
             await self.engine.dispose()
 
 
-_SQL_CONTEXTS: dict[tuple[int, str], SqlStorageContext] = {}
 _SQL_SCHEMA_CONTRIBUTORS: dict[str, Callable[["SqlSchemaRegistry"], "SqlSchemaContribution"]] = {}
 @dataclass(frozen=True, slots=True)
 class SqlTableManifest:
@@ -493,16 +495,7 @@ def create_sql_storage_context(
         namespace,
         owns_engine,
     )
-    _SQL_CONTEXTS[(id(engine), namespace)] = context
     return context
-
-
-def get_sql_storage_context(engine: "AsyncEngine", namespace: str) -> SqlStorageContext:
-    validate_persistence_namespace(namespace)
-    context = _SQL_CONTEXTS.get((id(engine), namespace))
-    if context is not None and context.engine is engine:
-        return context
-    return create_sql_storage_context(engine, namespace)
 
 
 def _dialect_for_name(name: str) -> SqlAlchemyDialect:
@@ -536,7 +529,6 @@ __all__ = [
     "SqlStorageContext",
     "create_sql_storage_context",
     "build_sql_schema_metadata",
-    "get_sql_storage_context",
     "register_storage_schema",
     "register_sql_schema_contributor",
     "prepare_storage_database",

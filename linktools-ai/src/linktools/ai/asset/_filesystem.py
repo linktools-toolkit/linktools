@@ -11,6 +11,7 @@ from typing import TypeVar
 from linktools.core import environ
 
 from ..storage import (
+    FilesystemMutationLock,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
@@ -39,12 +40,15 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
         self._directory = Path(resolved.locator)
         self._state_path = self._directory / ".asset-state.json"
         self._persistence_lock = asyncio.Lock()
+        self._mutation_lock = FilesystemMutationLock(self._directory / ".asset-state.lock")
 
     async def initialize(self) -> None:
-        async with self._persistence_lock:
+        async with self._persistence_lock, self._mutation_lock:
             self._directory.mkdir(parents=True, exist_ok=True)
             if self._state_path.exists():
                 self.import_state(await asyncio.to_thread(read_json, self._state_path))
+            else:
+                self.import_state(self._empty_state())
         _logger.debug(
             "filesystem asset backend initialized: root=%s revision=%s",
             self._directory,
@@ -106,7 +110,12 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
         )
 
     async def _mutate(self, operation: "Callable[[], Awaitable[_ResultT]]") -> _ResultT:
-        async with self._persistence_lock:
+        async with self._persistence_lock, self._mutation_lock:
+            self._directory.mkdir(parents=True, exist_ok=True)
+            if self._state_path.exists():
+                self.import_state(await asyncio.to_thread(read_json, self._state_path))
+            else:
+                self.import_state(self._empty_state())
             previous = self.export_state()
             try:
                 result = await operation()
@@ -117,6 +126,9 @@ class FilesystemAssetBackend(InMemoryAssetBackend):
             except BaseException:
                 self.import_state(previous)
                 raise
+
+    def _empty_state(self) -> "dict[str, object]":
+        return InMemoryAssetBackend(self.root, writable=self.writable).export_state()
 
 
 def filesystem_root(locator: str) -> AssetRoot:

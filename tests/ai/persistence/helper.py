@@ -9,7 +9,7 @@ from linktools.ai import RuntimeStorage
 from linktools.ai.adapter import SqlStepStore, open_sql_runtime
 from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeStores
-from linktools.ai.storage import create_sql_storage_context
+from linktools.ai.storage import build_sql_schema_metadata, create_sql_storage_context
 from linktools.ai.workspace import Workspace, open_workspace_runtime
 from pydantic_ai_harness.step_persistence import StepStore
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -33,10 +33,11 @@ async def open_sql_resources(storage: RuntimeStorage, *, connection_url: str | N
     try:
         await provision_database(engine)
         context = create_sql_storage_context(engine, namespace)
-        await context.initialize()
-        domain = await open_sql_runtime(engine, namespace=namespace, persist=storage.persist)
+        metadata, digest = build_sql_schema_metadata()
+        await context.initialize(metadata=metadata, schema_manifest_digest=digest)
+        domain = await open_sql_runtime(context, persist=storage.persist)
         await domain.initialize()
-        step_store = SqlStepStore(engine, namespace=namespace)
+        step_store = SqlStepStore(engine, namespace=namespace, context=context)
         await step_store.initialize()
         try:
             yield RuntimeResources(storage.target_kind, namespace, domain, step_store)

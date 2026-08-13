@@ -21,12 +21,13 @@ from ._step import (
     DurableFilesystemStepStore,
     RoutedStepStore,
     SqlStepStore,
+    build_sql_step_store,
     build_step_schema,
     register_step_schema,
 )
 
 __all__ = [
     "DurableFilesystemStepStore", "RoutedStepStore", "FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime",
-    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlRuntimeSchema", "SqlStepStore",
+    "NatsPublisher", "ProviderClient", "RuntimeMemoryStore", "SqlRuntimeSchema", "SqlStepStore", "build_sql_step_store",
     "StaticPrincipalProvider", "StepExecutionHistoryReader", "build_filesystem_runtime", "build_in_memory_runtime", "build_step_schema", "register_step_schema", "open_sql_runtime",
 ]

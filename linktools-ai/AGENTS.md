@@ -46,9 +46,11 @@ The current SQL entry points follow this rule:
 
 ```python
 context = create_sql_storage_context(engine, namespace)
-domain = await open_sql_runtime(context)
-steps = SqlStepStore(engine, namespace=namespace, context=context)
-assets = SqlAssetBackend(engine, namespace=namespace, context=context)
+metadata, digest = build_sql_schema_metadata()
+await context.initialize(metadata=metadata, schema_manifest_digest=digest)
+domain = await open_sql_runtime(context, persist=frozenset({StorageDomain.CONVERSATION}))
+steps = build_sql_step_store(context)
+assets = build_sql_asset_backend(context)
 ```
 
 Schema owners expose public schema contributors for migration and evidence generation. Runtime constructors register and freeze their own schema; normal callers do not pass tables around.

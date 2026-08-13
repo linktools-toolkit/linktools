@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from ..errors import ConfigError
 from ..types import MISSING
 from ..utils import atomic_write
+from ._locks import LockManager
 
 if TYPE_CHECKING:
     from typing import Any, Iterator
@@ -25,7 +26,7 @@ class ConfigStore(object):
 
     def __init__(self, path: "Any", lock_manager: "Any | None" = None) -> None:
         self._path = Path(str(path))
-        self._lock_manager = lock_manager
+        self._lock_manager = lock_manager or LockManager(self._path.parent / ".linktools-locks")
         self._data: "dict[str, Any]" = {}
         self._revision = 0
         self._tx_owner = threading.local()
@@ -100,13 +101,7 @@ class ConfigStore(object):
         if getattr(self._tx_owner, "value", None) == threading.get_ident():
             yield
             return
-        if self._lock_manager is not None:
-            lock = self._lock_manager.process_lock("config:" + self._path.name)
-        else:
-            # Fall back to a private filelock beside the config file.
-            from filelock import FileLock
-
-            lock = FileLock(str(self._path) + ".lock")
+        lock = self._lock_manager.file_lock(self._path)
         with lock:
             self.reload()
             self._tx_owner.value = threading.get_ident()

@@ -108,6 +108,24 @@ class _SharedTransactionLock:
         self._lock = asyncio.Lock()
         self._owner: asyncio.Task[object] | None = None
         self._depth = 0
+        self._dirty: set[StorageDomain] = set()
+        self._commit: Callable[[StorageDomain], None] | None = None
+        self._rollback: Callable[[frozenset[StorageDomain]], None] | None = None
+        self._reject_cross_domain = False
+
+    def configure(
+        self,
+        *,
+        commit: "Callable[[StorageDomain], None] | None" = None,
+        rollback: "Callable[[frozenset[StorageDomain]], None] | None" = None,
+        reject_cross_domain: bool = False,
+    ) -> None:
+        self._commit = commit
+        self._rollback = rollback
+        self._reject_cross_domain = reject_cross_domain
+
+    def mark_changed(self, domain: StorageDomain) -> None:
+        self._dirty.add(domain)
 
     async def __aenter__(self) -> None:
         owner = asyncio.current_task()
@@ -119,12 +137,27 @@ class _SharedTransactionLock:
         await self._lock.acquire()
         self._owner = owner
         self._depth = 1
+        self._dirty.clear()
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if asyncio.current_task() is not self._owner:
             raise RuntimeError("runtime transaction lock owner mismatch")
         self._depth -= 1
-        if self._depth == 0:
+        if self._depth != 0:
+            return
+        dirty = frozenset(self._dirty)
+        self._dirty.clear()
+        try:
+            if exc_type is not None:
+                if dirty and self._rollback is not None:
+                    self._rollback(dirty)
+            elif len(dirty) > 1 and self._reject_cross_domain:
+                if self._rollback is not None:
+                    self._rollback(dirty)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            elif len(dirty) == 1 and self._commit is not None:
+                self._commit(next(iter(dirty)))
+        finally:
             self._owner = None
             self._lock.release()
 
@@ -135,6 +168,8 @@ class _Base:
         self._closed = False
         self._lock = asyncio.Lock()
         self._on_change: Callable[[], None] | None = None
+        self._transaction: _SharedTransactionLock | None = None
+        self._owner_domain: StorageDomain | None = None
         self._refresh_source: Callable[[], None] | None = None
 
     @property
@@ -148,6 +183,9 @@ class _Base:
         self._closed = True
 
     def _mark_changed(self) -> None:
+        if self._transaction is not None and self._owner_domain is not None:
+            self._transaction.mark_changed(self._owner_domain)
+            return
         if self._on_change is not None:
             self._on_change()
 
@@ -159,6 +197,49 @@ class _Base:
 
     def _check_tenant(self, tenant_id: str) -> None:
         validate_tenant_id(tenant_id)
+
+
+_COMPONENT_DOMAINS = (
+    StorageDomain.CONVERSATION,
+    StorageDomain.EXECUTION,
+    StorageDomain.EXECUTION,
+    StorageDomain.EXECUTION,
+    StorageDomain.EXECUTION,
+    StorageDomain.TASK,
+    StorageDomain.EVALUATION,
+    StorageDomain.MEMORY,
+    StorageDomain.ARTIFACT,
+    StorageDomain.RECOVERY,
+    StorageDomain.RECOVERY,
+    StorageDomain.EXECUTION,
+    StorageDomain.RECOVERY,
+    None,
+    StorageDomain.EVALUATION,
+    StorageDomain.RECOVERY,
+    StorageDomain.CONVERSATION,
+    StorageDomain.MEMORY,
+    StorageDomain.ARTIFACT,
+    StorageDomain.TASK,
+    StorageDomain.EVALUATION,
+    StorageDomain.RECOVERY,
+)
+
+
+def _configure_transaction_component(
+    component: RuntimeRepository,
+    transaction: _SharedTransactionLock,
+    domain: "StorageDomain | None",
+) -> None:
+    if isinstance(component, _Base):
+        component._lock = transaction
+        component._transaction = transaction
+        component._owner_domain = domain
+    if isinstance(component, DomainBlobRouter):
+        for store_domain, store in component._stores.items():
+            if isinstance(store, _Base):
+                store._lock = transaction
+                store._transaction = transaction
+                store._owner_domain = store_domain
 
 
 class _SessionRepository(_Base):
@@ -506,13 +587,11 @@ class _ResultRepository(_Base):
         super().__init__(namespace)
         self._executions = executions
         self._results: dict[tuple[str, str], ResultRecord] = {}
-        self._sessions: _SessionRepository | None = None
         self._idempotency: _IdempotencyRepository | None = None
         self._events: _EventRepository | None = None
         self._operations: "_OperationRepository | None" = None
 
-    def bind_terminal_repositories(self, sessions: _SessionRepository, idempotency: _IdempotencyRepository, events: _EventRepository, operations: "_OperationRepository") -> None:
-        self._sessions = sessions
+    def bind_terminal_repositories(self, idempotency: _IdempotencyRepository, events: _EventRepository, operations: "_OperationRepository") -> None:
         self._idempotency = idempotency
         self._events = events
         self._operations = operations
@@ -536,7 +615,7 @@ class _ResultRepository(_Base):
         if not isinstance(commit.terminal_event_payload, dict):
             raise AIError(ErrorCode.EXECUTION_RESULT_CONFLICT)
         validate_observation_payload(commit.terminal_event_payload)
-        if self._sessions is None or self._idempotency is None or self._events is None or self._operations is None:
+        if self._idempotency is None or self._events is None or self._operations is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = (execution.tenant_id, execution.execution_id)
         async with self._lock:
@@ -1659,7 +1738,9 @@ def _route_runtime_stores(
     def selected(domain: StorageDomain) -> bool:
         return domain in persist
 
-    conversation_store = durable.conversation if selected(StorageDomain.CONVERSATION) else memory.conversation
+    full_persistence = StorageDomain.durable() <= persist
+    conversation_sessions = durable.conversation.sessions if selected(StorageDomain.CONVERSATION) else memory.conversation.sessions
+    conversation_blobs = durable.conversation.blobs if full_persistence else memory.conversation.blobs
     execution_store = durable.execution if selected(StorageDomain.EXECUTION) else memory.execution
     memory_store = durable.memory if selected(StorageDomain.MEMORY) else memory.memory
     artifact_store = durable.artifact if selected(StorageDomain.ARTIFACT) else memory.artifact
@@ -1682,7 +1763,7 @@ def _route_runtime_stores(
 
     return RuntimeStores(
         namespace=durable.namespace,
-        conversation=ConversationStore(conversation_store.sessions, operation(StorageDomain.CONVERSATION), conversation_store.blobs),
+        conversation=ConversationStore(conversation_sessions, operation(StorageDomain.CONVERSATION) if full_persistence else memory.conversation.operations, conversation_blobs),
         execution=ExecutionStore(execution_store.executions, execution_store.results, RoutedIdempotencyRepository(durable.execution.idempotency, memory.execution.idempotency, persist, StorageDomain.EXECUTION), execution_store.events, operation(StorageDomain.EXECUTION), execution_store.blobs),
         memory=MemoryStore(memory_store.records, operation(StorageDomain.MEMORY), memory_store.blobs),
         artifact=ArtifactStore(artifact_store.records, operation(StorageDomain.ARTIFACT), artifact_store.blobs),
@@ -1758,9 +1839,14 @@ class _DurableRuntime(InMemoryRuntime):
         self._writer_lock = writer_lock or FilesystemWriterLock(Path(state_path).parent / "runtime.lock")
         self._transaction_lock = _SharedTransactionLock()
         self._commit_lock = threading.Lock()
-        for component in self._durable_components:
-            if isinstance(component, _Base):
-                component._lock = self._transaction_lock
+        for index, component in enumerate(self._durable_components):
+            domain = _COMPONENT_DOMAINS[index] if index < len(_COMPONENT_DOMAINS) else None
+            _configure_transaction_component(component, self._transaction_lock, domain)
+        self._transaction_lock.configure(
+            commit=self._commit_domain,
+            rollback=self._rollback_domains,
+            reject_cross_domain=True,
+        )
         self._durable_initialize_lock = asyncio.Lock()
 
     @property
@@ -1779,12 +1865,9 @@ class _DurableRuntime(InMemoryRuntime):
             await self._writer_lock.acquire()
             try:
                 await asyncio.to_thread(self._load)
-                for component in self._durable_components:
-                    if isinstance(component, _Base):
-                        component._on_change = self._commit
                 await super().initialize()
                 if not Path(self._state_path).is_file():
-                    self._flush()
+                    self._write_manifest()
             except BaseException:
                 await self._writer_lock.release()
                 raise
@@ -1799,20 +1882,25 @@ class _DurableRuntime(InMemoryRuntime):
             await self._writer_lock.release()
         _logger.debug("filesystem runtime stores closed: namespace=%s", self.persistence.namespace)
 
-    def _commit(self) -> None:
+    def _rollback_domains(self, domains: frozenset[StorageDomain]) -> None:
+        with self._commit_lock:
+            for domain in domains:
+                self._load_domain(domain)
+
+    def _commit_domain(self, domain: StorageDomain) -> None:
         with self._commit_lock:
             if self._closed:
                 raise AIError(ErrorCode.STORAGE_CLOSED)
             try:
-                self._flush()
+                self._flush_domain(domain)
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
                     self._closed = True
                     raise
-                self._load()
+                self._load_domain(domain)
                 raise
             except BaseException as error:
-                self._load()
+                self._load_domain(domain)
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     def _load_payload(self, value: dict[str, JsonValue], *, clear: bool = True) -> None:
@@ -1926,20 +2014,70 @@ class _DurableRuntime(InMemoryRuntime):
             elif isinstance(component, InMemoryBlobStore):
                 component._blobs.clear()
 
-    def _flush(self) -> None:
-        root = Path(self._state_path).parent
+    def _write_manifest(self) -> None:
         manifest = {
             "format": "linktools-ai-runtime",
             "generation": 1,
             "namespace": self.persistence.namespace,
-            "domains": sorted(domain.value for domain in self._persist),
         }
         write_json_atomic(Path(self._state_path), manifest, fsync=True)
-        for domain in self._persist:
-            directory = root / domain.value
-            directory.mkdir(parents=True, exist_ok=True)
-            write_json_atomic(directory / "records.json", self._domain_records(domain), fsync=True)
-        _logger.debug("runtime metadata committed: namespace=%s selected_domains=%s", self.persistence.namespace, sorted(domain.value for domain in self._persist))
+
+    def _flush_domain(self, domain: StorageDomain) -> None:
+        if domain is StorageDomain.ASSET:
+            return
+        root = Path(self._state_path).parent
+        directory = root / domain.value
+        directory.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(directory / "records.json", self._domain_records(domain), fsync=True)
+        _logger.debug("runtime domain committed: namespace=%s domain=%s", self.persistence.namespace, domain.value)
+
+    def _clear_domain(self, domain: StorageDomain) -> None:
+        for component in self._durable_components:
+            if isinstance(component, _Base) and component._owner_domain is domain:
+                if isinstance(component, _SessionRepository):
+                    component._records.clear()
+                elif isinstance(component, _ExecutionRepository):
+                    component._records.clear()
+                elif isinstance(component, _ResultRepository):
+                    component._results.clear()
+                elif isinstance(component, _IdempotencyRepository):
+                    component._records.clear()
+                elif isinstance(component, _RecoveryCheckpointRepository):
+                    component._records.clear()
+                elif isinstance(component, _EventRepository):
+                    component._items.clear()
+                elif isinstance(component, _TaskRepository):
+                    component._plans.clear()
+                    component._nodes.clear()
+                elif isinstance(component, _EvaluationRepository):
+                    component._records.clear()
+                elif isinstance(component, _MemoryRepository):
+                    component._records.clear()
+                elif isinstance(component, _ArtifactRepository):
+                    component._records.clear()
+                elif isinstance(component, _ApprovalRepository):
+                    component._records.clear()
+                elif isinstance(component, _ExternalRepository):
+                    component._records.clear()
+                elif isinstance(component, _OperationRepository):
+                    component._records.clear()
+                elif isinstance(component, _ToolRepository):
+                    component._records.clear()
+
+    def _load_domain(self, domain: StorageDomain) -> None:
+        self._clear_domain(domain)
+        if domain is StorageDomain.ASSET:
+            return
+        records_path = Path(self._state_path).parent / domain.value / "records.json"
+        if not records_path.is_file():
+            return
+        records = read_json(records_path)
+        if not isinstance(records, dict):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _validate_state_record_uniqueness(_domain_validation_records(records))
+        domain_payload = _empty_payload()
+        _merge_domain_payload(domain_payload, records)
+        self._load_payload(domain_payload, clear=False)
 
     def _domain_records(self, domain: StorageDomain) -> dict[str, JsonValue]:
         sessions, executions, results, idempotency, events, tasks, evaluations, memories, artifacts, approvals, externals, _operations, tools = self.components[:13]
@@ -1952,7 +2090,9 @@ class _DurableRuntime(InMemoryRuntime):
             _json_record(item)
             for item in operation_repository._records.values()
         ]
-        values: dict[str, JsonValue] = {"operations": operation_values}
+        values: dict[str, JsonValue] = {}
+        if domain is not StorageDomain.CONVERSATION or StorageDomain.durable() <= self._persist:
+            values["operations"] = operation_values
         if domain is StorageDomain.CONVERSATION:
             values["sessions"] = [_record_json(item) for item in sessions._records.values()]
         elif domain is StorageDomain.EXECUTION:
@@ -1996,16 +2136,7 @@ class FilesystemRuntime(_DurableRuntime):
                 raise ValueError("runtime state identity mismatch")
             self._load_payload(_empty_payload())
             for domain in self._persist:
-                records_path = state_path.parent / domain.value / "records.json"
-                if not records_path.is_file():
-                    continue
-                records = read_json(records_path)
-                if not isinstance(records, dict):
-                    raise ValueError("runtime domain records must be an object")
-                _validate_state_record_uniqueness(_domain_validation_records(records))
-                domain_payload = _empty_payload()
-                _merge_domain_payload(domain_payload, records)
-                self._load_payload(domain_payload, clear=False)
+                self._load_domain(domain)
             self._validate_payload()
         except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
@@ -2304,18 +2435,21 @@ def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ..
     )
 
 
-def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None" = None, persist: frozenset[StorageDomain] | None = None, writer_lock: "FilesystemWriterLock | None" = None) -> InMemoryRuntime:
+def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None" = None, persist: "frozenset[StorageDomain] | StorageDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> InMemoryRuntime:
     validate_persistence_namespace(namespace)
-    selected_domains = frozenset({StorageDomain.CONVERSATION} if persist is None and filesystem else persist or ())
+    selected_domains = _normalize_runtime_persist(persist, filesystem=filesystem)
     sessions = _SessionRepository(namespace)
     executions = _ExecutionRepository(namespace)
     execution_idempotency = _IdempotencyRepository(namespace)
     evaluation_idempotency = _IdempotencyRepository(namespace)
     recovery_checkpoint = _RecoveryCheckpointRepository(namespace)
     blob_domains = (StorageDomain.CONVERSATION, StorageDomain.EXECUTION, StorageDomain.MEMORY, StorageDomain.ARTIFACT, StorageDomain.EVALUATION, StorageDomain.RECOVERY)
+    full_persistence = StorageDomain.durable() <= selected_domains
     if filesystem and state_path is not None:
         blob_stores = {
-            domain: FilesystemBlobStore(Path(state_path).parent / domain.value / "blob", namespace) if domain in selected_domains else InMemoryBlobStore(namespace)
+            domain: FilesystemBlobStore(Path(state_path).parent / domain.value / "blob", namespace)
+            if domain in selected_domains and (domain is not StorageDomain.CONVERSATION or full_persistence)
+            else InMemoryBlobStore(namespace)
             for domain in blob_domains
         }
     else:
@@ -2359,13 +2493,12 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
         operation_repositories[StorageDomain.RECOVERY],
     )
     executions.bind_start_repositories(components[3], components[4], components[11])
-    components[2].bind_terminal_repositories(components[0], components[3], components[4], components[11])
+    components[2].bind_terminal_repositories(components[3], components[4], components[11])
     if isinstance(components[7], _MemoryRepository):
         components[7].bind_operation_repository(operation_repositories[StorageDomain.MEMORY])
     transaction_lock = _SharedTransactionLock()
-    for component in components:
-        if isinstance(component, _Base):
-            component._lock = transaction_lock
+    for index, component in enumerate(components):
+        _configure_transaction_component(component, transaction_lock, _COMPONENT_DOMAINS[index])
     persistence = RuntimeStores(
         namespace=namespace,
         conversation=ConversationStore(sessions, operation_repositories[StorageDomain.CONVERSATION], blob_router.for_domain(StorageDomain.CONVERSATION)),
@@ -2398,7 +2531,7 @@ def build_in_memory_runtime(*, namespace: "str | None" = None) -> InMemoryRuntim
     return _build_runtime(filesystem=False, namespace=selected_namespace)
 
 
-def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[StorageDomain] | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
+def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[StorageDomain] | StorageDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
     if not isinstance(root, str) or not root.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     validate_persistence_namespace(namespace)
@@ -2406,6 +2539,23 @@ def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[S
     namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
     state_path = root_path / namespace_digest / "manifest.json"
     return _build_runtime(filesystem=True, namespace=namespace, state_path=str(state_path), persist=persist, writer_lock=writer_lock)
+
+
+def _normalize_runtime_persist(
+    persist: "frozenset[StorageDomain] | StorageDomain | None",
+    *,
+    filesystem: bool,
+) -> frozenset[StorageDomain]:
+    if persist is None:
+        return frozenset({StorageDomain.CONVERSATION}) if filesystem else frozenset()
+    values = frozenset({persist}) if isinstance(persist, StorageDomain) else frozenset(persist)
+    if not all(isinstance(item, StorageDomain) for item in values):
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    if StorageDomain.ALL in values:
+        if len(values) != 1:
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return StorageDomain.durable()
+    return values
 
 
 __all__ = ["FilesystemBlobStore", "FilesystemRuntime", "InMemoryBlobStore", "InMemoryRuntime", "build_filesystem_runtime", "build_in_memory_runtime"]

@@ -81,7 +81,11 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
 
     namespace_root = next(root.iterdir())
     manifest = json.loads((namespace_root / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["domains"] == ["conversation"]
+    assert manifest == {
+        "format": "linktools-ai-runtime",
+        "generation": 1,
+        "namespace": "selective",
+    }
     assert (namespace_root / "conversation" / "records.json").is_file()
     assert not (namespace_root / "execution").exists()
 

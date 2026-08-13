@@ -39,6 +39,7 @@ from ._sql import (
     SqlAssetBackend,
     SqlAssetSchema,
     SqlAssetTables,
+    build_sql_asset_backend,
 )
 from ._store import AssetCacheAdapter, AssetStore
 
@@ -74,7 +75,7 @@ __all__ = [
     "PrefixAssetPathAdapter",
     "ResolvedAsset",
     "SingleFileLayout",
-    "SqlAssetBackend",
+    "SqlAssetBackend", "build_sql_asset_backend",
     "SqlAssetSchema",
     "SqlAssetTables",
     "StrictConfigReader",

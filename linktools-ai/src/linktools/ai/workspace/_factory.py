@@ -18,7 +18,7 @@ from ..adapter import (
     DurableFilesystemStepStore,
     RoutedStepStore,
     RuntimeMemoryStore,
-    SqlStepStore,
+    build_sql_step_store,
     StepExecutionHistoryReader,
     build_filesystem_runtime,
     build_in_memory_runtime,
@@ -46,7 +46,7 @@ from ..asset import (
     InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     PrefixAssetPathAdapter,
-    SqlAssetBackend,
+    build_sql_asset_backend,
 )
 from ..capability import (
     CapabilityBinding,
@@ -97,6 +97,7 @@ from ..storage import (
     StorageLayer,
     StorageOverlay,
     StorageWriter,
+    SqlStorageContext,
     create_sql_storage_context,
 )
 from ..task import LocalTaskGraphLauncher, TaskNodeRunner
@@ -112,7 +113,7 @@ class _RuntimeResources:
     namespace: str
     domain: RuntimeStores
     steps: StepStore
-    sql_context: "object | None" = None
+    sql_context: "SqlStorageContext | None" = None
 
 
 @asynccontextmanager
@@ -120,7 +121,7 @@ async def _open_resources(
     storage: RuntimeStorage,
     *,
     namespace: str,
-    sql_context: "object | None" = None,
+    sql_context: "SqlStorageContext | None" = None,
 ) -> "AsyncIterator[_RuntimeResources]":
     if storage.target_kind == "memory":
         runtime = build_in_memory_runtime(namespace=namespace)
@@ -143,11 +144,10 @@ async def _open_resources(
             await steps.close()
             await runtime.close()
         return
-    owns_context = sql_context is None
     if sql_context is None:
-        sql_context = await _prepare_sql_context(storage, namespace)
-    domain = await open_sql_runtime(sql_context.engine, namespace=namespace, persist=storage.persist)
-    durable_steps = SqlStepStore(sql_context.engine, namespace=namespace)
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, "SQL resources require a prepared context")
+    domain = await open_sql_runtime(sql_context, persist=storage.persist)
+    durable_steps = build_sql_step_store(sql_context)
     steps = RoutedStepStore(InMemoryStepStore(), durable_steps, storage.persist)
     await steps.initialize()
     try:
@@ -156,8 +156,6 @@ async def _open_resources(
     finally:
         await steps.close()
         await domain.close()
-        if owns_context:
-            await sql_context.close()
 
 
 async def build_asset_store(root: str | Path) -> AssetStore:
@@ -176,7 +174,7 @@ async def build_asset_store(root: str | Path) -> AssetStore:
     return store
 
 
-async def _prepare_sql_context(storage: RuntimeStorage, namespace: str) -> object:
+async def _prepare_sql_context(storage: RuntimeStorage, namespace: str) -> SqlStorageContext:
     from sqlalchemy.ext.asyncio import create_async_engine
 
     if storage.target_kind == "sqlite":
@@ -436,7 +434,7 @@ def _grant_key(workspace: Workspace) -> bytes:
 def _asset_writer(
     storage: RuntimeStorage,
     namespace: str,
-    sql_context: "object | None",
+    sql_context: "SqlStorageContext | None",
 ) -> "StorageWriter[AssetKey, bytes, AssetInfo]":
     if StorageDomain.ASSET not in storage.persist:
         return InMemoryAssetBackend()
@@ -444,7 +442,7 @@ def _asset_writer(
         namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         return FilesystemAssetBackend(str(storage.location / namespace_key / "asset"))
     if storage.target_kind in {"sqlite", "sql"} and sql_context is not None:
-        return SqlAssetBackend(sql_context.engine, namespace=namespace)
+        return build_sql_asset_backend(sql_context)
     return InMemoryAssetBackend()
 
 

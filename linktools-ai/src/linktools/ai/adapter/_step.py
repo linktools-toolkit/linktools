@@ -27,21 +27,22 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemWriterLock,
     build_sql_schema_metadata,
+    create_sql_storage_context,
     SqlErrorKind,
+    SqlAlchemyDialect,
     classify_sql_error,
     read_json,
-    resolve_dialect,
     sql_blob,
     sql_digest,
     sql_index,
     sql_integer_id,
     sql_table_options,
     SqlSchemaRegistry,
+    SqlStorageContext,
     storage_name,
     sync_directory,
     write_json_atomic,
     StorageDomain,
-    get_sql_storage_context,
     register_sql_schema_contributor,
 )
 from ._schema import new_step_metadata
@@ -452,9 +453,9 @@ def _file_string_map(value: object) -> dict[str, str]:
 
 
 class SqlStepStore:
-    """Namespace-bound MySQL/PostgreSQL StepStore implementation."""
+    """Namespace-bound SQL StepStore implementation."""
 
-    def __init__(self, engine: "AsyncEngine", *, namespace: str) -> None:
+    def __init__(self, engine: "AsyncEngine", *, namespace: str, context: "SqlStorageContext | None" = None) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         if not isinstance(engine, AsyncEngine):
@@ -463,8 +464,12 @@ class SqlStepStore:
             validate_persistence_namespace(namespace)
         except AIError as error:
             raise ValueError("StepStore namespace is invalid") from error
+        if context is not None:
+            if context.engine is not engine or context.namespace != namespace:
+                raise ValueError("StepStore context identity mismatch")
         self._engine = engine
-        self._context = get_sql_storage_context(engine, namespace)
+        self._context = context or create_sql_storage_context(engine, namespace)
+        self._owns_context = context is None
         self._sessions = self._context.sessions
         self._namespace = namespace
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
@@ -481,7 +486,7 @@ class SqlStepStore:
         }
         self._media = _PromotingMediaStore(
             _MemoryMediaStore(),
-            _SqlMediaStore(self._sessions, namespace, metadata=self._metadata, tables=self._tables),
+            _SqlMediaStore(self._sessions, namespace, self._context.dialect, metadata=self._metadata, tables=self._tables),
         )
 
     @property
@@ -491,6 +496,8 @@ class SqlStepStore:
     async def initialize(self) -> None:
         if self._context.schema_manifest_digest is not None:
             return
+        if not self._owns_context:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._context.initialize(
             metadata=self._metadata,
             schema_manifest_digest=self._schema_digest,
@@ -574,7 +581,7 @@ class SqlStepStore:
         table = self._tables["effects"]
         async with self._sessions() as session:
             async with session.begin():
-                await resolve_dialect(session).upsert(
+                await self._dialect.upsert(
                     session,
                     table=table,
                     values=values,
@@ -608,12 +615,13 @@ class SqlStepStore:
 class _SqlMediaStore:
     """Content-addressed SQL media store used by Harness snapshots."""
 
-    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
+    def __init__(self, session_factory: "async_sessionmaker[AsyncSession]", namespace: str, dialect: SqlAlchemyDialect, *, metadata: "object | None" = None, tables: "dict[str, object] | None" = None) -> None:
         try:
             validate_persistence_namespace(namespace)
         except AIError as error:
             raise ValueError("media namespace is invalid") from error
         self._sessions = session_factory
+        self._dialect = dialect
         self._namespace_key = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
         if metadata is None or tables is None:
             self._metadata, self._tables = _build_tables()
@@ -816,6 +824,13 @@ def register_step_schema(registry: "SqlSchemaRegistry") -> "dict[str, Table]":
 register_sql_schema_contributor("adapter._step", register_step_schema)
 
 
+def build_sql_step_store(context: "SqlStorageContext") -> SqlStepStore:
+    """Build a StepStore from the workspace-owned SQL context."""
+    if context.schema_manifest_digest is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return SqlStepStore(context.engine, namespace=context.namespace, context=context)
+
+
 def _run_values(namespace_key: str, record: RunRecord) -> dict[str, object]:
     if record.conversation_id is None:
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -903,4 +918,4 @@ def _schema_digest(metadata: "MetaData") -> str:
     return hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
 
 
-__all__ = ["DurableFilesystemStepStore", "SqlStepStore", "build_step_schema", "register_step_schema"]
+__all__ = ["DurableFilesystemStepStore", "SqlStepStore", "build_sql_step_store", "build_step_schema", "register_step_schema"]

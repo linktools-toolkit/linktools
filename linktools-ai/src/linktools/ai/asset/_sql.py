@@ -17,6 +17,7 @@ from ..errors import AIError, ErrorCode
 from ..storage import (
     MetadataLoad,
     build_sql_schema_metadata,
+    create_sql_storage_context,
     SqlErrorKind,
     SqlSchemaRegistry,
     StorageBatchResult,
@@ -29,7 +30,6 @@ from ..storage import (
     StorageRevision,
     VersionSummary,
     classify_sql_error,
-    resolve_dialect,
     sql_blob,
     sql_digest,
     sql_index,
@@ -37,7 +37,7 @@ from ..storage import (
     sql_table_options,
     sql_text_key,
     storage_name,
-    get_sql_storage_context,
+    SqlStorageContext,
     register_sql_schema_contributor,
 )
 from ._backend import InMemoryAssetBackend
@@ -179,6 +179,13 @@ class SqlAssetSchema:
 register_sql_schema_contributor("asset.sql", SqlAssetSchema.register_schema)
 
 
+def build_sql_asset_backend(context: "SqlStorageContext") -> "SqlAssetBackend":
+    """Build an Asset backend from the workspace-owned SQL context."""
+    if context.schema_manifest_digest is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return SqlAssetBackend(context.engine, namespace=context.namespace, context=context)
+
+
 class SqlAssetBackend(InMemoryAssetBackend):
     """Persist current files, history, content blobs, and revisions separately."""
 
@@ -187,6 +194,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
         engine: "AsyncEngine",
         *,
         namespace: str,
+        context: "SqlStorageContext | None" = None,
     ) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -205,13 +213,18 @@ class SqlAssetBackend(InMemoryAssetBackend):
             self._metadata.tables[storage_name("asset_blobs")],
             self._metadata.tables[storage_name("asset_revision")],
         )
-        self._context = get_sql_storage_context(engine, namespace)
+        if context is not None and (context.engine is not engine or context.namespace != namespace):
+            raise ValueError("Asset context identity mismatch")
+        self._context = context or create_sql_storage_context(engine, namespace)
+        self._owns_context = context is None
         self._session_factory = self._context.sessions
         self._namespace = namespace
         self._state_loaded = False
 
     async def initialize(self) -> None:
         if self._context.schema_manifest_digest is None:
+            if not self._owns_context:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._context.initialize(
                 metadata=self._metadata,
                 schema_manifest_digest=self._schema_digest,
@@ -380,7 +393,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
                             next_versions[len(previous_versions) :],
                             next_entries,
                         )
-                        stored_revision = await resolve_dialect(session).upsert_increment(
+                        stored_revision = await self._context.dialect.upsert_increment(
                             session,
                             table=self._tables.revision,
                             values={"namespace": self._namespace},
@@ -497,7 +510,7 @@ class SqlAssetBackend(InMemoryAssetBackend):
             digest = values["blob_digest"]
             if digest is not None:
                 blob_contents[str(digest)] = content
-        dialect = resolve_dialect(session)
+        dialect = self._context.dialect
         if blob_contents:
             blob_values = tuple(
                 {"digest": digest, "content": content}
@@ -636,4 +649,5 @@ __all__ = [
     "SqlAssetBackend",
     "SqlAssetSchema",
     "SqlAssetTables",
+    "build_sql_asset_backend",
 ]
