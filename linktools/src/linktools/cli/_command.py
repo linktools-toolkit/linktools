@@ -45,8 +45,8 @@ def _debug_enabled(target: "BaseEnviron") -> bool:
 class CommandError(CliError):
     """Base exception for command-line failures.
 
-    Reparented from ``Error`` so the CLI exit-code mapper treats
-    command/user-input errors as exit 2 rather than internal (10).
+    The CLI exit-code mapper treats command/user-input errors as exit 2
+    rather than internal (10).
     """
     pass
 
@@ -317,7 +317,7 @@ def subcommand(
         add_help: bool = MISSING,
         allow_abbrev: bool = MISSING,
         pass_args: bool = False,
-        order: str = None) -> "Callable[[Callable[..., int | None]], Callable[..., int | None]]":
+        order: "str | None" = None) -> "Callable[[Callable[..., int | None]], Callable[..., int | None]]":
     """Subcommand.
 
     Args:
@@ -769,7 +769,7 @@ class _SubCommandMethod(SubCommand):
                     f"1. add `{dest}` parameter to {self.info}, {os.linesep}"
                     f"2. add `no_param=True` parameter to argument `{', '.join(argument_args)}`.")
 
-            # Resolve string annotations (e.g. from `from __future__ import annotations`).
+            # Resolve string annotations (e.g. when annotations are string-quoted).
             try:
                 import typing
                 type_hints = typing.get_type_hints(method)
@@ -822,7 +822,7 @@ class _SubCommandMethod(SubCommand):
     def run(self, args: "Namespace") -> "int | None":
         method = getattr(self.target, self.info.func.__name__)
 
-        actions = getattr(self, "_actions", None)
+        actions = self._actions
         if actions is None:
             raise CommandError("subcommand parser is not initialized")
 
@@ -885,7 +885,7 @@ class SubCommandWrapper(SubCommand):
 class SubCommandMixin:
 
     """Mixin that discovers, registers, and prints subcommands."""
-    def walk_subcommands(self: "BaseCommand", target: "Any", parent_id: str = None) -> "Generator[SubCommand, None, None]":
+    def walk_subcommands(self: "BaseCommand", target: "Any", parent_id: "str | None" = None) -> "Generator[SubCommand, None, None]":
         """Yield subcommands discovered from a target object.
 
         Args:
@@ -961,7 +961,7 @@ class SubCommandMixin:
 
     def add_subcommands(
             self: "BaseCommand",
-            parser: "CommandParser" = None,
+            parser: "CommandParser | None" = None,
             target: "Any" = None,
             required: bool = False,
             sort: bool = False,
@@ -1074,8 +1074,8 @@ class SubCommandMixin:
     def print_subcommands(
             self: "BaseCommand",
             args: "Namespace",
-            root: "SubCommand" = None,
-            max_level: int = None
+            root: "SubCommand | None" = None,
+            max_level: "int | None" = None
     ) -> None:
         """Print the registered subcommand tree.
 
@@ -1452,7 +1452,7 @@ class BaseCommand(SubCommandMixin, metaclass=abc.ABCMeta):
             exit_code = self.run(args) or 0
 
         except (CommandError, *self.known_errors) as e:
-            # Spec  map the error's domain to a stable exit code.
+            # Map the error's domain to a stable exit code.
             from ._exitcodes import exit_code_for
             exit_code = exit_code_for(e)
             error_type, error_message = e.__class__.__name__, str(e).strip()

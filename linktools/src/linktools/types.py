@@ -9,7 +9,7 @@ import weakref as _weakref
 from pathlib import Path as _Path
 
 
-# Monotonic clock for in-process deadlines. Spec  wall-clock changes
+# Monotonic clock for in-process deadlines. Wall-clock changes
 # (NTP, DST, manual) must never affect timeout/scheduling correctness; persistent
 # TTLs use UTC unix timestamps via time.time() elsewhere.
 _now = _time.monotonic
@@ -141,7 +141,7 @@ class Timeout:
         if self.expired:
             raise err_type(message)
 
-    def split(self, timeout: "TimeoutType" = None) -> "Timeout":
+    def split(self, timeout: "TimeoutType | None" = None) -> "Timeout":
         """Return a child timeout bounded by both ``timeout`` and our budget.
 
         The child never outlives the parent: its deadline is the sooner of

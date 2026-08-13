@@ -88,7 +88,7 @@ class RuntimeProcessFactory:
     def create_process(
             self,
             *args: "Any",
-            privilege: bool = None,
+            privilege: "bool | None" = None,
             **kwargs: "Any",
     ) -> "Process":
         # sudo is always interactive: if the sudo policy needs a password,
@@ -102,7 +102,7 @@ class RuntimeProcessFactory:
                 return popen(*prefix, *args, **kwargs)
         return popen(*args, **kwargs)
 
-    def docker_args(self, *args: "Any", privilege: bool = None) -> CommandSpec:
+    def docker_args(self, *args: "Any", privilege: "bool | None" = None) -> CommandSpec:
         """Build the full ``docker ...`` argv (no sudo) without executing
         it -- the single source of truth ``create_docker_process`` and
         ``ExecutionPlanner`` both build on."""
@@ -125,7 +125,7 @@ class RuntimeProcessFactory:
             self,
             containers: "Iterable[BaseContainer]",
             *args: str,
-            privilege: bool = None,
+            privilege: "bool | None" = None,
     ) -> CommandSpec:
         """Build the full ``docker ... compose --file ... --project-name ...
         ...`` argv. Resolves each container's real (already-written) compose
@@ -149,7 +149,7 @@ class RuntimeProcessFactory:
     def create_docker_process(
             self,
             *args: "Any",
-            privilege: bool = None,
+            privilege: "bool | None" = None,
             **kwargs: "Any",
     ) -> "Process":
         spec = self.docker_args(*args, privilege=privilege)
@@ -159,7 +159,7 @@ class RuntimeProcessFactory:
             self,
             containers: "Iterable[BaseContainer]",
             *args: str,
-            privilege: bool = None,
+            privilege: "bool | None" = None,
             **kwargs: "Any",
     ) -> "Process":
         spec = self.docker_compose_args(containers, *args, privilege=privilege)

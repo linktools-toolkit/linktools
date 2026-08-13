@@ -111,7 +111,7 @@ class StructuredCommandRunner:
     def execute(
             self,
             process: "Process",
-            timeout: "TimeoutType" = None,
+            timeout: "TimeoutType | None" = None,
             check: bool = True,
             error_type: "type | None" = None,
     ) -> "CommandResult":
@@ -171,7 +171,7 @@ class StructuredCommandRunner:
     def execute_text(
             self,
             process: "Process",
-            timeout: "TimeoutType" = None,
+            timeout: "TimeoutType | None" = None,
             check: bool = True,
     ) -> "CommandResult":
         return self.execute(process, timeout=timeout, check=check)
@@ -179,7 +179,7 @@ class StructuredCommandRunner:
     def execute_json(
             self,
             process: "Process",
-            timeout: "TimeoutType" = None,
+            timeout: "TimeoutType | None" = None,
             check: bool = True,
     ) -> "Any":
         result = self.execute(process, timeout=timeout, check=check)

@@ -103,7 +103,7 @@ class ExposeMixin:
             proxy_name: str = MISSING, proxy_domain_name: str = MISSING,
             proxy_conf: "PathType" = MISSING, proxy_url: str = MISSING,
             https_enable: bool = MISSING, waf_enable: bool = MISSING,
-            auth_enable: bool = False, auth_extra: "dict[str, Any]" = None,
+            auth_enable: bool = False, auth_extra: "dict[str, Any] | None" = None,
     ) -> "Proxy":
 
         if not proxy_conf and not proxy_url:
@@ -176,7 +176,7 @@ class ExposeMixin:
 
 class NginxMixin:
 
-    def get_nginx_domain(self: "BaseContainer", name: str = None) -> "LazyProvider":
+    def get_nginx_domain(self: "BaseContainer", name: "str | None" = None) -> "LazyProvider":
 
         def get_domain(cfg: "dict[str, Any]") -> str:
             if not self.containers["nginx"].enable:

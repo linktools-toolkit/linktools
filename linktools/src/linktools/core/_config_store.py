@@ -38,11 +38,13 @@ class ConfigStore(object):
 
     @property
     def revision(self) -> int:
-        """Bumped on every successful reload/set/save/remove -- lets a
-        PersistentSource wrapping this store (and anything comparing a
-        cached revision token against it, e.g. ConfigResolver) detect a
-        change made through a *different* PersistentSource/Config instance
-        wrapping the same underlying file."""
+        """Invalidation token for PersistentSource / ConfigResolver.
+
+        Bumped on: explicit reload (always), successful set/save/remove,
+        changed edit commit, and internal lock refresh when disk content
+        differs from in-memory. No-op edit or unchanged-disk refresh do
+        not bump.
+        """
         return self._revision
 
     def _touch(self) -> None:
@@ -50,17 +52,16 @@ class ConfigStore(object):
 
     # -- load / flush -------------------------------------------------------
 
-    def reload(self) -> None:
-        """Re-read the file; genuinely missing -> empty, anything else
-        unreadable -> ConfigError (fail-closed, never a silent empty
-        config: a dangling symlink or non-regular path must never be
-        mistaken for "nothing configured")."""
+    def _read_data(self) -> "dict[str, Any]":
+        """Read and validate the file without modifying ``_data`` or revision.
+
+        Genuinely missing path -> empty dict. Dangling symlink, non-regular
+        file, invalid JSON, or non-object root -> ConfigError (fail-closed).
+        """
         if not self._path.exists():
             if self._path.is_symlink():
                 raise ConfigError("config store path is a dangling symlink: %s" % self._path)
-            self._data = {}
-            self._touch()
-            return
+            return {}
         if not self._path.is_file():
             raise ConfigError("config store path is not a regular file: %s" % self._path)
         try:
@@ -70,12 +71,25 @@ class ConfigStore(object):
         try:
             data = json.loads(text)
         except ValueError as exc:
-            # User-editable file: surface the corruption rather than silently
-            # wiping it on the next write.
             raise ConfigError("config %s is not valid JSON: %s" % (self._path, exc))
         if not isinstance(data, dict):
             raise ConfigError("config %s must be a JSON object, got %s" % (self._path, type(data).__name__))
-        self._data = data
+        return data
+
+    def _refresh_if_changed(self) -> None:
+        """Internal lock refresh: only bump revision if disk differs."""
+        data = self._read_data()
+        if data != self._data:
+            self._data = data
+            self._touch()
+
+    def reload(self) -> None:
+        """Re-read the file (always bumps revision on success).
+
+        Fail-closed: a dangling symlink or non-regular path raises
+        ConfigError rather than silently presenting an empty config.
+        """
+        self._data = self._read_data()
         self._touch()
 
     def _flush(self) -> None:
@@ -88,22 +102,18 @@ class ConfigStore(object):
 
     @contextlib.contextmanager
     def _locked(self) -> "Iterator[None]":
-        """Acquire the cross-process lock, reread, yield, then flush on exit.
+        """Acquire the cross-process lock and refresh from disk.
 
-        Reentrant for the thread already holding it (e.g. an ordinary set()
-        called from within a namespace transaction on the same store): reused
-        directly rather than acquired again, since a fresh ``FileLock``/
-        ``process_lock`` object per call is not guaranteed OS-level reentrant
-        on the same path, and re-reading here would discard whatever the
-        outer call already has staged in memory. Safe to skip both: nobody
-        else can be writing this file while this thread holds the lock.
+        Reentrant for the thread already holding it (e.g. set() called
+        from within a namespace transaction on the same store). The
+        reentrant branch skips both lock acquisition and disk refresh.
         """
         if getattr(self._tx_owner, "value", None) == threading.get_ident():
             yield
             return
         lock = self._lock_manager.file_lock(self._path)
         with lock:
-            self.reload()
+            self._refresh_if_changed()
             self._tx_owner.value = threading.get_ident()
             try:
                 yield
@@ -138,7 +148,7 @@ class ConfigStore(object):
             previous = self._data
             self._data = dict(self._data)
             self._data[key] = value
-            self._flush_or_rollback(previous)
+            self._flush_or_recover(previous)
             self._touch()
 
     def save(self, **kwargs: "Any") -> None:
@@ -146,7 +156,7 @@ class ConfigStore(object):
             previous = self._data
             self._data = dict(self._data)
             self._data.update(kwargs)
-            self._flush_or_rollback(previous)
+            self._flush_or_recover(previous)
             self._touch()
 
     def remove(self, *keys: str) -> bool:
@@ -159,21 +169,33 @@ class ConfigStore(object):
                     self._data.pop(key, None)
                     removed = True
             if removed:
-                self._flush_or_rollback(previous)
+                self._flush_or_recover(previous)
                 self._touch()
         return removed
 
-    def _flush_or_rollback(self, previous: "dict[str, Any]") -> None:
-        """Write ``self._data`` to disk; on failure, restore ``previous``
-        before re-raising -- a failed flush (disk full, permission error)
-        must never leave the in-memory store reflecting a value that was
-        never actually persisted, which a caller reading it back (without
-        an intervening ``reload()``) would otherwise see as if it had
-        succeeded."""
+    def _flush_or_recover(self, previous: "dict[str, Any]") -> None:
+        """Write ``self._data`` to disk; on failure, synchronise memory to
+        the best-known persisted state and re-raise the original exception.
+
+        If ``_flush()`` fails before ``os.replace`` completes, the disk
+        still holds ``previous`` — memory is restored to ``previous``. If
+        the failure occurs after replace (e.g. a post-replace signal),
+        the disk may already hold the new value — memory is synchronised
+        to what the disk actually contains. If readback itself fails,
+        memory falls back to ``previous``. The original flush exception
+        always propagates.
+        """
         try:
             self._flush()
-        except Exception:
-            self._data = previous
+        except BaseException:
+            try:
+                persisted = self._read_data()
+            except BaseException:
+                self._data = previous
+            else:
+                self._data = persisted
+                if persisted != previous:
+                    self._touch()
             raise
 
     def namespace(self, name: str) -> "ConfigNamespace":
@@ -186,9 +208,13 @@ class ConfigStore(object):
         committing atomically on a clean exit.
 
         The cross-process lock spans the entire read-edit-commit lifecycle.
-        On any exception the in-memory state is untouched and nothing is
-        flushed. A value equal to the pre-edit snapshot (deep equality) is a
-        no-op: no flush, no revision bump.
+        If the context body raises, the local staged edit is not committed.
+        However, if the internal lock refresh detected and loaded external
+        disk changes before the body ran, those external changes are not
+        rolled back — only the local edit is discarded.
+
+        A value equal to the pre-edit snapshot (deep equality) is a no-op:
+        no flush, no revision bump.
         """
         with self._locked():
             if key in self._data:
@@ -202,7 +228,7 @@ class ConfigStore(object):
                 new_all = dict(self._data)
                 new_all[key] = value
                 self._data = new_all
-                self._flush_or_rollback(previous_all)
+                self._flush_or_recover(previous_all)
                 self._touch()
 
     def __repr__(self) -> str:

@@ -284,7 +284,6 @@ def get_commands(environ: "BaseEnviron") -> "Iterable[SubCommand]":
 
 if __name__ == '__main__':
     import functools
-    import logging
     from ._command import BaseCommand, CommandParser, CommandMain
 
 
@@ -296,7 +295,7 @@ if __name__ == '__main__':
 
                 def init_logging(
                     self,
-                    level: int = logging.INFO,
+                    level: int = 20,
                     log_file: "str | None" = None,
                 ) -> None:
                     super().init_logging(level=level, log_file=log_file)
@@ -327,7 +326,7 @@ if __name__ == '__main__':
 
         def run(self, args: "argparse.Namespace") -> "int | None":
             if args.verbose:
-                self.logger.level = logging.DEBUG
+                self.environ.logging.set_level(self.environ.name, 10)
             return args.func(args)
 
         def on_tool(self, args: "argparse.Namespace") -> int:

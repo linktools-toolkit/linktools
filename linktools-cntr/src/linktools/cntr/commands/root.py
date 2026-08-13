@@ -63,7 +63,7 @@ class Command(StatusCommands, BaseCommandGroup):
     @subcommand_argument("--detail", action="store_true", help="show container detail info")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_container_names))
-    def on_command_list(self, names: "list[str]" = None, detail: bool = False) -> None:
+    def on_command_list(self, names: "list[str] | None" = None, detail: bool = False) -> None:
         manager = _shared.manager
         # Registers every resolved-installed container's own config defaults
         # into env_config -- `list` is often the first command run against a
@@ -140,7 +140,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_up(self, names: "list[str]" = None, pull: str = False,
+    def on_command_up(self, names: "list[str] | None" = None, pull: str = False,
                       dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run, as_json=as_json):
             return
@@ -159,7 +159,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_restart(self, names: "list[str]" = None, pull: str = False,
+    def on_command_restart(self, names: "list[str] | None" = None, pull: str = False,
                            dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, pull=pull,
                          dry_run=dry_run, as_json=as_json):
@@ -175,7 +175,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_down(self, names: "list[str]" = None, dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
+    def on_command_down(self, names: "list[str] | None" = None, dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "down", names=names, dry_run=dry_run, as_json=as_json):
             return
         _shared.manager.compose_operations.down(names=names, report=report)

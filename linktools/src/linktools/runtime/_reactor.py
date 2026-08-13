@@ -26,7 +26,7 @@ def _get_logger():
 
 class _ReactorEvent:
 
-    def __init__(self, fn: "_t.Callable[[], any]", when: float, interval: float):
+    def __init__(self, fn: "_t.Callable[[], _t.Any]", when: float, interval: float):
         self.fn = fn
         self.when = when
         self.interval = interval
@@ -72,7 +72,7 @@ class Reactor:
     def _run(self):
         running = True
         while running:
-            now = _time.monotonic()  # spec  RUN-REA-001: never wall-clock
+            now = _time.monotonic()  # never wall-clock
             fn = None
             timeout = None
             with self._lock:
@@ -95,7 +95,7 @@ class Reactor:
                         import traceback
                         self._on_error(e, traceback.format_exc())
                     self.signal_stop()
-                except Exception as e:  #  RUN-REA-006: never swallow KI/SystemExit/GeneratorExit
+                except Exception as e:  # never swallow KI/SystemExit/GeneratorExit
                     if self._on_error is not None:
                         import traceback
                         self._on_error(e, traceback.format_exc())
@@ -118,21 +118,21 @@ class Reactor:
         with self._lock:
             self._running = False
 
-    def signal_stop(self, delay: float = None) -> None:
+    def signal_stop(self, delay: "float | None" = None) -> None:
         self.schedule(self._stop, delay)
 
-    def schedule(self, fn: "_t.Callable[[], any]", delay: float = None, interval: float = None) -> None:
-        now = _time.monotonic()  # spec  RUN-REA-001
+    def schedule(self, fn: "_t.Callable[[], _t.Any]", delay: "float | None" = None, interval: "float | None" = None) -> None:
+        now = _time.monotonic()
         when = now + delay if delay is not None else now
         with self._lock:
             item = _ReactorEvent(fn, when, interval)
             self._pending.append(item)
             self._cond.notify()
 
-    def _work(self, fn: "_t.Callable[[], any]"):
+    def _work(self, fn: "_t.Callable[[], _t.Any]"):
         fn()
 
-    def wait(self, timeout: "TimeoutType" = None) -> bool:
+    def wait(self, timeout: "TimeoutType | None" = None) -> bool:
         worker = self._worker
         if worker:
             if _threading.current_thread().ident == worker.ident:

@@ -246,11 +246,10 @@ class ProcessResult(object):
 class Process(object):
     """Composition wrapper around subprocess.Popen.
 
-    No longer inherits Popen; instead wraps it and delegates all attribute
-    access via __getattr__. This means callers that used Popen methods/attrs
-    (wait, poll, kill, stdout, pid, returncode, ...) work unchanged through
-    delegation, while Process owns its own lifecycle methods (call, check_call,
-    fetch, exec, recursive_kill, wait_for_result).
+    Delegates supported Popen attributes (wait, poll, kill, stdout, pid,
+    returncode, ...) via __getattr__ so they work unchanged, while owning its
+    own lifecycle methods (call, check_call, fetch, exec, recursive_kill,
+    wait_for_result).
     """
 
     def __init__(self, *args: "Any", **kwargs: "Any") -> None:
@@ -296,7 +295,7 @@ class Process(object):
         """Create and start a Process ."""
         return cls(*args, **kwargs)
 
-    def wait_for_result(self, timeout: "TimeoutType" = None) -> "ProcessResult":
+    def wait_for_result(self, timeout: "TimeoutType | None" = None) -> "ProcessResult":
         """Wait for the process and return a ProcessResult ."""
         from ..types import Timeout
         timed_out = False
@@ -321,7 +320,7 @@ class Process(object):
         )
 
     @timeoutable
-    def call(self, timeout: "TimeoutType" = None) -> int:
+    def call(self, timeout: "TimeoutType | None" = None) -> int:
         with self:
             try:
                 return self._popen.wait(timeout.remaining)
@@ -330,7 +329,7 @@ class Process(object):
                 raise
 
     @timeoutable
-    def check_call(self, timeout: "TimeoutType" = None) -> int:
+    def check_call(self, timeout: "TimeoutType | None" = None) -> int:
         with self:
             try:
                 retcode = self._popen.wait(timeout.remaining)
@@ -342,7 +341,7 @@ class Process(object):
                 raise
 
     @timeoutable
-    def fetch(self, timeout: "TimeoutType" = None) -> "Generator[tuple[AnyStr | None, AnyStr | None], Any, Any]":
+    def fetch(self, timeout: "TimeoutType | None" = None) -> "Generator[tuple[AnyStr | None, AnyStr | None], Any, Any]":
         if self.stdout or self.stderr:
             for code, data in self._output.get(timeout):
                 out = err = None
@@ -356,10 +355,10 @@ class Process(object):
     @timeoutable
     def exec(
             self,
-            timeout: "TimeoutType" = None,
+            timeout: "TimeoutType | None" = None,
             ignore_errors: bool = False,
-            on_stdout: "Callable[[str], None]" = None,
-            on_stderr: "Callable[[str], None]" = None,
+            on_stdout: "Callable[[str], None] | None" = None,
+            on_stderr: "Callable[[str], None] | None" = None,
             error_type: "Callable[[str], Exception]" = ExecError
     ) -> str:
         try:
@@ -441,9 +440,9 @@ class Process(object):
 def popen(
         *args: "Any",
         capture_output: bool = False,
-        stdin: "int | IO" = None, stdout: "int | IO" = None, stderr: "int | IO" = None,
-        shell: bool = False, cwd: "PathType" = None,
-        env: "dict[str, str]" = None, append_env: "dict[str, str]" = None, default_env: "dict[str, str]" = None,
+        stdin: "int | IO | None" = None, stdout: "int | IO | None" = None, stderr: "int | IO | None" = None,
+        shell: bool = False, cwd: "PathType | None" = None,
+        env: "dict[str, str] | None" = None, append_env: "dict[str, str] | None" = None, default_env: "dict[str, str] | None" = None,
         **kwargs: "Any"
 ) -> "Process":
     args = [str(arg) for arg in args]

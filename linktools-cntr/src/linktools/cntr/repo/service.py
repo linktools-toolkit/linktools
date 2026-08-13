@@ -151,7 +151,7 @@ class RepoService(object):
         cache out from under a future ``add()``/``remove()``."""
         return {url: dict(meta) for url, meta in self._load().items()}
 
-    def add(self, url: str, branch: str = None, replace: bool = False) -> None:
+    def add(self, url: "str | None", branch: "str | None" = None, replace: bool = False) -> None:
         """Add a repository. ``replace=True`` allows replacing an already-
         added repository at the same key (URL or local path) -- otherwise
         an existing entry is a hard error.
@@ -291,7 +291,7 @@ class RepoService(object):
             raise ContainerError(f"Repository `{url}` has an unsupported type: {repo_type!r}")
         return repo_type
 
-    def update(self, branch: str = None, reset: bool = False) -> "list[RepoUpdateResult]":
+    def update(self, branch: "str | None" = None, reset: bool = False) -> "list[RepoUpdateResult]":
         """Sync every repository, then re-check each one's requires.linktools-cntr.
 
         Never stops at the first failure or incompatibility -- every
@@ -510,7 +510,7 @@ class RepoService(object):
         reserved = _compute_manager_config_keys(self.manager.env_config)
         return sorted(key for key in local_env if key in reserved)
 
-    def validate(self, url: str = None) -> "tuple[dict[str, Any], list[str]]":
+    def validate(self, url: "str | None" = None) -> "tuple[dict[str, Any], list[str]]":
         """Describe one or all repositories; also report which are incompatible.
 
         Keyed by the credential-free display URL (``describe()`` already

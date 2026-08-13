@@ -139,9 +139,8 @@ class CacheStore(object):
 
     # -- row helpers -------------------------------------------------------
 
-    def _row(self, namespace: str, key: str) -> "sqlite3.Row | None":
-        """Return the live row for ``(namespace, key)``, deleting it if expired."""
-        conn = self._conn()
+    def _live_row(self, conn, namespace: str, key: str) -> "sqlite3.Row | None":
+        """Return the live row for ``(namespace, key)`` on ``conn``, deleting it if expired."""
         row = conn.execute(
             "SELECT * FROM cache_entries WHERE namespace=? AND key=?",
             (namespace, key),
@@ -156,6 +155,9 @@ class CacheStore(object):
             )
             return None
         return row
+
+    def _row(self, namespace: str, key: str) -> "sqlite3.Row | None":
+        return self._live_row(self._conn(), namespace, key)
 
     @staticmethod
     def _decode_row(row: "sqlite3.Row", codec: "CacheCodec") -> "Any":
@@ -274,10 +276,7 @@ class CacheStore(object):
         conn = self._conn()
 
         def _do_increment(c):
-            row = c.execute(
-                "SELECT value FROM cache_entries WHERE namespace=? AND key=?",
-                (namespace, key),
-            ).fetchone()
+            row = self._live_row(c, namespace, key)
             now = time.time()
             if row is None:
                 result = initial + delta
@@ -329,10 +328,10 @@ class CacheStore(object):
     def transaction(self) -> "Iterator[CacheStore]":
         """Run a batch of set/delete atomically; roll back on any error."""
         conn = self._conn()
-        if getattr(self._tx_owner, "value", None) is not None:
+        if self._in_transaction():
             raise CacheTransactionError("transactions cannot be nested")
-        self._tx_owner.value = threading.get_ident()
         self._begin(conn)
+        self._tx_owner.value = threading.get_ident()
         try:
             yield self
             conn.execute("COMMIT")

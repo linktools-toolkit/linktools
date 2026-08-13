@@ -10,7 +10,6 @@ forwarding setup; the forwarder implementations live in :mod:`linktools.ssh._for
 
 import contextlib
 import getpass
-import logging
 import os
 import sys
 import threading
@@ -35,8 +34,8 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ssh")
 
 _channel_logger = environ.get_logger("ssh.channel")
-# route level through LoggingManager, not direct setLevel.
-environ.logging.set_level("ssh.channel", logging.CRITICAL)
+_SSH_CHANNEL_LOG_LEVEL = 50
+environ.logging.set_level("ssh.channel", _SSH_CHANNEL_LOG_LEVEL)
 
 
 class SSHClient(paramiko.SSHClient):

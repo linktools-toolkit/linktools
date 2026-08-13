@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from linktools.types import MISSING
 from linktools.errors import CliError
 
-#  CLI-006: when True, prompt/confirm/choose never block for input.
+#  When True, prompt/confirm/choose never block for input.
 _no_input = False
 
 
@@ -32,6 +32,7 @@ def is_no_input() -> bool:
     return _no_input
 
 if TYPE_CHECKING:
+    from typing import TextIO
     from collections.abc import Iterable
     from rich.console import ConsoleRenderable, Console
     from rich.prompt import PromptBase
@@ -504,7 +505,7 @@ def prompt(
 def choose(
         prompt: str,
         choices: "Iterable[T] | dict[T, Any]",
-        title: str = None,
+        title: "str | None" = None,
         default: "T" = MISSING,
         show_default: bool = True,
         show_choices: bool = True

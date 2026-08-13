@@ -51,9 +51,9 @@ class LazyChoices(typing.Iterable):
 
     def __init__(
         self,
-        func: "_t.Callable[P, _t.Iterable[T]]",
-        *args: "P.args",
-        **kwargs: "P.kwargs",
+        func: "Callable[..., Iterable[Any]]",
+        *args: "Any",
+        **kwargs: "Any",
     ):
         self._data = MISSING
         self._fn = func
@@ -316,7 +316,7 @@ class ArgParseComplete:
         @abc.abstractmethod
         def get_args(
             self, parsed_args: "argparse.Namespace", **kwargs: "Any"
-        ) -> "typing.typing.list[str] | None":
+        ) -> "list[str] | None":
             pass
 
         def __call__(self, *, parsed_args, **kwargs):

@@ -49,8 +49,8 @@ def get_logger() -> "logging.Logger":
 
 def ignore_errors(
         fn: "Callable[P, T]", *,
-        args: "P.args" = None, kwargs: "P.kwargs" = None,
-        default: "T" = None
+        args: "P.args | None" = None, kwargs: "P.kwargs | None" = None,
+        default: "T | None" = None
 ) -> "T":
     """Run a callable and suppress the selected exception types.
 
@@ -169,7 +169,7 @@ def is_empty(obj: "Any") -> bool:
     return False
 
 
-def get_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = None) -> "T | None":  # noqa
+def get_item(obj: "Any", *keys: "Any", type: "type[T] | None" = None, default: "T | None" = None) -> "T | None":  # noqa
     """Return a nested item or attribute from an object.
 
     Args:
@@ -208,7 +208,7 @@ def get_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
     return obj
 
 
-def pop_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = None) -> "T | None":  # noqa
+def pop_item(obj: "Any", *keys: "Any", type: "type[T] | None" = None, default: "T | None" = None) -> "T | None":  # noqa
     """Return and remove a nested item from an object.
 
     Args:
@@ -260,7 +260,7 @@ def pop_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "T" = No
     return obj
 
 
-def get_list_item(obj: "Any", *keys: "Any", type: "type[T]" = None, default: "list[T]" = None) -> "list[T] | None":  # noqa
+def get_list_item(obj: "Any", *keys: "Any", type: "type[T] | None" = None, default: "list[T] | None" = None) -> "list[T] | None":  # noqa
     """Return a list item after trying several indexes.
 
     Args:

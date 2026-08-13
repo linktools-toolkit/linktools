@@ -122,7 +122,7 @@ class InstallSpec(object):
             _error(name, source, "install.size must be a non-negative integer")
 
     @classmethod
-    def from_mapping(cls, data: dict = None, name: str = "<unknown>", source: str = None) -> "InstallSpec":
+    def from_mapping(cls, data: "dict | None" = None, name: "str | None" = "<unknown>", source: "str | None" = None) -> "InstallSpec":
         data = _mapping(data, name, source, "install")
         unknown = set(data) - _SPEC_KEYS["install"]
         if unknown:
@@ -156,7 +156,7 @@ class RunSpec(object):
         self.environment = dict(self.environment)
 
     @classmethod
-    def from_mapping(cls, data: dict = None, name: str = "<unknown>", source: str = None) -> "RunSpec":
+    def from_mapping(cls, data: "dict | None" = None, name: "str | None" = "<unknown>", source: "str | None" = None) -> "RunSpec":
         data = _mapping(data, name, source, "run")
         unknown = set(data) - _SPEC_KEYS["run"]
         if unknown:
@@ -185,7 +185,7 @@ class ToolDefinition(object):
         self.variants = tuple(variants or ())
 
     @classmethod
-    def from_mapping(cls, name: str, data: dict, source: str = None,
+    def from_mapping(cls, name: "str | None", data: dict, source: "str | None" = None,
                      platform: str = "linux", architecture: str = "x86_64") -> "ToolDefinition":
         if not isinstance(name, str) or not _NAME.match(name):
             _error(name, source, "invalid tool name")
@@ -277,6 +277,13 @@ class Tool(object):
             return value.format(**context)
         except (KeyError, ValueError, IndexError, AttributeError) as exc:
             raise ToolDefinitionError("tool %s field %s (%s): %s" % (self.name, field, self.definition.source, exc))
+
+    @property
+    def url(self) -> "str | None":
+        return self._url
+
+    def format_value(self, value: "str | None", field: str) -> "str | None":
+        return self._format(value, field)
 
     def _resolve(self):
         install = self.definition.install
@@ -445,7 +452,7 @@ class ToolInstaller(object):
 
     def install(self, tool: "Tool") -> None:
         from ._download import DownloadRequest
-        if not tool._url:
+        if not tool.url:
             raise ToolNotSupport("no install source for %s" % tool.name)
         lock = getattr(self.environ, "locks", None)
         manager = lock.process_lock("tool:" + tool.name) if lock else _NullLock()
@@ -462,32 +469,32 @@ class ToolInstaller(object):
             staging.mkdir(parents=True, exist_ok=True)
             download_dir.mkdir(parents=True, exist_ok=True)
             try:
-                archive = download_dir / utils.guess_file_name(tool._url)
-                self.environ.downloads.download(DownloadRequest(url=tool._url, destination=str(archive),
+                archive = download_dir / utils.guess_file_name(tool.url)
+                self.environ.downloads.download(DownloadRequest(url=tool.url, destination=str(archive),
                     sha256=tool.definition.install.sha256, size=tool.definition.install.size))
                 download_size = archive.stat().st_size
                 if tool.definition.install.extract_dir:
-                    content = staging / tool._format(tool.definition.install.extract_dir, "install.extract_dir")
+                    content = staging / tool.format_value(tool.definition.install.extract_dir, "install.extract_dir")
                     if not utils.is_sub_path(str(content), str(staging)):
                         raise ToolInstallError("extract_dir escapes install directory for %s" % tool.name)
                     content.mkdir(parents=True, exist_ok=True)
                     utils.safe_extract(str(archive), str(content))
                 else:
                     content = staging
-                    destination = content / tool._format(tool.definition.install.entrypoint, "install.entrypoint") \
+                    destination = content / tool.format_value(tool.definition.install.entrypoint, "install.entrypoint") \
                         if tool.definition.install.entrypoint else content / archive.name
                     if not utils.is_sub_path(str(destination), str(staging)):
                         raise ToolInstallError("entrypoint escapes install directory for %s" % tool.name)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(archive), str(destination))
-                entry = tool._format(tool.definition.install.entrypoint, "install.entrypoint")
-                artifact = (staging / tool._format(tool.definition.install.extract_dir, "install.extract_dir") if tool.definition.install.extract_dir else staging) / (entry or archive.name)
+                entry = tool.format_value(tool.definition.install.entrypoint, "install.entrypoint")
+                artifact = (staging / tool.format_value(tool.definition.install.extract_dir, "install.extract_dir") if tool.definition.install.extract_dir else staging) / (entry or archive.name)
                 if not artifact.is_file() or not utils.is_sub_path(str(artifact), str(staging)):
                     raise ToolInstallError("entrypoint missing for %s" % tool.name)
                 files = sorted(p.relative_to(staging).as_posix() for p in staging.rglob("*") if p.is_file())
                 manifest = {"schema": 2, "name": tool.name, "version": tool.version,
                             "platform": tool.platform, "architecture": tool.architecture,
-                            "source_url": tool._url, "sha256": tool.definition.install.sha256,
+                            "source_url": tool.url, "sha256": tool.definition.install.sha256,
                             "size": download_size,
                             "entrypoint": artifact.relative_to(staging).as_posix(),
                             "files": files, "installed_at": _now_iso()}

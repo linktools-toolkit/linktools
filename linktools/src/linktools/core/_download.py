@@ -396,9 +396,9 @@ class UrlFile(metaclass=abc.ABCMeta):
 
     @timeoutable
     def save(self,
-             dest_dir: "PathType" = None, dest_name: str = None,
-             timeout: "TimeoutType" = None, max_retries: int = 3,
-             validators: "UrlFileValidatorType" = None, **kwargs: "Any") -> str:
+             dest_dir: "PathType | None" = None, dest_name: "str | None" = None,
+             timeout: "TimeoutType | None" = None, max_retries: int = 3,
+             validators: "UrlFileValidatorType | None" = None, **kwargs: "Any") -> str:
         """Download (or copy) the file and return its local path.
 
         With ``dest_dir`` the file lands at ``dest_dir/(dest_name or url name)``;
@@ -451,7 +451,7 @@ class UrlFile(metaclass=abc.ABCMeta):
             raise DownloadError(e)
 
     @timeoutable
-    def clear(self, timeout: "TimeoutType" = None) -> None:
+    def clear(self, timeout: "TimeoutType | None" = None) -> None:
         """Clear cached download data for this URL."""
         try:
             self._lock.acquire(timeout=timeout.remaining if timeout is not None else None)

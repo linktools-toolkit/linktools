@@ -419,7 +419,7 @@ def _load_lazy_module(name: str, spec: "ModuleSpec") -> "T":
     return module
 
 
-def import_module(name: str, spec: "ModuleSpec" = None) -> "T":
+def import_module(name: str, spec: "ModuleSpec | None" = None) -> "T":
     from importlib.util import find_spec
 
     if name in sys.modules:

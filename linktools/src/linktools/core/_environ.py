@@ -4,7 +4,6 @@
 and config access shared across every linktools command."""
 import abc
 import json
-import logging
 import os
 import shutil
 import time
@@ -17,6 +16,7 @@ from linktools.decorator import cached_property
 from linktools.types import MISSING
 
 if TYPE_CHECKING:
+    import logging
     from typing import IO, Any, Callable
     from linktools.types import T, Config, Tools, Tool, UrlFile, PathType
     from ._paths import EnvironmentPaths
@@ -393,7 +393,7 @@ class BaseEnviron(abc.ABC):
 
         return LoggingManager(self)
 
-    def get_logger(self, name: str = None) -> "logging.Logger":
+    def get_logger(self, name: "str | None" = None) -> "logging.Logger":
         """Return a named logger with redaction active.
 
         Avoids double-prefixing: if ``name`` already starts with the environment
@@ -468,7 +468,7 @@ class BaseEnviron(abc.ABC):
             ],
         )
 
-    def get_config(self, key: str, type: "type[T]" = None, default: "Any" = MISSING) -> "T":
+    def get_config(self, key: str, type: "type[T] | None" = None, default: "Any" = MISSING) -> "T":
         """Return a configuration value.
 
         Args:
@@ -481,7 +481,7 @@ class BaseEnviron(abc.ABC):
         """
         return self.config.get(key=key, type=type, default=default)
 
-    def require_config(self, key: str, type: "type[T]" = None) -> "T":
+    def require_config(self, key: str, type: "type[T] | None" = None) -> "T":
         """Return a must-exist configuration value; raise if it is missing."""
         return self.config.require(key=key, type=type)
 

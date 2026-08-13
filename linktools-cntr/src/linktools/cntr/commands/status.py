@@ -11,7 +11,7 @@ User-supplied container names are validated against the installed set
 BEFORE any Docker query runs (select_status_containers) -- an unknown name
 must never trigger a Docker inspect round-trip first. A logical container's
 displayed state is computed from its full *expected* service set (declared
-by the container, spec-wise: container.services), not just whatever Docker
+by the container, i.e. container.services), not just whatever Docker
 happened to return -- a declared-but-unobserved service becomes a synthetic
 ``ServiceStatus(observed=False, state="missing")`` entry that exists only in
 this display layer, never written to persisted/runtime state.
@@ -253,7 +253,7 @@ class StatusCommands:
     @subcommand_argument("--json", dest="as_json", action="store_true", default=False, help="output JSON")
     @subcommand_argument("--all-services", dest="all_services", action="store_true", default=False,
                          help="also include services not owned by any installed container")
-    def on_command_status(self, names: "list[str]" = None, as_json: bool = False, all_services: bool = False) -> None:
+    def on_command_status(self, names: "list[str] | None" = None, as_json: bool = False, all_services: bool = False) -> None:
         payload = collect_status(_shared.manager, names=names, all_services=all_services)
         if as_json:
             print(json.dumps(payload, indent=2, sort_keys=True))

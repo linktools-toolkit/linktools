@@ -51,7 +51,7 @@ class Subscription(object):
         if self._cancelled:
             return
         self._cancelled = True
-        self._bus._remove(self._event, self._callback)
+        self._bus.off(self._event, self._callback)
 
 
 class EventBus(object):
@@ -93,7 +93,7 @@ class EventBus(object):
     def emit(self, event: str, *args: "Any", **kwargs: "Any") -> None:
         logger = _get_logger()
         # Snapshot under the lock; invoke outside it so callbacks may
-        # cancel themselves or register new handlers ( RUN-EVT-004).
+        # cancel themselves or register new handlers.
         with self._lock:
             callbacks = self._handlers.get(event)
             if not callbacks:
@@ -115,7 +115,7 @@ class EventBus(object):
         for callback in invoke:
             try:
                 callback(*args, **kwargs)
-            except Exception as e:  #  RUN-EVT-002
+            except Exception as e:
                 if self._policy == LOG_AND_CONTINUE:
                     logger.warning("Event `%s` handler `%s` error" % (event, callback), exc_info=e)
                 elif self._policy == RAISE_FIRST:

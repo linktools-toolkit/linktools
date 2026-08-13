@@ -3,18 +3,17 @@
 
 """SSH host-key verification policy.
 
-Mapping from a linktools policy value to a paramiko ``MissingHostKeyPolicy``
-is centralised here so callers do not reach for ``AutoAddPolicy`` directly.
+Maps a linktools policy value to a paramiko ``MissingHostKeyPolicy`` so callers
+do not reach for ``AutoAddPolicy`` directly. This helper only selects the
+policy class; it does not load ``known_hosts`` or persist host keys itself.
 
-Security posture:
-
-* ``STRICT`` (intended default) -- reject unknown/changed hosts; load
-  ``known_hosts``.
-* ``ACCEPT_NEW`` -- accept a host key on first contact, then verify it
-  thereafter (atomic, append-only write to ``known_hosts``); a changed key
-  must fail.
-* ``INSECURE`` -- auto-add and never verify (emits a warning); only for
-  ephemeral/loopback connections (e.g. a USB-forwarded iOS device).
+* ``STRICT`` (intended default) -- paramiko ``RejectPolicy``; unknown and
+  changed host keys are rejected.
+* ``ACCEPT_NEW`` -- paramiko ``AutoAddPolicy``; accepts an unknown host key on
+  first contact.
+* ``INSECURE`` -- paramiko ``AutoAddPolicy`` (emits a warning); auto-adds and
+  never verifies. Only for ephemeral/loopback connections (e.g. a
+  USB-forwarded iOS device).
 """
 
 from linktools.core import environ
@@ -43,7 +42,7 @@ def host_key_policy_class(policy: str) -> type:
     import paramiko
 
     if policy == ACCEPT_NEW:
-        return paramiko.AutoAddPolicy  # TODO  atomic known_hosts write
+        return paramiko.AutoAddPolicy
     if policy == INSECURE:
         environ.logger.warning(
             "Using insecure SSH host-key policy; host identity is NOT verified."

@@ -79,11 +79,8 @@ class GitHead(object):
         self.name = name
 
     def checkout(self) -> None:
-        """Check out this branch in the working tree, serialized through
-        the owning repository's write lock -- same as every other write
-        operation on this repository."""
-        with self._repository._write_lock():
-            self._repository._checkout(self.name)
+        """Check out this branch in the working tree."""
+        self._repository.checkout(self.name)
 
 
 class GitRepository(object):
@@ -162,7 +159,11 @@ class GitRepository(object):
         with self._write_lock():
             porcelain.add(self._path, list(paths) or None)
 
-    def commit(self, message: str, author: str = None, committer: str = None,
+    def checkout(self, branch: str) -> None:
+        with self._write_lock():
+            self._checkout(branch)
+
+    def commit(self, message: str, author: "str | None" = None, committer: "str | None" = None,
                all: bool = False) -> str:
         with self._write_lock():
             encoded_author = author.encode() if author else None
@@ -380,8 +381,8 @@ class GitRepository(object):
     # -- clone ( atomic) ---------------------------------------------
 
     @classmethod
-    def clone(cls, environ: "Any", url: str, repo_path: str = None,
-              branch: str = None) -> "GitRepository":
+    def clone(cls, environ: "Any", url: "str | None", repo_path: "str | None" = None,
+              branch: "str | None" = None) -> "GitRepository":
         """Shallow-clone, atomically: clone to staging -> rename.
 
         An interrupted clone leaves only the staging dir behind, never a

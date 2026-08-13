@@ -288,7 +288,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--privileged", help="give extended privileges to the command")
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_exec_shell(self, command: str = None, privileged: bool = False, user: str = None, service_name: str = None) -> int:
+    def on_exec_shell(self, command: "str | None | None" = None, privileged: bool = False, user: "str | None" = None, service_name: "str | None" = None) -> int:
         return _actions.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
 
     @subcommand("logs", help="fetch the logs of container")
@@ -303,9 +303,9 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--until", metavar="string",
                          help="show logs before a timestamp (e.g. \"2013-01-02T13:23:37Z\") or relative (e.g. \"42m\" for 42 minutes)")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_exec_logs(self, follow: bool = True, tail: str = None, timestamps: bool = True,
-                     since: str = None, until: str = None,
-                     service_name: str = None) -> int:
+    def on_exec_logs(self, follow: bool = True, tail: "str | None" = None, timestamps: bool = True,
+                     since: "str | None | None" = None, until: "str | None" = None,
+                     service_name: "str | None" = None) -> int:
         return _actions.logs(self, follow=follow, tail=tail, timestamps=timestamps,
                           since=since, until=until, service_name=service_name)
 
@@ -314,12 +314,12 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("target", nargs='?', help="container path")
     @subcommand_argument("-p", "--permission", choices=("ro", "rw"))
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_mount(self, source: str = None, target: str = None, permission: str = "rw", service_name: str = None) -> None:
+    def on_mount(self, source: "str | None | None" = None, target: "str | None" = None, permission: str = "rw", service_name: "str | None" = None) -> None:
         return _actions.mount(self, source=source, target=target, permission=permission, service_name=service_name)
 
     @subcommand("umount", help="unmount path")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_unmount_file(self, service_name: str = None) -> None:
+    def on_unmount_file(self, service_name: "str | None" = None) -> None:
         return _actions.umount(self, service_name=service_name)
 
     def register_configs(self) -> None:
@@ -349,10 +349,10 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             return self.register_dynamic_config_field(key)
         return key
 
-    def get_config(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
+    def get_config(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return self.env_config.get(self._resolve_config_key(key), type=type, default=default)
 
-    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType" = None, default: "Any" = MISSING) -> "T":
+    def get_config_later(self, key: "ConfigKeyType", type: "ConfigType | None" = None, default: "Any" = MISSING) -> "T":
         return lazy_load(self.env_config.get, self._resolve_config_key(key), type=type, default=default)
 
     def make_exec_context(self, commands: "str | Iterable[str]") -> "EventContext":
@@ -393,7 +393,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
             path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
-    def choose_service(self, name: str = None) -> "dict[str, Any] | None":
+    def choose_service(self, name: "str | None" = None) -> "dict[str, Any] | None":
         services = self.services
         if not services:
             raise ContainerError(f"Not found any service in {self}")
@@ -456,7 +456,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         next_items.add(next_dependency)
         return False
 
-    def render_template(self, source: "PathType", destination: "PathType" = None, **kwargs: "Any") -> str:
+    def render_template(self, source: "PathType | None", destination: "PathType | None" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
 
     def __repr__(self):

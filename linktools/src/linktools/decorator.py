@@ -128,7 +128,7 @@ class _CachedProperty:
 
 
 def cached_property(
-        fn: "Callable[P, T]" = None, *, lock: bool = False,
+        fn: "Callable[P, T] | None" = None, *, lock: bool = False,
 ) -> "_CachedProperty | Callable[[Callable[P, T]], _CachedProperty]":
     """Create a property that caches its computed value on the instance.
 
@@ -180,7 +180,7 @@ class _CachedClassproperty:
 
 
 def cached_classproperty(
-        fn: "Callable[P, T]" = None, *, lock: bool = False
+        fn: "Callable[P, T] | None" = None, *, lock: bool = False
 ) -> "_CachedClassproperty | Callable[[Callable[P, T]], _CachedClassproperty]":
     """Create a class property that caches its computed value.
 

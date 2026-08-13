@@ -48,7 +48,6 @@ def ensure_within(path: "PathType", root: "PathType") -> Path:
     return Path(os.path.abspath(str(path)))
 
 
-# Alias for the spec's preferred name (
 safe_join = join_path
 
 
