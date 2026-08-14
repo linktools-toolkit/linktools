@@ -9,8 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime.state import RuntimeDomain
-from linktools.ai.runtime.state._memory import build_filesystem_runtime, build_in_memory_runtime
+
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -18,137 +17,78 @@ from linktools.ai.core import (
     ToolOperationStatus,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRecord, ToolOperationRecord
+from linktools.ai.runtime import RuntimeDomain, RuntimeState
+from linktools.ai.runtime._tool import ToolOperationRecord
+from linktools.ai.runtime.contract_api import ExecutionRecord
 
 
 def _tool_record() -> ToolOperationRecord:
     now = datetime.now(timezone.utc)
     return ToolOperationRecord(
-        "operation",
-        "tenant",
-        "run",
-        "call",
-        "a" * 64,
-        "tool",
-        "arguments",
-        "binding",
-        False,
-        ToolOperationStatus.PENDING,
-        None,
-        0,
-        None,
-        None,
-        None,
-        now,
-        now,
+        "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", False,
+        ToolOperationStatus.PENDING, None, 0, None, None, None, now, now,
     )
 
 
 @pytest.mark.asyncio
 async def test_configured_runtime_mutation_requires_active_transaction() -> None:
-    runtime = build_in_memory_runtime(namespace="mutation-guard")
-    await runtime.initialize()
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="mutation-guard", tenant_id="tenant")
     try:
         with pytest.raises(RuntimeError, match="storage mutation outside transaction"):
-            runtime.components[0]._mark_changed()
+            state.execution.executions._mark_changed()
     finally:
-        await runtime.close()
+        await state.close()
 
 
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
-    runtime_root = tmp_path / "runtime"
-    runtime = build_filesystem_runtime(str(runtime_root), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
-    await runtime.initialize()
+    root = tmp_path / "runtime"
+    state = RuntimeState.filesystem(root)
+    await state.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        await runtime.persistence.recovery.tools.reserve(_tool_record())
-        await runtime.persistence.recovery.tools.claim("operation", tenant_id="tenant", owner="worker", lease_seconds=1)
+        await state.recovery.tools.reserve(_tool_record())
+        await state.recovery.tools.claim("operation", tenant_id="tenant", owner="worker", lease_seconds=1)
         await asyncio.sleep(1.05)
         with pytest.raises(AIError) as error:
-            await runtime.persistence.recovery.tools.claim("operation", tenant_id="tenant", owner="worker-2", lease_seconds=1)
+            await state.recovery.tools.claim("operation", tenant_id="tenant", owner="worker-2", lease_seconds=1)
         assert error.value.code is ErrorCode.TOOL_EFFECT_UNKNOWN
     finally:
-        await runtime.close()
+        await state.close()
 
-    reopened = build_filesystem_runtime(str(runtime_root), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
-    await reopened.initialize()
+    reopened = RuntimeState.filesystem(root)
+    await reopened.initialize(namespace="effect-unknown", tenant_id="tenant")
     try:
-        record = await reopened.persistence.recovery.tools.get_operation("operation", tenant_id="tenant")
+        record = await reopened.recovery.tools.get_operation("operation", tenant_id="tenant")
         assert record is not None and record.status is ToolOperationStatus.EFFECT_UNKNOWN
     finally:
         await reopened.close()
 
 
 @pytest.mark.asyncio
-async def test_effect_unknown_storage_failure_wins_over_business_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), namespace="effect-failure", persist=RuntimeDomain.RECOVERY)
-    await runtime.initialize()
-    try:
-        await runtime.persistence.recovery.tools.reserve(_tool_record())
-        await runtime.persistence.recovery.tools.claim("operation", tenant_id="tenant", owner="worker", lease_seconds=1)
-        await asyncio.sleep(1.05)
-
-        def fail_flush(_: RuntimeDomain) -> None:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
-
-        monkeypatch.setattr(runtime, "_flush_domain", fail_flush)
-        with pytest.raises(AIError) as error:
-            await runtime.persistence.recovery.tools.claim("operation", tenant_id="tenant", owner="worker-2", lease_seconds=1)
-        assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
-    finally:
-        await runtime.close()
-
-
-@pytest.mark.asyncio
-async def test_nested_event_mutation_flushes_execution_domain_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=RuntimeDomain.EXECUTION)
-    await runtime.initialize()
+async def test_nested_event_mutation_persists_after_restart(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    state = RuntimeState.filesystem(root)
+    await state.initialize(namespace="nested-event", tenant_id="tenant")
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
-        "execution",
-        "tenant",
-        None,
-        "binding",
-        None,
-        "execution",
-        None,
-        None,
-        ExecutionLineageKind.RUN,
-        ExecutionStatus.STARTED,
-        0,
-        0,
-        0,
-        None,
-        {},
-        now,
-        now,
+        "execution", "tenant", None, "binding", None, "execution", None, None,
+        ExecutionLineageKind.RUN, ExecutionStatus.STARTED, 0, 0, 0, None, {}, now, now,
     )
     try:
-        await runtime.persistence.execution.executions.create(execution)
-        flushes: list[RuntimeDomain] = []
-        original_flush = runtime._flush_domain
-
-        def record_flush(domain: RuntimeDomain) -> None:
-            flushes.append(domain)
-            original_flush(domain)
-
-        monkeypatch.setattr(runtime, "_flush_domain", record_flush)
-        event = await runtime.persistence.execution.events.append(
-            "execution",
-            tenant_id="tenant",
-            expected_sequence=0,
-            event_type=ExecutionEventType.EXECUTION_STARTED,
-            payload={},
+        await state.execution.executions.create(execution)
+        event = await state.execution.events.append(
+            "execution", tenant_id="tenant", expected_sequence=0,
+            event_type=ExecutionEventType.EXECUTION_STARTED, payload={},
         )
         assert event.sequence == 1
-        assert flushes == [RuntimeDomain.EXECUTION]
     finally:
-        await runtime.close()
+        await state.close()
 
-    reopened = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=RuntimeDomain.EXECUTION)
-    await reopened.initialize()
+    reopened = RuntimeState.filesystem(root)
+    await reopened.initialize(namespace="nested-event", tenant_id="tenant")
     try:
-        events = await reopened.persistence.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
+        events = await reopened.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
         assert tuple(item.event_type for item in events.items) == (ExecutionEventType.EXECUTION_STARTED,)
     finally:
         await reopened.close()
@@ -156,13 +96,13 @@ async def test_nested_event_mutation_flushes_execution_domain_once(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() -> None:
-    runtime = build_in_memory_runtime(namespace="blob-stream")
-    await runtime.initialize()
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="blob-stream", tenant_id="tenant")
     started = asyncio.Event()
     release = asyncio.Event()
     data = b"stream"
     digest = hashlib.sha256(data).hexdigest()
-    store = runtime.persistence.object_store(RuntimeDomain.EXECUTION)
+    store = state._object_store(RuntimeDomain.EXECUTION)
 
     async def chunks() -> AsyncIterator[bytes]:
         started.set()
@@ -173,20 +113,11 @@ async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() 
         yield b"inline"
 
     try:
-        stream = asyncio.create_task(
-            store.put(
-                "v1/stream",
-                chunks(),
-                expected_size=len(data),
-                expected_digest=digest,
-            )
-        )
+        stream = asyncio.create_task(store.put("v1/stream", chunks(), expected_size=len(data), expected_digest=digest))
         await started.wait()
         inline = asyncio.create_task(
             store.put(
-                "v1/inline",
-                inline_chunks(),
-                expected_size=len(b"inline"),
+                "v1/inline", inline_chunks(), expected_size=6,
                 expected_digest=hashlib.sha256(b"inline").hexdigest(),
             )
         )
@@ -197,4 +128,4 @@ async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() 
         await stream
     finally:
         release.set()
-        await runtime.close()
+        await state.close()

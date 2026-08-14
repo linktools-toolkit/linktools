@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from ..core import validate_tenant_id
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, namespace_key, read_object
-from .state import RuntimeDomain
+from .state._plan import RuntimeDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _OBJECT_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})

@@ -5,7 +5,8 @@
 import pytest
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import DefaultExecutionService, ExecutionResult
+from linktools.ai.runtime import ExecutionResult
+from linktools.ai.runtime.composition_api import DefaultExecutionService
 from linktools.ai.task import TaskCompletionLedger
 from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, WorkerActivities, production_registration
 

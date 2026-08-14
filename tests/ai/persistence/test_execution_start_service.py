@@ -6,10 +6,12 @@
 import asyncio
 
 import pytest
-from linktools.ai.runtime.state._memory import build_in_memory_runtime
+from linktools.ai.runtime import RuntimeState
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import DefaultExecutionService, ExecutionRequest
+from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.composition_api import DefaultExecutionService
 
 
 class _History:
@@ -34,12 +36,14 @@ class _Launcher:
 
 @pytest.mark.asyncio
 async def test_execution_start_claim_has_one_launcher_winner() -> None:
-    runtime = build_in_memory_runtime(namespace="service-start")
-    await runtime.initialize()
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="service-start", tenant_id="tenant")
     launcher = _Launcher()
     service = DefaultExecutionService(
-        runtime.persistence,
+        state.execution,
+        state._object_store(RuntimeDomain.EXECUTION),
         TenantAuthorizationPolicy(),
+        sessions=state.conversation.sessions,
         backend=launcher,
         operation_ids=iter(("execution-a", "execution-b")).__next__,
         history_reader=_History(),
@@ -48,17 +52,19 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
     first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
     assert first.execution_id == second.execution_id
     assert launcher.calls == 1
-    await runtime.close()
+    await state.close()
 
 
 @pytest.mark.asyncio
 async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
-    runtime = build_in_memory_runtime(namespace="memory-namespace-validation")
-    await runtime.initialize()
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-namespace-validation", tenant_id="tenant")
     try:
         service = DefaultExecutionService(
-            runtime.persistence,
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
             TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
             backend=_Launcher(),
             history_reader=_History(),
         )
@@ -67,7 +73,7 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
             "a" * 64,
             ExecutionRequest("without memory", principal, "without-memory", memory_scope=None),
         )
-        execution = await runtime.persistence.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
+        execution = await state.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
         assert execution is not None
         assert execution.memory_scope is None
 
@@ -79,4 +85,4 @@ async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
                 )
             assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:
-        await runtime.close()
+        await state.close()

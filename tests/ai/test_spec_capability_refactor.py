@@ -3,7 +3,7 @@
 """Capability selection and immutable skill catalog contracts."""
 
 import pytest
-from linktools.ai.capability import (
+from linktools.ai.capability._skill import (
     SkillCatalogSnapshot,
     SkillDescriptor,
     bind_skill_capability,

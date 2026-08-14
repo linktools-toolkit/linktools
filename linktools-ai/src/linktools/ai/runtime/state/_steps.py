@@ -26,7 +26,7 @@ from pydantic_ai_harness.step_persistence import (
 
 from ...core import validate_persistence_namespace, validate_tenant_id
 from ...errors import AIError, ErrorCode
-from ._contracts import RuntimeDomain, RuntimeRetentionMode
+from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ...storage import (
     FilesystemMutationLock,
     FilesystemObjectStore,
@@ -41,7 +41,7 @@ from ...storage import (
     validate_sql,
     write_json_atomic,
 )
-from ._schema import build_step_sql_metadata
+from ..schema_api import build_step_sql_metadata
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -1066,10 +1066,19 @@ class RuntimeStepStore(StepStore):
             for child in children:
                 await child.initialize()
                 initialized.append(child)
-        except BaseException:
+        except BaseException as primary:
             for child in reversed(initialized):
-                await child.close()
-            raise
+                cleanup = asyncio.create_task(child.close(), name="linktools-step-child-cleanup")
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    try:
+                        await asyncio.shield(cleanup)
+                    except BaseException:
+                        _logger.error("step child cleanup failed after cancellation", exc_info=True)
+                except BaseException:
+                    _logger.error("step child cleanup failed", exc_info=environ.debug)
+            raise primary
         self._initialized = initialized
         self._business_unavailable = False
         _logger.debug("step persistence initialized: children=%s", len(initialized))

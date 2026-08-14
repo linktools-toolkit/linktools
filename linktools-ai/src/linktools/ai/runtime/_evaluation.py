@@ -24,9 +24,9 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
-from ._persistence import EvaluationRecord, IdempotencyRecord, RuntimeDomainStates
-from .state import RuntimeDomain
-from ._services import (
+from .state._contracts import EvaluationRecord, EvaluationState, ExecutionRepository, IdempotencyRecord
+from .state._plan import RuntimeDomain
+from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
     EvaluationHandle,
@@ -106,11 +106,12 @@ class EvaluationApi(EvaluationQueryApi, Protocol):
 class DefaultEvaluationService:
     """Persist evaluation identity and enforce compatibility before replay."""
 
-    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, execution: ExecutionService, *, release_terminal: _EvaluationReleaseCallback | None = None, acquire_execution_hold: _ExecutionHoldCallback | None = None, release_execution_hold: _ExecutionHoldCallback | None = None, request_execution_handoff: _ExecutionHandoffCallback | None = None) -> None:
+    def __init__(self, state: EvaluationState, executions: ExecutionRepository, authorization: AuthorizationPolicy, execution: ExecutionService, *, release_terminal: _EvaluationReleaseCallback | None = None, acquire_execution_hold: _ExecutionHoldCallback | None = None, release_execution_hold: _ExecutionHoldCallback | None = None, request_execution_handoff: _ExecutionHandoffCallback | None = None) -> None:
         hold_callbacks = (acquire_execution_hold, release_execution_hold, request_execution_handoff)
         if any(callback is None for callback in hold_callbacks) and any(callback is not None for callback in hold_callbacks):
             raise ValueError("evaluation execution hold callbacks must be complete")
-        self._persistence = persistence
+        self._state = state
+        self._executions = executions
         self._authorization = authorization
         self._execution = execution
         self._release_terminal = release_terminal or _no_release_terminal
@@ -125,7 +126,7 @@ class DefaultEvaluationService:
         key_hash = idempotency_key_hash(request.idempotency_key)
         await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
         request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding_digest, "output_schema_fingerprint": output_schema_fingerprint})
-        existing = await self._persistence.evaluation.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+        existing = await self._state.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -137,7 +138,7 @@ class DefaultEvaluationService:
             now = existing.created_at
         else:
             now = datetime.now(timezone.utc)
-            await self._persistence.evaluation.idempotency.reserve(IdempotencyRecord(
+            await self._state.idempotency.reserve(IdempotencyRecord(
                 tenant_id=request.principal.tenant_id,
                 runtime_domain=RuntimeDomain.EVALUATION,
                 scope="evaluation.run",
@@ -152,7 +153,7 @@ class DefaultEvaluationService:
                 updated_at=now,
             ))
         try:
-            record = await self._persistence.evaluation.records.get(evaluation_id, tenant_id=request.principal.tenant_id)
+            record = await self._state.records.get(evaluation_id, tenant_id=request.principal.tenant_id)
             if record is None:
                 if existing is not None and existing.status is IdempotencyStatus.COMPLETED:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -167,7 +168,7 @@ class DefaultEvaluationService:
                 )
                 await self._acquire_execution_hold(execution.execution_id, tenant_id=request.principal.tenant_id, hold_id=f"evaluation:{evaluation_id}")
                 record = EvaluationRecord(evaluation_id, request.principal.tenant_id, execution.execution_id, request.dataset_digest, 1, "default", 1, binding_digest, output_schema_fingerprint, None, EvaluationStatus.PENDING, 0, {}, now, now)
-                await self._persistence.evaluation.records.create(record)
+                await self._state.records.create(record)
             elif record.status not in {EvaluationStatus.SUCCEEDED, EvaluationStatus.FAILED, EvaluationStatus.CANCELLED}:
                 execution = await self._execution_record(record)
                 if execution is not None:
@@ -180,7 +181,7 @@ class DefaultEvaluationService:
             _logger.warning("evaluation reservation remains recoverable: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id, exc_info=environ.debug)
             raise
         try:
-            await self._persistence.evaluation.idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(
+            await self._state.idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(
                 tenant_id=request.principal.tenant_id,
                 runtime_domain=RuntimeDomain.EVALUATION,
                 scope="evaluation.run",
@@ -197,7 +198,7 @@ class DefaultEvaluationService:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.evaluation.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+            current = await self._state.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
             if current is None or current.status is not IdempotencyStatus.COMPLETED:
                 raise
         _logger.info("evaluation submitted: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id)
@@ -300,11 +301,11 @@ class DefaultEvaluationService:
                 return current
             updated = replace(current, status=target_status, revision=current.revision + 1, updated_at=datetime.now(timezone.utc))
             try:
-                result = await self._persistence.evaluation.records.compare_and_swap(current.evaluation_id, tenant_id=current.tenant_id, expected_revision=current.revision, next_record=updated)
+                result = await self._state.records.compare_and_swap(current.evaluation_id, tenant_id=current.tenant_id, expected_revision=current.revision, next_record=updated)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-                result = await self._persistence.evaluation.records.get(current.evaluation_id, tenant_id=current.tenant_id)
+                result = await self._state.records.get(current.evaluation_id, tenant_id=current.tenant_id)
                 if result is None or result.revision <= current.revision:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 current = result
@@ -368,14 +369,14 @@ class DefaultEvaluationService:
             self._handoff_condition.notify_all()
 
     async def _execution_record(self, record: EvaluationRecord):
-        return await self._persistence.execution.executions.get(record.execution_id, tenant_id=record.tenant_id)
+        return await self._executions.get(record.execution_id, tenant_id=record.tenant_id)
 
     async def _authorized(self, evaluation_id: str, principal: Principal, action: AuthorizationAction) -> EvaluationRecord:
-        header = await self._persistence.evaluation.records.get_header(evaluation_id, tenant_id=principal.tenant_id)
+        header = await self._state.records.get_header(evaluation_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._persistence.evaluation.records.get(evaluation_id, tenant_id=principal.tenant_id)
+        record = await self._state.records.get(evaluation_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record

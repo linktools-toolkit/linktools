@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.migrate import provision_asset_database, provision_runtime_database
-from linktools.ai.runtime.state import RuntimeDomain, build_runtime_sql_metadata
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.schema_api import build_runtime_sql_metadata
 from sqlalchemy.ext.asyncio import create_async_engine
 
 

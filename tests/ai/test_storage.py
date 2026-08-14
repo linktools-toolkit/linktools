@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute, build_runtime_sql_metadata
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.schema_api import build_runtime_sql_metadata
+from linktools.ai.runtime.state import RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (

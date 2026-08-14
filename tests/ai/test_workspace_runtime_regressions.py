@@ -7,17 +7,19 @@ import pytest
 from linktools.ai.adapter import RuntimeMemoryStore
 from linktools.ai.core import Principal
 from linktools.ai.model import ModelRegistry
-from linktools.ai.runtime.state._memory import build_in_memory_runtime
+from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
 
 
 @pytest.mark.asyncio
 async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
-    runtime = build_in_memory_runtime(namespace="memory-regression")
-    await runtime.initialize()
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="memory-regression", tenant_id="tenant")
     try:
         store = RuntimeMemoryStore(
-            runtime.persistence,
+            state.memory,
+            object_store=state._object_store(RuntimeDomain.MEMORY),
+            namespace="memory-regression",
             tenant_id="tenant",
             execution_id="execution",
             memory_scope="workspace",
@@ -34,7 +36,7 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
         )
         assert [match.path for match in result.matches] == ["workspace/memory/MEMORY.md"]
     finally:
-        await runtime.close()
+        await state.close()
 
 
 @pytest.mark.asyncio

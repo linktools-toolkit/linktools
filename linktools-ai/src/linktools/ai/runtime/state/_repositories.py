@@ -34,7 +34,7 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from .._persistence import (
+from ._contracts import (
     ConversationCursor,
     ApprovalRecord,
     ArtifactRecord,
@@ -52,7 +52,6 @@ from .._persistence import (
     ExecutionTerminalCommitResult,
     IdempotencyRecord,
     SessionRecord,
-    RuntimeDomain,
     RecoveryCheckpoint,
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
@@ -66,6 +65,7 @@ from .._persistence import (
 from .._tool import ToolOperationRecord
 from ...storage import ObjectRef, namespace_key
 from ...storage import SqlStorageContext
+from ._plan import RuntimeDomain
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from sqlalchemy import MetaData, Table

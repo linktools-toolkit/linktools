@@ -4,6 +4,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
@@ -38,13 +39,16 @@ class CapabilityRefResolution:
 class CapabilityMaterializationContext:
     principal: Principal
     execution: ResourceRef
-    execution_root: str
+    execution_root: Path
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
 
     def __post_init__(self) -> None:
         if self.principal.tenant_id != self.execution.tenant_id:
             raise ValueError("capability context tenant mismatch")
+        if not isinstance(self.execution_root, Path):
+            raise TypeError("execution_root must be a Path")
+        object.__setattr__(self, "execution_root", self.execution_root.expanduser().resolve(strict=False))
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
 

@@ -332,7 +332,7 @@ class SqlObjectStore:
         self._context: "SqlStorageContext | None" = None
 
     @classmethod
-    def _from_context(cls, context: "SqlStorageContext", *, store_id: str = "builtin") -> "SqlObjectStore":
+    def from_context(cls, context: "SqlStorageContext", *, store_id: str = "builtin") -> "SqlObjectStore":
         store = cls(context.engine, store_id=store_id)
         store._context = context
         return store

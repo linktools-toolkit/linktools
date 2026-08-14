@@ -4,17 +4,16 @@
 
 import asyncio
 
+from linktools.core import environ
 from pydantic_ai.exceptions import ModelRetry
 
 from ..agent import AgentCompiler, AgentDefinition, SubagentDelegate
 from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..runtime import (
-    CancelExecutionRequest,
-    DefaultExecutionService,
-    ExecutionRequest,
-    ExecutionResult,
-)
+from ..runtime.composition_api import DefaultExecutionService
+from ..runtime.service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
+
+_logger = environ.get_logger("ai.workspace.subagent")
 
 
 class SubagentDispatcher:
@@ -67,13 +66,8 @@ class SubagentDispatcher:
         try:
             definition = await self._compiler.compile_subagent(agent_id=agent_id, prompt_id=prompt_id)
         except AIError as error:
-            if error.code in {
-                ErrorCode.AGENT_NOT_FOUND,
-                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                ErrorCode.STORAGE_NOT_FOUND,
-                ErrorCode.OUTPUT_SCHEMA_UNKNOWN,
-            }:
-                raise ModelRetry("requested subagent is unavailable") from error
+            if error.code is ErrorCode.AGENT_NOT_FOUND:
+                raise ModelRetry("requested subagent agent or prompt is unavailable") from error
             raise
         self._definitions[definition.digest] = definition
         idempotency_key = "subagent:" + canonical_sha256(
@@ -93,8 +87,24 @@ class SubagentDispatcher:
         )
         try:
             result = await self._execution.wait(child.execution_id, principal=principal)
-        except asyncio.CancelledError:
-            await self.cancel_child(child.execution_id, parent_execution_id=parent_execution_id, principal=principal)
+        except BaseException as primary:
+            cleanup = asyncio.create_task(
+                self.cancel_child(child.execution_id, parent_execution_id=parent_execution_id, principal=principal),
+                name=f"ai-subagent-cleanup-{child.execution_id}",
+            )
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as cancellation:
+                try:
+                    await asyncio.shield(cleanup)
+                except BaseException:
+                    recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                    raise recovery from primary
+                raise cancellation
+            except BaseException as cleanup_error:
+                _logger.error("subagent child terminal confirmation failed: execution=%s", child.execution_id, exc_info=environ.debug)
+                recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                raise recovery from primary
             raise
         return _subagent_result(result)
 

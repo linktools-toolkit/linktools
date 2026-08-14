@@ -7,25 +7,25 @@ from datetime import datetime, timezone
 
 from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimeDomainStates
-from ._services import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
+from .state._contracts import RecoveryState
+from .service_api import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
 
 
 class DefaultExternalService:
-    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
-        self._persistence = persistence
+    def __init__(self, state: RecoveryState, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
+        self._state = state
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
     async def supply(self, execution_id: str, request: ExternalSupplyRequest) -> ExternalSupplyResult:
-        call = await self._persistence.recovery.external_calls.get(request.call_id, tenant_id=request.principal.tenant_id)
+        call = await self._state.external_calls.get(request.call_id, tenant_id=request.principal.tenant_id)
         if call is None or call.execution_id != execution_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        header = await self._persistence.recovery.external_calls.get_header(request.call_id, tenant_id=request.principal.tenant_id)
+        header = await self._state.external_calls.get_header(request.call_id, tenant_id=request.principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.EXTERNAL_SUPPLY, header)
-        updated = await self._persistence.recovery.external_calls.supply(
+        updated = await self._state.external_calls.supply(
             request.call_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ExternalCallStatus.PENDING,

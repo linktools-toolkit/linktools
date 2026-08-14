@@ -19,8 +19,7 @@ from ._contract import (
     CapabilityRefResolution,
     CapabilityMaterializationContext,
 )
-
-SKILL_TOOL_NAMES = ("list_skills", "load_skill")
+from .names_api import SKILL_TOOL_NAMES
 
 
 @dataclass(frozen=True, slots=True)

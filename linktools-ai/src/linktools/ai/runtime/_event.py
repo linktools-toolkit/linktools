@@ -17,8 +17,8 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimeDomainStates
-from ._services import ExecutionEvent
+from .state._contracts import ExecutionState
+from .service_api import ExecutionEvent
 
 _logger = environ.get_logger("ai.runtime.event")
 
@@ -31,17 +31,17 @@ class EventApi(Protocol):
 class DefaultEventService:
     """Read durable events and expose a bounded durable-first stream."""
 
-    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy) -> None:
-        self._persistence = persistence
+    def __init__(self, state: ExecutionState, authorization: AuthorizationPolicy) -> None:
+        self._state = state
         self._authorization = authorization
 
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
-        header = await self._persistence.execution.executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        header = await self._state.executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.EVENT_READ, header)
         await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
-        page = await self._persistence.execution.events.list(execution_id, tenant_id=principal.tenant_id, after_sequence=after_sequence, limit=limit)
+        page = await self._state.events.list(execution_id, tenant_id=principal.tenant_id, after_sequence=after_sequence, limit=limit)
         return Page(tuple(ExecutionEvent(item.execution_id, item.sequence, item.event_type, item.payload) for item in page.items), page.next_cursor)
 
     async def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> AsyncIterator[ExecutionEvent]:
@@ -49,7 +49,7 @@ class DefaultEventService:
         while True:
             page = await self.list(execution_id, principal=principal, after_sequence=cursor, limit=200)
             if not page.items:
-                execution = await self._persistence.execution.executions.get(execution_id, tenant_id=principal.tenant_id)
+                execution = await self._state.executions.get(execution_id, tenant_id=principal.tenant_id)
                 if execution is None or execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     return
                 await asyncio.sleep(0.1)

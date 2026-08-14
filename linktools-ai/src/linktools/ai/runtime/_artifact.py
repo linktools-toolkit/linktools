@@ -29,12 +29,12 @@ from ..core import (
     canonical_sha256,
 )
 from ..errors import AIError, ErrorCode
-from ._persistence import (
+from .state._contracts import (
     OperationLedgerInput,
     OperationLedgerRecord,
-    RuntimeDomainStates,
+    ArtifactState,
 )
-from ._services import ArtifactDownload, ArtifactView
+from .service_api import ArtifactDownload, ArtifactView
 
 _logger = environ.get_logger("ai.runtime.artifact")
 
@@ -47,10 +47,10 @@ class ArtifactApi(Protocol):
 class DefaultArtifactService:
     """Authorize metadata access before issuing an opaque download URL."""
 
-    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, *, grant_key: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
+    def __init__(self, state: ArtifactState, authorization: AuthorizationPolicy, *, grant_key: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
         if not grant_key:
             raise ValueError("artifact grant key is required")
-        self._persistence = persistence
+        self._state = state
         self._authorization = authorization
         self._grant_key = grant_key
         self._cursor_signer = cursor_signer
@@ -63,28 +63,28 @@ class DefaultArtifactService:
             ResourceRef(ResourceKind.ARTIFACT, execution_id, principal.tenant_id),
         )
         raw_cursor = _decode_cursor(cursor, principal.tenant_id, execution_id, self._cursor_signer)
-        page = await self._persistence.artifact.records.list_by_execution(execution_id, tenant_id=principal.tenant_id, cursor=raw_cursor, limit=limit)
+        page = await self._state.records.list_by_execution(execution_id, tenant_id=principal.tenant_id, cursor=raw_cursor, limit=limit)
         values = tuple(ArtifactView(item.artifact_id, item.execution_id, item.size) for item in page.items)
         next_cursor = None if page.next_cursor is None else self._cursor_signer.encode(CursorPayload(1, principal.tenant_id, "ARTIFACT", _artifact_filter(execution_id), page.next_cursor, 0, int(time.time()) + 3600))
         return Page(values, next_cursor)
 
     async def get(self, artifact_id: str, *, principal: Principal) -> ArtifactDownload:
-        header = await self._persistence.artifact.records.get_header(artifact_id, tenant_id=principal.tenant_id)
+        header = await self._state.records.get_header(artifact_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, AuthorizationAction.ARTIFACT_READ, header)
-        record = await self._persistence.artifact.records.get_metadata(artifact_id, tenant_id=principal.tenant_id)
+        record = await self._state.records.get_metadata(artifact_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         expires_at = int(time.time()) + 300
         nonce = secrets.token_hex(16)
         request_digest = canonical_sha256({"action": "artifact.download", "tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest})
         now = datetime.now(timezone.utc)
-        operation = await self._persistence.artifact.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.object_ref.key, record.digest, None, True, now, now))
+        operation = await self._state.operations.append(OperationLedgerInput(nonce, principal.tenant_id, ResourceKind.DOWNLOAD_GRANT, artifact_id, record.execution_id, OperationKind.DOWNLOAD_GRANT, OperationStatus.PENDING, request_digest, record.object_ref.key, record.digest, None, True, now, now))
         payload = {"tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest, "expires_at": expires_at, "nonce": nonce}
         signature = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
         token = _encode_grant({**payload, "hmac": signature})
-        await self._persistence.artifact.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
+        await self._state.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
         _logger.info("artifact grant issued: artifact=%s tenant=%s", artifact_id, principal.tenant_id)
         return ArtifactDownload(artifact_id, f"{self._entry_path}/{artifact_id}/download?grant={token}", str(expires_at))
 
@@ -95,10 +95,10 @@ class DefaultArtifactService:
             expected = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(signature, expected) or str(payload["tenant_id"]) != principal.tenant_id or str(payload["principal_id"]) != principal.principal_id or int(payload["expires_at"]) < int(time.time()):
                 raise ValueError("invalid artifact grant")
-            operation = await self._persistence.artifact.operations.get(str(payload["nonce"]), tenant_id=principal.tenant_id)
+            operation = await self._state.operations.get(str(payload["nonce"]), tenant_id=principal.tenant_id)
             if operation is None or operation.status is not OperationStatus.SUCCEEDED or operation.result_digest != str(payload["artifact_digest"]):
                 raise ValueError("unknown artifact grant")
-            record = await self._persistence.artifact.records.get_metadata(str(payload["artifact_id"]), tenant_id=principal.tenant_id)
+            record = await self._state.records.get_metadata(str(payload["artifact_id"]), tenant_id=principal.tenant_id)
             if record is None or record.digest != str(payload["artifact_digest"]):
                 raise ValueError("artifact grant target mismatch")
             return record.object_ref.key

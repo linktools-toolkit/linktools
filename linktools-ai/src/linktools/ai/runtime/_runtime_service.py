@@ -11,7 +11,7 @@ from linktools.core import environ
 from ..agent import AgentCompiler, AgentDefinition
 from ..core import JsonValue, Principal, SessionStatus, validate_memory_scope
 from ..errors import AIError, ErrorCode
-from ._services import (
+from .service_api import (
     ApprovalService,
     ArtifactService,
     CreateSessionRequest,
@@ -107,7 +107,7 @@ class Runtime:
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             definition = await self._compile_session(session_id, principal)
             await self._ensure_session(definition, session_id, principal)
-            from ._services import ResumeSessionRequest
+            from .service_api import ResumeSessionRequest
 
             handle = await self.session.resume(
                 definition.digest,

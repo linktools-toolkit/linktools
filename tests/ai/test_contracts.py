@@ -20,7 +20,8 @@ from linktools.ai.observe import (
     RecordedTraceItem,
     snapshot_digest,
 )
-from linktools.ai.runtime import ExecutionRequest, ToolOperationRecord
+from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
 from linktools.ai.task import SwarmLimits, TaskGraph, TaskLease, TaskNode

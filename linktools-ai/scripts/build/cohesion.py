@@ -52,6 +52,12 @@ def _annotations(node: ast.AST) -> tuple[ast.expr, ...]:
 
 
 def _is_forwarding_module(tree: ast.Module) -> bool:
+    if any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "__public_boundary__" for target in node.targets)
+        for node in tree.body
+    ):
+        return False
     definitions = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))]
     if definitions:
         return False

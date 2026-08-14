@@ -12,12 +12,25 @@ from linktools.core import environ
 
 from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
 from ..agent import ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AgentCompiler, AgentDefinition, AgentExecutor, AssistantTextOutput, OutputTypeRegistry
-from ..asset import AssetRef, AssetRepository, AssetStore, AssetTypeBinding, AssetTypeRegistry, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
+from ..asset import AssetRef, AssetRepository, AssetStore, AssetTypeRegistry, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
 from ..capability import CapabilityGrant, CapabilityProvider, SkillCapabilityProvider
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..runtime import DefaultApprovalService, DefaultArtifactService, DefaultEvaluationService, DefaultEventService, DefaultExecutionService, DefaultSessionService, DefaultTaskService, LocalExecutionBackend, RecoveryCheckpointState, RecoveryHandoffPhase, Runtime, RuntimeDomain, RuntimeRetentionMode, RuntimeState, RuntimeStatePlan, RuntimeStateRoute, RuntimeTaskNodeRunner
+from ..runtime import Runtime
+from ..runtime.composition_api import (
+    DefaultApprovalService,
+    DefaultArtifactService,
+    DefaultEvaluationService,
+    DefaultEventService,
+    DefaultExecutionService,
+    DefaultSessionService,
+    DefaultTaskService,
+    LocalExecutionBackend,
+    RuntimeTaskNodeRunner,
+)
+from ..runtime.state import RuntimeDomain, RuntimeRetentionMode, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from ..runtime.contract_api import RecoveryCheckpointState, RecoveryHandoffPhase, RecoveryState
 from ..spec import AgentCapabilityRef, AgentSpec, PromptSpec, builtin_asset_bindings
 from ..storage import StorageLayer, StorageOverlay
 from ..task import LocalTaskGraphLauncher
@@ -37,11 +50,9 @@ async def _build_default_assets(workspace: Workspace) -> AssetRepository:
     return repository
 
 
-def _build_asset_repository(store: AssetStore, *, extra_bindings: Sequence[AssetTypeBinding[object]] = ()) -> AssetRepository:
+def _build_asset_repository(store: AssetStore) -> AssetRepository:
     registry = AssetTypeRegistry()
     for binding in builtin_asset_bindings():
-        registry.register(binding)
-    for binding in extra_bindings:
         registry.register(binding)
     return AssetRepository(store, registry.freeze())
 
@@ -79,8 +90,8 @@ def _build_default_models(workspace: Workspace) -> ModelRegistry:
     model = configured.strip() if isinstance(configured, str) and configured.strip() else os.getenv("OPENAI_MODEL", "").strip()
     if not model:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "model is required")
-    base_url = os.getenv("OPENAI_BASE_URL") or None
-    api_key = os.getenv("OPENAI_API_KEY") or None
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+    api_key = os.getenv("OPENAI_API_KEY", "").strip() or None
     return ModelRegistry.openai(model=model, base_url=base_url, api_key=api_key)
 
 
@@ -89,8 +100,8 @@ def _default_runtime_state(workspace: Workspace) -> RuntimeState:
     return RuntimeState.from_plan(plan)
 
 
-async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], stores: object, *, tenant_id: str) -> None:
-    checkpoints = await stores.recovery.checkpoints.list(tenant_id=tenant_id)
+async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], recovery: RecoveryState, *, tenant_id: str) -> None:
+    checkpoints = await recovery.checkpoints.list(tenant_id=tenant_id)
     for checkpoint in checkpoints:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
             continue
@@ -150,72 +161,158 @@ async def open_workspace_runtime(
     compiler = AgentCompiler(selected_assets, model_resolver=model_resolver, output_types=output_types, capability_providers=providers, capability_grants=grants, execution_profile_fingerprint=profile)
     selected_runtime = runtime or _default_runtime_state(workspace)
     await selected_runtime.initialize(namespace=workspace.workspace_id, tenant_id=workspace.workspace_id)
-    resources = selected_runtime.resources
-    definitions: dict[str, AgentDefinition] = {}
-    history = StepExecutionHistoryReader(workspace.workspace_id, resources, selected_runtime.steps.read_store(RuntimeDomain.EXECUTION), HmacCursorSigner("execution-history", _grant_key(workspace)))
-    authorization = TenantAuthorizationPolicy(workspace.workspace_id)
-    execution = DefaultExecutionService(resources, authorization, history_reader=history, release_terminal=selected_runtime.retention.release_execution_handoff)
-    dispatcher = SubagentDispatcher(compiler, definitions, execution)
-    executor = AgentExecutor(execution_root=workspace.root)
-    backend = LocalExecutionBackend(
-        resources,
-        selected_runtime.steps,
-        executor,
-        definitions,
-        tenant_id=workspace.workspace_id,
-        execution_root=workspace.root,
-        step_reads={domain: selected_runtime.steps.read_store(domain) for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)},
-        step_lifecycle=selected_runtime.steps,
-        memory_store_factory=lambda memory_tenant, execution_id, memory_scope: RuntimeMemoryStore(resources, tenant_id=memory_tenant, execution_id=execution_id, memory_scope=memory_scope, transient=selected_runtime.plan.route(RuntimeDomain.MEMORY).retention is RuntimeRetentionMode.TRANSIENT),
-        recovery_enabled=RuntimeDomain.RECOVERY in selected_runtime.plan.durable_domains,
-        conversation_durable=selected_runtime.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE,
-        handoff_contract_digest=selected_runtime.handoff_contract_digest,
-        subagent_dispatcher=dispatcher,
-    )
-    execution.bind_backend(backend)
-    execution.bind_subagent_cancellation(dispatcher)
-    session = DefaultSessionService(resources, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)), release_terminal=selected_runtime.retention.release_session)
-    task_runner = RuntimeTaskNodeRunner(execution, definitions)
-    task_launcher = LocalTaskGraphLauncher(resources.task.tasks, task_runner, owner=f"workspace:{workspace.workspace_id}")
-    task = DefaultTaskService(resources.task, authorization, task_launcher, release_terminal=selected_runtime.retention.release_task_graph)
-    evaluation = DefaultEvaluationService(resources, authorization, execution, release_terminal=selected_runtime.retention.release_evaluation, acquire_execution_hold=execution._acquire_dependency_hold, release_execution_hold=execution._release_dependency_hold, request_execution_handoff=execution._request_terminal_handoff)
-    approval = DefaultApprovalService(resources, authorization)
-    event = DefaultEventService(resources, authorization)
-    artifact = DefaultArtifactService(resources, authorization, grant_key=_grant_key(workspace), cursor_signer=HmacCursorSigner("artifact", _grant_key(workspace)))
-
-    async def close_runtime() -> None:
-        await _close_quiescent(task_launcher.shutdown, "workspace-task-quiesce")
-        await _close_quiescent(backend.close, "workspace-execution-quiesce")
-        await _close_quiescent(selected_runtime.close, "workspace-runtime-state-close")
-
-    runtime_value = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=close_runtime)
+    setup_cleanup: list[Callable[[], Awaitable[None]]] = [selected_runtime.close]
     try:
+        definitions: dict[str, AgentDefinition] = {}
+        history = StepExecutionHistoryReader(
+            namespace=workspace.workspace_id,
+            executions=selected_runtime.execution.executions,
+            store=selected_runtime.steps.read_store(RuntimeDomain.EXECUTION),
+            cursor_signer=HmacCursorSigner("execution-history", _grant_key(workspace)),
+        )
+        authorization = TenantAuthorizationPolicy(workspace.workspace_id)
+        execution = DefaultExecutionService(
+            selected_runtime.execution,
+            selected_runtime._object_store(RuntimeDomain.EXECUTION),
+            authorization,
+            sessions=selected_runtime.conversation.sessions,
+            history_reader=history,
+            release_terminal=selected_runtime.retention.release_execution_handoff,
+        )
+        dispatcher = SubagentDispatcher(compiler, definitions, execution)
+        executor = AgentExecutor(execution_root=workspace.root)
+
+        def memory_store_factory(memory_tenant: str, execution_id: str, memory_scope: str) -> RuntimeMemoryStore:
+            memory_route = selected_runtime.plan.route(RuntimeDomain.MEMORY)
+            memory_objects = (
+                selected_runtime._working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{execution_id}")
+                if memory_route.retention is RuntimeRetentionMode.TRANSIENT
+                else selected_runtime._object_store(RuntimeDomain.MEMORY)
+            )
+            return RuntimeMemoryStore(
+                selected_runtime.memory,
+                object_store=memory_objects,
+                namespace=workspace.workspace_id,
+                tenant_id=memory_tenant,
+                execution_id=execution_id,
+                memory_scope=memory_scope,
+                transient=memory_route.retention is RuntimeRetentionMode.TRANSIENT,
+            )
+
+        backend = LocalExecutionBackend(
+            selected_runtime.conversation,
+            selected_runtime.execution,
+            selected_runtime.recovery,
+            selected_runtime._object_store(RuntimeDomain.EXECUTION),
+            selected_runtime._object_store(RuntimeDomain.RECOVERY),
+            selected_runtime._metrics,
+            workspace.workspace_id,
+            selected_runtime.steps,
+            executor,
+            definitions,
+            tenant_id=workspace.workspace_id,
+            execution_root=workspace.root,
+            step_reads={domain: selected_runtime.steps.read_store(domain) for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)},
+            step_lifecycle=selected_runtime.steps,
+            memory_store_factory=memory_store_factory,
+            recovery_enabled=RuntimeDomain.RECOVERY in selected_runtime.plan.durable_domains,
+            conversation_durable=selected_runtime.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE,
+            handoff_contract_digest=selected_runtime.handoff_contract_digest,
+            subagent_dispatcher=dispatcher,
+        )
+        setup_cleanup.append(backend.close)
+        execution.bind_backend(backend)
+        execution.bind_subagent_cancellation(dispatcher)
+        session = DefaultSessionService(
+            selected_runtime.conversation,
+            selected_runtime.execution.executions,
+            authorization,
+            execution,
+            HmacCursorSigner("session", _grant_key(workspace)),
+            release_terminal=selected_runtime.retention.release_session,
+        )
+        task_runner = RuntimeTaskNodeRunner(execution, definitions)
+        task_launcher = LocalTaskGraphLauncher(selected_runtime.task.tasks, task_runner, owner=f"workspace:{workspace.workspace_id}")
+        setup_cleanup.append(task_launcher.shutdown)
+        task = DefaultTaskService(selected_runtime.task, authorization, task_launcher, release_terminal=selected_runtime.retention.release_task_graph)
+        evaluation = DefaultEvaluationService(
+            selected_runtime.evaluation,
+            selected_runtime.execution.executions,
+            authorization,
+            execution,
+            release_terminal=selected_runtime.retention.release_evaluation,
+            acquire_execution_hold=execution._acquire_dependency_hold,
+            release_execution_hold=execution._release_dependency_hold,
+            request_execution_handoff=execution._request_terminal_handoff,
+        )
+        approval = DefaultApprovalService(selected_runtime.recovery, authorization)
+        event = DefaultEventService(selected_runtime.execution, authorization)
+        artifact = DefaultArtifactService(selected_runtime.artifact, authorization, grant_key=_grant_key(workspace), cursor_signer=HmacCursorSigner("artifact", _grant_key(workspace)))
+        coordinator = _RuntimeCloseCoordinator((task_launcher.shutdown, backend.close, selected_runtime.close))
+        runtime_value = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=coordinator.close)
         if RuntimeDomain.RECOVERY in selected_runtime.plan.durable_domains:
-            await _compile_recovery_definitions(compiler, definitions, resources, tenant_id=workspace.workspace_id)
+            await _compile_recovery_definitions(compiler, definitions, selected_runtime.recovery, tenant_id=workspace.workspace_id)
         if RuntimeDomain.RECOVERY in selected_runtime.plan.durable_domains:
             await backend.reconcile()
         _logger.info("workspace runtime opened: workspace=%s durable_domains=%s", workspace.workspace_id, sorted(domain.value for domain in selected_runtime.plan.durable_domains))
+    except BaseException as primary:
+        await _cleanup_setup(setup_cleanup, primary)
+        raise
+    try:
         yield runtime_value
-    except BaseException:
+    except BaseException as body_error:
         try:
             await runtime_value.close()
-        except BaseException:
-            _logger.exception("workspace runtime setup cleanup failed")
+        except BaseException as close_error:
+            raise close_error from body_error
         raise
     else:
         await runtime_value.close()
 
 
-async def _close_quiescent(callback: Callable[[], Awaitable[None]], name: str) -> None:
-    task = asyncio.create_task(callback(), name=name)
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
+class _RuntimeCloseCoordinator:
+    def __init__(self, actions: tuple[Callable[[], Awaitable[None]], ...]) -> None:
+        self._actions = actions
+        self._cursor = 0
+        self._task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._cursor >= len(self._actions):
+                return
+            task = self._task
+            if task is None or task.done():
+                task = asyncio.create_task(self._run(), name="linktools-workspace-runtime-close")
+                self._task = task
         try:
-            await task
+            await asyncio.shield(task)
+        except asyncio.CancelledError as cancellation:
+            try:
+                await asyncio.shield(task)
+            except BaseException as error:
+                raise error from cancellation
+            raise
+
+    async def _run(self) -> None:
+        while self._cursor < len(self._actions):
+            await self._actions[self._cursor]()
+            self._cursor += 1
+
+
+async def _cleanup_setup(actions: list[Callable[[], Awaitable[None]]], primary: BaseException) -> None:
+    del primary
+    for action in reversed(actions):
+        task = asyncio.create_task(action(), name="linktools-workspace-setup-cleanup")
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(task)
+            except BaseException:
+                _logger.error("workspace setup cleanup failed after cancellation", exc_info=True)
         except BaseException:
-            _logger.exception("quiescent cleanup failed after cancellation: name=%s", name)
-        raise
+            _logger.error("workspace setup cleanup failed", exc_info=environ.debug)
 
 
 def _validate_providers(providers: Sequence[CapabilityProvider]) -> None:

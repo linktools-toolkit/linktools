@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from .._domain import RuntimeDomain
+from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

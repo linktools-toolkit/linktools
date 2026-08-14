@@ -30,14 +30,15 @@ from ..core import (
     idempotency_key_hash,
 )
 from ..errors import AIError, ErrorCode
-from ._persistence import (
+from .state._contracts import (
     OperationLedgerInput,
     OperationLedgerRecord,
-    RuntimeDomainStates,
     ConversationCursor,
+    ConversationState,
+    ExecutionRepository,
     SessionRecord,
 )
-from ._services import (
+from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
     CreateSessionRequest,
@@ -88,8 +89,9 @@ class SessionApi(SessionQueryApi, Protocol):
 class DefaultSessionService:
     """Enforce session ownership, binding immutability, and revision CAS."""
 
-    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, release_terminal: _SessionReleaseCallback | None = None) -> None:
-        self._persistence = persistence
+    def __init__(self, conversation: ConversationState, executions: ExecutionRepository, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, release_terminal: _SessionReleaseCallback | None = None) -> None:
+        self._conversation = conversation
+        self._executions = executions
         self._authorization = authorization
         self._execution = execution
         self._cursor_signer = cursor_signer
@@ -103,7 +105,7 @@ class DefaultSessionService:
         digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest, "metadata": dict(request.metadata)})
         operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
         if operation.result_ref:
-            current = await self._persistence.conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
+            current = await self._conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
             if current is not None:
                 return await self._view(current, request.principal)
         now = datetime.now(timezone.utc)
@@ -123,11 +125,11 @@ class DefaultSessionService:
             continuation=None,
         )
         try:
-            await self._persistence.conversation.sessions.create(record)
+            await self._conversation.sessions.create(record)
         except AIError as error:
             if error.code is not ErrorCode.SESSION_CONFLICT:
                 raise
-            current = await self._persistence.conversation.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
+            current = await self._conversation.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
             if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             record = current
@@ -142,7 +144,7 @@ class DefaultSessionService:
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, "list", request.principal.tenant_id))
-        records = await self._persistence.conversation.sessions.list(tenant_id=request.principal.tenant_id, owner_principal_id=request.principal.principal_id)
+        records = await self._conversation.sessions.list(tenant_id=request.principal.tenant_id, owner_principal_id=request.principal.principal_id)
         if not 1 <= request.limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         snapshot = _session_snapshot(records)
@@ -157,7 +159,7 @@ class DefaultSessionService:
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
-            executions = await self._persistence.execution.executions.list_by_session(session_id, tenant_id=principal.tenant_id)
+            executions = await self._executions.list_by_session(session_id, tenant_id=principal.tenant_id)
             active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
             return LoadedSession(await self._view(record, principal), active)
 
@@ -182,7 +184,7 @@ class DefaultSessionService:
             digest = canonical_sha256({"action": "session.fork", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "source": session_id, "target": request.new_session_id, "binding": source.binding_digest})
             operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.new_session_id, OperationKind.SESSION_FORK, digest)
             if operation.result_ref:
-                current = await self._persistence.conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
+                current = await self._conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
                 if current is not None:
                     return await self._view(current, request.principal)
             if source.binding_digest != binding_digest:
@@ -204,11 +206,11 @@ class DefaultSessionService:
                 continuation=source.continuation,
             )
             try:
-                await self._persistence.conversation.sessions.create(target)
+                await self._conversation.sessions.create(target)
             except AIError as error:
                 if error.code is not ErrorCode.SESSION_CONFLICT:
                     raise
-                existing_target = await self._persistence.conversation.sessions.get(request.new_session_id, tenant_id=request.principal.tenant_id)
+                existing_target = await self._conversation.sessions.get(request.new_session_id, tenant_id=request.principal.tenant_id)
                 if (
                     existing_target is None
                     or existing_target.tenant_id != target.tenant_id
@@ -239,7 +241,7 @@ class DefaultSessionService:
         digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
         operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
         if operation.result_ref:
-            updated = await self._persistence.conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            updated = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if updated is not None:
                 return await self._view(updated, request.principal)
         requested_cwd = request.cwd if request.cwd is not None else current.cwd
@@ -260,7 +262,7 @@ class DefaultSessionService:
             raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
         now = datetime.now(timezone.utc)
         next_record = replace(current, revision=current.revision + 1, resource_generation=current.resource_generation + 1, cwd=requested_cwd, metadata=request.metadata, updated_at=now)
-        updated = await self._persistence.conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
+        updated = await self._conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
         await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
         _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
         return await self._view(updated, request.principal)
@@ -274,7 +276,7 @@ class DefaultSessionService:
         digest = canonical_sha256({"action": "session.close", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "force": request.force, "wait_timeout_seconds": request.wait_timeout_seconds})
         operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
         if operation.result_ref:
-            closed = await self._persistence.conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
+            closed = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if closed is not None:
                 view = await self._view(closed, request.principal)
                 if closed.status is SessionStatus.CLOSED:
@@ -293,7 +295,7 @@ class DefaultSessionService:
             raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
         if current.status is SessionStatus.OPEN:
             now = datetime.now(timezone.utc)
-            current = await self._persistence.conversation.sessions.compare_and_swap(
+            current = await self._conversation.sessions.compare_and_swap(
                 session_id,
                 tenant_id=request.principal.tenant_id,
                 expected_revision=current.revision,
@@ -317,7 +319,7 @@ class DefaultSessionService:
             except asyncio.TimeoutError as error:
                 now = datetime.now(timezone.utc)
                 cleanup = replace(current, status=SessionStatus.CLEANUP_REQUIRED, revision=current.revision + 1, updated_at=now)
-                await self._persistence.conversation.sessions.compare_and_swap(
+                await self._conversation.sessions.compare_and_swap(
                     session_id,
                     tenant_id=request.principal.tenant_id,
                     expected_revision=current.revision,
@@ -326,7 +328,7 @@ class DefaultSessionService:
                 raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
         now = datetime.now(timezone.utc)
         closing = replace(current, status=SessionStatus.CLOSED, revision=current.revision + 1, updated_at=now, closed_at=now)
-        updated = await self._persistence.conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
+        updated = await self._conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
         await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
         _logger.debug("session closed: session=%s revision=%s force=%s", session_id, updated.revision, request.force)
         view = await self._view(updated, request.principal)
@@ -388,7 +390,7 @@ class DefaultSessionService:
             self._handoff_condition.notify_all()
 
     async def _active_executions(self, session_id: str, tenant_id: str) -> tuple:
-        records = await self._persistence.execution.executions.list_by_session(session_id, tenant_id=tenant_id)
+        records = await self._executions.list_by_session(session_id, tenant_id=tenant_id)
         return tuple(
             record
             for record in records
@@ -400,24 +402,24 @@ class DefaultSessionService:
             await asyncio.sleep(0.05)
 
     async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
-        header = await self._persistence.conversation.sessions.get_header(session_id, tenant_id=principal.tenant_id)
+        header = await self._conversation.sessions.get_header(session_id, tenant_id=principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(principal, action, header)
-        record = await self._persistence.conversation.sessions.get(session_id, tenant_id=principal.tenant_id)
+        record = await self._conversation.sessions.get(session_id, tenant_id=principal.tenant_id)
         if record is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         return record
 
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
-        executions = await self._persistence.execution.executions.list_by_session(record.session_id, tenant_id=principal.tenant_id)
+        executions = await self._executions.list_by_session(record.session_id, tenant_id=principal.tenant_id)
         active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
         return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active, record.metadata)
 
     async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, operation_kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
         operation_id = idempotency_key_hash(operation_id)
         for _ in range(4):
-            existing = await self._persistence.conversation.operations.get(operation_id, tenant_id=tenant_id)
+            existing = await self._conversation.operations.get(operation_id, tenant_id=tenant_id)
             if existing is not None:
                 if existing.request_digest != request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -425,7 +427,7 @@ class DefaultSessionService:
             now = datetime.now(timezone.utc)
             record = OperationLedgerInput(operation_id, tenant_id, resource_kind, resource_id, None, operation_kind, OperationStatus.PENDING, request_digest, None, None, None, True, now, now)
             try:
-                return await self._persistence.conversation.operations.append(record)
+                return await self._conversation.operations.append(record)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
@@ -435,11 +437,11 @@ class DefaultSessionService:
         now = datetime.now(timezone.utc)
         completed = OperationLedgerRecord(operation.operation_id, tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, result_ref, result_digest, None, operation.compactable, operation.sequence, operation.created_at, now)
         try:
-            await self._persistence.conversation.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=completed)
+            await self._conversation.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=completed)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.conversation.operations.get(operation.operation_id, tenant_id=tenant_id)
+            current = await self._conversation.operations.get(operation.operation_id, tenant_id=tenant_id)
             if current is None or current.status is not OperationStatus.SUCCEEDED or current.result_digest != result_digest:
                 raise
 

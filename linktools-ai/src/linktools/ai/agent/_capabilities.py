@@ -9,7 +9,6 @@ from typing import Any, Protocol
 
 from linktools.core import environ
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability as PydanticAgentCapability
-from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.capabilities import WrapToolExecuteHandler
 from pydantic_ai.exceptions import ModelRetry, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
@@ -27,7 +26,7 @@ from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
-from ..capability import SKILL_TOOL_NAMES
+from ..capability.names_api import SKILL_TOOL_NAMES
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 

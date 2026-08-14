@@ -1,79 +1,116 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Runtime-owned, owner-scoped cleanup for transient state."""
+"""Runtime-owned retention and transient object cleanup."""
+
+from typing import Protocol
 
 from linktools.core import environ
 
 from ...core import canonical_sha256, step_run_id
-from .._persistence import ConversationCursor, RuntimeDomainStates
-from ._contracts import RuntimeDomain, RuntimeRetentionMode
-from ._memory import RuntimeObjectRouter, _RuntimeOwnerPruner
-from ._plan import RuntimeStatePlan
+from ...storage import ObjectStore
+from ._contracts import (
+    ArtifactState,
+    ConversationCursor,
+    ConversationState,
+    EvaluationState,
+    ExecutionState,
+    MemoryState,
+    RecoveryState,
+    TaskState,
+)
+from ._memory import _RuntimeOwnerPruner
+from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
 from ._steps import RuntimeStepStore
+
+class _RuntimeObjectRouter(Protocol):
+    def object_store(self, domain: RuntimeDomain) -> "ObjectStore": ...
+    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> "ObjectStore": ...
+    async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None: ...
+    async def clear_transient(self) -> None: ...
 
 
 _logger = environ.get_logger("ai.runtime.state.retention")
 
 
-def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
-    logical_scope_key = canonical_sha256(memory_scope)
-    return canonical_sha256({"execution_id": execution_id, "memory_scope_key": logical_scope_key})
-
-
 class RuntimeRetentionController:
-    def __init__(self, stores: RuntimeDomainStates, steps: RuntimeStepStore, plan: RuntimeStatePlan, *, namespace: str) -> None:
-        self._stores = stores
+    def __init__(
+        self,
+        *,
+        conversation: ConversationState,
+        execution: ExecutionState,
+        memory: MemoryState,
+        artifact: ArtifactState,
+        task: TaskState,
+        evaluation: EvaluationState,
+        recovery: RecoveryState,
+        objects: "_RuntimeObjectRouter",
+        steps: RuntimeStepStore,
+        plan: RuntimeStatePlan,
+        namespace: str,
+    ) -> None:
+        self._execution = execution
+        self._objects = objects
         self._steps = steps
-        self._plan = plan
         self._namespace = namespace
-        self._transient_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT)
-        self._pruner = _RuntimeOwnerPruner(stores, self._transient_domains)
+        self._transient_domains = frozenset(
+            domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT
+        )
+        self._pruner = _RuntimeOwnerPruner(
+            conversation=conversation,
+            execution=execution,
+            memory=memory,
+            artifact=artifact,
+            task=task,
+            evaluation=evaluation,
+            recovery=recovery,
+            transient_domains=self._transient_domains,
+        )
         self._closed = False
 
     async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None:
-        execution = await self._stores.execution.executions.get(execution_id, tenant_id=tenant_id)
+        execution = await self._execution.executions.get(execution_id, tenant_id=tenant_id)
+        candidates: tuple[str, ...] = ()
+        if execution is not None:
+            candidates = tuple(
+                step_run_id(
+                    namespace=self._namespace,
+                    tenant_id=tenant_id,
+                    execution_id=execution_id,
+                    segment_sequence=sequence,
+                )
+                for sequence in range(1, execution.agent_run_sequence + 1)
+            )
+            await self._steps.release_staging_many(candidate_step_run_ids=candidates)
         owner_scope = f"execution:{execution_id}"
-        if execution is None:
-            if RuntimeDomain.EXECUTION in self._transient_domains:
-                await self._stores.release_object_scope(RuntimeDomain.EXECUTION, owner_scope=owner_scope)
-            return
-        candidates = frozenset(
-            step_run_id(
-                namespace=self._namespace,
-                tenant_id=tenant_id,
-                execution_id=execution_id,
-                segment_sequence=sequence,
-            )
-            for sequence in range(1, execution.agent_run_sequence + 1)
-        )
-        memory_scope_key = None
-        if execution.memory_scope is not None:
-            memory_scope_key = _memory_working_scope_key(execution_id, execution.memory_scope)
-        for domain in (RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY):
-            if domain not in self._transient_domains:
-                continue
-            await self._pruner.prune_execution_working(
-                execution_id,
-                tenant_id,
-                memory_scope_key,
-                candidates,
-                domains=frozenset({domain}),
-            )
-            await self._stores.release_object_scope(domain, owner_scope=owner_scope)
-        await self._steps.release_staging_many(candidate_step_run_ids=tuple(sorted(candidates)))
-        if RuntimeDomain.EXECUTION in self._transient_domains:
-            await self._pruner.prune_execution_terminal(execution_id, tenant_id)
-            await self._stores.release_object_scope(RuntimeDomain.EXECUTION, owner_scope=owner_scope)
-        _logger.info("execution transient handoff released: tenant=%s execution=%s attempts=%s", tenant_id, execution_id, len(candidates))
+        for domain in self._transient_domains:
+            if domain is RuntimeDomain.EXECUTION:
+                await self._pruner.prune_execution_terminal(execution_id, tenant_id)
+            elif domain in {RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY}:
+                memory_scope_key = None
+                if execution is not None and execution.memory_scope is not None:
+                    memory_scope_key = _memory_working_scope_key(execution_id, execution.memory_scope)
+                await self._pruner.prune_execution_working(
+                    execution_id,
+                    tenant_id,
+                    memory_scope_key,
+                    frozenset(candidates),
+                    domains=frozenset({domain}),
+                )
+            try:
+                await self._objects.release_object_scope(domain, owner_scope=owner_scope)
+            except BaseException:
+                _logger.error("transient object scope release failed: domain=%s scope=%s", domain.value, owner_scope, exc_info=True)
+                raise
+        _logger.info("execution transient handoff released: tenant=%s execution=%s", tenant_id, execution_id)
 
-    async def release_session(self, session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None:
+    async def release_session(self, session_id: str, *, tenant_id: str, continuation: "ConversationCursor | None") -> None:
         if RuntimeDomain.CONVERSATION not in self._transient_domains:
             return
         continuation_step_run_id = None if continuation is None else continuation.step_run_id
         release_archive = await self._pruner.prune_session(session_id, tenant_id, continuation_step_run_id)
         if release_archive and continuation_step_run_id is not None:
             await self._steps.release_archive(RuntimeDomain.CONVERSATION, continuation_step_run_id)
-        _logger.debug("session transient handoff released: tenant=%s session=%s archive=%s", tenant_id, session_id, release_archive)
+        await self._objects.release_object_scope(RuntimeDomain.CONVERSATION, owner_scope=f"session:{session_id}")
 
     async def release_task_graph(self, graph_id: str, *, tenant_id: str) -> None:
         if RuntimeDomain.TASK in self._transient_domains:
@@ -87,20 +124,21 @@ class RuntimeRetentionController:
         if self._closed:
             return
         failure: BaseException | None = None
-        try:
-            await self._pruner.clear_transient(self._transient_domains)
-        except BaseException as error:
-            failure = error
-        try:
-            if isinstance(self._stores.object_router, RuntimeObjectRouter):
-                await self._stores.object_router._clear_transient(self._transient_domains)
-        except BaseException as error:
-            if failure is None:
-                failure = error
+        for cleanup in (self._pruner.clear_transient, self._objects.clear_transient):
+            try:
+                await cleanup()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+                _logger.error("transient retention cleanup failed", exc_info=True)
         if failure is not None:
-            _logger.error("runtime transient retention close failed", exc_info=environ.debug)
             raise failure
         self._closed = True
+        _logger.debug("runtime transient retention closed: domains=%s", sorted(domain.value for domain in self._transient_domains))
+
+
+def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
+    return canonical_sha256({"execution_id": execution_id, "memory_scope_key": canonical_sha256(memory_scope)})
 
 
 __all__ = []

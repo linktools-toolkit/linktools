@@ -9,44 +9,104 @@ from typing import TYPE_CHECKING
 
 from ...core import canonical_sha256
 from ...errors import AIError, ErrorCode
-from ._contracts import RuntimeDomain, RuntimeRetentionMode
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 
-class _RuntimeRouteKind(StrEnum):
+class RuntimeDomain(StrEnum):
+    CONVERSATION = "conversation"
+    EXECUTION = "execution"
+    MEMORY = "memory"
+    ARTIFACT = "artifact"
+    TASK = "task"
+    EVALUATION = "evaluation"
+    RECOVERY = "recovery"
+
+
+class RuntimeRetentionMode(StrEnum):
+    DURABLE = "durable"
+    VOLATILE = "volatile"
+    TRANSIENT = "transient"
+
+
+class _RuntimeStateBackendKind(StrEnum):
     MEMORY = "memory"
     FILESYSTEM = "filesystem"
     SQLITE = "sqlite"
     SQL = "sql"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class RuntimeStateRoute:
-    kind: str
-    retention: RuntimeRetentionMode
-    path: "Path | None" = None
-    engine: "AsyncEngine | None" = None
+    _kind: _RuntimeStateBackendKind
+    _retention: RuntimeRetentionMode
+    _path: "Path | None"
+    _engine: "AsyncEngine | None"
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError("use RuntimeStateRoute factory methods")
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        kind: _RuntimeStateBackendKind,
+        retention: RuntimeRetentionMode,
+        path: "Path | None" = None,
+        engine: "AsyncEngine | None" = None,
+    ) -> "RuntimeStateRoute":
+        value = object.__new__(cls)
+        object.__setattr__(value, "_kind", kind)
+        object.__setattr__(value, "_retention", retention)
+        object.__setattr__(value, "_path", path)
+        object.__setattr__(value, "_engine", engine)
+        value._validate()
+        return value
+
+    def _validate(self) -> None:
+        valid = (
+            (self._kind is _RuntimeStateBackendKind.MEMORY and self._retention in {RuntimeRetentionMode.VOLATILE, RuntimeRetentionMode.TRANSIENT} and self._path is None and self._engine is None)
+            or (self._kind in {_RuntimeStateBackendKind.FILESYSTEM, _RuntimeStateBackendKind.SQLITE} and self._retention is RuntimeRetentionMode.DURABLE and self._path is not None and self._engine is None)
+            or (self._kind is _RuntimeStateBackendKind.SQL and self._retention is RuntimeRetentionMode.DURABLE and self._path is None and self._engine is not None)
+        )
+        if not valid:
+            raise ValueError("RuntimeStateRoute has an invalid backend and retention combination")
+
+    @property
+    def kind(self) -> str:
+        return self._kind.value
+
+    @property
+    def retention(self) -> RuntimeRetentionMode:
+        return self._retention
+
+    @property
+    def path(self) -> "Path | None":
+        return self._path
+
+    @property
+    def engine(self) -> "AsyncEngine | None":
+        return self._engine
 
     @classmethod
     def memory(cls) -> "RuntimeStateRoute":
-        return cls(_RuntimeRouteKind.MEMORY.value, RuntimeRetentionMode.VOLATILE)
+        return cls._create(kind=_RuntimeStateBackendKind.MEMORY, retention=RuntimeRetentionMode.VOLATILE)
 
     @classmethod
     def transient(cls) -> "RuntimeStateRoute":
-        return cls(_RuntimeRouteKind.MEMORY.value, RuntimeRetentionMode.TRANSIENT)
+        return cls._create(kind=_RuntimeStateBackendKind.MEMORY, retention=RuntimeRetentionMode.TRANSIENT)
 
     @classmethod
     def filesystem(cls, path: "str | Path") -> "RuntimeStateRoute":
-        return cls(_RuntimeRouteKind.FILESYSTEM.value, RuntimeRetentionMode.DURABLE, _normalize_path(path))
+        return cls._create(kind=_RuntimeStateBackendKind.FILESYSTEM, retention=RuntimeRetentionMode.DURABLE, path=_normalize_path(path))
 
     @classmethod
     def sqlite(cls, path: "str | Path") -> "RuntimeStateRoute":
-        normalized = _normalize_path(path)
-        if str(path).strip() == ":memory:" or not str(normalized):
+        if not isinstance(path, (str, Path)) or not str(path).strip() or str(path).strip() == ":memory:":
             raise ValueError("RuntimeStateRoute.sqlite requires a filesystem path")
-        return cls(_RuntimeRouteKind.SQLITE.value, RuntimeRetentionMode.DURABLE, normalized)
+        normalized = _normalize_path(path)
+        return cls._create(kind=_RuntimeStateBackendKind.SQLITE, retention=RuntimeRetentionMode.DURABLE, path=normalized)
 
     @classmethod
     def sql(cls, engine: "AsyncEngine") -> "RuntimeStateRoute":
@@ -56,13 +116,13 @@ class RuntimeStateRoute:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL route requires an AsyncEngine")
         if engine.dialect.name == "sqlite" and engine.url.database in {None, "", ":memory:"}:
             raise ValueError("external SQL route requires durable SQLite or external SQL")
-        return cls(_RuntimeRouteKind.SQL.value, RuntimeRetentionMode.DURABLE, engine=engine)
+        return cls._create(kind=_RuntimeStateBackendKind.SQL, retention=RuntimeRetentionMode.DURABLE, engine=engine)
 
     @property
     def route_identity(self) -> str:
-        if self.kind in {_RuntimeRouteKind.FILESYSTEM.value, _RuntimeRouteKind.SQLITE.value}:
+        if self._kind in {_RuntimeStateBackendKind.FILESYSTEM, _RuntimeStateBackendKind.SQLITE}:
             payload: object = {"kind": self.kind, "path": self.path.as_posix() if self.path is not None else None}
-        elif self.kind == _RuntimeRouteKind.SQL.value:
+        elif self._kind is _RuntimeStateBackendKind.SQL:
             if self.engine is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             payload = {
@@ -92,7 +152,7 @@ class RuntimeStatePlan:
         routes = tuple(self.route(domain) for domain in RuntimeDomain)
         if any(not isinstance(route, RuntimeStateRoute) for route in routes):
             raise ValueError("RuntimeStatePlan contains an invalid route")
-        filesystem_roots = [route.path for route in routes if route.kind == _RuntimeRouteKind.FILESYSTEM.value]
+        filesystem_roots = [route.path for route in routes if route.kind == _RuntimeStateBackendKind.FILESYSTEM.value]
         if len(filesystem_roots) != len({path for path in filesystem_roots}):
             raise ValueError("filesystem RuntimeStateRoute path must be unique across RuntimeDomain values")
 
@@ -120,4 +180,4 @@ def _normalize_path(value: "str | Path") -> Path:
     return Path(value).expanduser().resolve(strict=False)
 
 
-__all__ = ["RuntimeStatePlan", "RuntimeStateRoute"]
+__all__ = ["RuntimeDomain", "RuntimeRetentionMode", "RuntimeStatePlan", "RuntimeStateRoute"]

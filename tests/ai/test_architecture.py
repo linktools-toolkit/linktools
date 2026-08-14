@@ -214,7 +214,17 @@ def test_private_conversion_tree_is_exact() -> None:
     assert not (root / "core" / "errors.py").is_file()
     assert check_names(root) == ()
     policy = json.loads(Path("linktools-ai/scripts/build/matrix/linktools-ai-package-policy.json").read_text(encoding="utf-8"))
-    assert policy["public_modules"] == ["errors", "acp"]
+    assert policy["public_modules"] == [
+        "errors",
+        "acp",
+        "capability.names_api",
+        "capability.validation_api",
+        "runtime.composition_api",
+        "runtime.contract_api",
+        "runtime.object_api",
+        "runtime.schema_api",
+        "runtime.service_api",
+    ]
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:

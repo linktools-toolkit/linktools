@@ -30,30 +30,29 @@ from ..core import (
     validate_persistence_namespace,
 )
 from ..errors import AIError, ErrorCode
-from ..runtime import (
+from ..runtime.service_api import (
     ExecutionHistoryItem,
-    ExecutionRecord,
     ExecutionTraceItem,
-    RuntimeDomainStates,
     TranscriptItem,
 )
+from ..runtime.contract_api import ExecutionRecord, ExecutionRepository
 
 
 class StepExecutionHistoryReader:
     """Own the adapter projection between StepStore facts and Runtime views."""
 
-    def __init__(self, namespace: str, persistence: RuntimeDomainStates, store: StepStore, cursor_signer: CursorSigner) -> None:
+    def __init__(self, *, namespace: str, executions: ExecutionRepository, store: StepStore, cursor_signer: CursorSigner) -> None:
         try:
             validate_persistence_namespace(namespace)
         except AIError as error:
             raise ValueError("execution history namespace is invalid") from error
         self._namespace = namespace
-        self._persistence = persistence
+        self._executions = executions
         self._store = store
         self._cursor_signer = cursor_signer
 
     async def trace(self, execution_id: str, *, tenant_id: str, cursor: "str | None", limit: int) -> "Page[ExecutionTraceItem]":
-        record = await self._persistence.execution.executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if not 1 <= limit <= 200:
@@ -76,7 +75,7 @@ class StepExecutionHistoryReader:
     async def history(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> "Page[ExecutionHistoryItem]":
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        record = await self._persistence.execution.executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         entries = await self._history_tree(record, tenant_id)
@@ -107,7 +106,7 @@ class StepExecutionHistoryReader:
     async def transcript(self, execution_id: str, *, tenant_id: str, cursor: str | None, limit: int) -> Page[TranscriptItem]:
         if not 1 <= limit <= 200:
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
-        record = await self._persistence.execution.executions.get(execution_id, tenant_id=tenant_id)
+        record = await self._executions.get(execution_id, tenant_id=tenant_id)
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if record.agent_run_sequence == 0:
@@ -152,7 +151,7 @@ class StepExecutionHistoryReader:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             visited.add(record.execution_id)
             result.append((record, depth))
-            for child in await self._persistence.execution.executions.list_children(record.execution_id, tenant_id=tenant_id):
+            for child in await self._executions.list_children(record.execution_id, tenant_id=tenant_id):
                 await visit(child, depth + 1)
 
         await visit(root, 0)
