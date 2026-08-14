@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
-from linktools.ai.workspace import build_workspace_asset_repository as build_asset_repository
 from linktools.ai.asset import (
     AssetInfo,
     AssetKey,
@@ -20,11 +19,12 @@ from linktools.ai.asset import (
     AssetVariantBinding,
     DirectoryLayout,
     InMemoryAssetBackend,
-    LocalDirectoryAssetBackend,
+    DirectoryAssetBackend,
     SingleFileLayout,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
+    builtin_asset_bindings,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpec,
@@ -34,6 +34,19 @@ from linktools.ai.storage import (
     StorageOverlay,
     StorageResetResult,
 )
+
+
+def build_asset_repository(
+    store: AssetStore,
+    *,
+    extra_bindings: tuple[AssetTypeBinding[object], ...] = (),
+) -> AssetRepository:
+    registry = AssetTypeRegistry()
+    for binding in builtin_asset_bindings():
+        registry.register(binding)
+    for binding in extra_bindings:
+        registry.register(binding)
+    return AssetRepository(store, registry.freeze())
 
 
 @dataclass(frozen=True, slots=True)
@@ -517,7 +530,7 @@ async def test_local_directory_backend_can_be_used_as_a_read_only_logical_layer(
     path = root / "subagent" / "foo" / "AGENT.md"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"foo")
-    backend = LocalDirectoryAssetBackend(str(root))
+    backend = DirectoryAssetBackend(str(root))
     store = AssetStore(StorageOverlay(backend))
     await store.initialize()
     registry = AssetTypeRegistry()

@@ -34,7 +34,7 @@ from ..runtime import (
     ExecutionHistoryItem,
     ExecutionRecord,
     ExecutionTraceItem,
-    RuntimeStores,
+    RuntimeDomainStates,
     TranscriptItem,
 )
 
@@ -42,7 +42,7 @@ from ..runtime import (
 class StepExecutionHistoryReader:
     """Own the adapter projection between StepStore facts and Runtime views."""
 
-    def __init__(self, namespace: str, persistence: RuntimeStores, store: StepStore, cursor_signer: CursorSigner) -> None:
+    def __init__(self, namespace: str, persistence: RuntimeDomainStates, store: StepStore, cursor_signer: CursorSigner) -> None:
         try:
             validate_persistence_namespace(namespace)
         except AIError as error:

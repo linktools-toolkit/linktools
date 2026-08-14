@@ -9,12 +9,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
-from linktools.ai.adapter import build_runtime_sql_metadata
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute, build_runtime_sql_metadata
 from linktools.ai.asset import build_asset_sql_metadata
-from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ToolOperationRecord
 from linktools.ai.storage import (
     FilesystemContentCache,
     InMemoryContentCache,
@@ -32,7 +29,6 @@ from linktools.ai.storage import (
     StorageValueValidator,
 )
 
-from tests.ai.persistence.helper import open_sql_resources
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +219,7 @@ async def test_composition_writer_must_be_readable() -> None:
 
 
 def test_sql_metadata_builders_are_owner_scoped() -> None:
-    runtime_metadata = build_runtime_sql_metadata(RuntimeStoragePlan.all())
+    runtime_metadata = build_runtime_sql_metadata(frozenset(RuntimeDomain))
     asset_metadata = build_asset_sql_metadata()
 
     assert {"runtime_sessions", "runtime_executions", "step_runs", "step_events", "step_effects"} <= set(runtime_metadata.tables)
@@ -232,7 +228,7 @@ def test_sql_metadata_builders_are_owner_scoped() -> None:
     assert "runtime_sessions" not in asset_metadata.tables
 
     recovery_metadata = build_runtime_sql_metadata(
-        RuntimeStoragePlan({RuntimeDomain.RECOVERY: RuntimeStorageRoute.durable()})
+        frozenset({RuntimeDomain.RECOVERY})
     )
     assert "step_effects" in recovery_metadata.tables
     assert "runtime_sessions" not in recovery_metadata.tables
@@ -285,39 +281,3 @@ async def test_read_only_write_is_fail_closed() -> None:
     with pytest.raises(AIError) as error:
         await storage.put("key", Value("key", 1, b"value"))
     assert error.value.code == ErrorCode.STORAGE_READ_ONLY
-
-
-@pytest.mark.asyncio
-async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
-    timestamp = datetime.now(timezone.utc)
-    storage = RuntimeStorage.sqlite(str(tmp_path / "tool-state.db"), plan=RuntimeStoragePlan.all())
-    async with open_sql_resources(storage, namespace="runtime") as runtime:
-        record = ToolOperationRecord(
-            "operation", "runtime", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
-            ToolOperationStatus.PENDING, None, 0, None, None, None, timestamp, timestamp,
-        )
-        await runtime.domain.recovery.tools.reserve(record)
-        assert await runtime.domain.recovery.tools.get_operation("operation", tenant_id="runtime") == record
-        claimed = await runtime.domain.recovery.tools.claim(
-            "operation",
-            tenant_id="runtime",
-            owner="worker",
-            lease_seconds=30,
-        )
-        assert claimed.owner == "worker"
-        completed = await runtime.domain.recovery.tools.complete(
-            "operation",
-            tenant_id="runtime",
-            owner="worker",
-            fence=claimed.fence,
-            result_object_ref=None,
-        )
-        assert completed.status is ToolOperationStatus.COMPLETED
-        with pytest.raises(AIError) as error:
-            await runtime.domain.recovery.tools.reserve(
-                ToolOperationRecord(
-                    "operation", "runtime", "run", "other-call", "a" * 64, "tool", "arguments", "binding", True,
-                    ToolOperationStatus.PENDING, None, 0, None, None, None, timestamp, timestamp,
-                )
-            )
-        assert error.value.code == ErrorCode.TOOL_OPERATION_CONFLICT

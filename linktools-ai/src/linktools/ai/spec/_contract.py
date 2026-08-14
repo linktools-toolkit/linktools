@@ -93,7 +93,6 @@ class AgentSpec:
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
-    allow_subagents: "tuple[str, ...]" = ()
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -102,7 +101,6 @@ class AgentSpec:
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
-        object.__setattr__(self, "allow_subagents", canonical_string_tuple(self.allow_subagents, field="allow_subagents"))
         object.__setattr__(self, "instructions", tuple(self.instructions))
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
         unique: dict[tuple[str, str], AgentCapabilityRef] = {}

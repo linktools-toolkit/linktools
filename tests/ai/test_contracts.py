@@ -3,6 +3,7 @@
 
 """Agent, Task, Observe, and Temporal boundary contracts."""
 
+import warnings
 from dataclasses import fields
 from datetime import datetime, timezone
 
@@ -10,7 +11,7 @@ import pytest
 from linktools.ai.asset import AssetRef
 from linktools.ai.core import OperationLedgerRecord, Principal, PrincipalKind, ResourceKind, ResourceRef
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.model import ModelRegistry, ModelRoute
+from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import (
     InMemoryTraceRecorder,
     MiddlewarePipeline,
@@ -19,7 +20,8 @@ from linktools.ai.observe import (
     RecordedTraceItem,
     snapshot_digest,
 )
-from linktools.ai.runtime import ExecutionRequest, RuntimeStoragePlan, RuntimeStorageRoute, ToolOperationRecord
+from linktools.ai.runtime import ExecutionRequest, ToolOperationRecord
+from linktools.ai.runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
 from linktools.ai.task import SwarmLimits, TaskGraph, TaskLease, TaskNode
 from linktools.ai.temporal import (
@@ -60,9 +62,10 @@ def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
 
 def test_model_registry_snapshot_is_instance_owned() -> None:
     registry = ModelRegistry()
-    snapshot = registry.prime({"route": ModelRoute("route", "openai", "model")})
-    assert snapshot.routes["route"].model == "model"
-    assert snapshot.routes["route"].route_id == "route"
+    registry.register_openai("route", model="model")
+    snapshot = registry.snapshot()
+    assert snapshot.resolve("route").model_identity == "openai:model"
+    assert snapshot.resolve("route").route_id == "route"
 
 
 @pytest.mark.parametrize("value", ["", " spaced", "spaced ", "line\nbreak", "control\u0085value", "界" * 129])
@@ -71,13 +74,22 @@ def test_classification_fields_reject_noncanonical_values(value: str) -> None:
         AssetRef(value, "asset")
     with pytest.raises(ValueError):
         AgentCapabilityRef(value, "capability")
+def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
     with pytest.raises(ValueError):
-        RuntimeStoragePlan({value: RuntimeStorageRoute.volatile()})
+        RuntimeStatePlan(conversation="invalid")
 
 
-def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
-    with pytest.raises(ValueError):
-        RuntimeStoragePlan({"conversation": RuntimeStorageRoute.volatile()})
+def test_subagent_tool_schema_accepts_json_payload() -> None:
+    from linktools.ai.agent._capabilities import _SubagentCapability
+
+    async def delegate(**_kwargs: str) -> dict[str, object]:
+        return {"execution_id": "child", "status": "SUCCEEDED", "output": {"value": True}}
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        _SubagentCapability(delegate).get_toolset()
+
+    assert not any("Could not generate return schema" in str(item.message) for item in captured)
 
 
 def test_authorization_kinds_are_canonical() -> None:

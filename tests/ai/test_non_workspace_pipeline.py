@@ -18,7 +18,8 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import AllowAllToolPolicy, ToolAuthorization, ToolDescriptor
 from linktools.ai.spec import PromptSpec, PromptSpecCodec
-from linktools.ai.workspace import DisabledSandbox, build_workspace_tool_map
+from linktools.ai.workspace import DisabledSandbox
+from linktools.ai.workspace._tools import build_workspace_tool_map
 
 
 @pytest.mark.asyncio

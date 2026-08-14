@@ -1,6 +1,6 @@
 {
-  "runtime_owner": "adapter.sql",
-  "step_owner": "adapter._step",
+  "runtime_owner": "runtime.state._sql",
+  "step_owner": "runtime.state._steps",
   "asset_owner": "asset.sql",
   "storage_tables": [
     "ai_storage_schema_manifest"

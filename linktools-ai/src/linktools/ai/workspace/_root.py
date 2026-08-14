@@ -15,6 +15,8 @@ except ImportError:
 from ..core import JsonValue, Principal, PrincipalKind, canonical_sha256
 from ..errors import AIError, ErrorCode
 
+_STORAGE_DIR_NAME = ".linktools"
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspacePolicy:
@@ -34,6 +36,10 @@ class Workspace:
     config: "dict[str, JsonValue]"
     workspace_id: str
 
+    @property
+    def storage_root(self) -> Path:
+        return self.root / _STORAGE_DIR_NAME
+
     @classmethod
     def discover(
         cls,
@@ -46,16 +52,16 @@ class Workspace:
             candidate = candidate.parent
         if root is None:
             for parent in (candidate, *candidate.parents):
-                config_file = parent / ".linktools" / "config.yaml"
+                config_file = parent / _STORAGE_DIR_NAME / "config.yaml"
                 if config_file.exists():
                     return cls._build(parent, config_file)
-        config_file = candidate / ".linktools" / "config.yaml"
+        config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(candidate, config_file if config_file.exists() else None)
 
     @classmethod
     def load(cls, root: "str | Path") -> "Workspace":
         candidate = Path(root).expanduser().resolve()
-        config_file = candidate / ".linktools" / "config.yaml"
+        config_file = candidate / _STORAGE_DIR_NAME / "config.yaml"
         return cls._build(candidate, config_file if config_file.exists() else None)
 
     @classmethod

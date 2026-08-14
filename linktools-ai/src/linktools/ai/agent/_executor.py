@@ -31,12 +31,12 @@ from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
-from ..capability import CapabilityRuntimeContext
+from ..capability import CapabilityMaterializationContext
 from ..core import ExecutionEventType, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..model import ModelMaterializer
 from ._capabilities import (
     AgentRunScope,
+    SubagentDelegate,
     compose_platform_capabilities,
     tool_name_allowed,
 )
@@ -58,8 +58,7 @@ class AgentExecutionResult:
 class AgentExecutor:
     """Execute one immutable definition without loading declarations or committing runtime state."""
 
-    def __init__(self, materializer: ModelMaterializer, *, execution_root: Path) -> None:
-        self._materializer = materializer
+    def __init__(self, *, execution_root: Path) -> None:
         self._execution_root = execution_root.expanduser().resolve()
 
     async def execute(
@@ -72,20 +71,21 @@ class AgentExecutor:
         step_store: StepStore,
         step_run_id: str,
         segment_sequence: int,
-        capability_context: CapabilityRuntimeContext,
+        capability_context: CapabilityMaterializationContext,
         memory_scope: "str | None" = None,
         memory_store: "SearchableMemoryStore | None" = None,
         platform_tool_names: "tuple[str, ...]" = (),
         parent_step_run_id: "str | None" = None,
+        subagent_delegate: "SubagentDelegate | None" = None,
         event_sink: EventSink,
     ) -> AgentExecutionResult:
         if not self._execution_root.is_dir():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if await step_store.get_run(run_id=step_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        model = self._materializer.materialize(definition.model_route, definition.model_connection)
+        model = definition.model.materialize()
         agent = self._build_agent(definition, model)
-        materialized: list[PydanticAgentCapability[None]] = []
+        materialized: "list[PydanticAgentCapability[None]]" = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
         scope = AgentRunScope(
@@ -99,6 +99,7 @@ class AgentExecutor:
             memory_store=memory_store,
             platform_tool_names=platform_tool_names,
             parent_step_run_id=parent_step_run_id,
+            subagent_delegate=subagent_delegate,
         )
         platform = await compose_platform_capabilities(
             scope,
@@ -143,7 +144,7 @@ class AgentExecutor:
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages())
 
     def _build_agent(self, definition: AgentDefinition, model: "Model | str") -> "Agent[None, object]":
-        output_type: type[BaseModel] | TextOutput = definition.output_type
+        output_type: "type[BaseModel] | TextOutput" = definition.output_type
         if output_type is AssistantTextOutput:
             output_type = TextOutput(_assistant_text_output)
         return cast(
@@ -162,7 +163,7 @@ class _AllowlistPresentation(AbstractCapability[None]):
     def __init__(self, allow_tools: "tuple[str, ...]") -> None:
         self._allow_tools = allow_tools
 
-    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+    async def prepare_tools(self, _ctx: RunContext[None], tool_defs: "list[ToolDefinition]") -> "list[ToolDefinition]":
         selected = [tool for tool in tool_defs if _function_tool_allowed(tool.name, self._allow_tools)]
         names = [tool.name for tool in selected]
         if len(names) != len(set(names)):

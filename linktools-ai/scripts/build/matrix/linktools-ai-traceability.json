@@ -11,7 +11,7 @@
         "runtime/_execution.py",
         "runtime/_session.py",
         "runtime/_services.py",
-        "app/_facade.py"
+        "runtime/_runtime_service.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py",
@@ -22,7 +22,7 @@
       "owner": "workbench",
       "requirements": "R-01,R-03,R-11,T-01,T-03,T-05,T-06,T-07,T-18,T-19,T-20",
       "implementation": [
-        "app/_workbench.py",
+        "workspace/_factory.py",
         "storage/_lock.py"
       ],
       "tests": [
@@ -34,9 +34,9 @@
       "requirements": "R-01,R-04,R-06,R-10,T-15,T-21",
       "implementation": [
         "adapter/_history.py",
-        "adapter/_persistence.py",
-        "adapter/_sql.py",
-        "adapter/_schema.py"
+        "runtime/state/_memory.py",
+        "runtime/state/_sql.py",
+        "runtime/state/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py",
@@ -48,8 +48,8 @@
       "owner": "composition",
       "requirements": "R-02,R-09",
       "implementation": [
-        "app/_assembly.py",
-        "app/_facade.py"
+        "workspace/_factory.py",
+        "runtime/_runtime_service.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_access_exposes_task_api_and_query_wrappers"
@@ -87,7 +87,7 @@
         "errors.py",
         "runtime",
         "adapter",
-        "app/_assembly.py",
+        "workspace/_factory.py",
         "workspace"
       ],
       "tests": [
@@ -119,8 +119,8 @@
       "requirements": "R-01,T-19,T-20,T-21",
       "implementation": [
         "runtime/_execution.py",
-        "app/_workbench.py",
-        "adapter/_sql.py"
+        "workspace/_factory.py",
+        "runtime/state/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",

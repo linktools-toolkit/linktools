@@ -37,8 +37,8 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectRef, ObjectStore, StorageMetrics
 from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
-from ._plan import RuntimeDomain
-from ._tool import ToolStateStore
+from ._domain import RuntimeDomain
+from ._tool import ToolStateRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -647,14 +647,14 @@ class RecoveryStore:
     external_calls: ExternalCallRepository
     checkpoints: RecoveryCheckpointRepository
     operations: OperationLedgerRepository
-    tools: ToolStateStore
+    tools: ToolStateRepository
 
     def components(self) -> tuple[RuntimeRepository, ...]:
         return self.approvals, self.external_calls, self.checkpoints, self.operations, self.tools
 
 
 @dataclass(frozen=True, slots=True)
-class RuntimeStores:
+class RuntimeDomainStates:
     namespace: str
     conversation: ConversationStore
     execution: ExecutionStore
@@ -712,7 +712,7 @@ __all__ = [
     "ArtifactStore", "ConversationStore", "EvaluationRecord", "EvaluationRepository", "EvaluationStore", "ExecutionEventRecord", "ExecutionRecord", "ExecutionStore",
     "ExecutionRepository", "ExecutionStartClaim", "ExecutionStartReservation", "ExecutionStartReservationResult", "ExecutionStartUnknownCommit", "ExecutionCancelRequestCommit", "ExecutionTerminalCommit", "ExecutionTerminalCommitResult", "ExternalCallRecord", "IdempotencyTerminalUpdate", "OperationTerminalUpdate",
     "ExternalCallRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository", "MemoryStore", "RecoveryCheckpoint", "RecoveryCheckpointRepository", "RecoveryStore",
-    "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "RuntimeRepository", "RuntimeStores",
+    "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "RuntimeRepository", "RuntimeDomainStates",
     "RecoveryCheckpointState", "RecoveryConversationIntent", "RecoveryExecutionInput", "RecoveryHandoffPhase", "RecoveryIdempotencyInput", "RecoveryTerminalHandoff", "RecoveryTerminalOutcome", "SessionRecord", "SessionRepository", "RuntimeDomain",
     "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus", "RuntimeObjectRouter",
 ]

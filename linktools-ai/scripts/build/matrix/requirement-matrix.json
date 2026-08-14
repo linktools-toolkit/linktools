@@ -7,9 +7,9 @@
       "implementation": [
         "runtime/_persistence.py",
         "runtime/_execution.py",
-        "app/_workbench.py",
-        "adapter/_persistence.py",
-        "adapter/_sql.py"
+        "workspace/_factory.py",
+        "runtime/state/_memory.py",
+        "runtime/state/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_workspace_resume_advances_head_from_the_previous_session_head",
@@ -22,9 +22,9 @@
     },
     {
       "id": "R-02",
-      "owner": "app/_facade",
+      "owner": "runtime/_runtime_service",
       "implementation": [
-        "app/_facade.py",
+        "runtime/_runtime_service.py",
         "runtime/_execution.py",
         "runtime/_session.py",
         "task/_service.py",
@@ -39,9 +39,9 @@
     },
     {
       "id": "R-03",
-      "owner": "app/_workbench",
+      "owner": "workspace/_factory",
       "implementation": [
-        "app/_workbench.py",
+        "workspace/_factory.py",
         "runtime/_services.py"
       ],
       "tests": [
@@ -58,7 +58,7 @@
       "owner": "adapter/history",
       "implementation": [
         "adapter/_history.py",
-        "app/_assembly.py"
+        "workspace/_factory.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_history_projection_has_no_app_dependency",
@@ -138,8 +138,8 @@
         "runtime/_execution.py",
         "runtime/_session.py",
         "runtime/_evaluation.py",
-        "app/_assembly.py",
-        "app/_workbench.py",
+        "workspace/_factory.py",
+        "workspace/_factory.py",
         "workspace/_root.py",
         "workspace/_tools.py",
         "runtime/_tool.py",
@@ -157,9 +157,9 @@
       "id": "R-10",
       "owner": "adapter",
       "implementation": [
-        "adapter/_persistence.py",
-        "adapter/_sql.py",
-        "adapter/_schema.py"
+        "runtime/state/_memory.py",
+        "runtime/state/_sql.py",
+        "runtime/state/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_terminal_session_head_stale_cas_is_atomic_for_memory_and_sqlite",
@@ -171,9 +171,9 @@
     },
     {
       "id": "R-11",
-      "owner": "app/_workbench",
+      "owner": "workspace/_factory",
       "implementation": [
-        "app/_workbench.py",
+        "workspace/_factory.py",
         "storage/_lock.py"
       ],
       "tests": [
@@ -266,7 +266,7 @@
       "id": "T-07",
       "owner": "tests",
       "implementation": [
-        "app/_workbench.py",
+        "workspace/_factory.py",
         "tests/ai/test_v5_conformance.py"
       ],
       "tests": [
@@ -352,7 +352,7 @@
       "implementation": [
         "linktools-ai/src/linktools/ai/core/_value.py",
         "linktools-ai/src/linktools/ai/runtime/_persistence.py",
-        "linktools-ai/src/linktools/ai/app/_assembly.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_public_runtime_contract_has_no_profile_or_replacement_category"
@@ -365,8 +365,8 @@
       "id": "T-14",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/app/_assembly.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_runtime_composition_is_driven_by_injected_dependencies"
@@ -379,9 +379,9 @@
       "id": "T-15",
       "owner": "profile-removal",
       "implementation": [
-        "linktools-ai/src/linktools/ai/adapter/_persistence.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/adapter/_schema.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_memory.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_file_decoder_ignores_legacy_profile_fields",
@@ -423,9 +423,9 @@
     },
     {
       "id": "T-18",
-      "owner": "app/_workbench",
+      "owner": "workspace/_factory",
       "implementation": [
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/storage/_lock.py"
       ],
       "tests": [
@@ -442,7 +442,7 @@
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/_execution.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_cancel_natural_terminal_wins_without_effect_unknown_or_storage_failure",
@@ -457,7 +457,7 @@
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/_execution.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_confirmed_cancel_requires_task_cancelled_and_closes_operation",
@@ -472,7 +472,7 @@
       "constraints": "Executable verification must exercise the exact requirement; the named test must execute the exact behavior.",
       "implementation": [
         "linktools-ai/src/linktools/ai/runtime/_execution.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py"
       ],
       "tests": [
         "tests/ai/test_v5_conformance.py::test_memory_and_sqlite_request_cancel_operation_preconditions_match"
@@ -641,7 +641,7 @@
       "owner": "architecture/import",
       "requirement": "package public surface 完整，SQL asset backend 通过 asset package surface 提供，adapter/asset/app/temporal 基础 import 不 eager-load sqlalchemy/temporalio/acp。",
       "constraints": "optional dependency blocker 必须在独立 subprocess 中执行。",
-      "implementation": ["linktools-ai/src/linktools/ai/adapter/__init__.py", "linktools-ai/src/linktools/ai/asset/__init__.py", "linktools-ai/src/linktools/ai/app/__init__.py", "linktools-ai/src/linktools/ai/temporal/__init__.py"],
+      "implementation": ["linktools-ai/src/linktools/ai/adapter/__init__.py", "linktools-ai/src/linktools/ai/asset/__init__.py", "linktools-ai/src/linktools/ai/workspace/__init__.py", "linktools-ai/src/linktools/ai/temporal/__init__.py"],
       "tests": ["tests/ai/test_architecture.py::test_package_public_surface_and_optional_dependency_isolation"],
       "finding_mapping": "F-15/T-34",
       "status": "PASS"
@@ -671,7 +671,7 @@
       "owner": "runtime/regression",
       "requirement": "前几轮 Runtime/Task correctness、cancellation、effect ownership、profile-free contract、history 与 Workbench regression 全部保持。",
       "constraints": "本轮不得重设计 state machine 或 cancellation semantics。",
-      "implementation": ["linktools-ai/src/linktools/ai/runtime", "linktools-ai/src/linktools/ai/app/_workbench.py"],
+      "implementation": ["linktools-ai/src/linktools/ai/runtime", "linktools-ai/src/linktools/ai/workspace/_factory.py"],
       "tests": ["tests/ai/test_v5_conformance.py::test_task_run_same_key_has_single_effect_owner", "tests/ai/test_v5_conformance.py::test_execution_cancel_same_id_unknown_then_confirmed_converges", "tests/ai/test_v5_conformance.py::test_profile_removal_preserves_idempotency_conflicts_and_digest_scope"],
       "finding_mapping": "F-15/T-37",
       "status": "PASS"

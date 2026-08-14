@@ -6,7 +6,7 @@
 import asyncio
 
 import pytest
-from linktools.ai.adapter import build_in_memory_runtime
+from linktools.ai.runtime.state._memory import build_in_memory_runtime
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import DefaultExecutionService, ExecutionRequest

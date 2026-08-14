@@ -33,7 +33,7 @@ from ..errors import AIError, ErrorCode
 from ._persistence import (
     OperationLedgerInput,
     OperationLedgerRecord,
-    RuntimeStores,
+    RuntimeDomainStates,
     ConversationCursor,
     SessionRecord,
 )
@@ -88,7 +88,7 @@ class SessionApi(SessionQueryApi, Protocol):
 class DefaultSessionService:
     """Enforce session ownership, binding immutability, and revision CAS."""
 
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, release_terminal: _SessionReleaseCallback | None = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, release_terminal: _SessionReleaseCallback | None = None) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._execution = execution

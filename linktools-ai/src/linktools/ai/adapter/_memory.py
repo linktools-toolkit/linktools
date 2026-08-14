@@ -34,7 +34,7 @@ from ..runtime import (
     OperationLedgerInput,
     RuntimeDomain,
     RuntimeObjectKeyFactory,
-    RuntimeStores,
+    RuntimeDomainStates,
     put_runtime_object,
     read_runtime_object,
 )
@@ -51,7 +51,7 @@ def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
 class RuntimeMemoryStore(SearchableMemoryStore):
     """Map Harness memory paths to the bound Runtime memory repositories."""
 
-    def __init__(self, persistence: RuntimeStores, *, tenant_id: str, execution_id: str, memory_scope: str, transient: bool = False) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, *, tenant_id: str, execution_id: str, memory_scope: str, transient: bool = False) -> None:
         try:
             validate_tenant_id(tenant_id)
             validate_memory_scope(memory_scope)

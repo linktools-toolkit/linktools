@@ -24,10 +24,10 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ..core import validate_persistence_namespace, validate_tenant_id
-from ..errors import AIError, ErrorCode
-from ..runtime import RuntimeDomain, RuntimeRetention
-from ..storage import (
+from ...core import validate_persistence_namespace, validate_tenant_id
+from ...errors import AIError, ErrorCode
+from ._contracts import RuntimeDomain, RuntimeRetentionMode
+from ...storage import (
     FilesystemMutationLock,
     FilesystemObjectStore,
     FilesystemWriterLock,
@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
 
 
-_logger = environ.get_logger("ai.adapter.step")
+_logger = environ.get_logger("ai.runtime.state.steps")
 _ARCHIVE_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY})
 _ARCHIVE_ORDER = (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
 
@@ -263,14 +263,15 @@ class FilesystemStepArchive(StagingStepStore):
         if runtime_domain not in _ARCHIVE_DOMAINS:
             raise ValueError("Step archive owner is invalid")
         super().__init__()
-        self._root = Path(root).expanduser().resolve() / _namespace_key(namespace) / "steps" / runtime_domain.value / _scope_key(tenant_id)
+        scoped_root = Path(root).expanduser().resolve() / _namespace_key(namespace) / _scope_key(tenant_id)
+        self._root = scoped_root / "steps"
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._runtime_domain = runtime_domain
-        physical_root = Path(root).expanduser().resolve()
-        self._object_store = object_store if object_store is not None else FilesystemObjectStore(physical_root / _namespace_key(namespace) / "objects")
+        physical_root = Path(root).expanduser().resolve() / _namespace_key(namespace) / _scope_key(tenant_id)
+        self._object_store = object_store if object_store is not None else FilesystemObjectStore(physical_root / "objects")
         self._mutation_lock = FilesystemMutationLock(self._root / "mutation.lock")
-        self._lifetime_lock = FilesystemWriterLock(physical_root / _namespace_key(namespace) / "steps" / "step.lock")
+        self._lifetime_lock = FilesystemWriterLock(physical_root / "runtime.lock")
         self._manage_writer_lock = True
         self._counters: dict[str, dict[str, int]] = {}
         self._ready = False
@@ -280,7 +281,7 @@ class FilesystemStepArchive(StagingStepStore):
         return self._runtime_domain
 
     @classmethod
-    def _runtime(
+    def from_runtime(
         cls,
         root: str | Path,
         *,
@@ -480,7 +481,7 @@ class FilesystemStepArchive(StagingStepStore):
 
 
 class SqlStepArchive(StepStore):
-    """Explicit SQL Step archive boundary; schema is owned by the Runtime adapter."""
+    """Explicit SQL Step archive boundary owned by RuntimeState."""
 
     def __init__(self, engine: "AsyncEngine", *, namespace: str, tenant_id: str, runtime_domain: RuntimeDomain, object_store: ObjectStore | None = None) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
@@ -511,7 +512,7 @@ class SqlStepArchive(StepStore):
         return self._runtime_domain
 
     @classmethod
-    def _runtime(
+    def from_runtime(
         cls,
         engine: "AsyncEngine",
         *,
@@ -998,7 +999,7 @@ class SqlStepArchive(StepStore):
             yield session
 
 
-class RuntimeStepPersistence(StepStore):
+class RuntimeStepStore(StepStore):
     """Own the staging facts and the fixed Step archive routing matrix."""
 
     def __init__(
@@ -1008,9 +1009,9 @@ class RuntimeStepPersistence(StepStore):
         conversation_archive: StepStore,
         execution_archive: "StepStore | None",
         recovery_archive: "StepStore | None",
-        conversation_retention: RuntimeRetention,
-        execution_retention: RuntimeRetention,
-        recovery_retention: RuntimeRetention,
+        conversation_retention: RuntimeRetentionMode,
+        execution_retention: RuntimeRetentionMode,
+        recovery_retention: RuntimeRetentionMode,
     ) -> None:
         self._staging = staging
         self._validate_archive(RuntimeDomain.CONVERSATION, conversation_retention, conversation_archive)
@@ -1034,12 +1035,12 @@ class RuntimeStepPersistence(StepStore):
         self._initialized: list[StepStore] = []
 
     @staticmethod
-    def _validate_archive(runtime_domain: RuntimeDomain, retention: RuntimeRetention, archive: StepStore | None) -> None:
-        if not isinstance(retention, RuntimeRetention):
+    def _validate_archive(runtime_domain: RuntimeDomain, retention: RuntimeRetentionMode, archive: StepStore | None) -> None:
+        if not isinstance(retention, RuntimeRetentionMode):
             raise ValueError("Step archive retention is invalid")
         if runtime_domain is RuntimeDomain.CONVERSATION and archive is None:
             raise ValueError("Conversation Step archive is required")
-        if retention is RuntimeRetention.TRANSIENT:
+        if retention is RuntimeRetentionMode.TRANSIENT:
             if runtime_domain is RuntimeDomain.CONVERSATION and not isinstance(archive, InMemoryStepArchive):
                 raise ValueError("transient Conversation archive must be in-memory")
             if runtime_domain is RuntimeDomain.CONVERSATION and archive.runtime_domain is not runtime_domain:
@@ -1047,7 +1048,7 @@ class RuntimeStepPersistence(StepStore):
             if runtime_domain is not RuntimeDomain.CONVERSATION and archive is not None:
                 raise ValueError("transient Step archive must be absent")
             return
-        if retention is RuntimeRetention.VOLATILE:
+        if retention is RuntimeRetentionMode.VOLATILE:
             if not isinstance(archive, InMemoryStepArchive):
                 raise ValueError("volatile Step archive must be in-memory")
             if archive.runtime_domain is not runtime_domain:
@@ -1471,7 +1472,7 @@ def _namespace_key(namespace: str) -> str:
 
 
 def _scope_key(tenant_id: str) -> str:
-    return _digest("tenant:" + tenant_id)
+    return _digest(tenant_id)
 
 
 def _digest(value: str) -> str:
@@ -1674,7 +1675,7 @@ __all__ = [
     "FilesystemStepArchive",
     "InMemoryStepArchive",
     "ObjectMediaAdapter",
-    "RuntimeStepPersistence",
+    "RuntimeStepStore",
     "SqlStepArchive",
     "StagingStepStore",
 ]

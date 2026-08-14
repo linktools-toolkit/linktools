@@ -19,9 +19,10 @@ from ..agent import (
     MEMORY_TOOL_NAMES,
     AgentDefinition,
     AgentExecutor,
+    SubagentDelegate,
     select_platform_tool_names,
 )
-from ..capability import CapabilityRuntimeContext
+from ..capability import CapabilityMaterializationContext
 from ..core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -55,13 +56,24 @@ from ._persistence import (
     RecoveryTerminalHandoff,
     RecoveryTerminalOutcome,
     ResultRecord,
-    RuntimeStores,
+    RuntimeDomainStates,
 )
-from ._plan import RuntimeDomain
+from .state import RuntimeDomain
 from ._services import ExecutionRequest
 
 if TYPE_CHECKING:
     from ..storage import ObjectRef
+
+
+class _SubagentDispatcher(Protocol):
+    def delegate_for(
+        self,
+        *,
+        parent_execution_id: str,
+        root_execution_id: str,
+        memory_scope: "str | None",
+        principal: Principal,
+    ) -> SubagentDelegate: ...
 
 _logger = environ.get_logger("ai.runtime.local")
 
@@ -79,7 +91,7 @@ class LocalExecutionBackend:
 
     def __init__(
         self,
-        persistence: RuntimeStores,
+        persistence: RuntimeDomainStates,
         steps: StepStore,
         executor: AgentExecutor,
         definitions: dict[str, AgentDefinition],
@@ -92,6 +104,7 @@ class LocalExecutionBackend:
         recovery_enabled: bool = False,
         conversation_durable: bool = False,
         handoff_contract_digest: "str | None" = None,
+        subagent_dispatcher: "_SubagentDispatcher | None" = None,
     ) -> None:
         self._persistence = persistence
         self._steps = steps
@@ -103,6 +116,7 @@ class LocalExecutionBackend:
         self._recovery_enabled = recovery_enabled
         self._conversation_durable = conversation_durable
         self._handoff_contract_digest = handoff_contract_digest
+        self._subagent_dispatcher = subagent_dispatcher
         self._step_reads = dict(step_reads)
         if frozenset(self._step_reads) != frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}):
             raise ValueError("step_reads must contain exactly the three Step owner domains")
@@ -533,6 +547,7 @@ class LocalExecutionBackend:
             platform_tool_names = select_platform_tool_names(
                 allow_tools=definition.spec.allow_tools,
                 memory_scope=current.memory_scope,
+                subagent_available=current.parent_execution_id is None and self._subagent_dispatcher is not None,
             )
             selected_memory = tuple(name for name in platform_tool_names if name in MEMORY_TOOL_NAMES)
             if selected_memory:
@@ -547,16 +562,26 @@ class LocalExecutionBackend:
                 step_store=self._steps,
                 step_run_id=run_id,
                 segment_sequence=current.agent_run_sequence,
-                capability_context=CapabilityRuntimeContext(
+                capability_context=CapabilityMaterializationContext(
                     request.principal,
                     ResourceRef(ResourceKind.EXECUTION, execution_id, current.tenant_id),
+                    str(self._execution_root),
                     definition.spec.allow_tools,
                     definition.spec.allow_skills,
-                    definition.spec.allow_subagents,
                 ),
                 memory_scope=current.memory_scope,
                 memory_store=memory,
                 platform_tool_names=platform_tool_names,
+                subagent_delegate=(
+                    None
+                    if current.parent_execution_id is not None or self._subagent_dispatcher is None
+                    else self._subagent_dispatcher.delegate_for(
+                        parent_execution_id=current.execution_id,
+                        root_execution_id=current.root_execution_id,
+                        memory_scope=current.memory_scope,
+                        principal=request.principal,
+                    )
+                ),
                 event_sink=sink,
             )
             await self._commit_success(current, definition, result.output, run_id)
@@ -922,7 +947,7 @@ def _terminal_record(
     )
 
 
-async def _terminal_idempotency(persistence: RuntimeStores, execution: ExecutionRecord, status: ExecutionStatus, result_digest: str | None, error_code: str | None) -> IdempotencyTerminalUpdate | None:
+async def _terminal_idempotency(persistence: RuntimeDomainStates, execution: ExecutionRecord, status: ExecutionStatus, result_digest: str | None, error_code: str | None) -> IdempotencyTerminalUpdate | None:
     records = await persistence.execution.idempotency.list_by_resource(ResourceKind.EXECUTION, execution.execution_id, tenant_id=execution.tenant_id)
     if len(records) > 1:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

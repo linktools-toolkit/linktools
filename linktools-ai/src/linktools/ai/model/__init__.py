@@ -1,19 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Model registry and resolver contracts."""
+"""Model registry, resolver, and binding contracts."""
 
-from ._connection import (
-    ModelConnectionConfig,
-    ModelConnectionRegistry,
-    ModelCredentialProvider,
-    StaticModelCredentialProvider,
-)
-from ._materializer import ModelMaterializer, OpenAIModelMaterializer
-from ._registry import ModelRegistry, ModelRegistrySnapshot, ModelRoute
-from ._resolver import ModelResolver, SnapshotModelResolver
+from ._contract import ModelBinding, ModelResolver
+from ._registry import ModelRegistry
 
-__all__ = [
-    "ModelConnectionConfig", "ModelConnectionRegistry", "ModelCredentialProvider", "ModelMaterializer",
-    "ModelRegistry", "ModelRegistrySnapshot", "ModelResolver", "ModelRoute", "OpenAIModelMaterializer", "SnapshotModelResolver",
-    "StaticModelCredentialProvider",
-]
+__all__ = ["ModelBinding", "ModelRegistry", "ModelResolver"]

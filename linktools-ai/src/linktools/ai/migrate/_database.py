@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Explicit Runtime and Asset SQL provisioning orchestration."""
+"""Explicit Runtime and Asset schema provisioning."""
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from linktools.core import environ
-
-from ..adapter import build_runtime_sql_metadata
 from ..asset import build_asset_sql_metadata
-from ..runtime import RuntimeStoragePlan
-from ..storage import ObjectStore, provision_sql
+from ..runtime import RuntimeDomain
+from ..runtime.state import build_runtime_sql_metadata
+from ..storage import provision_sql
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
+    from ..storage import ObjectStore
 
 
-_logger = environ.get_logger("ai.migrate")
-
-
-async def provision_runtime_database(engine: "AsyncEngine", *, plan: RuntimeStoragePlan = RuntimeStoragePlan.all()) -> None:
-    metadata = build_runtime_sql_metadata(plan)
+async def provision_runtime_database(
+    engine: "AsyncEngine",
+    *,
+    domains: Iterable[RuntimeDomain] = tuple(RuntimeDomain),
+    object_store: "ObjectStore | None" = None,
+) -> None:
+    selected = frozenset(domains)
+    if not selected:
+        raise ValueError("at least one RuntimeDomain is required")
+    if not selected.issubset(frozenset(RuntimeDomain)):
+        raise ValueError("domains must contain RuntimeDomain values")
+    metadata = build_runtime_sql_metadata(
+        selected,
+        include_object_tables=object_store is None and bool(selected & frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})),
+    )
     await provision_sql(engine, metadata)
-    _logger.info("Runtime SQL schema provisioned: tables=%s", len(metadata.tables))
 
 
-async def provision_asset_database(engine: "AsyncEngine", *, object_store: ObjectStore | None = None) -> None:
-    metadata = build_asset_sql_metadata(object_store=object_store)
-    await provision_sql(engine, metadata)
-    _logger.info("Asset SQL schema provisioned: tables=%s", len(metadata.tables))
+async def provision_asset_database(engine: "AsyncEngine") -> None:
+    await provision_sql(engine, build_asset_sql_metadata())
 
 
 __all__ = ["provision_asset_database", "provision_runtime_database"]

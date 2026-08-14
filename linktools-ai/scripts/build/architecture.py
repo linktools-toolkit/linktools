@@ -258,6 +258,8 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]', public_modu
                 continue
             if len(relative) != 3 or relative[1] != "workflow":
                 errors.append(f"invalid temporal depth: {path}")
+        elif relative[0] == "runtime" and len(relative) == 3 and relative[1] == "state":
+            continue
         elif len(relative) != 2:
             errors.append(f"invalid module depth: {path}")
     for package in packages:

@@ -13,9 +13,9 @@ from ._backend import InMemoryAssetBackend
 from ._config import StrictConfigReader, resolved_name
 from ._directory import (
     AssetPathAdapter,
-    LocalDirectoryAssetBackend,
+    DirectoryAssetBackend,
     PrefixAssetPathAdapter,
-    local_directory_root,
+    directory_root,
 )
 from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot
 from ._filesystem import FilesystemAssetBackend, filesystem_root
@@ -71,7 +71,7 @@ __all__ = [
     "FilesystemAssetBackend",
     "InMemoryAssetBackend",
     "InvalidAssetError",
-    "LocalDirectoryAssetBackend",
+    "DirectoryAssetBackend",
     "PrefixAssetPathAdapter",
     "ResolvedAsset",
     "SingleFileLayout",
@@ -79,6 +79,6 @@ __all__ = [
     "build_asset_sql_metadata",
     "StrictConfigReader",
     "filesystem_root",
-    "local_directory_root",
+    "directory_root",
     "resolved_name",
 ]

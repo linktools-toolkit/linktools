@@ -32,7 +32,7 @@ from ..errors import AIError, ErrorCode
 from ._persistence import (
     OperationLedgerInput,
     OperationLedgerRecord,
-    RuntimeStores,
+    RuntimeDomainStates,
 )
 from ._services import ArtifactDownload, ArtifactView
 
@@ -47,7 +47,7 @@ class ArtifactApi(Protocol):
 class DefaultArtifactService:
     """Authorize metadata access before issuing an opaque download URL."""
 
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, *, grant_key: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, *, grant_key: bytes, cursor_signer: CursorSigner, entry_path: str = "/v1/artifacts") -> None:
         if not grant_key:
             raise ValueError("artifact grant key is required")
         self._persistence = persistence

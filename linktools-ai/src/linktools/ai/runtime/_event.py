@@ -17,7 +17,7 @@ from ..core import (
     Principal,
 )
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimeStores
+from ._persistence import RuntimeDomainStates
 from ._services import ExecutionEvent
 
 _logger = environ.get_logger("ai.runtime.event")
@@ -31,7 +31,7 @@ class EventApi(Protocol):
 class DefaultEventService:
     """Read durable events and expose a bounded durable-first stream."""
 
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy) -> None:
         self._persistence = persistence
         self._authorization = authorization
 

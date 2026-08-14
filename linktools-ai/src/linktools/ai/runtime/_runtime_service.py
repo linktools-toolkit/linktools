@@ -3,8 +3,8 @@
 """Public Runtime execution root."""
 
 import secrets
-from collections.abc import AsyncIterator, Mapping
-from typing import Any
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
 from linktools.core import environ
 
@@ -48,7 +48,7 @@ class Runtime:
         artifact: ArtifactService,
         *,
         definitions: "dict[str, AgentDefinition] | None" = None,
-        close_callback: "Any | None" = None,
+        close_callback: "Callable[[], Awaitable[None]] | None" = None,
     ) -> None:
         if any(value is None for value in (compiler, execution, session, task, evaluation, approval, event, artifact)):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -63,6 +63,8 @@ class Runtime:
         self._definitions = {} if definitions is None else definitions
         self._close_callback = close_callback
         self._closed = False
+        self._close_lock = asyncio.Lock()
+        self._close_task: "asyncio.Task[None] | None" = None
 
     async def compile_agent(
         self,
@@ -202,11 +204,31 @@ class Runtime:
         )
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        async with self._close_lock:
+            if self._closed:
+                return
+            if self._close_task is None:
+                self._close_task = asyncio.create_task(self._cleanup(), name="linktools-runtime-close")
+            task = self._close_task
+        cancelled = False
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+            await asyncio.shield(task)
+        except BaseException:
+            async with self._close_lock:
+                if self._close_task is task:
+                    self._close_task = None
+            raise
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _cleanup(self) -> None:
         if self._close_callback is not None:
             await self._close_callback()
+        async with self._close_lock:
+            self._closed = True
 
     async def _stream(
         self,

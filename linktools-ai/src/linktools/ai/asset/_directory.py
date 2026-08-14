@@ -66,7 +66,7 @@ class PrefixAssetPathAdapter:
         return AssetKey(self._kinds.get(prefix, prefix), identifier)
 
 
-class LocalDirectoryAssetBackend:
+class DirectoryAssetBackend:
     """Expose existing local files without maintaining version history."""
 
     def __init__(
@@ -76,9 +76,9 @@ class LocalDirectoryAssetBackend:
         writable: bool = False,
         path_adapter: "AssetPathAdapter | None" = None,
     ) -> None:
-        resolved = local_directory_root(root) if isinstance(root, str) else root
+        resolved = directory_root(root) if isinstance(root, str) else root
         if resolved.scheme != "file":
-            raise ValueError("LocalDirectoryAssetBackend requires a filesystem root")
+            raise ValueError("DirectoryAssetBackend requires a filesystem root")
         self._root = resolved
         self._directory = Path(resolved.locator)
         self._writable = writable
@@ -345,7 +345,7 @@ class LocalDirectoryAssetBackend:
             path = path.parent
 
 
-def local_directory_root(locator: str) -> AssetRoot:
+def directory_root(locator: str) -> AssetRoot:
     path = Path(locator).expanduser().resolve()
     digest = hashlib.sha256(str(path).encode("utf-8")).hexdigest()
     return AssetRoot(f"file:{digest[:16]}", "file", str(path), digest)
@@ -377,7 +377,7 @@ def _entry_revision(value: bytes) -> StorageEntryRevision:
 
 __all__ = [
     "AssetPathAdapter",
-    "LocalDirectoryAssetBackend",
+    "DirectoryAssetBackend",
     "PrefixAssetPathAdapter",
-    "local_directory_root",
+    "directory_root",
 ]

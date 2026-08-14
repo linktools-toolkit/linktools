@@ -18,7 +18,7 @@ from linktools.ai.asset import (
     AssetStore,
     FilesystemAssetBackend,
     InMemoryAssetBackend,
-    LocalDirectoryAssetBackend,
+    DirectoryAssetBackend,
 )
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.storage import (
@@ -48,7 +48,7 @@ class CountingAssetBackend(InMemoryAssetBackend):
 
 
 def make_store(
-    backend: "InMemoryAssetBackend | FilesystemAssetBackend | LocalDirectoryAssetBackend",
+    backend: "InMemoryAssetBackend | FilesystemAssetBackend | DirectoryAssetBackend",
 ) -> "tuple[AssetStore, StorageOverlay[AssetKey, bytes, AssetInfo]]":
     storage = StorageOverlay(backend, writer=backend)
     return AssetStore(storage), storage

@@ -60,7 +60,7 @@
       ],
       "implementation": [
         "linktools-ai/src/linktools/ai/adapter/_history.py",
-        "linktools-ai/src/linktools/ai/app/_assembly.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ]
     },
     {
@@ -69,7 +69,7 @@
       "requirement": "Workspace identity 不再依赖 config bytes，tenant/namespace/workspace identity 一致；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -117,7 +117,7 @@
       "requirement": "binding digest 与实际 Agent definition 使用同一 resolution；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -126,9 +126,9 @@
       "status": "complete",
       "requirement": "cancel request state+event atomic，unknown 不伪造 CANCELLED；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py",
-        "linktools-ai/src/linktools/ai/app/_assembly.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ]
     },
     {
@@ -138,7 +138,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py",
         "linktools-ai/src/linktools/ai/agent/_capabilities.py"
       ]
     },
@@ -149,7 +149,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -158,7 +158,7 @@
       "requirement": "ACP tool success/failure 映射正确且不泄露 raw payload；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -168,7 +168,7 @@
       "requirement": "segment claim loser/retry provider 调用数为 0；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -197,9 +197,9 @@
       "status": "complete",
       "requirement": "MySQL/PostgreSQL implementation、compile、collection、integration test code 完整；无环境时 live 状态明确为 not_run_no_environment_accepted；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -254,7 +254,7 @@
       "requirement": "Execution composition 缺少 explicit ExecutionLauncher 与 WorkflowGateway 时 fail-fast RUNTIME_DEPENDENCY_NOT_READY；合法 composition 仅由实际注入依赖决定，不使用业务 category。",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -275,7 +275,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -305,7 +305,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -315,7 +315,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -323,9 +323,9 @@
       "status": "complete",
       "requirement": "Runtime/Step SQL schema ownership/digest 分离且 namespace predicate 完整；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -333,9 +333,9 @@
       "status": "complete",
       "requirement": "storage kernel behavior/schema/invariants 保持；storage implementation module 使用 `_` prefix，package-level storage exports保持可用，唯一 direct public submodule 仍由 package policy声明。",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -350,7 +350,7 @@
     {
       "id": "DOD-036",
       "status": "complete",
-      "requirement": "runtime domain 不依赖 app composition；Runtime/RuntimeAccess/build_runtime/build_runtime_access 由 app/_facade.py 唯一拥有，runtime/__init__.py 不反向 re-export composition symbol。",
+      "requirement": "runtime domain 不依赖 app composition；Runtime/RuntimeAccess/build_runtime/build_runtime_access 由 runtime/_runtime_service.py 唯一拥有，runtime/__init__.py 不反向 re-export composition symbol。",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
         "linktools-ai/scripts/build/architecture.py"
@@ -372,7 +372,7 @@
       "requirement": "caller 未提供 idempotency key 时，facade 在 service 调用前生成 effective key，transient context 与 Runtime request 使用同一 hash；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -382,7 +382,7 @@
       "requirement": "ExecutionLauncher.cancel() 只有 CONFIRMED/UNKNOWN 两种明确 outcome，UNKNOWN 绝不提交 CANCELLED；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -403,17 +403,17 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
       "id": "DOD-042",
       "status": "complete",
-      "requirement": "adapter/_schema.py 显式分离 runtime_metadata 与 step_metadata，SQLite/MySQL/PostgreSQL初始化边界符合 5.17；",
+      "requirement": "runtime/state/_schema.py 显式分离 runtime_metadata 与 step_metadata，SQLite/MySQL/PostgreSQL初始化边界符合 5.17；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -422,7 +422,7 @@
       "requirement": "Session fork 只继承 head/binding/cwd；首次 resume 使用 Harness public fork_run()，不复制 durable rows。",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -432,7 +432,7 @@
       "requirement": "start claim 后 launcher outcome unknown 使用原子 mark_start_unknown()；recovery 不按 deployment/profile category 分支，也不透明重启同 segment。",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -482,7 +482,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -490,9 +490,9 @@
       "status": "complete",
       "requirement": "Runtime/Step SQL table 集合、metadata owner、schema digest 与 namespace key 精确符合 5.17；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -502,7 +502,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -512,7 +512,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -555,11 +555,11 @@
     {
       "id": "DOD-057",
       "status": "complete",
-      "requirement": "app/_sql.py 仅做应用级 schema assembly，不污染 Runtime/Step 独立 schema digest/atomic domain；",
+      "requirement": "runtime/state/_materializer.py 仅做应用级 schema assembly，不污染 Runtime/Step 独立 schema digest/atomic domain；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -568,7 +568,7 @@
       "requirement": "所有 application mutation wrapper 在进入 Runtime service 前生成非空 effective idempotency key，DefaultExecutionService 不再自行生成第二套随机 key；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -593,7 +593,7 @@
     {
       "id": "DOD-061",
       "status": "complete",
-      "requirement": "runtime/__init__.py 不再 re-export Runtime/RuntimeAccess/RuntimeDependencies/build_runtime/build_runtime_access，这些 composition symbol 由 app/_facade.py 拥有；",
+      "requirement": "runtime/__init__.py 不再 re-export Runtime/RuntimeAccess/RuntimeDependencies/build_runtime/build_runtime_access，这些 composition symbol 由 runtime/_runtime_service.py 拥有；",
       "evidence": [
         "tests/ai/persistence/test_architecture.py",
         "linktools-ai/scripts/build/architecture.py"
@@ -611,11 +611,11 @@
     {
       "id": "DOD-063",
       "status": "complete",
-      "requirement": "app/_sql.py 不再合并 asset/runtime/step MetaData 或 schema digest，只编排独立 owner；",
+      "requirement": "runtime/state/_materializer.py 不再合并 asset/runtime/step MetaData 或 schema digest，只编排独立 owner；",
       "evidence": [
-        "linktools-ai/src/linktools/ai/adapter/_schema.py",
-        "linktools-ai/src/linktools/ai/adapter/_sql.py",
-        "linktools-ai/src/linktools/ai/app/_sql.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_schema.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_sql.py",
+        "linktools-ai/src/linktools/ai/runtime/state/_materializer.py"
       ]
     },
     {
@@ -633,7 +633,7 @@
       "requirement": "Create/Fork Session 的 cwd 与 LoadedSession 契约完整，fork cwd 与 SESSION_FORK 在同一 transaction；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -643,7 +643,7 @@
       "requirement": "Retry/Fork request 使用真实 caller prompt，全仓无 synthetic retry:<id> / fork:<id> prompt；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -682,7 +682,7 @@
       "requirement": "WorkspaceAgentRuntime 的 open/run/cancel/list/fork/close/shutdown 全部按 4.3.1 只经 Runtime services/launcher 执行，无第二 durable state path；",
       "evidence": [
         "tests/ai/test_local_commands.py",
-        "linktools-ai/src/linktools/ai/app/_workbench.py",
+        "linktools-ai/src/linktools/ai/workspace/_factory.py",
         "linktools-ai/src/linktools/ai/runtime/_execution.py"
       ]
     },
@@ -693,7 +693,7 @@
       "evidence": [
         "tests/ai/persistence/test_filesystem_step_store.py",
         "tests/ai/persistence/test_harness_contract.py",
-        "linktools-ai/src/linktools/ai/adapter/_step.py"
+        "linktools-ai/src/linktools/ai/runtime/state/_steps.py"
       ]
     },
     {
@@ -702,7 +702,7 @@
       "requirement": "facade 与 launcher 同文件的边界由 AST/class-level gate 验证，既阻止 facade direct persistence，也不误报 launcher 合法 terminal aggregate；",
       "evidence": [
         "tests/ai/test_architecture.py::test_facade_launcher_boundary_is_class_scoped",
-        "linktools-ai/src/linktools/ai/app/_workbench.py"
+        "linktools-ai/src/linktools/ai/workspace/_factory.py"
       ]
     },
     {

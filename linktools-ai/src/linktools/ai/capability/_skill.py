@@ -10,14 +10,14 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
-from ..asset import AssetDiscoveryStatus, AssetRef, AssetRepository
+from ..asset import AssetRef, AssetRepository
 from ..core import canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef, SkillSpec
 from ._contract import (
     CapabilityBinding,
     CapabilityRefResolution,
-    CapabilityRuntimeContext,
+    CapabilityMaterializationContext,
 )
 
 SKILL_TOOL_NAMES = ("list_skills", "load_skill")
@@ -70,7 +70,6 @@ class SkillCapabilityBinding:
     resolutions: "tuple[CapabilityRefResolution, ...]"
     catalog: SkillCatalogSnapshot
     fingerprint: str
-    inherit_to_subagents: bool = True
 
     @property
     def id(self) -> str:
@@ -80,7 +79,7 @@ class SkillCapabilityBinding:
     def provider(self) -> str:
         return "skill"
 
-    async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[AbstractCapability[None], ...]":
+    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[AbstractCapability[None], ...]":
         selected_ids = frozenset(
             resolution.id
             for resolution in self.resolutions
@@ -126,7 +125,6 @@ def bind_skill_capability(
         canonical_sha256(
             {
                 "provider": "skill",
-                "inherit_to_subagents": True,
                 "configs": [dict(ref.config) for ref in refs],
                 "resolutions": [_resolution_payload(item) for item in binding_resolutions],
             }
@@ -190,28 +188,16 @@ class SkillCapability(AbstractCapability[None]):
         return None
 
 
-class AssetSkillProvider:
+class SkillCapabilityProvider:
     """Resolve skills and bootstrap refs through the logical AssetRepository."""
 
     provider = "skill"
 
-    def __init__(self, assets: AssetRepository) -> None:
-        self._assets = assets
-
-    async def bootstrap_refs(self) -> "tuple[AgentCapabilityRef, ...]":
-        entries = await _list_asset_entries(self._assets, "skill")
-        refs: list[AgentCapabilityRef] = []
-        for entry in entries:
-            if entry.status is AssetDiscoveryStatus.CONFLICT:
-                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
-            refs.append(AgentCapabilityRef(self.provider, entry.ref.id, required=False))
-        return tuple(refs)
-
-    async def bind(self, refs: "tuple[AgentCapabilityRef, ...]") -> CapabilityBinding:
+    async def bind(self, refs: "tuple[AgentCapabilityRef, ...]", *, assets: AssetRepository) -> CapabilityBinding:
         values: list[SkillSpec | None] = []
         for ref in refs:
             try:
-                resolved = await self._assets.resolve(AssetRef("skill", ref.id))
+                resolved = await assets.resolve(AssetRef("skill", ref.id))
             except AIError as error:
                 if error.code is ErrorCode.STORAGE_NOT_FOUND and not ref.required:
                     values.append(None)
@@ -233,17 +219,6 @@ async def merge_skill_catalogs(catalogs: "tuple[SkillCatalogView, ...]") -> Skil
     return SkillCatalogSnapshot(tuple(descriptors), tuple(specifications))
 
 
-async def _list_asset_entries(assets: AssetRepository, kind: str):
-    cursor = None
-    entries = []
-    while True:
-        page = await assets.list(kind=kind, cursor=cursor)
-        entries.extend(page.items)
-        if page.next_cursor is None:
-            return tuple(entries)
-        cursor = page.next_cursor
-
-
 def _resolution_payload(resolution: CapabilityRefResolution) -> "dict[str, object]":
     return {
         "id": resolution.id,
@@ -260,6 +235,6 @@ def _allowed(value: str, allowlist: "tuple[str, ...]") -> bool:
 
 
 __all__ = [
-    "AssetSkillProvider", "SKILL_TOOL_NAMES", "SkillCapability", "SkillCapabilityBinding", "SkillCatalogSnapshot", "SkillCatalogView", "SkillDescriptor",
+    "SkillCapabilityProvider", "SKILL_TOOL_NAMES", "SkillCapability", "SkillCapabilityBinding", "SkillCatalogSnapshot", "SkillCatalogView", "SkillDescriptor",
     "bind_skill_capability", "merge_skill_catalogs", "snapshot_skill_catalog",
 ]

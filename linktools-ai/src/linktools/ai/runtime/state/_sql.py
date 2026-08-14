@@ -10,29 +10,31 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..errors import AIError, ErrorCode
-from ..runtime import (
+from ...errors import AIError, ErrorCode
+from .._domain import RuntimeDomain
+from .._persistence import (
     ArtifactStore,
     ConversationStore,
     EvaluationStore,
     ExecutionStore,
     MemoryStore,
     RecoveryStore,
-    RuntimeDomain,
     RuntimeRepository,
-    RuntimeStoragePlan,
-    RuntimeRetention,
-    RuntimeStores,
+    RuntimeDomainStates,
     TaskStore,
 )
-from ..storage import SqlStorageContext
+from ._contracts import RuntimeRetentionMode
+from ._plan import RuntimeStatePlan
+from ...storage import SqlStorageContext
 from ._transaction import TransactionHub
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from ...storage import ObjectStore
 
-_logger = environ.get_logger("ai.adapter.sql_runtime")
+
+_logger = environ.get_logger("ai.runtime.state.sql")
 
 
 class _SqlRuntimeTransaction:
@@ -137,8 +139,9 @@ class _SqlRuntimeTransaction:
 
 @dataclass
 class _SqlRuntime:
-    persistence: RuntimeStores
+    persistence: RuntimeDomainStates
     components: tuple[RuntimeRepository, ...]
+    context: SqlStorageContext
 
     async def initialize(self) -> None:
         initialized: list[RuntimeRepository] = []
@@ -176,14 +179,15 @@ def build_sql_runtime(
     *,
     namespace: str,
     tenant_id: str,
-    plan: RuntimeStoragePlan,
+    plan: RuntimeStatePlan,
+    object_store: "ObjectStore | None" = None,
 ) -> _SqlRuntime:
-    from ..storage import SqlObjectStore
-    from ._persistence import (
+    from ...storage import SqlObjectStore
+    from ._memory import (
         RuntimeObjectRouter,
         _build_in_memory_parts,
     )
-    from ._sql_repositories import (
+    from ._repositories import (
         _SqlApprovalRepository,
         _SqlArtifactRepository,
         _SqlEventRepository,
@@ -200,12 +204,19 @@ def build_sql_runtime(
     )
     from ._schema import build_runtime_sql_metadata
 
-    from ._persistence import RuntimeTransactionBinding
+    from ._memory import RuntimeTransactionBinding
 
-    metadata = build_runtime_sql_metadata(plan)
+    metadata = build_runtime_sql_metadata(
+        plan,
+        include_object_tables=object_store is None and any(
+            plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+            and domain in {RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY}
+            for domain in RuntimeDomain
+        ),
+    )
     hub = TransactionHub()
     transaction_binding = RuntimeTransactionBinding()
-    durable_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetention.DURABLE)
+    durable_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetentionMode.DURABLE)
     memory_domains = frozenset(RuntimeDomain) - durable_domains
     memory_parts = _build_in_memory_parts(
         namespace=namespace,
@@ -217,7 +228,7 @@ def build_sql_runtime(
     sql_transactions = {
         domain: _SqlRuntimeTransaction(context, hub, domain)
         for domain in RuntimeDomain
-        if plan.route(domain).retention is RuntimeRetention.DURABLE
+        if plan.route(domain).retention is RuntimeRetentionMode.DURABLE
     }
     sql_components: list[RuntimeRepository] = []
     sql_sessions = None
@@ -274,11 +285,10 @@ def build_sql_runtime(
     recovery_checkpoints = sql_checkpoint if sql_checkpoint is not None else memory.recovery_checkpoint
     recovery_tools = sql_tool if sql_tool is not None else memory.tools
     object_stores = {}
-    sql_objects = SqlObjectStore._from_context(context)
+    sql_objects = object_store or SqlObjectStore._from_context(context)
     for domain in RuntimeDomain:
-        route = plan.route(domain)
-        object_stores[domain] = route.object_store or (sql_objects if domain in durable else memory.object_stores[domain])
-    persistence = RuntimeStores(
+        object_stores[domain] = sql_objects if domain in durable else memory.object_stores[domain]
+    persistence = RuntimeDomainStates(
         namespace=namespace,
         conversation=ConversationStore(conversation_sessions, operation(RuntimeDomain.CONVERSATION)),
         execution=ExecutionStore(execution_store, execution_idempotency, execution_events, operation(RuntimeDomain.EXECUTION)),
@@ -291,7 +301,7 @@ def build_sql_runtime(
     )
     components = tuple(dict.fromkeys((*sql_components, *memory_components)))
     _logger.info("SQL runtime composed: namespace=%s tenant=%s durable=%s", namespace, tenant_id, sorted(domain.value for domain in durable))
-    return _SqlRuntime(persistence, components)
+    return _SqlRuntime(persistence, components, context)
 
 
 __all__ = []

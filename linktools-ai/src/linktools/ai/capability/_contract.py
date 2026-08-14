@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability provider, binding, and execution-context contracts."""
+"""Capability binding, grant, and provider contracts."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -8,17 +8,10 @@ from typing import Literal, Protocol
 
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
-from ..core import (
-    Principal,
-    ResourceRef,
-    canonical_sha256,
-    canonical_string_tuple,
-    validate_capability_provider,
-)
+from ..asset import AssetRepository
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
-
-_FINGERPRINT_LENGTH = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,43 +20,33 @@ class CapabilityRefResolution:
     requested_revision: "int | None"
     resolved_revision: "int | None"
     required: bool
-    status: "Literal['resolved', 'unresolved']"
+    status: Literal["resolved", "unresolved"]
     fingerprint: "str | None"
 
     def __post_init__(self) -> None:
-        if (
-            not self.id.strip()
-            or not isinstance(self.required, bool)
-            or self.requested_revision is not None
-            and (not isinstance(self.requested_revision, int) or isinstance(self.requested_revision, bool) or self.requested_revision < 1)
-            or self.resolved_revision is not None
-            and (not isinstance(self.resolved_revision, int) or isinstance(self.resolved_revision, bool) or self.resolved_revision < 1)
-        ):
+        if not self.id.strip() or not isinstance(self.required, bool):
             raise ValueError("capability resolution identity is invalid")
-        if self.status == "resolved" and not _is_fingerprint(self.fingerprint):
+        if self.status == "resolved" and (self.resolved_revision is None or not _is_fingerprint(self.fingerprint)):
             raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
-        if self.status == "unresolved" and (self.required or self.fingerprint is not None or self.resolved_revision is not None):
+        if self.status == "unresolved" and (self.required or self.resolved_revision is not None or self.fingerprint is not None):
             raise ValueError("unresolved capability resolution is invalid")
         if self.status not in {"resolved", "unresolved"}:
             raise ValueError("capability resolution status is invalid")
-        if self.status == "resolved" and self.resolved_revision is None:
-            raise ValueError("resolved capability revision is required")
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityRuntimeContext:
+class CapabilityMaterializationContext:
     principal: Principal
     execution: ResourceRef
+    execution_root: str
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
-    allow_subagents: "tuple[str, ...]" = ()
 
     def __post_init__(self) -> None:
         if self.principal.tenant_id != self.execution.tenant_id:
             raise ValueError("capability context tenant mismatch")
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
-        object.__setattr__(self, "allow_subagents", canonical_string_tuple(self.allow_subagents, field="allow_subagents"))
 
 
 class CapabilityBinding(Protocol):
@@ -79,12 +62,9 @@ class CapabilityBinding(Protocol):
     @property
     def fingerprint(self) -> str: ...
 
-    @property
-    def inherit_to_subagents(self) -> bool: ...
-
     async def materialize(
         self,
-        context: CapabilityRuntimeContext,
+        context: CapabilityMaterializationContext,
     ) -> "tuple[PydanticAgentCapability[None], ...]": ...
 
 
@@ -92,35 +72,38 @@ class CapabilityProvider(Protocol):
     @property
     def provider(self) -> str: ...
 
-    async def bootstrap_refs(self) -> "tuple[AgentCapabilityRef, ...]": ...
-
     async def bind(
         self,
         refs: "tuple[AgentCapabilityRef, ...]",
+        *,
+        assets: AssetRepository,
     ) -> CapabilityBinding: ...
 
 
 @dataclass(frozen=True, slots=True)
-class StaticCapabilityBinding:
-    """Wrap one application-authorized capability as an immutable grant."""
-
+class CapabilityGrant:
     id: str
-    fingerprint: str
     capability: "PydanticAgentCapability[None]"
+    revision: int = 1
     inherit_to_subagents: bool = True
-    provider: str = "application"
-    resolutions: "tuple[CapabilityRefResolution, ...]" = ()
+
+    @property
+    def provider(self) -> str:
+        return "application"
+
+    @property
+    def resolutions(self) -> "tuple[CapabilityRefResolution, ...]":
+        return ()
+
+    @property
+    def fingerprint(self) -> str:
+        return canonical_sha256({"provider": self.provider, "id": self.id, "revision": self.revision})
 
     def __post_init__(self) -> None:
-        try:
-            validate_capability_provider(self.provider)
-        except AIError as error:
-            raise ValueError("static capability binding is incomplete") from error
-        if not self.id.strip() or self.capability is None:
-            raise ValueError("static capability binding is incomplete")
-        validate_fingerprint(self.fingerprint)
+        if not self.id.strip() or self.capability is None or not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1 or not isinstance(self.inherit_to_subagents, bool):
+            raise ValueError("capability grant is incomplete")
 
-    async def materialize(self, context: CapabilityRuntimeContext) -> "tuple[PydanticAgentCapability[None], ...]":
+    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[PydanticAgentCapability[None], ...]":
         del context
         return (self.capability,)
 
@@ -130,23 +113,12 @@ class UnresolvedCapabilityBinding:
     provider: str
     resolutions: "tuple[CapabilityRefResolution, ...]"
     fingerprint: str
-    inherit_to_subagents: bool = False
 
     @property
     def id(self) -> str:
         return f"unresolved:{self.provider}"
 
-    def __post_init__(self) -> None:
-        validate_capability_provider(self.provider)
-        if not _is_fingerprint(self.fingerprint):
-            raise AIError(ErrorCode.CAPABILITY_FINGERPRINT_INVALID)
-        if not self.resolutions or any(item.status != "unresolved" for item in self.resolutions):
-            raise ValueError("unresolved capability binding requires unresolved resolutions")
-
-    async def materialize(
-        self,
-        context: CapabilityRuntimeContext,
-    ) -> "tuple[PydanticAgentCapability[None], ...]":
+    async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[PydanticAgentCapability[None], ...]":
         del context
         return ()
 
@@ -156,66 +128,15 @@ def unresolved_binding(provider: str, refs: Sequence[AgentCapabilityRef]) -> Unr
     return UnresolvedCapabilityBinding(
         provider,
         resolutions,
-        canonical_sha256(
-            {
-                "provider": provider,
-                "status": "UNRESOLVED_PROVIDER",
-                "refs": [
-                    {
-                        "provider": ref.provider,
-                        "id": ref.id,
-                        "requested_revision": ref.revision,
-                        "required": ref.required,
-                        "config": dict(ref.config),
-                    }
-                    for ref in refs
-                ],
-            }
-        ),
+        canonical_sha256({"provider": provider, "status": "UNRESOLVED_PROVIDER", "refs": [_ref_payload(ref) for ref in refs]}),
     )
 
 
-def group_capability_refs(
-    refs: Sequence[AgentCapabilityRef],
-) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
-    """Group refs by first-seen provider while preserving declaration order."""
+def group_capability_refs(refs: Sequence[AgentCapabilityRef]) -> "tuple[tuple[str, tuple[AgentCapabilityRef, ...]], ...]":
     grouped: dict[str, list[AgentCapabilityRef]] = {}
-    order: list[str] = []
     for ref in refs:
-        if ref.provider not in grouped:
-            grouped[ref.provider] = []
-            order.append(ref.provider)
-        grouped[ref.provider].append(ref)
-    return tuple((provider, tuple(grouped[provider])) for provider in order)
-
-
-def canonical_bootstrap_refs(
-    provider: str,
-    refs: Sequence[AgentCapabilityRef],
-) -> "tuple[AgentCapabilityRef, ...]":
-    try:
-        validate_capability_provider(provider)
-    except AIError as error:
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID) from error
-    if not isinstance(refs, tuple):
-        raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-    groups: dict[tuple[str, str], AgentCapabilityRef] = {}
-    for ref in refs:
-        if not isinstance(ref, AgentCapabilityRef) or ref.provider != provider or ref.required or ref.revision is not None and ref.revision < 1:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        key = ref.provider, ref.id
-        previous = groups.get(key)
-        if previous is not None:
-            if _ref_payload(previous) != _ref_payload(ref):
-                raise AIError(ErrorCode.CAPABILITY_CONFLICT)
-            continue
-        groups[key] = ref
-    return tuple(
-        sorted(
-            groups.values(),
-            key=lambda ref: (ref.provider, ref.id, 0 if ref.revision is None else ref.revision),
-        )
-    )
+        grouped.setdefault(ref.provider, []).append(ref)
+    return tuple((provider, tuple(values)) for provider, values in grouped.items())
 
 
 def validate_fingerprint(value: str) -> None:
@@ -224,14 +145,21 @@ def validate_fingerprint(value: str) -> None:
 
 
 def _is_fingerprint(value: "str | None") -> bool:
-    return isinstance(value, str) and len(value) == _FINGERPRINT_LENGTH and all(character in "0123456789abcdef" for character in value)
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _ref_payload(ref: AgentCapabilityRef) -> dict[str, object]:
+    return {"provider": ref.provider, "id": ref.id, "revision": ref.revision, "required": ref.required, "config": dict(ref.config)}
 
 
 __all__ = [
-    "CapabilityBinding", "CapabilityProvider", "CapabilityRefResolution", "CapabilityRuntimeContext",
-    "StaticCapabilityBinding", "UnresolvedCapabilityBinding", "canonical_bootstrap_refs", "group_capability_refs", "unresolved_binding", "validate_fingerprint",
+    "CapabilityBinding",
+    "CapabilityGrant",
+    "CapabilityMaterializationContext",
+    "CapabilityProvider",
+    "CapabilityRefResolution",
+    "UnresolvedCapabilityBinding",
+    "group_capability_refs",
+    "unresolved_binding",
+    "validate_fingerprint",
 ]
-
-
-def _ref_payload(ref: AgentCapabilityRef) -> tuple[object, ...]:
-    return ref.provider, ref.id, ref.revision, ref.required, canonical_sha256(dict(ref.config))

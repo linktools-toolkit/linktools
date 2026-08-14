@@ -50,9 +50,9 @@ from ._persistence import (
     OperationLedgerRecord,
     OperationTerminalUpdate,
     ResultRecord,
-    RuntimeStores,
+    RuntimeDomainStates,
 )
-from ._plan import RuntimeDomain
+from .state import RuntimeDomain
 from ._services import (
     CancelExecutionRequest,
     CancelExecutionResult,
@@ -97,6 +97,10 @@ class _ExecutionReleaseCallback(Protocol):
 
 class _ExecutionTerminalVerifier(Protocol):
     async def __call__(self, execution: ExecutionRecord, status: ExecutionStatus, required_step_run_id: "str | None") -> None: ...
+
+
+class _SubagentCancellation(Protocol):
+    async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...
 
 
 async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
@@ -148,7 +152,7 @@ class DefaultExecutionService:
 
     def __init__(
         self,
-        persistence: RuntimeStores,
+        persistence: RuntimeDomainStates,
         authorization: AuthorizationPolicy,
         *,
         backend: "ExecutionBackend | None" = None,
@@ -164,10 +168,23 @@ class DefaultExecutionService:
         self._history_reader = history_reader
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
+        self._subagent_cancellation: _SubagentCancellation | None = None
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._session_locks_guard = asyncio.Lock()
         self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
+
+    def bind_backend(self, backend: ExecutionBackend) -> None:
+        if backend is None:
+            raise ValueError("execution backend is required")
+        if self._backend is not None:
+            raise RuntimeError("execution backend is already bound")
+        self._backend = backend
+
+    def bind_subagent_cancellation(self, cancellation: _SubagentCancellation) -> None:
+        if self._subagent_cancellation is not None:
+            raise RuntimeError("subagent cancellation is already bound")
+        self._subagent_cancellation = cancellation
 
     async def _acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
         if not hold_id:
@@ -256,6 +273,49 @@ class DefaultExecutionService:
         if not session_id.strip():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
+
+    async def start_subagent(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        parent_execution_id: str,
+        root_execution_id: str,
+    ) -> ExecutionHandle:
+        return await self._start(
+            binding_digest,
+            request,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            lineage_kind=ExecutionLineageKind.SUBAGENT,
+            scope="execution.subagent",
+        )
+
+    async def list_children(self, execution_id: str, *, principal: Principal) -> tuple[ExecutionView, ...]:
+        async with self._execution_consumer(execution_id, principal.tenant_id):
+            await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
+            children = await self._persistence.execution.executions.list_children(
+                execution_id,
+                tenant_id=principal.tenant_id,
+            )
+            return tuple(ExecutionView(child.execution_id, child.status) for child in children)
+
+    async def start_subagent(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        parent_execution_id: str,
+        root_execution_id: str,
+    ) -> ExecutionHandle:
+        return await self._start(
+            binding_digest,
+            request,
+            parent_execution_id=parent_execution_id,
+            root_execution_id=root_execution_id,
+            lineage_kind=ExecutionLineageKind.SUBAGENT,
+            scope="execution.subagent",
+        )
 
     async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
         if session_id is None:
@@ -484,7 +544,7 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
         )
-        return await self._start(binding_digest, retry_request, session_id=previous.session_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
+        return await self._start(binding_digest, retry_request, session_id=previous.session_id, parent_execution_id=previous.parent_execution_id, root_execution_id=previous.root_execution_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
@@ -496,7 +556,7 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
         )
-        return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
+        return await self._start(binding_digest, fork_request, session_id=previous.session_id, parent_execution_id=previous.parent_execution_id, root_execution_id=previous.root_execution_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         async with self._execution_consumer(execution_id, request.principal.tenant_id):
@@ -575,6 +635,8 @@ class DefaultExecutionService:
                 raise
             if self._backend is None:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            if self._subagent_cancellation is not None:
+                await self._subagent_cancellation.cancel_children(cancelling.execution_id, request.principal)
             outcome = await self._backend.cancel(cancelling)
             if outcome is CancelEffectOutcome.UNKNOWN:
                 resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)

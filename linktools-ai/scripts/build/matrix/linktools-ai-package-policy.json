@@ -112,11 +112,6 @@
     "adapter._identity": [
       "core"
     ],
-    "adapter._schema": [
-      "core",
-      "storage",
-      "runtime"
-    ],
     "agent._compiler": [
       "core",
       "asset",
@@ -134,7 +129,7 @@
       "asset",
       "spec"
     ],
-    "runtime._root": [
+    "runtime._runtime_service": [
       "core",
       "agent"
     ],

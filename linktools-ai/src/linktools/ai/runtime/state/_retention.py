@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Adapter-owned, owner-scoped cleanup for transient Runtime state."""
+"""Runtime-owned, owner-scoped cleanup for transient state."""
 
 from linktools.core import environ
 
-from ..core import step_run_id
-from ..runtime import ConversationCursor, RuntimeDomain, RuntimeRetention, RuntimeStoragePlan, RuntimeStores
-from ._persistence import RuntimeObjectRouter, _RuntimeOwnerPruner
-from ._memory import _memory_working_scope_key
-from ._step import RuntimeStepPersistence
+from ...core import canonical_sha256, step_run_id
+from .._persistence import ConversationCursor, RuntimeDomainStates
+from ._contracts import RuntimeDomain, RuntimeRetentionMode
+from ._memory import RuntimeObjectRouter, _RuntimeOwnerPruner
+from ._plan import RuntimeStatePlan
+from ._steps import RuntimeStepStore
 
 
-_logger = environ.get_logger("ai.adapter.retention")
+_logger = environ.get_logger("ai.runtime.state.retention")
 
 
-class _RuntimeRetention:
-    def __init__(self, stores: RuntimeStores, steps: RuntimeStepPersistence, plan: RuntimeStoragePlan, *, namespace: str) -> None:
+def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
+    logical_scope_key = canonical_sha256(memory_scope)
+    return canonical_sha256({"execution_id": execution_id, "memory_scope_key": logical_scope_key})
+
+
+class RuntimeRetentionController:
+    def __init__(self, stores: RuntimeDomainStates, steps: RuntimeStepStore, plan: RuntimeStatePlan, *, namespace: str) -> None:
         self._stores = stores
         self._steps = steps
         self._plan = plan
         self._namespace = namespace
-        self._transient_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetention.TRANSIENT)
+        self._transient_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).retention is RuntimeRetentionMode.TRANSIENT)
         self._pruner = _RuntimeOwnerPruner(stores, self._transient_domains)
         self._closed = False
 

@@ -2,18 +2,20 @@
 # -*- coding: utf-8 -*-
 """Execution-scoped Pydantic AI infrastructure capabilities."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from linktools.core import environ
-from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability as PydanticAgentCapability
+from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.capabilities import WrapToolExecuteHandler
 from pydantic_ai.exceptions import ModelRetry, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
@@ -26,13 +28,14 @@ from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
 from ..capability import SKILL_TOOL_NAMES
-from ..core import canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.agent.capabilities")
 
 MEMORY_TOOL_NAMES = ("delete_memory", "read_memory", "search_memory", "write_memory")
 PLANNING_TOOL_NAMES = ("write_plan",)
+SUBAGENT_TOOL_NAMES = ("delegate_task",)
 WORKSPACE_FILESYSTEM_TOOL_NAMES = (
     "create_directory", "edit_file", "file_info", "find_files", "list_directory", "read_file", "search_files", "write_file",
 )
@@ -75,6 +78,11 @@ class AgentRunScope:
     platform_tool_names: "tuple[str, ...]" = ()
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
+    subagent_delegate: "SubagentDelegate | None" = None
+
+
+class SubagentDelegate(Protocol):
+    async def __call__(self, *, tool_call_id: str, agent_id: str, prompt_id: str, task: str) -> "dict[str, JsonValue]": ...
 
 
 async def compose_platform_capabilities(
@@ -115,6 +123,10 @@ async def compose_platform_capabilities(
         )
     if any(name in selected for name in PLANNING_TOOL_NAMES):
         capabilities.append(Planning())
+    if "delegate_task" in selected:
+        if scope.subagent_delegate is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        capabilities.append(_SubagentCapability(scope.subagent_delegate))
     capabilities.append(_build_compaction(scope.context_target_tokens))
     _logger.debug(
         "platform capabilities composed: agent=%s step=%s tools=%s count=%s memory_scope_digest=%s",
@@ -140,11 +152,32 @@ def tool_name_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return "*" in allow_tools or name in allow_tools
 
 
-def select_platform_tool_names(*, allow_tools: "tuple[str, ...]", memory_scope: "str | None") -> "tuple[str, ...]":
+def select_platform_tool_names(*, allow_tools: "tuple[str, ...]", memory_scope: "str | None", subagent_available: bool = False) -> "tuple[str, ...]":
     candidates = list(PLANNING_TOOL_NAMES)
     if memory_scope is not None:
         candidates.extend(MEMORY_TOOL_NAMES)
+    if subagent_available:
+        candidates.extend(SUBAGENT_TOOL_NAMES)
     return tuple(sorted(name for name in candidates if tool_name_allowed(name, allow_tools)))
+
+
+class _SubagentCapability(AbstractCapability[None]):
+    def __init__(self, delegate: SubagentDelegate) -> None:
+        self._delegate = delegate
+
+    def get_toolset(self) -> "FunctionToolset[None]":
+        toolset = FunctionToolset[None](id="linktools-subagent")
+
+        @toolset.tool
+        async def delegate_task(ctx: RunContext[None], agent_id: str, prompt_id: str, task: str) -> "dict[str, Any]":
+            values = (agent_id.strip(), prompt_id.strip(), task.strip())
+            if not all(values):
+                raise ModelRetry("agent_id, prompt_id, and task are required")
+            if not ctx.tool_call_id:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+            return await self._delegate(tool_call_id=ctx.tool_call_id, agent_id=values[0], prompt_id=values[1], task=values[2])
+
+        return toolset
 
 
 def _memory_guidance(selected_tools: "tuple[str, ...]") -> str:
@@ -185,5 +218,5 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
 __all__ = [
     "AgentRunScope", "MEMORY_TOOL_NAMES", "PLANNING_TOOL_NAMES", "SKILL_TOOL_NAMES",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES", "WORKSPACE_SHELL_TOOL_NAMES", "compose_platform_capabilities",
-    "select_platform_tool_names", "tool_name_allowed",
+    "select_platform_tool_names", "tool_name_allowed", "SUBAGENT_TOOL_NAMES", "SubagentDelegate",
 ]

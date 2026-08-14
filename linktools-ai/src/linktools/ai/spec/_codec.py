@@ -49,7 +49,6 @@ class AgentSpecCodec:
                 "instructions": list(value.instructions),
                 "allow_tools": value.allow_tools,
                 "allow_skills": value.allow_skills,
-                "allow_subagents": value.allow_subagents,
                 "metadata": dict(value.metadata),
             }
         )
@@ -78,7 +77,6 @@ class AgentSpecCodec:
             tuple(str(item) for item in cast("list[object]", raw.get("instructions", []))),
             _strict_allowlist(raw, "allow_tools", ("*",)),
             _strict_allowlist(raw, "allow_skills", ("*",)),
-            _strict_allowlist(raw, "allow_subagents", ()),
             cast("dict[str, object]", raw.get("metadata", {})),
         )
 

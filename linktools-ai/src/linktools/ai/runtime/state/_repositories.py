@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..core import (
+from ...core import (
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
@@ -33,8 +33,8 @@ from ..core import (
     validate_lease_owner,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode
-from ..runtime import (
+from ...errors import AIError, ErrorCode
+from .._persistence import (
     ConversationCursor,
     ApprovalRecord,
     ArtifactRecord,
@@ -62,16 +62,16 @@ from ..runtime import (
     RecoveryTerminalOutcome,
     RecoveryIdempotencyInput,
     ResultRecord,
-    ToolOperationRecord,
 )
-from ..storage import ObjectRef, namespace_key
-from ..storage import SqlStorageContext
+from .._tool import ToolOperationRecord
+from ...storage import ObjectRef, namespace_key
+from ...storage import SqlStorageContext
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
     from sqlalchemy import MetaData, Table
     from sqlalchemy.ext.asyncio import AsyncSession
     from typing import Protocol
-    from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
+    from ...task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
 
 
     class _SqlTransactionProtocol(Protocol):
@@ -82,7 +82,7 @@ if TYPE_CHECKING:
         def mark_changed(self) -> None: ...
 
 
-_logger = environ.get_logger("ai.adapter.sql_repositories")
+_logger = environ.get_logger("ai.runtime.state.repositories")
 
 
 class _SqlRepositoryBase:
@@ -724,7 +724,7 @@ class _SqlEventRepository(_SqlRepositoryBase):
 
 class _SqlOperationRepository(_SqlRepositoryBase):
     def _from_row(self, row: Mapping[str, object]) -> OperationLedgerRecord:
-        from ..core import OperationKind
+        from ...core import OperationKind
 
         return OperationLedgerRecord(str(row["operation_id"]), self._tenant_id, ResourceKind(str(row["resource_kind"])), str(row["resource_id"]), None if row["execution_id"] is None else str(row["execution_id"]), OperationKind(str(row["operation_kind"])), OperationStatus(str(row["status"])), str(row["request_digest"]), None if row["result_ref"] is None else str(row["result_ref"]), None if row["result_digest"] is None else str(row["result_digest"]), None if row["error_code"] is None else str(row["error_code"]), bool(row["compactable"]), int(row["sequence"]), _utc(row["created_at"]), _utc(row["updated_at"]))
 
@@ -1011,12 +1011,12 @@ class _SqlTaskRepository(_SqlRepositoryBase):
         return graph_row, node_rows
 
     def _view(self, graph_row: Mapping[str, object], node_rows: tuple[Mapping[str, object], ...]) -> "TaskGraphView":
-        from ..task import TaskGraphView, TaskNode
+        from ...task import TaskGraphView, TaskNode
 
         return TaskGraphView(str(graph_row["graph_id"]), TaskStatus(str(graph_row["status"])), tuple(TaskNode(str(row["node_id"]), tuple(row["dependencies_json"] or ())) for row in node_rows))
 
     def _node_view(self, row: Mapping[str, object]) -> "TaskNodeView":
-        from ..task import TaskNodeView
+        from ...task import TaskNodeView
 
         return TaskNodeView(str(row["graph_id"]), str(row["node_id"]), tuple(row["dependencies_json"] or ()), TaskStatus(str(row["status"])), row["owner"], int(row["fence"]), _optional_utc(row["lease_expires_at"]), row["result_digest"], row["error_code"], row["error_digest"], row["execution_id"])
 
@@ -1124,7 +1124,7 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 
     async def create_graph(self, graph: "TaskGraph", *, tenant_id: str) -> "TaskGraphView":
         self._check_tenant(tenant_id)
-        from ..task import TaskGraphView
+        from ...task import TaskGraphView
 
         async with self._mutation() as session:
             table = self._table("runtime_task_graphs")
@@ -1212,8 +1212,8 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 
     async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> "TaskLease":
         self._check_tenant(tenant_id)
-        from ..task import TaskLease
-        from ..core import validate_lease_owner
+        from ...task import TaskLease
+        from ...core import validate_lease_owner
 
         validate_lease_owner(owner)
         if not 1 <= lease_seconds <= 3600:
@@ -1254,7 +1254,7 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 
     async def complete(self, lease: "TaskLease", *, tenant_id: str, execution_id: "str | None", result_digest: str) -> "TaskTerminalRecord":
         self._check_tenant(tenant_id)
-        from ..task import TaskTerminalRecord
+        from ...task import TaskTerminalRecord
 
         async with self._mutation() as session:
             await self._locked_graph(session, lease.graph_id)
@@ -1266,7 +1266,7 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 
     async def fail(self, lease: "TaskLease", *, tenant_id: str, error_code: str, error_digest: str) -> "TaskTerminalRecord":
         self._check_tenant(tenant_id)
-        from ..task import TaskTerminalRecord
+        from ...task import TaskTerminalRecord
 
         async with self._mutation() as session:
             await self._locked_graph(session, lease.graph_id)

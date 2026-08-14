@@ -6,8 +6,8 @@
 --
 -- This reference contains every current SQL table, grouped by its owner:
 --   * Schema manifest table owned by storage.database;
---   * Runtime tables owned by adapter.sql;
---   * Harness StepStore tables owned by adapter._step;
+--   * Runtime tables owned by runtime.state._sql;
+--   * Harness StepStore tables owned by runtime.state._steps;
 --   * Asset current entries, change history, content blobs, and revision
 --     counter tables owned by asset.sql.
 -- The application validates this complete manifest before opening SQL-backed

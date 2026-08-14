@@ -4,13 +4,10 @@
 
 from typing import TYPE_CHECKING
 
-from ..runtime import (
-    RuntimeDomain,
-    RuntimeRetention,
-    RuntimeStoragePlan,
-    RuntimeStorageRoute,
-)
-from ..storage import (
+from .._domain import RuntimeDomain
+from ._contracts import RuntimeRetentionMode
+from ._plan import RuntimeStatePlan, RuntimeStateRoute
+from ...storage import (
     build_object_sql_metadata,
     sql_digest,
     sql_integer_id,
@@ -21,28 +18,33 @@ from ..storage import (
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
-    from ..storage import ObjectStore
+    from ...storage import ObjectStore
 
 
 _STEP_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY})
 _OBJECT_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})
 
 
-def required_runtime_sql_tables(plan: RuntimeStoragePlan) -> frozenset[str]:
+def required_runtime_sql_tables(plan: RuntimeStatePlan, *, include_object_tables: bool | None = None) -> frozenset[str]:
     names: set[str] = set()
     for domain in RuntimeDomain:
-        if plan.route(domain).retention is not RuntimeRetention.DURABLE:
+        if plan.route(domain).retention is not RuntimeRetentionMode.DURABLE:
             continue
         names.update(_DOMAIN_TABLES[domain])
-    if any(
-        plan.route(domain).retention is RuntimeRetention.DURABLE and plan.route(domain).object_store is None
+    if include_object_tables is None:
+        include_object_tables = any(
+            plan.route(domain).retention is RuntimeRetentionMode.DURABLE
+            for domain in _OBJECT_DOMAINS
+        )
+    if include_object_tables and any(
+        plan.route(domain).retention is RuntimeRetentionMode.DURABLE
         for domain in _OBJECT_DOMAINS
     ):
         names.update({"storage_objects", "storage_object_chunks"})
     return frozenset(names)
 
 
-def build_runtime_sql_metadata(plan: RuntimeStoragePlan) -> "MetaData":
+def build_runtime_sql_metadata(plan: "RuntimeStatePlan | frozenset[RuntimeDomain]", *, include_object_tables: bool | None = None) -> "MetaData":
     from sqlalchemy import (
         JSON,
         Boolean,
@@ -56,8 +58,13 @@ def build_runtime_sql_metadata(plan: RuntimeStoragePlan) -> "MetaData":
         func,
     )
 
+    if isinstance(plan, frozenset):
+        routes = {domain.value: RuntimeStateRoute.memory() for domain in RuntimeDomain}
+        for domain in plan:
+            routes[domain.value] = RuntimeStateRoute.filesystem(f"runtime-{domain.value}")
+        plan = RuntimeStatePlan(**routes)
     metadata = MetaData()
-    tables = required_runtime_sql_tables(plan)
+    tables = required_runtime_sql_tables(plan, include_object_tables=include_object_tables)
     common = {
         "namespace_key": sql_digest(),
         "tenant_id": sql_text_key(256),
@@ -130,13 +137,10 @@ def build_runtime_sql_metadata(plan: RuntimeStoragePlan) -> "MetaData":
 def build_step_sql_metadata(runtime_domain: RuntimeDomain, *, object_store: "ObjectStore | None" = None) -> "MetaData":
     if runtime_domain not in _STEP_DOMAINS:
         raise ValueError("Step archive owner is invalid")
-    plan = RuntimeStoragePlan(
-        {
-            runtime_domain: RuntimeStorageRoute.durable(
-                object_store=object_store,
-            ),
-        }
-    )
+    route = RuntimeStateRoute.filesystem("runtime")
+    routes = {domain.value: RuntimeStateRoute.memory() for domain in RuntimeDomain}
+    routes[runtime_domain.value] = route
+    plan = RuntimeStatePlan(**routes)
     full_metadata = build_runtime_sql_metadata(plan)
     from sqlalchemy import MetaData
 

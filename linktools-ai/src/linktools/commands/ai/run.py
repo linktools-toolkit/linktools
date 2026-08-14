@@ -16,6 +16,7 @@ from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.core import ExecutionEventType, ExecutionStatus
 from ...ai.errors import AIError
+from ...ai.model import ModelRegistry
 from ...ai.runtime import Runtime
 from ...ai.workspace import Workspace, open_workspace_runtime
 
@@ -59,9 +60,11 @@ class Command(BaseCommand):
         async def execute() -> int:
             async with open_workspace_runtime(
                 workspace,
-                model=args.model,
-                base_url=args.base_url,
-                api_key=args.api_key,
+                models=ModelRegistry.openai(
+                    model=args.model,
+                    base_url=args.base_url,
+                    api_key=args.api_key,
+                ),
             ) as runtime:
                 return await _emit_result(runtime, workspace, args.prompt, session_id, memory_scope, args.json)
 

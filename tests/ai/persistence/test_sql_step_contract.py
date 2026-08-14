@@ -4,8 +4,8 @@
 """Dialect-independent SQL StepStore checks."""
 
 import pytest
-from linktools.ai.adapter import SqlStepArchive
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.state._steps import SqlStepArchive
+from linktools.ai.runtime.state import RuntimeDomain
 from pydantic_ai_harness.step_persistence import StepStore
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -16,7 +16,7 @@ def test_one_sql_step_archive_implements_the_public_harness_protocol() -> None:
 
 
 def test_sql_table_names_and_namespace_columns_are_separate() -> None:
-    source = open("linktools-ai/src/linktools/ai/adapter/_step.py", encoding="utf-8").read()
+    source = open("linktools-ai/src/linktools/ai/runtime/state/_steps.py", encoding="utf-8").read()
     assert '"step_runs"' in source
     assert '"step_events"' in source
     assert "namespace_key" in source

@@ -10,9 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.adapter import FilesystemStepArchive
+from linktools.ai.runtime.state._steps import FilesystemStepArchive
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.state import RuntimeDomain
 from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
@@ -47,7 +47,7 @@ async def test_filesystem_step_store_round_trip_and_restart(tmp_path: Path) -> N
     assert len(await second.list_events(run_id=run.run_id)) == 1
     assert await second.latest_snapshot(run_id=run.run_id) is not None
     await second.close()
-    recovery = _archive(tmp_path, RuntimeDomain.RECOVERY)
+    recovery = _archive(tmp_path / "recovery", RuntimeDomain.RECOVERY)
     await recovery.initialize()
     await recovery.register_run(run)
     await recovery.record_tool_effect(ToolEffectRecord(tool_call_id="call", tool_name="tool", run_id=run.run_id, status="started", started_at=datetime.now(timezone.utc), ended_at=None, idempotency_key="key", effect_summary=None))

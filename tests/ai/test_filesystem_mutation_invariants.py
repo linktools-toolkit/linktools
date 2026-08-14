@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
-from linktools.ai.adapter import build_filesystem_runtime, build_in_memory_runtime
+from linktools.ai.runtime.state import RuntimeDomain
+from linktools.ai.runtime.state._memory import build_filesystem_runtime, build_in_memory_runtime
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -57,11 +57,8 @@ async def test_configured_runtime_mutation_requires_active_transaction() -> None
 
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
-    storage = RuntimeStorage.filesystem(
-        tmp_path,
-        plan=RuntimeStoragePlan({RuntimeDomain.RECOVERY: RuntimeStorageRoute.durable()}),
-    )
-    runtime = build_filesystem_runtime(str(storage.target_path), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
+    runtime_root = tmp_path / "runtime"
+    runtime = build_filesystem_runtime(str(runtime_root), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
     await runtime.initialize()
     try:
         await runtime.persistence.recovery.tools.reserve(_tool_record())
@@ -73,7 +70,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     finally:
         await runtime.close()
 
-    reopened = build_filesystem_runtime(str(storage.target_path), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
+    reopened = build_filesystem_runtime(str(runtime_root), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
     await reopened.initialize()
     try:
         record = await reopened.persistence.recovery.tools.get_operation("operation", tenant_id="tenant")

@@ -17,7 +17,7 @@ from ..core import (
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimeStores
+from ._persistence import RuntimeDomainStates
 from ._services import (
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
@@ -39,7 +39,7 @@ class ApprovalApi(ApprovalQueryApi, Protocol):
 class DefaultApprovalService:
     """Persist decisions before any optional workflow notification."""
 
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway

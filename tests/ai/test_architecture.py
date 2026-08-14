@@ -218,57 +218,31 @@ def test_private_conversion_tree_is_exact() -> None:
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:
-    from linktools.ai import adapter, asset, capability, storage, temporal, workspace
-    from linktools.ai.adapter import (
-        FilesystemStepArchive,
-        RuntimeStepPersistence,
-        SqlStepArchive,
-        build_in_memory_runtime,
-    )
-    from linktools.ai.agent import (
-        AgentCompiler,
-        AgentDefinition,
-        AgentExecutor,
-        OutputTypeRegistry,
-    )
-    from linktools.ai.asset import (
-        AssetCacheAdapter,
-        AssetStore,
-        FilesystemAssetBackend,
-        InMemoryAssetBackend,
-        LocalDirectoryAssetBackend,
-        SqlAssetBackend,
-    )
-    from linktools.ai.spec import MCPServerSpecCodec, SkillSpecCodec
-    from linktools.ai.storage import StorageBatchResult, StorageReader, StorageWriter
-    from linktools.ai.temporal import (
-        EvaluationActivity,
-        ExecuteActivity,
-        SessionActivity,
-        TaskActivity,
-    )
-    from linktools.ai.temporal.workflow import (
-        EvaluationWorkflow,
-        ExecutionWorkflow,
-        SessionWorkflow,
-        TaskWorkflow,
-    )
+    from linktools.ai import adapter, asset, capability, model, runtime, workspace
 
     command_modules = tuple(
         importlib.import_module(f"linktools.commands.ai.{name}")
         for name in ("acp", "doctor", "run", "smoke")
     )
-    assert adapter and asset and capability and storage and temporal and workspace
+    assert adapter and asset and capability and model and runtime and workspace
     assert all(command_modules)
-    assert all((AgentCompiler, AgentDefinition, AgentExecutor, OutputTypeRegistry, FilesystemStepArchive, RuntimeStepPersistence, SqlStepArchive, build_in_memory_runtime, AssetCacheAdapter, AssetStore, FilesystemAssetBackend, InMemoryAssetBackend, LocalDirectoryAssetBackend, SqlAssetBackend, MCPServerSpecCodec, SkillSpecCodec, StorageBatchResult, StorageReader, StorageWriter, EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, EvaluationWorkflow, ExecutionWorkflow, SessionWorkflow, TaskWorkflow))
-    assert not hasattr(adapter, "open_sql_runtime")
-    assert not hasattr(adapter, "build_sql_step_store")
-    assert not hasattr(adapter, "compose_sql_runtime")
-    assert not hasattr(adapter, "compose_sql_step_store")
-    assert not hasattr(asset, "build_sql_asset_backend")
-    assert not hasattr(asset, "compose_sql_asset_backend")
-    assert hasattr(storage, "SqlStorageContext")
-    assert hasattr(storage, "create_sql_storage_context")
+    assert adapter.__all__ == [
+        "NatsPublisher",
+        "ProviderClient",
+        "PydanticMCPRuntime",
+        "RuntimeMemoryStore",
+        "StaticPrincipalProvider",
+        "StepExecutionHistoryReader",
+    ]
+    assert model.__all__ == ["ModelBinding", "ModelRegistry", "ModelResolver"]
+    assert workspace.__all__ == [
+        "DisabledSandbox",
+        "Sandbox",
+        "Workspace",
+        "WorkspacePolicy",
+        "open_workspace_runtime",
+        "trusted_workspace_principal",
+    ]
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check("linktools-ai/src/linktools/ai").errors)
     environment = dict(os.environ)
     source_root = Path(__file__).parents[2]
@@ -299,7 +273,7 @@ def test_facade_launcher_boundary_is_class_scoped() -> None:
     path = Path("linktools-ai/src/linktools/ai/workspace/_factory.py")
     tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
     functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    assert {"open_workspace_runtime", "build_workspace_asset_repository"} <= functions
+    assert "open_workspace_runtime" in functions
 
 
 def test_runtime_step_contract_matrix_is_current() -> None:

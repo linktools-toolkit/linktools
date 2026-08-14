@@ -11,7 +11,7 @@ from linktools.ai.asset import (
     AssetRoot,
     AssetStore,
     InMemoryAssetBackend,
-    LocalDirectoryAssetBackend,
+    DirectoryAssetBackend,
     SqlAssetBackend,
     build_asset_sql_metadata,
     StrictConfigReader,
@@ -90,7 +90,7 @@ def test_asset_path_adapter_and_config_are_available() -> None:
 
 @pytest.mark.asyncio
 async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -> None:
-    backend = LocalDirectoryAssetBackend(
+    backend = DirectoryAssetBackend(
         AssetRoot("file:directory", "file", str(tmp_path), "directory"),
         writable=True,
         path_adapter=_MappedPathAdapter(),
@@ -116,7 +116,7 @@ async def test_local_directory_asset_layer_stat_has_integer_revision(tmp_path: P
     path.parent.mkdir(parents=True)
     path.write_bytes(b"one")
     primary = InMemoryAssetBackend(AssetRoot("memory:primary", "memory", "primary", "primary"))
-    builtin = LocalDirectoryAssetBackend(
+    builtin = DirectoryAssetBackend(
         AssetRoot("file:directory", "file", str(tmp_path), "directory"),
         path_adapter=_MappedPathAdapter(),
     )

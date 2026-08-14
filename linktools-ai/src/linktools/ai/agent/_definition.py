@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from ..capability import CapabilityBinding, validate_fingerprint
 from ..errors import AIError, ErrorCode
-from ..model import ModelConnectionConfig, ModelRoute
+from ..model import ModelBinding
 from ..spec import AgentSpec, PromptSpec
 
 
@@ -19,8 +19,7 @@ class AgentDefinition:
     digest: str
     spec: AgentSpec
     prompt: PromptSpec
-    model_route: ModelRoute
-    model_connection: "ModelConnectionConfig | None"
+    model: ModelBinding
     output_type: "type[BaseModel]"
     output_schema_fingerprint: str
     effective_capabilities: "tuple[CapabilityBinding, ...]"

@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
-from ..capability import StaticCapabilityBinding
+from ..capability import CapabilityGrant
 from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
@@ -134,20 +134,18 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     return cast(tuple[WorkspaceTool, ...], (list_dir, read_file, write_file, bash))
 
 
-def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[StaticCapabilityBinding, ...]':
+def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[CapabilityGrant, ...]':
     project_root = Path(root).expanduser().resolve()
     _logger.debug("local workspace tools configured root=%s", project_root)
     filesystem = FileSystem(root_dir=project_root)
     shell = Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
     return (
-        StaticCapabilityBinding(
+        CapabilityGrant(
             "workspace-filesystem",
-            canonical_sha256({"kind": "filesystem", "root": project_root.as_posix(), "version": 1}),
             filesystem,
         ),
-        StaticCapabilityBinding(
+        CapabilityGrant(
             "workspace-shell",
-            canonical_sha256({"kind": "shell", "root": project_root.as_posix(), "version": 1}),
             shell,
         ),
     )

@@ -7,12 +7,12 @@ from datetime import datetime, timezone
 
 from ..core import AuthorizationAction, AuthorizationPolicy, ExternalCallStatus
 from ..errors import AIError, ErrorCode
-from ._persistence import RuntimeStores
+from ._persistence import RuntimeDomainStates
 from ._services import ExternalSupplyRequest, ExternalSupplyResult, WorkflowGateway
 
 
 class DefaultExternalService:
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway

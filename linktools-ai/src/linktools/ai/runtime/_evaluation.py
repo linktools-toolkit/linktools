@@ -24,8 +24,8 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
-from ._persistence import EvaluationRecord, IdempotencyRecord, RuntimeStores
-from ._plan import RuntimeDomain
+from ._persistence import EvaluationRecord, IdempotencyRecord, RuntimeDomainStates
+from .state import RuntimeDomain
 from ._services import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -106,7 +106,7 @@ class EvaluationApi(EvaluationQueryApi, Protocol):
 class DefaultEvaluationService:
     """Persist evaluation identity and enforce compatibility before replay."""
 
-    def __init__(self, persistence: RuntimeStores, authorization: AuthorizationPolicy, execution: ExecutionService, *, release_terminal: _EvaluationReleaseCallback | None = None, acquire_execution_hold: _ExecutionHoldCallback | None = None, release_execution_hold: _ExecutionHoldCallback | None = None, request_execution_handoff: _ExecutionHandoffCallback | None = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, authorization: AuthorizationPolicy, execution: ExecutionService, *, release_terminal: _EvaluationReleaseCallback | None = None, acquire_execution_hold: _ExecutionHoldCallback | None = None, release_execution_hold: _ExecutionHoldCallback | None = None, request_execution_handoff: _ExecutionHandoffCallback | None = None) -> None:
         hold_callbacks = (acquire_execution_hold, release_execution_hold, request_execution_handoff)
         if any(callback is None for callback in hold_callbacks) and any(callback is not None for callback in hold_callbacks):
             raise ValueError("evaluation execution hold callbacks must be complete")

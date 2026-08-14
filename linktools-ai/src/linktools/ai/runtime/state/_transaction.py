@@ -10,13 +10,13 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..runtime import RuntimeDomain
+from .._domain import RuntimeDomain
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-_logger = environ.get_logger("ai.adapter.transaction")
+_logger = environ.get_logger("ai.runtime.state.transaction")
 
 
 Callback = Callable[[], Awaitable[None] | None]

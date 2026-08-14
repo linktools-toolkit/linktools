@@ -48,7 +48,7 @@ class ToolOperationRecord:
             raise ValueError("tool operation lease identity is invalid") from error
 
 
-class ToolStateStore(Protocol):
+class ToolStateRepository(Protocol):
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord: ...
     async def get_operation(self, tool_operation_id: str, *, tenant_id: str) -> "ToolOperationRecord | None": ...
     async def claim(self, tool_operation_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> ToolOperationRecord: ...
@@ -98,4 +98,4 @@ class ToolPolicy(Protocol):
     ) -> ToolAuthorization: ...
 
 
-__all__ = ["AllowAllToolPolicy", "ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateStore"]
+__all__ = ["AllowAllToolPolicy", "ToolAuthorization", "ToolDescriptor", "ToolOperationRecord", "ToolPolicy", "ToolStateRepository"]

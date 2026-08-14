@@ -19,7 +19,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
-from ..core import (
+from ...core import (
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
@@ -44,8 +44,8 @@ from ..core import (
     validate_persistence_namespace,
     validate_tenant_id,
 )
-from ..errors import AIError, ErrorCode
-from ..runtime import (
+from ...errors import AIError, ErrorCode
+from .._persistence import (
     ApprovalRecord,
     ArtifactRecord,
     ArtifactStore,
@@ -85,15 +85,14 @@ from ..runtime import (
     ResultRecord,
     RuntimeDomain,
     RuntimeRepository,
-    RuntimeStores,
+    RuntimeDomainStates,
     SessionRecord,
     TaskLease,
     TaskNodeView,
     TaskStore,
-    ToolOperationRecord,
-    ToolStateStore,
 )
-from ..storage import (
+from .._tool import ToolOperationRecord, ToolStateRepository
+from ...storage import (
     FilesystemObjectStore,
     FilesystemWriterLock,
     InMemoryObjectStore,
@@ -103,10 +102,10 @@ from ..storage import (
     read_json,
     write_json_atomic,
 )
-from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ...task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._transaction import RuntimeTransactionCoordinator, TransactionHub
 
-_logger = environ.get_logger("ai.adapter.persistence")
+_logger = environ.get_logger("ai.runtime.state.memory")
 
 
 def _transient_scope(domain: RuntimeDomain, owner_scope: str) -> str:
@@ -1219,7 +1218,7 @@ class _EvaluationRepository(_Base):
         return tuple(sorted((item for item in self._records.values() if item.tenant_id == tenant_id and item.execution_id == execution_id), key=lambda item: item.evaluation_id))
 
 
-class _ToolRepository(_Base, ToolStateStore):
+class _ToolRepository(_Base, ToolStateRepository):
     def __init__(self, namespace: str, coordinator: RuntimeTransactionCoordinator) -> None:
         super().__init__(namespace, coordinator)
         self._records: dict[tuple[str, str], ToolOperationRecord] = {}
@@ -1444,7 +1443,7 @@ class RoutedIdempotencyRepository:
 class _RuntimeOwnerPruner:
     """Perform exact owner pruning under each repository coordinator."""
 
-    def __init__(self, persistence: RuntimeStores, transient_domains: frozenset[RuntimeDomain] | None = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, transient_domains: frozenset[RuntimeDomain] | None = None) -> None:
         self._persistence = persistence
         self._transient_domains = transient_domains or frozenset()
 
@@ -1679,10 +1678,10 @@ def _operation_domain(kind: ResourceKind) -> RuntimeDomain:
 
 
 def _route_runtime_stores(
-    durable: RuntimeStores,
-    memory: RuntimeStores,
+    durable: RuntimeDomainStates,
+    memory: RuntimeDomainStates,
     persist: frozenset[RuntimeDomain],
-) -> RuntimeStores:
+) -> RuntimeDomainStates:
     def selected(domain: RuntimeDomain) -> bool:
         return domain in persist
 
@@ -1711,7 +1710,7 @@ def _route_runtime_stores(
         domain: durable.object_store(domain) if domain in persist else memory.object_store(domain)
         for domain in RuntimeDomain
     })
-    return RuntimeStores(
+    return RuntimeDomainStates(
         namespace=durable.namespace,
         conversation=ConversationStore(conversation_sessions, operation(RuntimeDomain.CONVERSATION)),
         execution=ExecutionStore(execution_store.executions, RoutedIdempotencyRepository(durable.execution.idempotency, memory.execution.idempotency, persist, RuntimeDomain.EXECUTION), execution_store.events, operation(RuntimeDomain.EXECUTION)),
@@ -1727,7 +1726,7 @@ def _route_runtime_stores(
 class InMemoryRuntime:
     def __init__(
         self,
-        persistence: RuntimeStores,
+        persistence: RuntimeDomainStates,
         components: tuple[RuntimeRepository, ...],
         *,
         operation_repositories: "Mapping[RuntimeDomain, OperationLedgerRepository] | None" = None,
@@ -1742,7 +1741,7 @@ class InMemoryRuntime:
         self._initialize_lock = asyncio.Lock()
         self._close_hook: Callable[[], Awaitable[None]] | None = None
 
-    persistence: RuntimeStores
+    persistence: RuntimeDomainStates
     components: tuple[RuntimeRepository, ...]
     operation_repositories: dict[RuntimeDomain, OperationLedgerRepository]
 
@@ -1793,11 +1792,12 @@ class InMemoryRuntime:
         self._close_hook = hook
 
 class _DurableRuntime(InMemoryRuntime):
-    def __init__(self, persistence: RuntimeStores, components: tuple[RuntimeRepository, ...], state_path: str, persist: frozenset[RuntimeDomain], writer_lock: FilesystemWriterLock | None = None, durable_components: tuple[RuntimeRepository, ...] | None = None, transaction_components: tuple[RuntimeRepository, ...] | None = None, release_components: tuple[RuntimeRepository, ...] | None = None, operation_repositories: "Mapping[RuntimeDomain, OperationLedgerRepository] | None" = None) -> None:
+    def __init__(self, persistence: RuntimeDomainStates, components: tuple[RuntimeRepository, ...], state_path: str, persist: frozenset[RuntimeDomain], writer_lock: FilesystemWriterLock | None = None, durable_components: tuple[RuntimeRepository, ...] | None = None, transaction_components: tuple[RuntimeRepository, ...] | None = None, release_components: tuple[RuntimeRepository, ...] | None = None, operation_repositories: "Mapping[RuntimeDomain, OperationLedgerRepository] | None" = None, tenant_id: str = "") -> None:
         super().__init__(persistence, components, operation_repositories=operation_repositories)
         self._durable_components = components if durable_components is None else durable_components
         self._state_path = state_path
         self._persist = persist
+        self._tenant_id = tenant_id
         self._transaction_components = components if transaction_components is None else transaction_components
         self._release_components = components if release_components is None else release_components
         self._writer_lock = writer_lock or FilesystemWriterLock(Path(state_path).parent / "runtime.lock")
@@ -1981,15 +1981,17 @@ class _DurableRuntime(InMemoryRuntime):
 
     def _write_manifest(self) -> None:
         manifest = {
-            "format": "linktools-ai-runtime",
-            "generation": 2,
+            "format": "linktools-ai-runtime-state",
+            "generation": 1,
             "namespace": self.persistence.namespace,
+            "tenant_id": self._tenant_id,
+            "domain": next(iter(self._persist)).value if len(self._persist) == 1 else "runtime",
         }
         write_json_atomic(Path(self._state_path), manifest, fsync=True)
 
     def _flush_domain(self, domain: RuntimeDomain) -> None:
         root = Path(self._state_path).parent
-        directory = root / domain.value
+        directory = root
         directory.mkdir(parents=True, exist_ok=True)
         write_json_atomic(directory / "records.json", self._domain_records(domain), fsync=True)
         _logger.debug("runtime domain committed: namespace=%s domain=%s", self.persistence.namespace, domain.value)
@@ -2029,7 +2031,7 @@ class _DurableRuntime(InMemoryRuntime):
 
     def _load_domain(self, domain: RuntimeDomain) -> None:
         self._clear_domain(domain)
-        records_path = Path(self._state_path).parent / domain.value / "records.json"
+        records_path = Path(self._state_path).parent / "records.json"
         if not records_path.is_file():
             return
         records = read_json(records_path)
@@ -2092,7 +2094,8 @@ class FilesystemRuntime(_DurableRuntime):
             return
         try:
             state = read_json(state_path)
-            if state.get("format") != "linktools-ai-runtime" or state.get("generation") != 2 or state.get("namespace") != self.persistence.namespace:
+            expected_domain = next(iter(self._persist)).value if len(self._persist) == 1 else "runtime"
+            if state.get("format") != "linktools-ai-runtime-state" or state.get("generation") != 1 or state.get("namespace") != self.persistence.namespace or state.get("tenant_id") != self._tenant_id or state.get("domain") != expected_domain:
                 raise ValueError("runtime state identity mismatch")
             self._load_payload(_empty_payload())
             for domain in self._persist:
@@ -2718,7 +2721,7 @@ def _restore_runtime_snapshot(snapshot: object) -> None:
                 component._counters = value
 
 
-def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None" = None, persist: "frozenset[RuntimeDomain] | RuntimeDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None, transaction_hub: TransactionHub | None = None, transaction_binding: RuntimeTransactionBinding | None = None) -> InMemoryRuntime:
+def _build_runtime(*, filesystem: bool, namespace: str, tenant_id: str = "", state_path: "str | None" = None, persist: "frozenset[RuntimeDomain] | RuntimeDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None, transaction_hub: TransactionHub | None = None, transaction_binding: RuntimeTransactionBinding | None = None, runtime_cls: "type[FilesystemRuntime] | None" = None) -> InMemoryRuntime:
     validate_persistence_namespace(namespace)
     selected_domains = _normalize_runtime_persist(persist, filesystem=filesystem)
     new_transaction_hub = transaction_hub is None
@@ -2806,7 +2809,7 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
             commit=transaction_binding.commit,
             rollback=transaction_binding.rollback,
         )
-    persistence = RuntimeStores(
+    persistence = RuntimeDomainStates(
         namespace=namespace,
         conversation=ConversationStore(sessions, operation_repositories[RuntimeDomain.CONVERSATION]),
         execution=ExecutionStore(executions, components[3], components[4], execution_operations),
@@ -2823,7 +2826,8 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
         memory_runtime = _build_runtime(filesystem=False, namespace=namespace, transaction_hub=transaction_hub, transaction_binding=transaction_binding)
         routed = _route_runtime_stores(persistence, memory_runtime.persistence, selected_domains)
         transaction_binding.bind_components((*components, *memory_runtime.components))
-        runtime = FilesystemRuntime(
+        runtime_type = FilesystemRuntime if runtime_cls is None else runtime_cls
+        runtime = runtime_type(
             routed,
             (*components, *memory_runtime.components),
             state_path,
@@ -2833,6 +2837,7 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
             transaction_components=(*components, *memory_runtime.components),
             release_components=memory_runtime.components,
             operation_repositories=operation_repositories,
+            tenant_id=tenant_id,
         )
         runtime_holder["runtime"] = runtime
         return runtime
@@ -2854,14 +2859,15 @@ def _select_in_memory_components(runtime: InMemoryRuntime, domains: frozenset[Ru
     )
 
 
-def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[RuntimeDomain] | RuntimeDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:
+def build_filesystem_runtime(root: str, *, namespace: str, tenant_id: str = "", persist: "frozenset[RuntimeDomain] | RuntimeDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None, runtime_cls: "type[FilesystemRuntime] | None" = None) -> FilesystemRuntime:
     if not isinstance(root, str) or not root.strip():
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     validate_persistence_namespace(namespace)
     root_path = Path(root).expanduser().resolve()
     namespace_digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
-    state_path = root_path / namespace_digest / "manifest.json"
-    return _build_runtime(filesystem=True, namespace=namespace, state_path=str(state_path), persist=persist, writer_lock=writer_lock)
+    tenant_digest = hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+    state_path = root_path / namespace_digest / tenant_digest / "manifest.json"
+    return _build_runtime(filesystem=True, namespace=namespace, tenant_id=tenant_id, state_path=str(state_path), persist=persist, writer_lock=writer_lock, runtime_cls=runtime_cls)
 
 
 def _normalize_runtime_persist(

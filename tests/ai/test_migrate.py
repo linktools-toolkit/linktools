@@ -6,15 +6,14 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from linktools.ai.adapter import build_runtime_sql_metadata
 from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.migrate import provision_asset_database, provision_runtime_database
-from linktools.ai.runtime import RuntimeStoragePlan
+from linktools.ai.runtime.state import RuntimeDomain, build_runtime_sql_metadata
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _expected_tables() -> set[str]:
-    runtime = build_runtime_sql_metadata(RuntimeStoragePlan.all())
+    runtime = build_runtime_sql_metadata(frozenset(RuntimeDomain))
     assets = build_asset_sql_metadata()
     return set(runtime.tables) | set(assets.tables)
 

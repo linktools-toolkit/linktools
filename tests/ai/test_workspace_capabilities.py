@@ -6,7 +6,7 @@
 from pathlib import Path
 
 import pytest
-from linktools.ai.workspace import build_workspace_capability_grants, build_workspace_tool_map
+from linktools.ai.workspace._tools import build_workspace_capability_grants, build_workspace_tool_map
 
 
 def test_workspace_grants_are_stable_and_root_scoped(tmp_path: Path) -> None:
