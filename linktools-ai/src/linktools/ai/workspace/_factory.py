@@ -19,7 +19,6 @@ from ..adapter import (
     StepExecutionHistoryReader,
     open_runtime_persistence,
     runtime_durable_domains,
-    runtime_storage_engine,
     runtime_storage_kind,
     runtime_storage_path,
 )
@@ -322,7 +321,7 @@ async def open_workspace_runtime(
             task_runner,
             owner=f"workspace:{workspace.workspace_id}",
         )
-        task = DefaultTaskService(resources.domain, authorization, task_launcher, release_terminal=resources.retention.release_task_graph)
+        task = DefaultTaskService(resources.domain.task, authorization, task_launcher, release_terminal=resources.retention.release_task_graph)
         evaluation = DefaultEvaluationService(
             resources.domain,
             authorization,

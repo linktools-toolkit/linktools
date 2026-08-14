@@ -10,13 +10,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeStorage, StorageDomain
+from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.adapter import (
-    DurableFilesystemStepStore,
-    SqlRuntimeSchema,
-    SqlStepStore,
+    FilesystemStepArchive,
+    RuntimeStepPersistence,
+    build_runtime_sql_metadata,
     build_filesystem_runtime,
     build_in_memory_runtime,
+    open_runtime_persistence,
 )
 from linktools.ai.core import (
     ExecutionEventType,
@@ -31,7 +32,7 @@ from linktools.ai.core import (
     idempotency_key_hash,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_database
+from linktools.ai.migrate import provision_runtime_database
 from linktools.ai.runtime import (
     ExecutionRecord,
     ExecutionStartClaim,
@@ -43,14 +44,7 @@ from linktools.ai.runtime import (
     ResultRecord,
     SessionRecord,
 )
-from linktools.ai.storage import (
-    CoordinationScope,
-    SqlSchemaRegistry,
-    build_sql_schema_metadata,
-    create_sql_context,
-    prepare_storage_database,
-    validate_schema,
-)
+from linktools.ai.storage import ObjectRef, provision_sql, validate_sql
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -70,16 +64,21 @@ async def test_in_memory_resources_owns_harness_store() -> None:
 
 
 @pytest.mark.asyncio
-async def test_filesystem_resources_uses_shared_runtime_writer_and_durable_step_store(tmp_path: Path) -> None:
+async def test_filesystem_resources_uses_a_durable_step_archive(tmp_path: Path) -> None:
     runtime = build_filesystem_runtime(str(tmp_path), namespace="project")
-    steps = DurableFilesystemStepStore(runtime.runtime_root, "project", writer_lock=runtime.writer_lock)
+    steps = FilesystemStepArchive(
+        tmp_path,
+        namespace="project",
+        tenant_id="tenant",
+        runtime_domain=RuntimeDomain.CONVERSATION,
+    )
     await runtime.initialize()
     await steps.initialize()
     try:
         resources = RuntimeResources("filesystem", "project", runtime.persistence, steps)
-        assert isinstance(resources.steps, DurableFilesystemStepStore)
+        assert isinstance(resources.steps, FilesystemStepArchive)
         runtime_root = tmp_path / hashlib.sha256(b"project").hexdigest()
-        assert (runtime_root / "step").is_dir()
+        assert (runtime_root / "steps" / "conversation").is_dir()
         assert not (tmp_path / "steps").exists()
     finally:
         await steps.close()
@@ -91,53 +90,39 @@ async def test_sqlite_resources_uses_the_shared_sql_database(tmp_path: Path) -> 
     primary = tmp_path / "runtime.db"
     storage = RuntimeStorage.sqlite(str(primary))
     async with open_sql_resources(storage, namespace="namespace") as resources:
-        assert isinstance(resources.steps, SqlStepStore)
+        assert isinstance(resources.steps, RuntimeStepPersistence)
     with sqlite3.connect(primary) as connection:
         tables = {row[0] for row in connection.execute("select name from sqlite_master where type='table'")}
-    assert any(name.startswith("ai_step_") for name in tables)
+    assert {"step_runs", "step_snapshots"} <= tables
 
 
 @pytest.mark.asyncio
 async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'isolation.db'}")
-    from linktools.ai.migrate import provision_database
-
-    await provision_database(engine)
-    metadata, digest = build_sql_schema_metadata()
-    first_context = create_sql_context(engine, "runtime-a")
-    second_context = create_sql_context(engine, "runtime-b")
-    await first_context.initialize(metadata=metadata, schema_manifest_digest=digest)
-    await second_context.initialize(metadata=metadata, schema_manifest_digest=digest)
-    first = await SqlRuntimeSchema._open_sql_runtime(first_context, persist=frozenset({StorageDomain.CONVERSATION}))
-    second = await SqlRuntimeSchema._open_sql_runtime(second_context, persist=frozenset({StorageDomain.CONVERSATION}))
+    plan = RuntimeStoragePlan({RuntimeDomain.CONVERSATION: RuntimeStorageRoute.durable()})
+    await provision_runtime_database(engine, plan=plan)
+    storage = RuntimeStorage.sql(engine, plan=plan)
     now = datetime.now(timezone.utc)
-    try:
-        for tenant_id, owner_principal_id in (("tenant-a", "principal-a"), ("tenant-b", "principal-b")):
-            await first.conversation.sessions.create(SessionRecord("shared", tenant_id, owner_principal_id, "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
-        await second.conversation.sessions.create(SessionRecord("shared", "tenant-a", "principal-c", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+    async with open_runtime_persistence(storage, namespace="runtime-a", tenant_id="runtime-a") as first, open_runtime_persistence(storage, namespace="runtime-b", tenant_id="runtime-b") as second:
+        await first.domain.conversation.sessions.create(SessionRecord("shared", "runtime-a", "principal-a", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
+        await second.domain.conversation.sessions.create(SessionRecord("shared", "runtime-b", "principal-b", "binding", SessionStatus.OPEN, 0, 0, None, {}, now, now, None))
 
-        assert (await first.conversation.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-a"
-        assert (await first.conversation.sessions.get("shared", tenant_id="tenant-b")).owner_principal_id == "principal-b"
-        assert (await second.conversation.sessions.get("shared", tenant_id="tenant-a")).owner_principal_id == "principal-c"
-        assert first.namespace != second.namespace
+        assert (await first.domain.conversation.sessions.get("shared", tenant_id="runtime-a")).owner_principal_id == "principal-a"
+        assert (await second.domain.conversation.sessions.get("shared", tenant_id="runtime-b")).owner_principal_id == "principal-b"
+        assert first.domain.namespace != second.domain.namespace
         with pytest.raises(AIError) as sql_tenant_error:
-            await first.conversation.sessions.get("shared", tenant_id=" tenant-a")
-        assert sql_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-        memory_record = MemoryRecord("memory", "tenant-a", "a" * 64, "content", "digest", {}, 0, now, now)
+            await first.domain.conversation.sessions.get("shared", tenant_id="runtime-b")
+        assert sql_tenant_error.value.code is ErrorCode.STORAGE_NOT_FOUND
+        memory_record = MemoryRecord("memory", "runtime-a", "a" * 64, "content", "digest", {}, 0, now, now)
         foreign_operation = OperationLedgerInput(
-            "operation", "tenant-b", ResourceKind.MEMORY, "memory", None,
+            "operation", "runtime-b", ResourceKind.MEMORY, "memory", None,
             OperationKind.MEMORY_WRITE, OperationStatus.SUCCEEDED, "request",
             None, None, None, True, now, now,
         )
         with pytest.raises(AIError) as sql_atomic_tenant_error:
-            await first.memory.records.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
+            await first.domain.memory.records.put_with_operation(memory_record, expected_revision=0, operation=foreign_operation)
         assert sql_atomic_tenant_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
-    finally:
-        await first.conversation.sessions.close()
-        await second.conversation.sessions.close()
-        await first_context.close()
-        await second_context.close()
-        await engine.dispose()
+    await engine.dispose()
 
     memory = build_in_memory_runtime(namespace="tenant-validation")
     await memory.initialize()
@@ -155,20 +140,16 @@ async def test_persistence_namespace_and_tenant_are_orthogonal(tmp_path: Path) -
 @pytest.mark.asyncio
 async def test_storage_database_preparation_owns_sqlite_dialect_setup(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
-    registry = SqlSchemaRegistry()
-    tables = SqlRuntimeSchema.register_schema(registry)
-    manifest = registry.freeze()
+    plan = RuntimeStoragePlan({RuntimeDomain.CONVERSATION: RuntimeStorageRoute.durable()})
+    metadata = build_runtime_sql_metadata(plan)
     try:
-        database = await prepare_storage_database(
-            engine,
-            metadata=registry.metadata,
-            schema_manifest_digest=manifest.digest,
-        )
-        assert database.sessions.kw["bind"] is engine
-        assert database.engine is engine
-        assert database.coordination_scope is CoordinationScope.PROCESS
-        assert database.metadata is next(iter(tables.values())).metadata
-        assert database.schema_manifest_digest == manifest.digest
+        await provision_sql(engine, metadata)
+        await validate_sql(engine, metadata)
+        async with engine.connect() as connection:
+            from sqlalchemy import inspect
+
+            tables = await connection.run_sync(lambda sync_connection: set(inspect(sync_connection).get_table_names()))
+        assert {"runtime_sessions", "runtime_operation_counters", "runtime_operations"} <= tables
     finally:
         await engine.dispose()
 
@@ -176,11 +157,11 @@ async def test_storage_database_preparation_owns_sqlite_dialect_setup(tmp_path: 
 @pytest.mark.asyncio
 async def test_sql_schema_validation_allows_other_owner_tables(tmp_path: Path) -> None:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
-    registry = SqlSchemaRegistry()
-    SqlRuntimeSchema.register_schema(registry)
+    plan = RuntimeStoragePlan({RuntimeDomain.CONVERSATION: RuntimeStorageRoute.durable()})
+    metadata = build_runtime_sql_metadata(plan)
     try:
-        await provision_database(engine)
-        await validate_schema(engine, registry.metadata)
+        await provision_sql(engine, metadata)
+        await validate_sql(engine, metadata)
     finally:
         await engine.dispose()
 
@@ -190,10 +171,10 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
     runtime = build_in_memory_runtime(namespace="claim")
     await runtime.initialize()
     now = datetime.now(timezone.utc)
-    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     key_hash = idempotency_key_hash("request")
     await runtime.persistence.execution.executions.create(execution)
-    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
+    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", RuntimeDomain.EXECUTION, "run", key_hash, "digest", ResourceKind.EXECUTION, "execution", IdempotencyStatus.RESERVED, None, None, now, now))
     claim = ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now)
     outcomes = await asyncio.gather(runtime.persistence.execution.executions.claim_start(claim), runtime.persistence.execution.executions.claim_start(claim), return_exceptions=True)
     assert sum(isinstance(item, ExecutionRecord) for item in outcomes) == 1
@@ -205,13 +186,13 @@ async def test_memory_claim_start_has_one_winner_and_reserves_segment() -> None:
 @pytest.mark.asyncio
 async def test_sqlite_claim_start_updates_the_runtime_resources_atomically(tmp_path: Path) -> None:
     now = datetime.now(timezone.utc)
-    storage = RuntimeStorage.sqlite(str(tmp_path / "claim.db"))
+    storage = RuntimeStorage.sqlite(str(tmp_path / "claim.db"), plan=RuntimeStoragePlan.all())
     async with open_sql_resources(storage, namespace="claim") as resources:
-        execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+        execution = ExecutionRecord(execution_id="execution", tenant_id="claim", session_id=None, binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.RUN, status=ExecutionStatus.PENDING_START, revision=0, event_sequence=0, agent_run_sequence=0, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
         key_hash = idempotency_key_hash("request")
         await resources.domain.execution.executions.create(execution)
-        await resources.domain.execution.idempotency.reserve(IdempotencyRecord("tenant", "run", key_hash, "digest", "execution", IdempotencyStatus.RESERVED, None, None, now, now))
-        claimed = await resources.domain.execution.executions.claim_start(ExecutionStartClaim("execution", "tenant", 0, 0, "run", key_hash, "digest", now))
+        await resources.domain.execution.idempotency.reserve(IdempotencyRecord("claim", RuntimeDomain.EXECUTION, "run", key_hash, "digest", ResourceKind.EXECUTION, "execution", IdempotencyStatus.RESERVED, None, None, now, now))
+        claimed = await resources.domain.execution.executions.claim_start(ExecutionStartClaim("execution", "claim", 0, 0, "run", key_hash, "digest", now))
         assert claimed.status is ExecutionStatus.STARTED
         assert claimed.agent_run_sequence == 1
 
@@ -222,13 +203,13 @@ async def test_memory_terminal_aggregate_commits_event_idempotency_without_sessi
     await runtime.initialize()
     now = datetime.now(timezone.utc)
     await runtime.persistence.conversation.sessions.create(SessionRecord(session_id="session", tenant_id="tenant", owner_principal_id="owner", binding_digest="binding", status=SessionStatus.OPEN, revision=0, resource_generation=0, cwd=None, metadata={}, created_at=now, updated_at=now, closed_at=None, continuation=None))
-    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.STARTED, revision=1, event_sequence=0, agent_run_sequence=1, result_ref=None, result_digest=None, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    execution = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.STARTED, revision=1, event_sequence=0, agent_run_sequence=1, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
     await runtime.persistence.execution.executions.create(execution)
     key_hash = idempotency_key_hash("terminal")
-    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", "execution.run", key_hash, "request", "execution", IdempotencyStatus.STARTED, None, None, now, now))
-    terminal = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=1, agent_run_sequence=1, result_ref="digest", result_digest="digest", error_code=None, safe_error_details={}, created_at=now, updated_at=now)
-    result = ResultRecord("execution", "tenant", ExecutionStatus.SUCCEEDED, "none", 1, "none", "digest", "digest", StopReason.END_TURN, 0, 0, 0, now)
-    await runtime.persistence.execution.results.commit_terminal(ExecutionTerminalCommit(1, 0, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED, {}, IdempotencyTerminalUpdate("execution.run", key_hash, IdempotencyStatus.STARTED, IdempotencyStatus.COMPLETED, "request", "digest", None), None))
+    await runtime.persistence.execution.idempotency.reserve(IdempotencyRecord("tenant", RuntimeDomain.EXECUTION, "execution.run", key_hash, "request", ResourceKind.EXECUTION, "execution", IdempotencyStatus.STARTED, None, None, now, now))
+    terminal = ExecutionRecord(execution_id="execution", tenant_id="tenant", session_id="session", binding_digest="binding", parent_execution_id=None, root_execution_id="execution", source_execution_id=None, base_execution_id=None, lineage_kind=ExecutionLineageKind.SESSION_RESUME, status=ExecutionStatus.SUCCEEDED, revision=2, event_sequence=1, agent_run_sequence=1, error_code=None, safe_error_details={}, created_at=now, updated_at=now)
+    result = ResultRecord("execution", "tenant", "text", 1, "digest", ObjectRef("memory", "result", "a" * 64, 0), StopReason.END_TURN, 0, 0, 0, now)
+    await runtime.persistence.execution.commit_terminal(ExecutionTerminalCommit(1, 0, terminal, result, ExecutionEventType.EXECUTION_SUCCEEDED, {}, IdempotencyTerminalUpdate("execution.run", key_hash, IdempotencyStatus.STARTED, IdempotencyStatus.COMPLETED, "request", "digest", None), None))
     assert (await runtime.persistence.execution.idempotency.get("execution.run", key_hash, tenant_id="tenant")).status is IdempotencyStatus.COMPLETED
     events = await runtime.persistence.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
     assert tuple(item.event_type for item in events.items) == (ExecutionEventType.EXECUTION_SUCCEEDED,)

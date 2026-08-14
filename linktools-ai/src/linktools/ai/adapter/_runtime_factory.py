@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeDomain, RuntimeRetention, RuntimeStorage, RuntimeStores
-from ..storage import ObjectRef, ObjectStore, SqlStorageContext, TransientObjectStore, create_sql_storage_context, provision_sql, validate_sql
+from ..storage import ObjectStore, SqlStorageContext, TransientObjectStore, create_sql_storage_context, provision_sql, validate_sql
 from ._persistence import (
     build_filesystem_runtime,
     build_in_memory_runtime,

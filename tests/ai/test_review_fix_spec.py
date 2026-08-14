@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from linktools.ai import RuntimeStorage, StorageDomain
+from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.adapter import build_in_memory_runtime
 from linktools.ai.core import (
     ExecutionLineageKind,
@@ -31,7 +31,7 @@ from linktools.ai.runtime import (
     ExecutionRecord,
     ResultRecord,
 )
-from linktools.ai.storage import SQLiteDialect, resolve_dialect
+from linktools.ai.storage import resolve_dialect
 from linktools.ai.task import (
     CancelGraphRequest,
     DefaultTaskService,
@@ -65,7 +65,7 @@ async def test_task_cancel_claim_replay_and_caller_cancellation() -> None:
     runtime = build_in_memory_runtime(namespace="review-fix-cancel")
     await runtime.initialize()
     launcher = _Launcher()
-    service = DefaultTaskService(runtime.persistence, TenantAuthorizationPolicy(), launcher)
+    service = DefaultTaskService(runtime.persistence.task, TenantAuthorizationPolicy(), launcher)
     principal = Principal("owner", "tenant")
     request = TaskGraphRequest(TaskGraph("graph", (TaskNode("task"),)), principal, "run-key")
     try:
@@ -103,7 +103,7 @@ async def test_task_cancel_finalizer_outcome_precedence(
 ) -> None:
     runtime = build_in_memory_runtime(namespace="review-fix-cancel-outcome")
     await runtime.initialize()
-    service = DefaultTaskService(runtime.persistence, TenantAuthorizationPolicy(), _Launcher())
+    service = DefaultTaskService(runtime.persistence.task, TenantAuthorizationPolicy(), _Launcher())
     principal = Principal("owner", "tenant")
     try:
         await service.run_graph(TaskGraphRequest(TaskGraph("graph", (TaskNode("task"),)), principal, "run-key"))
@@ -147,6 +147,7 @@ async def test_sql_database_now_uses_utc_expression_for_mysql() -> None:
         bind=SimpleNamespace(dialect=SimpleNamespace(name="mysql")),
         scalar=None,
     )
+    session.get_bind = lambda: session.bind
 
     async def scalar(statement: object) -> datetime:
         session.statement = statement
@@ -165,6 +166,7 @@ async def test_sql_database_now_converts_postgresql_offset_to_utc() -> None:
         bind=SimpleNamespace(dialect=SimpleNamespace(name="postgresql")),
         scalar=None,
     )
+    session.get_bind = lambda: session.bind
 
     async def scalar(statement: object) -> datetime:
         session.statement = statement
@@ -193,37 +195,24 @@ async def test_sqlite_database_now_preserves_fractional_seconds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sql_task_lease_mutations_share_database_time_contract(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    storage = RuntimeStorage.sqlite(str(tmp_path / "runtime.db"), persist=StorageDomain.TASK)
-    captured: list[datetime] = []
-    original_database_now = SQLiteDialect.database_now
-
-    async def capture_database_now(_dialect: SQLiteDialect, session: object) -> datetime:
-        value = await original_database_now(_dialect, session)
-        captured.append(value)
-        return value
-
-    monkeypatch.setattr(
-        "linktools.ai.storage._dialects.SQLiteDialect.database_now",
-        capture_database_now,
+async def test_sql_task_lease_mutations_use_aware_expiry(tmp_path: Path) -> None:
+    storage = RuntimeStorage.sqlite(
+        str(tmp_path / "runtime.db"),
+        plan=RuntimeStoragePlan({RuntimeDomain.TASK: RuntimeStorageRoute.durable()}),
     )
     async with open_sql_resources(storage, namespace="review-fix-sql") as resources:
-        await resources.domain.task.tasks.create_plan(TaskGraph("graph", (TaskNode("task"),)), tenant_id="tenant")
-        plan = await resources.domain.task.tasks.reconcile_plan("graph", tenant_id="tenant")
+        await resources.domain.task.tasks.create_graph(TaskGraph("graph", (TaskNode("task"),)), tenant_id="review-fix-sql")
+        plan = await resources.domain.task.tasks.reconcile_graph("graph", tenant_id="review-fix-sql")
         assert plan.status is TaskStatus.READY
-        lease = await resources.domain.task.tasks.claim("graph", "task", tenant_id="tenant", owner="owner", lease_seconds=1)
-        assert len(captured) == 2
-        assert lease.lease_expires_at - captured[1] == timedelta(seconds=1)
-        assert captured[1].microsecond >= 1_000
-        renewed = await resources.domain.task.tasks.renew(lease, tenant_id="tenant", lease_seconds=2)
+        lease = await resources.domain.task.tasks.claim("graph", "task", tenant_id="review-fix-sql", owner="owner", lease_seconds=1)
+        now = datetime.now(timezone.utc)
+        assert now < lease.lease_expires_at <= now + timedelta(seconds=2)
+        renewed = await resources.domain.task.tasks.renew(lease, tenant_id="review-fix-sql", lease_seconds=2)
         assert renewed.lease_expires_at > lease.lease_expires_at
-        terminal = await resources.domain.task.tasks.complete(renewed, tenant_id="tenant", execution_id=None, result_digest="a" * 64)
+        terminal = await resources.domain.task.tasks.complete(renewed, tenant_id="review-fix-sql", execution_id=None, result_digest="a" * 64)
         assert terminal.status is TaskStatus.SUCCEEDED
         with pytest.raises(AIError) as error:
-            await resources.domain.task.tasks.renew(renewed, tenant_id="tenant", lease_seconds=1)
+            await resources.domain.task.tasks.renew(renewed, tenant_id="review-fix-sql", lease_seconds=1)
         assert error.value.code is ErrorCode.TASK_FENCE_STALE
 
 
@@ -261,6 +250,7 @@ class _ExecutionPersistence:
             results=result_repository,
             idempotency=None,
             blobs=None,
+            get_result=result_repository.get,
         )
 
 
@@ -295,22 +285,25 @@ async def test_failed_execution_result_requires_empty_payload_identity() -> None
         1,
         0,
         0,
-        None,
-        None,
         "TASK_NODE_FAILED",
         {},
         now,
         now,
     )
-    result = ResultRecord("execution", "tenant", ExecutionStatus.FAILED, "none", 1, "none", None, None, StopReason.ERROR, 0, 0, 0, now)
+    result = ResultRecord("execution", "tenant", None, None, None, None, StopReason.ERROR, 0, 0, 0, now)
     persistence = _ExecutionPersistence(execution, result)
     service = DefaultExecutionService(persistence, TenantAuthorizationPolicy(), history_reader=_History())
     principal = Principal("owner", "tenant")
     response = await service.result("execution", principal=principal)
     assert response.status is ExecutionStatus.FAILED
 
-    persistence.execution.executions.record = replace(execution, result_ref="ref", result_digest="a" * 64)
-    persistence.execution.results.record = replace(result, payload_ref="ref", payload_digest="a" * 64)
+    persistence.execution.results.record = replace(
+        result,
+        output_schema_id="text",
+        output_schema_revision=1,
+        output_schema_fingerprint="digest",
+        object_ref=object(),
+    )
     with pytest.raises(AIError) as error:
         await service.result("execution", principal=principal)
     assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR

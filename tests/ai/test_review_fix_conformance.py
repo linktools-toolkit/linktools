@@ -17,4 +17,4 @@ def test_model_connection_configuration_is_secret_free_and_stable() -> None:
 
 def test_runtime_storage_normalizes_sqlite_paths() -> None:
     storage = RuntimeStorage.sqlite("relative.db")
-    assert storage.location is not None and storage.location.as_posix().endswith("/relative.db")
+    assert storage.target_path is not None and storage.target_path.as_posix().endswith("/relative.db")

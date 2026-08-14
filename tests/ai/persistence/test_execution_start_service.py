@@ -44,7 +44,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
         operation_ids=iter(("execution-a", "execution-b")).__next__,
         history_reader=_History(),
     )
-    request = ExecutionRequest(prompt="hello", principal=Principal("owner", "tenant"), idempotency_key="same", memory_namespace="test")
+    request = ExecutionRequest(prompt="hello", principal=Principal("owner", "tenant"), idempotency_key="same", memory_scope="test")
     first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
     assert first.execution_id == second.execution_id
     assert launcher.calls == 1
@@ -52,7 +52,7 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execution_memory_namespace_can_be_disabled_but_not_blank() -> None:
+async def test_execution_memory_scope_can_be_disabled_but_not_blank() -> None:
     runtime = build_in_memory_runtime(namespace="memory-namespace-validation")
     await runtime.initialize()
     try:
@@ -65,17 +65,17 @@ async def test_execution_memory_namespace_can_be_disabled_but_not_blank() -> Non
         principal = Principal("owner", "tenant")
         handle = await service.run(
             "a" * 64,
-            ExecutionRequest("without memory", principal, "without-memory", memory_namespace=None),
+            ExecutionRequest("without memory", principal, "without-memory", memory_scope=None),
         )
         execution = await runtime.persistence.execution.executions.get(handle.execution_id, tenant_id=principal.tenant_id)
         assert execution is not None
-        assert execution.memory_namespace is None
+        assert execution.memory_scope is None
 
         for value in ("", "  "):
             with pytest.raises(AIError) as error:
                 await service.run(
                     "a" * 64,
-                    ExecutionRequest("invalid memory", principal, f"invalid-{len(value)}", memory_namespace=value),
+                    ExecutionRequest("invalid memory", principal, f"invalid-{len(value)}", memory_scope=value),
                 )
             assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
     finally:

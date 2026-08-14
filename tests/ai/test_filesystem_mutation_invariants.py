@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeStorage, StorageDomain
+from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from linktools.ai.adapter import build_filesystem_runtime, build_in_memory_runtime
 from linktools.ai.core import (
     ExecutionEventType,
@@ -39,7 +39,6 @@ def _tool_record() -> ToolOperationRecord:
         None,
         None,
         None,
-        None,
         now,
         now,
     )
@@ -58,8 +57,11 @@ async def test_configured_runtime_mutation_requires_active_transaction() -> None
 
 @pytest.mark.asyncio
 async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path: Path) -> None:
-    storage = RuntimeStorage.filesystem(tmp_path, persist=StorageDomain.RECOVERY)
-    runtime = build_filesystem_runtime(str(storage.location), namespace="effect-unknown", persist=StorageDomain.RECOVERY)
+    storage = RuntimeStorage.filesystem(
+        tmp_path,
+        plan=RuntimeStoragePlan({RuntimeDomain.RECOVERY: RuntimeStorageRoute.durable()}),
+    )
+    runtime = build_filesystem_runtime(str(storage.target_path), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
     await runtime.initialize()
     try:
         await runtime.persistence.recovery.tools.reserve(_tool_record())
@@ -71,7 +73,7 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
     finally:
         await runtime.close()
 
-    reopened = build_filesystem_runtime(str(storage.location), namespace="effect-unknown", persist=StorageDomain.RECOVERY)
+    reopened = build_filesystem_runtime(str(storage.target_path), namespace="effect-unknown", persist=RuntimeDomain.RECOVERY)
     await reopened.initialize()
     try:
         record = await reopened.persistence.recovery.tools.get_operation("operation", tenant_id="tenant")
@@ -82,14 +84,14 @@ async def test_effect_unknown_commits_before_error_and_survives_reopen(tmp_path:
 
 @pytest.mark.asyncio
 async def test_effect_unknown_storage_failure_wins_over_business_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), namespace="effect-failure", persist=StorageDomain.RECOVERY)
+    runtime = build_filesystem_runtime(str(tmp_path), namespace="effect-failure", persist=RuntimeDomain.RECOVERY)
     await runtime.initialize()
     try:
         await runtime.persistence.recovery.tools.reserve(_tool_record())
         await runtime.persistence.recovery.tools.claim("operation", tenant_id="tenant", owner="worker", lease_seconds=1)
         await asyncio.sleep(1.05)
 
-        def fail_flush(_: StorageDomain) -> None:
+        def fail_flush(_: RuntimeDomain) -> None:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
         monkeypatch.setattr(runtime, "_flush_domain", fail_flush)
@@ -102,7 +104,7 @@ async def test_effect_unknown_storage_failure_wins_over_business_error(tmp_path:
 
 @pytest.mark.asyncio
 async def test_nested_event_mutation_flushes_execution_domain_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    runtime = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=StorageDomain.EXECUTION)
+    runtime = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=RuntimeDomain.EXECUTION)
     await runtime.initialize()
     now = datetime.now(timezone.utc)
     execution = ExecutionRecord(
@@ -120,18 +122,16 @@ async def test_nested_event_mutation_flushes_execution_domain_once(tmp_path: Pat
         0,
         0,
         None,
-        None,
-        None,
         {},
         now,
         now,
     )
     try:
         await runtime.persistence.execution.executions.create(execution)
-        flushes: list[StorageDomain] = []
+        flushes: list[RuntimeDomain] = []
         original_flush = runtime._flush_domain
 
-        def record_flush(domain: StorageDomain) -> None:
+        def record_flush(domain: RuntimeDomain) -> None:
             flushes.append(domain)
             original_flush(domain)
 
@@ -144,11 +144,11 @@ async def test_nested_event_mutation_flushes_execution_domain_once(tmp_path: Pat
             payload={},
         )
         assert event.sequence == 1
-        assert flushes == [StorageDomain.EXECUTION]
+        assert flushes == [RuntimeDomain.EXECUTION]
     finally:
         await runtime.close()
 
-    reopened = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=StorageDomain.EXECUTION)
+    reopened = build_filesystem_runtime(str(tmp_path), namespace="nested-event", persist=RuntimeDomain.EXECUTION)
     await reopened.initialize()
     try:
         events = await reopened.persistence.execution.events.list("execution", tenant_id="tenant", after_sequence=0, limit=10)
@@ -165,23 +165,34 @@ async def test_blob_stream_consumption_does_not_hold_runtime_transaction_lock() 
     release = asyncio.Event()
     data = b"stream"
     digest = hashlib.sha256(data).hexdigest()
+    store = runtime.persistence.object_store(RuntimeDomain.EXECUTION)
 
     async def chunks() -> AsyncIterator[bytes]:
         started.set()
         await release.wait()
         yield data
 
+    async def inline_chunks() -> AsyncIterator[bytes]:
+        yield b"inline"
+
     try:
         stream = asyncio.create_task(
-            runtime.persistence.execution.blobs.put_stream(
-                tenant_id="tenant",
-                chunks=chunks(),
+            store.put(
+                "v1/stream",
+                chunks(),
                 expected_size=len(data),
                 expected_digest=digest,
             )
         )
         await started.wait()
-        inline = asyncio.create_task(runtime.persistence.execution.blobs.put_bytes(tenant_id="tenant", data=b"inline"))
+        inline = asyncio.create_task(
+            store.put(
+                "v1/inline",
+                inline_chunks(),
+                expected_size=len(b"inline"),
+                expected_digest=hashlib.sha256(b"inline").hexdigest(),
+            )
+        )
         await asyncio.sleep(0)
         assert inline.done()
         release.set()

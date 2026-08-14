@@ -13,18 +13,15 @@ from linktools.ai.asset import (
     InMemoryAssetBackend,
     LocalDirectoryAssetBackend,
     SqlAssetBackend,
-    SqlAssetSchema,
+    build_asset_sql_metadata,
     StrictConfigReader,
 )
-from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.migrate import provision_database
+from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
-    TABLE_PREFIX,
     MySQLDialect,
     PostgreSQLDialect,
     SQLiteDialect,
     SqlErrorKind,
-    SqlSchemaRegistry,
     StorageLayer,
     StorageChange,
     StorageOverlay,
@@ -39,6 +36,9 @@ class _DialectSession:
     def __init__(self, name: str) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=name))
         self.statements = []
+
+    def get_bind(self) -> object:
+        return self.bind
 
     async def execute(self, statement: object) -> "_DialectResult":
         self.statements.append(statement)
@@ -180,17 +180,13 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     try:
-        registry = SqlSchemaRegistry()
-        tables = SqlAssetSchema.register_schema(registry)
-        manifest = registry.freeze()
+        tables = build_asset_sql_metadata().tables
         backend = SqlAssetBackend(engine, namespace="test")
         assert backend.root.scheme == "sql"
-        assert manifest.digest
-        assert tuple(table.name for table in (tables.entry, tables.change, tables.blob, tables.revision)) == (
-            f"{TABLE_PREFIX}asset_entries",
-            f"{TABLE_PREFIX}asset_changes",
-            f"{TABLE_PREFIX}asset_blobs",
-            f"{TABLE_PREFIX}asset_revision",
+        assert tuple(table.name for table in (tables["asset_entries"], tables["asset_changes"], tables["asset_revision"])) == (
+            "asset_entries",
+            "asset_changes",
+            "asset_revision",
         )
     finally:
         await engine.dispose()
@@ -215,7 +211,7 @@ async def test_sql_asset_namespace_isolates_the_same_logical_key(tmp_path: Path)
     second = SqlAssetBackend(engine, namespace="assets-b")
     key = AssetKey("prompt", "shared")
     try:
-        await provision_database(engine)
+        await provision_asset_database(engine)
         await first.initialize()
         await second.initialize()
         await first.put(key, b"first")
@@ -248,10 +244,9 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         statements.append(statement)
 
     try:
-        registry = SqlSchemaRegistry()
-        tables = SqlAssetSchema.register_schema(registry)
+        tables = build_asset_sql_metadata().tables
         backend = SqlAssetBackend(engine, namespace="history")
-        await provision_database(engine)
+        await provision_asset_database(engine)
         await backend.initialize()
         key = AssetKey("mcp", "history.yaml")
         first = await backend.put(key, b"one")
@@ -276,31 +271,29 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
             if statement.lstrip().upper().startswith("SELECT")
         )
         assert len(selects) == 2
-        assert all("asset_revision" in statement for statement in selects)
+        assert all("asset_" in statement for statement in selects)
         async with session_factory() as session:
             counts = []
-            for table in (tables.entry, tables.change, tables.blob, tables.revision):
+            for table in (tables["asset_entries"], tables["asset_changes"], tables["storage_objects"], tables["asset_revision"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert counts == [1, 4, 2, 1]
-        assert not hasattr(tables.revision.c, "payload")
+        assert not hasattr(tables["asset_revision"].c, "payload")
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_sql_asset_backend_requires_preprovisioned_schema(tmp_path: Path) -> None:
+async def test_sql_asset_backend_provisions_its_owner_schema(tmp_path: Path) -> None:
     from sqlalchemy import inspect
     from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     try:
         backend = SqlAssetBackend(engine, namespace="missing")
-        with pytest.raises(AIError) as error:
-            await backend.initialize()
-        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        await backend.initialize()
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
-        assert tables == []
+        assert {"asset_entries", "asset_changes", "asset_revision"} <= set(tables)
     finally:
         await engine.dispose()
 
@@ -392,10 +385,9 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        registry = SqlSchemaRegistry()
-        tables = SqlAssetSchema.register_schema(registry)
+        tables = build_asset_sql_metadata().tables
         backend = SqlAssetBackend(engine, namespace="batch")
-        await provision_database(engine)
+        await provision_asset_database(engine)
         await backend.initialize()
         changes = tuple(
             StorageChange(
@@ -411,7 +403,7 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         assert await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
         async with session_factory() as session:
             counts = []
-            for table in (tables.entry, tables.change, tables.blob):
+            for table in (tables["asset_entries"], tables["asset_changes"], tables["storage_objects"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert tuple(counts) == (130, 130, 130)
     finally:

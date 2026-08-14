@@ -22,10 +22,50 @@ from ..errors import AIError, ErrorCode
 from ._domain import AssetInfo, AssetKey
 
 if TYPE_CHECKING:
-    from ._repository import AssetScope
+    from ..core import Page
+    from ..storage import StorageDeleteResult, StorageEntryRevision, StorageResetResult
 
 LogicalT = TypeVar("LogicalT")
 _SNAPSHOT_TOKEN = object()
+
+
+class AssetScope(Protocol):
+    @property
+    def entry_path(self) -> str: ...
+
+    async def stat(self, path: str) -> "AssetInfo | None": ...
+
+    async def get(self, path: str) -> "bytes | None": ...
+
+    async def list(
+        self,
+        *,
+        prefix: "str | None" = None,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[AssetResource]": ...
+
+    async def put(
+        self,
+        path: str,
+        value: bytes,
+        *,
+        expected_revision: "StorageEntryRevision | None" = None,
+    ) -> AssetInfo: ...
+
+    async def delete(
+        self,
+        path: str,
+        *,
+        expected_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageDeleteResult[AssetKey]": ...
+
+    async def reset(
+        self,
+        path: str,
+        *,
+        expected_revision: "StorageEntryRevision | None" = None,
+    ) -> "StorageResetResult[AssetKey]": ...
 
 
 @dataclass(frozen=True, slots=True)

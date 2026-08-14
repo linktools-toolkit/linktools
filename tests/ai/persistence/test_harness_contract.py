@@ -9,18 +9,19 @@ from inspect import signature
 from pathlib import Path
 
 import pytest
-from linktools.ai.adapter import DurableFilesystemStepStore
+from linktools.ai.adapter import FilesystemStepArchive
 from linktools.ai.core import step_conversation_id, step_run_id
+from linktools.ai.runtime import RuntimeDomain
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest, ModelResponse
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence, StepStore, continue_run, fork_run
 
 
 def test_harness_versions_and_public_step_store() -> None:
-    assert version("pydantic-ai-harness") == "0.13.0"
-    assert version("pydantic-ai-slim") == "2.27.0"
+    assert version("pydantic-ai-harness") == "0.18.1"
+    assert version("pydantic-ai-slim") == "2.29.0"
     assert isinstance(InMemoryStepStore(), StepStore)
-    assert isinstance(DurableFilesystemStepStore.__new__(DurableFilesystemStepStore), StepStore)
+    assert isinstance(FilesystemStepArchive.__new__(FilesystemStepArchive), StepStore)
 
 
 def test_harness_public_signatures_are_the_locked_contract() -> None:
@@ -54,13 +55,18 @@ def test_step_ids_are_scoped_and_fixed_width() -> None:
     assert run != step_run_id(namespace="ns", tenant_id="tenant", execution_id="execution", segment_sequence=2)
 
 
-def test_filesystem_step_store_uses_digest_only_paths(tmp_path: Path) -> None:
+def test_filesystem_step_archive_uses_digest_only_paths(tmp_path: Path) -> None:
     async def run() -> list[Path]:
-        store = DurableFilesystemStepStore(tmp_path, "tenant/unsafe")
+        store = FilesystemStepArchive(
+            tmp_path,
+            namespace="tenant-unsafe",
+            tenant_id="tenant",
+            runtime_domain=RuntimeDomain.EXECUTION,
+        )
         await store.initialize()
-        paths = list((tmp_path / "step").rglob("*"))
+        paths = list((tmp_path / "steps").rglob("*"))
         await store.close()
         return paths
 
     paths = asyncio.run(run())
-    assert all(path.name not in {"tenant", "unsafe"} for path in paths)
+    assert all(path.name not in {"tenant-unsafe", "tenant"} for path in paths)

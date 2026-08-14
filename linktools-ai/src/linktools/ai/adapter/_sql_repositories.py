@@ -67,10 +67,19 @@ from ..runtime import (
 from ..storage import ObjectRef, namespace_key
 from ..storage import SqlStorageContext
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from sqlalchemy import MetaData, Table
     from sqlalchemy.ext.asyncio import AsyncSession
+    from typing import Protocol
+    from ..task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
 
-    from ._sql_runtime import _SqlRuntimeTransaction
+
+    class _SqlTransactionProtocol(Protocol):
+        def mutation(self) -> "AbstractAsyncContextManager[None]": ...
+
+        def current_session(self) -> "AsyncSession": ...
+
+        def mark_changed(self) -> None: ...
 
 
 _logger = environ.get_logger("ai.adapter.sql_repositories")
@@ -85,7 +94,7 @@ class _SqlRepositoryBase:
         namespace: str,
         tenant_id: str,
         owner_domain: RuntimeDomain,
-        transaction: "_SqlRuntimeTransaction",
+        transaction: "_SqlTransactionProtocol",
     ) -> None:
         self._context = context
         self._metadata = metadata

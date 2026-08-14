@@ -123,7 +123,7 @@ class DefaultTaskService(TaskApi):
                 request_digest=digest,
             )
             if not claimed:
-                view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+                view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
                 if view is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if not _terminal(view.status):
@@ -134,7 +134,7 @@ class DefaultTaskService(TaskApi):
                 return result
             created = False
             try:
-                view = await self._persistence.task.tasks.create_graph(request.graph, tenant_id=tenant_id)
+                view = await self._persistence.tasks.create_graph(request.graph, tenant_id=tenant_id)
                 created = True
                 await self._launcher.start(request)
             except asyncio.CancelledError:
@@ -174,11 +174,11 @@ class DefaultTaskService(TaskApi):
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
         async with self._graph_consumer(graph_id, principal.tenant_id):
-            header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+            header = await self._persistence.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
             if header is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
-            return await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
+            return await self._persistence.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
 
     async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult:
         if timeout_seconds is not None and timeout_seconds < 0:
@@ -187,11 +187,11 @@ class DefaultTaskService(TaskApi):
         async with self._graph_consumer(graph_id, principal.tenant_id):
             async def poll() -> TaskGraphResult:
                 while True:
-                    header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+                    header = await self._persistence.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
                     if header is None:
                         raise AIError(ErrorCode.AUTHORIZATION_DENIED)
                     await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
-                    view = await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
+                    view = await self._persistence.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
                     if _terminal(view.status):
                         result = await self._result(view, principal.tenant_id)
                         await self._request_graph_release(graph_id, principal.tenant_id)
@@ -205,7 +205,7 @@ class DefaultTaskService(TaskApi):
 
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
         async with self._graph_consumer(graph_id, request.principal.tenant_id):
-            header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=request.principal.tenant_id)
+            header = await self._persistence.tasks.get_header(graph_id, tenant_id=request.principal.tenant_id)
             if header is None:
                 raise AIError(ErrorCode.AUTHORIZATION_DENIED)
             await self._authorization.authorize(request.principal, AuthorizationAction.TASK_CANCEL, header)
@@ -310,20 +310,20 @@ class DefaultTaskService(TaskApi):
             self._handoff_condition.notify_all()
 
     async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> "tuple[bool, OperationLedgerRecord]":
-        operation = await self._persistence.task.operations.get(operation_id, tenant_id=tenant_id)
+        operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
         if operation is None:
             now = datetime.now(timezone.utc)
-            operation = await self._persistence.task.operations.append(OperationLedgerInput(operation_id, tenant_id, ResourceKind.TASK_GRAPH, graph_id, None, kind, OperationStatus.PENDING, request_digest, None, None, None, True, now, now))
+            operation = await self._persistence.operations.append(OperationLedgerInput(operation_id, tenant_id, ResourceKind.TASK_GRAPH, graph_id, None, kind, OperationStatus.PENDING, request_digest, None, None, None, True, now, now))
         if operation.request_digest != request_digest:
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         if operation.status is OperationStatus.PENDING:
             running = replace(operation, status=OperationStatus.RUNNING, updated_at=datetime.now(timezone.utc))
             try:
-                return True, await self._persistence.task.operations.compare_and_swap(operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=running)
+                return True, await self._persistence.operations.compare_and_swap(operation_id, tenant_id=tenant_id, expected_status=OperationStatus.PENDING, next_record=running)
             except AIError as error:
                 if error.code is not ErrorCode.STORAGE_CONFLICT:
                     raise
-                operation = await self._persistence.task.operations.get(operation_id, tenant_id=tenant_id)
+                operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
                 if operation is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if operation.status is OperationStatus.SUCCEEDED:
@@ -334,11 +334,11 @@ class DefaultTaskService(TaskApi):
 
     async def _claim_cancel_operation(self, operation_id: str, tenant_id: str, graph_id: str, request_digest: str) -> tuple[bool, OperationLedgerRecord]:
         while True:
-            operation = await self._persistence.task.operations.get(operation_id, tenant_id=tenant_id)
+            operation = await self._persistence.operations.get(operation_id, tenant_id=tenant_id)
             if operation is None:
                 now = datetime.now(timezone.utc)
                 try:
-                    operation = await self._persistence.task.operations.append(
+                    operation = await self._persistence.operations.append(
                         OperationLedgerInput(
                             operation_id,
                             tenant_id,
@@ -365,7 +365,7 @@ class DefaultTaskService(TaskApi):
             if operation.status is OperationStatus.PENDING:
                 running = replace(operation, status=OperationStatus.RUNNING, updated_at=datetime.now(timezone.utc))
                 try:
-                    claimed = await self._persistence.task.operations.compare_and_swap(
+                    claimed = await self._persistence.operations.compare_and_swap(
                         operation_id,
                         tenant_id=tenant_id,
                         expected_status=OperationStatus.PENDING,
@@ -394,7 +394,7 @@ class DefaultTaskService(TaskApi):
         tenant_id = request.principal.tenant_id
         claimed, operation = await self._claim_cancel_operation(operation_id, tenant_id, graph_id, request_digest)
         try:
-            view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+            view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
         except BaseException as error:
             if claimed or operation.status in {OperationStatus.RUNNING, OperationStatus.EFFECT_UNKNOWN}:
                 return await self._settle_cancel_error(operation, graph_id, request, error)
@@ -406,8 +406,8 @@ class DefaultTaskService(TaskApi):
         if claimed:
             try:
                 if not _terminal(view.status):
-                    view = await self._persistence.task.tasks.cancel_graph(graph_id, tenant_id=tenant_id)
-                view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+                    view = await self._persistence.tasks.cancel_graph(graph_id, tenant_id=tenant_id)
+                view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
                 if view is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if not _terminal(view.status):
@@ -439,7 +439,7 @@ class DefaultTaskService(TaskApi):
     ) -> TaskGraphView:
         tenant_id = request.principal.tenant_id
         try:
-            view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+            view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
         except Exception as reload_error:
             await self._record_effect_unknown(operation, tenant_id)
             if isinstance(error, AIError):
@@ -472,11 +472,11 @@ class DefaultTaskService(TaskApi):
     async def _record_success(self, operation: OperationLedgerRecord, tenant_id: str, view: TaskGraphView, *, expected_status: OperationStatus = OperationStatus.RUNNING) -> OperationLedgerRecord:
         completed = replace(operation, status=OperationStatus.SUCCEEDED, result_ref=view.graph_id, result_digest=canonical_sha256({"graph_id": view.graph_id, "status": view.status.value}), error_code=None, updated_at=datetime.now(timezone.utc))
         try:
-            return await self._persistence.task.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=expected_status, next_record=completed)
+            return await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=expected_status, next_record=completed)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.task.operations.get(operation.operation_id, tenant_id=tenant_id)
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.status is OperationStatus.SUCCEEDED:
@@ -488,11 +488,11 @@ class DefaultTaskService(TaskApi):
     async def _record_failure(self, operation: OperationLedgerRecord, tenant_id: str, error_code: str) -> OperationLedgerRecord:
         failed = replace(operation, status=OperationStatus.FAILED, error_code=error_code, updated_at=datetime.now(timezone.utc))
         try:
-            return await self._persistence.task.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=operation.status, next_record=failed)
+            return await self._persistence.operations.compare_and_swap(operation.operation_id, tenant_id=tenant_id, expected_status=operation.status, next_record=failed)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.task.operations.get(operation.operation_id, tenant_id=tenant_id)
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.status is OperationStatus.FAILED:
@@ -504,7 +504,7 @@ class DefaultTaskService(TaskApi):
             return operation
         unknown = replace(operation, status=OperationStatus.EFFECT_UNKNOWN, error_code=None, updated_at=datetime.now(timezone.utc))
         try:
-            return await self._persistence.task.operations.compare_and_swap(
+            return await self._persistence.operations.compare_and_swap(
                 operation.operation_id,
                 tenant_id=tenant_id,
                 expected_status=operation.status,
@@ -513,7 +513,7 @@ class DefaultTaskService(TaskApi):
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._persistence.task.operations.get(operation.operation_id, tenant_id=tenant_id)
+            current = await self._persistence.operations.get(operation.operation_id, tenant_id=tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if current.status in {OperationStatus.EFFECT_UNKNOWN, OperationStatus.SUCCEEDED}:
@@ -522,19 +522,19 @@ class DefaultTaskService(TaskApi):
 
     async def _abort_plan(self, request: TaskGraphRequest) -> None:
         try:
-            await self._persistence.task.tasks.cancel_graph(request.graph.graph_id, tenant_id=request.principal.tenant_id)
+            await self._persistence.tasks.cancel_graph(request.graph.graph_id, tenant_id=request.principal.tenant_id)
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_NOT_FOUND:
                 _logger.warning("failed to close unlaunched task graph: graph=%s error=%s", request.graph.graph_id, error.code.value)
 
     async def _replay_result(self, graph_id: str, tenant_id: str) -> TaskGraphResult:
-        view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+        view = await self._persistence.tasks.get_graph(graph_id, tenant_id=tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._result(view, tenant_id)
 
     async def _result(self, view: TaskGraphView, tenant_id: str) -> TaskGraphResult:
-        nodes = await self._persistence.task.tasks.list_nodes(view.graph_id, tenant_id=tenant_id)
+        nodes = await self._persistence.tasks.list_nodes(view.graph_id, tenant_id=tenant_id)
         results = tuple(TaskNodeResult(node.node_id, node.status, node.result_digest, node.execution_id, node.error_code, node.error_digest) for node in nodes)
         execution_ids = tuple(item.execution_id for item in results if item.status is TaskStatus.SUCCEEDED and item.execution_id is not None)
         return TaskGraphResult(view.graph_id, view.status, execution_ids, results)

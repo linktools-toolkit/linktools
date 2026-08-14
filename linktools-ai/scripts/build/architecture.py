@@ -103,6 +103,36 @@ def _import_targets(node: ast.ImportFrom, current: str, path: Path, modules: 'di
     return candidates or (base,)
 
 
+def _dynamic_import_aliases(tree: ast.AST) -> 'tuple[set[str], set[str]]':
+    importlib_module_aliases: set[str] = set()
+    import_module_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_module_aliases.add(alias.asname or "importlib")
+        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            for alias in node.names:
+                if alias.name == "import_module":
+                    import_module_aliases.add(alias.asname or "import_module")
+    return importlib_module_aliases, import_module_aliases
+
+
+def _is_dynamic_import_call(
+    node: ast.Call,
+    importlib_module_aliases: set[str],
+    import_module_aliases: set[str],
+) -> bool:
+    if isinstance(node.func, ast.Name):
+        return node.func.id == "__import__" or node.func.id in import_module_aliases
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "import_module"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in importlib_module_aliases
+    )
+
+
 def _is_type_checking_import(node: ast.AST, checking_lines: 'set[int]') -> bool:
     return node.lineno in checking_lines
 
@@ -116,9 +146,10 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
     package_runtime: dict[str, set[str]] = {}
     dynamic_imports: list[str] = []
     reexports: dict[str, list[str]] = {}
-    forbidden_calls = {"__import__", "eval", "exec", "getattr", "import_module"}
+    forbidden_calls = {"eval", "exec", "getattr", "import_module"}
     for name, path in modules.items():
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        importlib_module_aliases, import_module_aliases = _dynamic_import_aliases(tree)
         if path.name == "__init__.py":
             reexports[name] = sorted(
                 target
@@ -162,7 +193,18 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
                 target_package = _module_package(resolved, modules)
                 if source_package and target_package and target_package != source_package:
                     package_runtime[source_package].add(target_package)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
+            if isinstance(node, ast.Call) and _is_dynamic_import_call(
+                node,
+                importlib_module_aliases,
+                import_module_aliases,
+            ):
+                function_name = (
+                    node.func.id
+                    if isinstance(node.func, ast.Name)
+                    else f"{ast.unparse(node.func.value)}.{node.func.attr}"
+                )
+                dynamic_imports.append(f"{path}:{node.lineno}:{function_name}")
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.func.id}")
             if isinstance(node, ast.Attribute) and node.attr in {"__dict__", "__getattr__"}:
                 dynamic_imports.append(f"{path}:{node.lineno}:{node.attr}")
@@ -170,8 +212,16 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
         "modules": sorted(modules),
         "runtime": {key: sorted(value) for key, value in sorted(runtime.items())},
         "type_checking": {key: sorted(value) for key, value in sorted(type_checking.items())},
+        "dependency": {
+            key: sorted(runtime[key] | type_checking[key])
+            for key in sorted(modules)
+        },
         "package_runtime": {key: sorted(value) for key, value in sorted(package_runtime.items())},
         "scc": [list(component) for component in _scc(runtime)],
+        "dependency_scc": [
+            list(component)
+            for component in _scc({key: runtime[key] | type_checking[key] for key in modules})
+        ],
         "package_scc": [list(component) for component in _scc(package_runtime)],
         "dynamic_imports": sorted(dynamic_imports),
         "reexports": reexports,
@@ -254,33 +304,52 @@ def _private_import_errors(
             if current_is_package:
                 current = current.rsplit(".__init__", 1)[0]
             tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            importlib_module_aliases, import_module_aliases = _dynamic_import_aliases(tree)
             for node in ast.walk(tree):
-                targets: tuple[tuple[str, int], ...] = ()
+                targets: list[tuple[str, int]] = []
                 if isinstance(node, ast.Import):
-                    targets = tuple((alias.name, node.lineno) for alias in node.names)
+                    targets.extend((alias.name, node.lineno) for alias in node.names)
                 elif isinstance(node, ast.ImportFrom):
                     base = _resolve(node.module or "", node.level, current, current_is_package=current_is_package)
-                    if node.module:
-                        targets = (
-                            (base, node.lineno),
-                            *((f"{base}.{alias.name}", node.lineno) for alias in node.names if alias.name.startswith("_")),
-                        )
-                    else:
-                        targets = tuple((f"{base}.{alias.name}", node.lineno) for alias in node.names if alias.name != "*")
+                    targets.append((base, node.lineno))
+                    targets.extend(
+                        (f"{base}.{alias.name}", node.lineno)
+                        for alias in node.names
+                        if alias.name.startswith("_")
+                    )
+                if isinstance(node, ast.Call) and _is_dynamic_import_call(
+                    node,
+                    importlib_module_aliases,
+                    import_module_aliases,
+                ):
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        targets.append((node.args[0].value, node.lineno))
                 for target, lineno in targets:
-                    if not target.startswith("linktools.ai.") or not target.rsplit(".", 1)[-1].startswith("_"):
+                    if not _is_supported_source_module(target):
                         continue
                     source_owner = _owner_package(current)
                     target_owner = _owner_package(target)
-                    if source_owner != target_owner:
+                    owner_parts = target_owner.split(".")
+                    target_parts = target.split(".")
+                    private_path = any(part.startswith("_") for part in target_parts[len(owner_parts):])
+                    if source_owner != target_owner and private_path:
                         errors.append(f"private cross-package import: {path}:{lineno}: {current} -> {target}")
     return errors
 
 
 def _owner_package(module: str) -> str:
-    parts = module.split(".")
-    private_index = next((index for index, part in enumerate(parts) if part.startswith("_") and index >= 2), len(parts))
-    return ".".join(parts[:private_index])
+    if module == "linktools.ai":
+        return "linktools.ai"
+    if module.startswith("linktools.ai."):
+        parts = module.split(".")
+        return ".".join(parts[:3])
+    if module == "linktools.commands.ai" or module.startswith("linktools.commands.ai."):
+        return "linktools.commands.ai"
+    return module
+
+
+def _is_supported_source_module(module: str) -> bool:
+    return module == "linktools.ai" or module.startswith("linktools.ai.") or module == "linktools.commands.ai" or module.startswith("linktools.commands.ai.")
 
 
 def _init_errors(root: Path) -> 'list[str]':
@@ -353,6 +422,7 @@ class ArchitecturePolicyChecker:
         commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
         errors.extend(_private_import_errors(((root, "linktools.ai"), (commands_root, "linktools.commands.ai"))))
         errors.extend(f"runtime SCC: {component}" for component in report["scc"] if isinstance(component, list))
+        errors.extend(f"dependency SCC: {component}" for component in report["dependency_scc"] if isinstance(component, list))
         errors.extend(f"package SCC: {component}" for component in report["package_scc"] if isinstance(component, list))
         errors.extend(f"forbidden import or reflection: {item}" for item in report["dynamic_imports"] if isinstance(item, str))
         dependencies = policy.get("dependencies", {})

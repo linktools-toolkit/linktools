@@ -19,7 +19,7 @@ from linktools.ai.observe import (
     RecordedTraceItem,
     snapshot_digest,
 )
-from linktools.ai.runtime import BlobPayloadService, ExecutionRequest, ToolOperationRecord
+from linktools.ai.runtime import ExecutionRequest, RuntimeStoragePlan, RuntimeStorageRoute, ToolOperationRecord
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
 from linktools.ai.task import SwarmLimits, TaskGraph, TaskLease, TaskNode
 from linktools.ai.temporal import (
@@ -46,7 +46,6 @@ from linktools.ai.temporal.workflow import (
     TaskWorkflowInput,
     TaskWorkflowResult,
 )
-from linktools.ai import RuntimeStorage
 from linktools.ai.workspace import trusted_workspace_principal
 from scripts.build.agent_bundle import build_bundle
 
@@ -72,14 +71,13 @@ def test_classification_fields_reject_noncanonical_values(value: str) -> None:
         AssetRef(value, "asset")
     with pytest.raises(ValueError):
         AgentCapabilityRef(value, "capability")
-    with pytest.raises(AIError) as storage_error:
-        RuntimeStorage.filesystem(".", persist={value})
-    assert storage_error.value.code is ErrorCode.REQUEST_FIELD_INVALID
+    with pytest.raises(ValueError):
+        RuntimeStoragePlan({value: RuntimeStorageRoute.volatile()})
 
 
-def test_payload_service_rejects_a_noncanonical_tenant() -> None:
-    with pytest.raises(ValueError, match="payload tenant is invalid"):
-        BlobPayloadService(object(), tenant_id=" tenant")
+def test_runtime_storage_plan_rejects_an_invalid_domain() -> None:
+    with pytest.raises(ValueError):
+        RuntimeStoragePlan({"conversation": RuntimeStorageRoute.volatile()})
 
 
 def test_authorization_kinds_are_canonical() -> None:
@@ -96,13 +94,13 @@ def test_contextual_classification_fields_stay_concise() -> None:
     operation_fields = {field.name for field in fields(OperationLedgerRecord)}
     task_lease_fields = {field.name for field in fields(TaskLease)}
     tool_operation_fields = {field.name for field in fields(ToolOperationRecord)}
-    assert "kind" in operation_fields and "operation_kind" not in operation_fields
+    assert "operation_kind" in operation_fields and "kind" not in operation_fields
     assert "owner" in task_lease_fields and "lease_owner" not in task_lease_fields
     assert "owner" in tool_operation_fields and "lease_owner" not in tool_operation_fields
 
 
 @pytest.mark.parametrize("value", [" memory", "memory ", "memory\nvalue", "界" * 129])
-def test_memory_namespace_rejects_noncanonical_values(value: str) -> None:
+def test_memory_scope_rejects_noncanonical_values(value: str) -> None:
     with pytest.raises(AIError) as error:
         ExecutionRequest("prompt", trusted_workspace_principal("workspace"), "request", value)
     assert error.value.code is ErrorCode.REQUEST_FIELD_INVALID
@@ -295,7 +293,7 @@ async def test_workflow_gateway_validates_contract_and_unknown_operations() -> N
             return None
 
     gateway = WorkflowGateway(Client())
-    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_namespace="test")
+    local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_scope="test")
     await gateway.start_execution("execution", local)
     with pytest.raises(ValueError):
         await gateway.query_execution("execution", "unknown")

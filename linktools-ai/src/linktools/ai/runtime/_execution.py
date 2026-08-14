@@ -291,25 +291,25 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             if existing.status is IdempotencyStatus.RESERVED:
-                pending = await self._persistence.execution.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
+                pending = await self._persistence.execution.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
                 if pending is not None and pending.status is ExecutionStatus.STARTED:
-                    return ExecutionHandle(existing.execution_id)
+                    return ExecutionHandle(existing.resource_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 try:
-                    await self._persistence.execution.executions.claim_start(ExecutionStartClaim(existing.execution_id, request.principal.tenant_id, pending.revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
+                    await self._persistence.execution.executions.claim_start(ExecutionStartClaim(existing.resource_id, request.principal.tenant_id, pending.revision, pending.event_sequence, scope, key_hash, request_digest, datetime.now(timezone.utc)))
                 except AIError as error:
-                    current = await self._persistence.execution.executions.get(existing.execution_id, tenant_id=request.principal.tenant_id)
+                    current = await self._persistence.execution.executions.get(existing.resource_id, tenant_id=request.principal.tenant_id)
                     if error.code is not ErrorCode.STORAGE_CONFLICT or current is None or current.status is not ExecutionStatus.STARTED:
                         raise
-                    return ExecutionHandle(existing.execution_id)
-                await self._launch_claim(request, existing.execution_id, request.principal.tenant_id, scope, key_hash)
-                return ExecutionHandle(existing.execution_id)
+                    return ExecutionHandle(existing.resource_id)
+                await self._launch_claim(request, existing.resource_id, request.principal.tenant_id, scope, key_hash)
+                return ExecutionHandle(existing.resource_id)
             if existing.status is IdempotencyStatus.FAILED:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_START_PERSISTENCE_FAILED)
             if existing.status is IdempotencyStatus.CANCELLED:
                 raise _stable_idempotency_error(existing.error_code, ErrorCode.EXECUTION_CANCELLED)
-            return ExecutionHandle(existing.execution_id)
+            return ExecutionHandle(existing.resource_id)
         if session_id is not None:
             active = await self._persistence.execution.executions.list_by_session(session_id, tenant_id=request.principal.tenant_id)
             if any(item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} for item in active):
@@ -356,9 +356,9 @@ class DefaultExecutionService:
             )
         )
         if not reservation.created:
-            if reservation.execution_idempotency.request_digest != request_digest:
+            if reservation.idempotency.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.execution_idempotency.status is IdempotencyStatus.RESERVED:
+            if reservation.execution.status is ExecutionStatus.PENDING_START and reservation.idempotency.status is IdempotencyStatus.RESERVED:
                 try:
                     await self._persistence.execution.executions.claim_start(ExecutionStartClaim(reservation.execution.execution_id, reservation.execution.tenant_id, reservation.execution.revision, reservation.execution.event_sequence, scope, key_hash, request_digest, now))
                 except AIError as error:
@@ -367,9 +367,9 @@ class DefaultExecutionService:
                         raise
                     return ExecutionHandle(reservation.execution.execution_id)
                 await self._launch_claim(request, reservation.execution.execution_id, reservation.execution.tenant_id, scope, key_hash)
-            elif reservation.execution.status is ExecutionStatus.STARTED and reservation.execution_idempotency.status is IdempotencyStatus.STARTED:
+            elif reservation.execution.status is ExecutionStatus.STARTED and reservation.idempotency.status is IdempotencyStatus.STARTED:
                 return ExecutionHandle(reservation.execution.execution_id)
-            elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.execution_idempotency.status is IdempotencyStatus.START_UNKNOWN:
+            elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

@@ -45,7 +45,6 @@ class _SqlRuntimeTransaction:
     @asynccontextmanager
     async def mutation(self) -> AsyncIterator[None]:
         await self._hub.enter(self._owner_domain)
-        entered = True
         outer = self._hub.depth == 1
         session = self._session
         try:

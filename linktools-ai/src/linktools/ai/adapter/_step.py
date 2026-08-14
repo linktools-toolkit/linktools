@@ -157,8 +157,13 @@ class StagingStepStore(StepStore):
             latest[item.tool_call_id] = item
         return [item for item in latest.values() if item.status == "started"]
 
-    async def fact_run_ids(self) -> tuple[str, ...]:
-        return tuple(sorted(set(self._runs) | set(self._events) | set(self._snapshots) | set(self._effects)))
+    def _fact_run_ids(self) -> frozenset[str]:
+        return frozenset(
+            set(self._runs)
+            | set(self._events)
+            | set(self._snapshots)
+            | set(self._effects)
+        )
 
     async def _fact_projection(self, run_id: str) -> "tuple[RunRecord | None, tuple[StepEvent, ...], tuple[ContinuableSnapshot, ...], tuple[ToolEffectRecord, ...]]":
         async with self._lock:
@@ -185,7 +190,7 @@ class StagingStepStore(StepStore):
 
 
 class InMemoryStepArchive(StepStore):
-    """Hydrated owner archive for volatile and transient Conversation facts."""
+    """Hydrated owner archive for volatile and transient Step facts."""
 
     def __init__(self, runtime_domain: RuntimeDomain) -> None:
         if runtime_domain not in _ARCHIVE_DOMAINS:
@@ -221,7 +226,7 @@ class InMemoryStepArchive(StepStore):
         return await self._store.list_events(run_id=run_id)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        if self._runtime_domain not in {RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION}:
+        if self._runtime_domain not in _ARCHIVE_DOMAINS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._store.save_snapshot(snapshot)
 
@@ -359,7 +364,7 @@ class FilesystemStepArchive(StagingStepStore):
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self._ensure_ready()
-        if self._runtime_domain not in {RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION}:
+        if self._runtime_domain not in _ARCHIVE_DOMAINS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if snapshot.run_id not in self._runs:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -816,7 +821,7 @@ class SqlStepArchive(StepStore):
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self._ensure_ready()
-        if self._runtime_domain not in {RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION}:
+        if self._runtime_domain not in _ARCHIVE_DOMAINS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from sqlalchemy import insert, select, update
 
@@ -1066,6 +1071,7 @@ class RuntimeStepPersistence(StepStore):
             raise
         self._initialized = initialized
         self._business_unavailable = False
+        _logger.debug("step persistence initialized: children=%s", len(initialized))
 
     async def register_run(self, record: RunRecord) -> None:
         await self._ensure_business()
@@ -1145,7 +1151,13 @@ class RuntimeStepPersistence(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         archive = self._archives.get(RuntimeDomain.RECOVERY)
         if archive is not None:
-            await _materialize_snapshot(self._staging, archive, run, snapshot)
+            await _materialize_snapshot(
+                self._staging,
+                archive,
+                run,
+                snapshot,
+                require_complete=require_complete,
+            )
 
     async def materialize_conversation(self, *, step_run_id: str) -> None:
         run = await self._staging.get_run(run_id=step_run_id)
@@ -1153,7 +1165,7 @@ class RuntimeStepPersistence(StepStore):
         archive = self._archives.get(RuntimeDomain.CONVERSATION)
         if run is None or snapshot is None or snapshot.state != "complete" or archive is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        await _materialize_snapshot(self._staging, archive, run, snapshot)
+        await _materialize_snapshot(self._staging, archive, run, snapshot, require_complete=True)
 
     async def materialize_from_recovery(self, *, target: RuntimeDomain, step_run_id: str) -> None:
         if target not in {RuntimeDomain.EXECUTION, RuntimeDomain.CONVERSATION}:
@@ -1173,13 +1185,13 @@ class RuntimeStepPersistence(StepStore):
             source_run, source_snapshot = await _read_complete_current_snapshot(source, step_run_id)
             if destination is None:
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-            await _materialize_snapshot(source, destination, source_run, source_snapshot)
+            await _materialize_snapshot(source, destination, source_run, source_snapshot, require_complete=True)
             return
         if run_exists:
             source = recovery if recovery is not None else self._staging
             source_run, source_snapshot = await _read_complete_current_snapshot(source, step_run_id)
             if execution is not None:
-                await _materialize_snapshot(source, execution, source_run, source_snapshot)
+                await _materialize_snapshot(source, execution, source_run, source_snapshot, require_complete=True)
             return
         if execution is None and recovery is None:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -1188,7 +1200,7 @@ class RuntimeStepPersistence(StepStore):
             recovery_projection = await _read_recovery_projection(recovery, step_run_id)
             if recovery_projection is None or recovery_projection.run != recovery_run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await _materialize_snapshot(recovery, execution, recovery_run, recovery_snapshot)
+            await _materialize_snapshot(recovery, execution, recovery_run, recovery_snapshot, require_complete=True)
             execution_projection = await _read_execution_projection(execution, step_run_id)
             if execution_projection is None or execution_projection.run != recovery_run:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1254,11 +1266,18 @@ class RuntimeStepPersistence(StepStore):
 
     async def preflight_close(self) -> None:
         async with self._close_lock:
+            self._business_unavailable = True
             if self._close_preflight_ok:
                 return
-            for run_id in await self._staging.fact_run_ids():
-                await self._verify_staging_run(run_id, required=False)
+            _logger.debug("step preflight close started")
+            try:
+                for run_id in sorted(self._staging._fact_run_ids()):
+                    await self._verify_staging_run(run_id, required=False)
+            except BaseException:
+                _logger.warning("step preflight close failed", exc_info=True)
+                raise
             self._close_preflight_ok = True
+            _logger.debug("step preflight close completed")
 
     async def close(self) -> None:
         async with self._close_lock:
@@ -1340,11 +1359,26 @@ async def _read_recovery_projection(store: StepStore, run_id: str) -> _RecoveryE
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-async def _materialize_snapshot(source: StepStore, target: StepStore, run: RunRecord, snapshot: ContinuableSnapshot) -> None:
+async def _materialize_snapshot(
+    source: StepStore,
+    target: StepStore,
+    run: RunRecord,
+    snapshot: ContinuableSnapshot,
+    *,
+    require_complete: bool,
+) -> None:
+    _logger.debug(
+        "materializing step snapshot: run=%s state=%s require_complete=%s",
+        run.run_id,
+        snapshot.state,
+        require_complete,
+    )
     await _materialize_run(source, target, run.run_id)
     await target.save_snapshot(snapshot)
     current = await target.latest_snapshot(run_id=run.run_id, include_interrupted=True)
-    if current != snapshot or current is None or current.state != "complete":
+    if current is None or current != snapshot:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if require_complete and current.state != "complete":
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
@@ -1503,9 +1537,10 @@ async def _snapshot_from_json(value: dict[str, object], object_store: ObjectStor
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if object_store_id != object_store.store_id:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    state = _snapshot_state(value.get("state", "complete"))
     messages = value.get("messages", [])
     await _materialize_media(messages, object_store)
-    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=value.get("state", "complete"))
+    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=state)
 
 
 async def _snapshot_from_sql(value: Mapping[str, object], object_store: ObjectStore) -> ContinuableSnapshot:
@@ -1514,9 +1549,16 @@ async def _snapshot_from_sql(value: Mapping[str, object], object_store: ObjectSt
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if object_store_id != object_store.store_id:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+    state = _snapshot_state(value.get("state", "complete"))
     messages = value.get("messages_json") or []
     await _materialize_media(messages, object_store)
-    return ContinuableSnapshot(run_id=str(value["step_run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=value.get("state", "complete"))
+    return ContinuableSnapshot(run_id=str(value["step_run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=state)
+
+
+def _snapshot_state(value: object) -> str:
+    if value not in ("complete", "interrupted"):
+        raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+    return str(value)
 
 
 def _snapshot_row_matches(row: Mapping[str, object], payload: Mapping[str, object], snapshot: ContinuableSnapshot) -> bool:

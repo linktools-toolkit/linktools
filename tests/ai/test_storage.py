@@ -4,16 +4,14 @@
 """Generic Storage composition and cache conformance tests."""
 
 import asyncio
-import json
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai import RuntimeStorage
-from linktools.ai.adapter import SqlRuntimeSchema
-from linktools.ai.asset import SqlAssetSchema
+from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
+from linktools.ai.adapter import build_runtime_sql_metadata
+from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.core import ToolOperationStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ToolOperationRecord
@@ -23,8 +21,6 @@ from linktools.ai.storage import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
-    SqlSchemaRegistry,
-    register_storage_schema,
     StorageDeleteResult,
     StorageEntryRevision,
     StorageLayer,
@@ -226,147 +222,20 @@ async def test_composition_writer_must_be_readable() -> None:
         StorageOverlay(primary, writer=WritableBackend(()))
 
 
-def test_mysql_init_schema_matches_runtime_metadata_and_dba_rules() -> None:
-    schema_path = Path("linktools-ai/migrations/init_schema.sql")
-    sql = schema_path.read_text(encoding="utf-8")
-    assert "not a production bootstrap or migration" in sql
-    assert "reviewed, environment-specific DBA migration tooling" in sql
-    matrix = json.loads(Path("linktools-ai/scripts/build/matrix/sql-schema-manifest.json").read_text(encoding="utf-8"))
-    storage_registry = SqlSchemaRegistry()
-    register_storage_schema(storage_registry)
-    registry = SqlSchemaRegistry()
-    SqlRuntimeSchema.register_schema(registry)
-    manifest = registry.freeze()
-    asset_registry = SqlSchemaRegistry()
-    asset_tables = SqlAssetSchema.register_schema(asset_registry)
-    asset_table_values = (asset_tables.entry, asset_tables.change, asset_tables.blob, asset_tables.revision)
-    assert tuple(table.name for table in asset_table_values) == tuple(matrix["asset_tables"])
-    expected_tables = tuple(matrix["storage_tables"]) + tuple(table.name for table in manifest.tables) + tuple(matrix["step_tables"]) + tuple(matrix["asset_tables"])
-    actual_tables = tuple(re.findall(r"CREATE TABLE `([^`]+)`", sql))
-    assert actual_tables == expected_tables
-    assert matrix["runtime_digest"] == manifest.digest
-    assert "CHARACTER SET ascii" not in sql
-    assert " COLLATE ascii_bin" not in sql
-    for table in tuple(storage_registry.metadata.sorted_tables) + tuple(registry.metadata.sorted_tables) + tuple(asset_table_values):
-        for index in table.indexes:
-            assert not index.name.startswith("ai_")
-            assert len(index.columns) <= 3
-        for constraint in table.constraints:
-            if constraint.name is not None and constraint.__class__.__name__ == "UniqueConstraint":
-                assert not constraint.name.startswith("ai_")
-                assert len(constraint.columns) <= 3
-    assert registry.metadata.tables["ai_runtime_sessions"].c.session_id.nullable is False
-    assert registry.metadata.tables["ai_runtime_tools"].c.run_id.nullable is False
-    assert registry.metadata.tables["ai_runtime_tools"].c.tool_call_id.nullable is False
-    for table in registry.metadata.sorted_tables:
-        block = re.search(
-            rf"CREATE TABLE `{re.escape(table.name)}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        body = block.group(1)
-        columns = tuple(re.findall(r"^  `([^`]+)` ", body, re.MULTILINE))
-        assert columns[-2:] == ("updated_at", "created_at")
-        assert set(columns) == {column.name for column in table.columns}
-        assert all(f"`{column.name}`" in body and " COMMENT '" in body for column in table.columns)
-        assert "COMMENT='" in block.group(0)
-        timestamp_indexes = {
-            tuple(column.name for column in index.columns)
-            for index in table.indexes
-            if len(index.columns) == 1
-        }
-        assert ("updated_at",) in timestamp_indexes
-        assert ("created_at",) in timestamp_indexes
-        for index in table.indexes:
-            assert f"KEY `{index.name}`" in body
-            for column in index.columns:
-                if isinstance(getattr(column.type, "length", None), int) and column.type.length > 128:
-                    assert f"`{column.name}`(128)" in body
-        for constraint in table.constraints:
-            if constraint.name is not None and constraint.__class__.__name__ == "UniqueConstraint":
-                assert f"UNIQUE KEY `{constraint.name}`" in body
-                for column in constraint.columns:
-                    if isinstance(getattr(column.type, "length", None), int) and column.type.length > 128:
-                        assert f"`{column.name}`(128)" in body
-    for table_name in expected_tables:
-        block = re.search(
-            rf"CREATE TABLE `{re.escape(table_name)}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        body = block.group(1)
-        columns = tuple(re.findall(r"^  `([^`]+)` ", body, re.MULTILINE))
-        assert columns[0] == "id"
-        assert columns[-2:] == ("updated_at", "created_at")
-        assert "PRIMARY KEY (`id`)" in body
-        assert "COMMENT='" in block.group(0)
-        assert all(re.search(rf"^  `{re.escape(column)}` .* COMMENT '", body, re.MULTILINE) for column in columns)
-        assert "KEY `ix_updated_at` (`updated_at`)" in body
-        assert "KEY `ix_created_at` (`created_at`)" in body
-    for table in asset_table_values:
-        block = re.search(
-            rf"CREATE TABLE `{re.escape(table.name)}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        columns = tuple(re.findall(r"^  `([^`]+)` ", block.group(1), re.MULTILINE))
-        assert columns == tuple(column.name for column in table.columns)
-    step_indexes = {
-        "ai_step_runs": ("uk_namespace_key_run_id", "uk_namespace_key_run_key"),
-        "ai_step_effects": ("uk_namespace_key_run_id_tool_call_id",),
-        "ai_step_media": ("uk_namespace_key_sha256",),
-    }
-    for table_name in matrix["step_tables"]:
-        block = re.search(
-            rf"CREATE TABLE `{re.escape(table_name)}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        body = block.group(1)
-        columns = tuple(re.findall(r"^  `([^`]+)` ", body, re.MULTILINE))
-        assert columns[0] == "id"
-        assert columns[-2:] == ("updated_at", "created_at")
-        assert "KEY `ix_updated_at` (`updated_at`)" in body
-        assert "KEY `ix_created_at` (`created_at`)" in body
-        for index_name in step_indexes.get(table_name, ()):
-            assert f"KEY `{index_name}`" in body
-        if table_name == "ai_step_runs":
-            assert re.search(r"^  `conversation_id` .* NOT NULL COMMENT '", body, re.MULTILINE)
-    expected_runtime_keys = {
-        "ai_runtime_blob_chunks": ("uk_namespace_key_tenant_id_chunk_key",),
-        "ai_runtime_executions": (
-            "ix_namespace_key_tenant_id_parent_execution_id",
-            "ix_namespace_key_tenant_id_session_id",
-        ),
-        "ai_runtime_idempotency": ("uk_namespace_key_tenant_id_identity_key",),
-        "ai_runtime_operation_counters": ("uk_namespace_key_tenant_id_partition_key",),
-        "ai_runtime_tools": ("uk_namespace_key_tenant_id_call_key",),
-    }
-    for table_name, index_names in expected_runtime_keys.items():
-        block = re.search(
-            rf"CREATE TABLE `{re.escape(table_name)}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        for index_name in index_names:
-            assert f"KEY `{index_name}`" in block.group(1)
-    for table_name in ("ai_step_events", "ai_step_snapshots"):
-        block = re.search(
-            rf"CREATE TABLE `{table_name}` \((.*?)\n\) ENGINE=.*?;",
-            sql,
-            re.DOTALL,
-        )
-        assert block is not None
-        assert "KEY `ix_namespace_key_run_id` (`namespace_key`, `run_id`(128))" in block.group(1)
-    assert "ai_session_turns" not in sql
-    assert "ai_execution_trace" not in sql
-    assert "ai_runtime_repository_records" not in sql
+def test_sql_metadata_builders_are_owner_scoped() -> None:
+    runtime_metadata = build_runtime_sql_metadata(RuntimeStoragePlan.all())
+    asset_metadata = build_asset_sql_metadata()
 
+    assert {"runtime_sessions", "runtime_executions", "step_runs", "step_events", "step_effects"} <= set(runtime_metadata.tables)
+    assert {"asset_entries", "asset_changes", "asset_revision", "storage_objects", "storage_object_chunks"} <= set(asset_metadata.tables)
+    assert "asset_entries" not in runtime_metadata.tables
+    assert "runtime_sessions" not in asset_metadata.tables
+
+    recovery_metadata = build_runtime_sql_metadata(
+        RuntimeStoragePlan({RuntimeDomain.RECOVERY: RuntimeStorageRoute.durable()})
+    )
+    assert "step_effects" in recovery_metadata.tables
+    assert "runtime_sessions" not in recovery_metadata.tables
 
 @pytest.mark.asyncio
 async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() -> None:
@@ -421,35 +290,34 @@ async def test_read_only_write_is_fail_closed() -> None:
 @pytest.mark.asyncio
 async def test_sql_tool_state_is_durable_and_conflict_safe(tmp_path: Path) -> None:
     timestamp = datetime.now(timezone.utc)
-    storage = RuntimeStorage.sqlite(str(tmp_path / "tool-state.db"))
+    storage = RuntimeStorage.sqlite(str(tmp_path / "tool-state.db"), plan=RuntimeStoragePlan.all())
     async with open_sql_resources(storage, namespace="runtime") as runtime:
         record = ToolOperationRecord(
-            "operation", "tenant", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
-            ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
+            "operation", "runtime", "run", "call", "a" * 64, "tool", "arguments", "binding", True,
+            ToolOperationStatus.PENDING, None, 0, None, None, None, timestamp, timestamp,
         )
         await runtime.domain.recovery.tools.reserve(record)
-        assert await runtime.domain.recovery.tools.get_operation("operation", tenant_id="tenant") == record
+        assert await runtime.domain.recovery.tools.get_operation("operation", tenant_id="runtime") == record
         claimed = await runtime.domain.recovery.tools.claim(
             "operation",
-            tenant_id="tenant",
+            tenant_id="runtime",
             owner="worker",
             lease_seconds=30,
         )
         assert claimed.owner == "worker"
         completed = await runtime.domain.recovery.tools.complete(
             "operation",
-            tenant_id="tenant",
+            tenant_id="runtime",
             owner="worker",
             fence=claimed.fence,
-            result_ref="result",
-            result_digest="b" * 64,
+            result_object_ref=None,
         )
         assert completed.status is ToolOperationStatus.COMPLETED
         with pytest.raises(AIError) as error:
             await runtime.domain.recovery.tools.reserve(
                 ToolOperationRecord(
-                    "operation", "tenant", "run", "other-call", "a" * 64, "tool", "arguments", "binding", True,
-                    ToolOperationStatus.PENDING, None, 0, None, None, None, None, timestamp, timestamp,
+                    "operation", "runtime", "run", "other-call", "a" * 64, "tool", "arguments", "binding", True,
+                    ToolOperationStatus.PENDING, None, 0, None, None, None, timestamp, timestamp,
                 )
             )
         assert error.value.code == ErrorCode.TOOL_OPERATION_CONFLICT

@@ -7,12 +7,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
-
 from linktools.errors import Error
-
-if TYPE_CHECKING:
-    from .core import JsonValue
 
 
 def _cause_digest(value: Mapping[str, str]) -> str:
@@ -137,7 +132,7 @@ class SafeError:
     category: str
     retryable: bool
     operation_id: str
-    safe_details: "Mapping[str, JsonValue]"
+    safe_details: "Mapping[str, object]"
     cause_digest: str
 
 
@@ -152,7 +147,7 @@ class AIError(Error):
         category: 'str | None' = None,
         retryable: 'bool | None' = None,
         operation_id: 'str | None' = None,
-        safe_details: 'Mapping[str, JsonValue] | None' = None,
+        safe_details: 'Mapping[str, object] | None' = None,
     ) -> None:
         super().__init__(message or code.value)
         self.code = code

@@ -20,7 +20,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import CreateSessionRequest, ExecutionRecord, LocalExecutionBackend, SessionRecord
 from linktools.ai.spec import AgentSpec
-from linktools.ai import RuntimeStorage
+from linktools.ai import RuntimeDomain, RuntimeStorage
 from linktools.ai.workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
 from pydantic_ai_harness.step_persistence import InMemoryStepStore
 
@@ -39,14 +39,14 @@ class _MCPRuntime:
 
 @pytest.mark.asyncio
 async def test_workspace_default_agent_declares_configured_mcp_servers(tmp_path: Path) -> None:
-    mcp = tmp_path / ".linktools" / "assets" / "mcp" / "local"
+    mcp = tmp_path / ".linktools" / "mcp" / "local"
     mcp.parent.mkdir(parents=True)
     mcp.write_text('{"args":[],"command":"echo","id":"local","revision":1}', encoding="utf-8")
 
     workspace = Workspace.load(tmp_path)
     async with open_workspace_runtime(
         workspace,
-        storage=RuntimeStorage.memory(),
+        runtime_storage=RuntimeStorage.memory(),
         model="test-model",
         mcp_runtime=_MCPRuntime(),
     ) as runtime:
@@ -74,7 +74,7 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
     runtime = build_in_memory_runtime(namespace="memory-regression")
     await runtime.initialize()
     try:
-        store = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", namespace="workspace")
+        store = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", execution_id="execution", memory_scope="workspace")
         await store.write("workspace/memory/MEMORY.md", "remember commit-writer", expected_version=None)
 
         assert await store.list_paths("workspace/memory/", limit=10) == ["workspace/memory/MEMORY.md"]
@@ -92,12 +92,12 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_memory_namespace_is_independent_from_tenant_and_path() -> None:
+async def test_memory_scope_is_independent_from_tenant_and_path() -> None:
     runtime = build_in_memory_runtime(namespace="runtime-namespace")
     await runtime.initialize()
     try:
-        first = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", namespace="memory-a")
-        second = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", namespace="memory-b")
+        first = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", execution_id="execution-a", memory_scope="memory-a")
+        second = RuntimeMemoryStore(runtime.persistence, tenant_id="tenant", execution_id="execution-b", memory_scope="memory-b")
         await first.write("notes/shared.md", "first", expected_version=None)
         await second.write("notes/shared.md", "second", expected_version=None)
 
@@ -144,8 +144,6 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
                     revision=0,
                     event_sequence=0,
                     agent_run_sequence=1,
-                    result_ref=None,
-                    result_digest=None,
                     error_code=None,
                     safe_error_details={},
                     created_at=now,
@@ -159,6 +157,12 @@ async def test_local_reconcile_uses_workspace_tenant_not_persistence_namespace(t
             {},
             tenant_id="workspace-tenant",
             execution_root=tmp_path,
+            step_reads={
+                RuntimeDomain.CONVERSATION: InMemoryStepStore(),
+                RuntimeDomain.EXECUTION: InMemoryStepStore(),
+                RuntimeDomain.RECOVERY: InMemoryStepStore(),
+            },
+            step_lifecycle=object(),
         )
 
         await backend.reconcile()

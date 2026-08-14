@@ -14,8 +14,8 @@ from linktools.ai.spec import AgentCapabilityRef, SkillSpec
 
 
 def test_platform_tool_selection_is_allowlist_scoped() -> None:
-    assert select_platform_tool_names(allow_tools=("write_plan",), memory_namespace="memory") == ("write_plan",)
-    assert select_platform_tool_names(allow_tools=("*",), memory_namespace=None) == ("write_plan",)
+    assert select_platform_tool_names(allow_tools=("write_plan",), memory_scope="memory") == ("write_plan",)
+    assert select_platform_tool_names(allow_tools=("*",), memory_scope=None) == ("write_plan",)
 
 
 def test_skill_catalog_snapshot_is_sorted_and_immutable() -> None:

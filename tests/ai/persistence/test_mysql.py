@@ -12,7 +12,7 @@ from tests.ai.persistence.helper import open_sql_resources
 
 
 def test_mysql_config_redacts_credentials() -> None:
-    assert RuntimeStorage.memory().location is None
+    assert RuntimeStorage.memory().target_path is None
 
 
 @pytest.mark.asyncio
