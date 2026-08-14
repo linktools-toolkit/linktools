@@ -225,7 +225,7 @@ class ProcessResult(object):
     """Result of a completed process ."""
 
     def __init__(self, args: "Any", returncode: int, stdout: "Any" = None,
-                 stderr: "Any" = None, duration: float = None,
+                 stderr: "Any" = None, duration: "float | None" = None,
                  timed_out: bool = False) -> None:
         self.args = args
         self.returncode = returncode

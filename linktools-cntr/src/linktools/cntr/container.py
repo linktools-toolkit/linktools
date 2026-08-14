@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from pathlib import Path
     from typing import Any
-    from linktools.core import Config, ConfigStore, Environ
+    from linktools.core import Config, ConfigNamespace, Environ
     from linktools.types import T, ConfigType, ConfigKeyType, PathType
     from .manager import ContainerManager
     from .context import EventContext
@@ -119,7 +119,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
         return []
 
     @cached_property
-    def settings(self) -> "ConfigStore":
+    def settings(self) -> "ConfigNamespace":
         """Return this container's persistent operational settings namespace.
 
         Backed by ``manager.settings`` (``cntr.json``, not
@@ -288,7 +288,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("--privileged", help="give extended privileges to the command")
     @subcommand_argument("-u", "--user", help="Username or UID (format: \"<name|uid>[:<group|gid>]\")")
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_exec_shell(self, command: "str | None | None" = None, privileged: bool = False, user: "str | None" = None, service_name: "str | None" = None) -> int:
+    def on_exec_shell(self, command: "str | None" = None, privileged: bool = False, user: "str | None" = None, service_name: "str | None" = None) -> int:
         return _actions.shell(self, command=command, privileged=privileged, user=user, service_name=service_name)
 
     @subcommand("logs", help="fetch the logs of container")
@@ -304,7 +304,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                          help="show logs before a timestamp (e.g. \"2013-01-02T13:23:37Z\") or relative (e.g. \"42m\" for 42 minutes)")
     @subcommand_argument("--service", dest="service_name", help="service name")
     def on_exec_logs(self, follow: bool = True, tail: "str | None" = None, timestamps: bool = True,
-                     since: "str | None | None" = None, until: "str | None" = None,
+                     since: "str | None" = None, until: "str | None" = None,
                      service_name: "str | None" = None) -> int:
         return _actions.logs(self, follow=follow, tail=tail, timestamps=timestamps,
                           since=since, until=until, service_name=service_name)
@@ -314,7 +314,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
     @subcommand_argument("target", nargs='?', help="container path")
     @subcommand_argument("-p", "--permission", choices=("ro", "rw"))
     @subcommand_argument("--service", dest="service_name", help="service name")
-    def on_mount(self, source: "str | None | None" = None, target: "str | None" = None, permission: str = "rw", service_name: "str | None" = None) -> None:
+    def on_mount(self, source: "str | None" = None, target: "str | None" = None, permission: str = "rw", service_name: "str | None" = None) -> None:
         return _actions.mount(self, source=source, target=target, permission=permission, service_name=service_name)
 
     @subcommand("umount", help="unmount path")
@@ -456,7 +456,7 @@ class BaseContainer(ExposeMixin, NginxMixin, metaclass=AbstractMetaClass):
                         next_items.add(next_dependency)
         return False
 
-    def render_template(self, source: "PathType | None", destination: "PathType | None" = None, **kwargs: "Any") -> str:
+    def render_template(self, source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
         return _template.render_template(self, source, destination=destination, **kwargs)
 
     def __repr__(self):

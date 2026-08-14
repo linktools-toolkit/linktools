@@ -26,7 +26,7 @@ def _get_logger():
 
 class _ReactorEvent:
 
-    def __init__(self, fn: "_t.Callable[[], _t.Any]", when: float, interval: float):
+    def __init__(self, fn: "_t.Callable[[], _t.Any]", when: float, interval: "float | None" = None):
         self.fn = fn
         self.when = when
         self.interval = interval

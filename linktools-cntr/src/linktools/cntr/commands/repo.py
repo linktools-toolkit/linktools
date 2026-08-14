@@ -36,7 +36,7 @@ class RepoCommand(BaseCommandGroup):
     @subcommand_argument("-b", "--branch", help="branch name")
     @subcommand_argument("--replace", action="store_true",
                          help="replace an already-added repository at this URL/path")
-    def on_command_add(self, url: "str | None", branch: "str | None" = None, replace: bool = False) -> None:
+    def on_command_add(self, url: str, branch: "str | None" = None, replace: bool = False) -> None:
         # A repo may carry executable Python container definitions, so
         # interactive `add` asks for confirmation; the global --yes flag (or
         # any other non-interactive run) skips it via is_no_input() -- there

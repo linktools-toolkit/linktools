@@ -67,7 +67,7 @@ def config(container: "BaseContainer") -> "dict[str, Any] | None":
 
 
 def shell(container: "BaseContainer", command: "str | None" = None, privileged: bool = False,
-          user: "str | None | None" = None, service_name: "str | None" = None) -> int:
+          user: "str | None" = None, service_name: "str | None" = None) -> int:
     service = container.choose_service(service_name)
 
     options = []
@@ -97,7 +97,7 @@ def shell(container: "BaseContainer", command: "str | None" = None, privileged: 
 
 
 def logs(container: "BaseContainer", follow: bool = True, tail: "str | None" = None, timestamps: bool = True,
-         since: "str | None | None" = None, until: "str | None" = None, service_name: "str | None" = None) -> int:
+         since: "str | None" = None, until: "str | None" = None, service_name: "str | None" = None) -> int:
     service = container.choose_service(service_name)
 
     options = []
@@ -119,8 +119,8 @@ def logs(container: "BaseContainer", follow: bool = True, tail: "str | None" = N
     ).call()
 
 
-def mount(container: "BaseContainer", source: "str | None | None" = None, target: "str | None" = None,
-          permission: "str | None" = "rw", service_name: "str | None" = None) -> None:
+def mount(container: "BaseContainer", source: "str | None" = None, target: "str | None" = None,
+          permission: str = "rw", service_name: "str | None" = None) -> None:
     if not source or not target:
         if not source and not target:
             with container.settings.transaction() as settings:

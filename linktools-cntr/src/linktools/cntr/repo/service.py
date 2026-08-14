@@ -151,7 +151,7 @@ class RepoService(object):
         cache out from under a future ``add()``/``remove()``."""
         return {url: dict(meta) for url, meta in self._load().items()}
 
-    def add(self, url: "str | None", branch: "str | None" = None, replace: bool = False) -> None:
+    def add(self, url: str, branch: "str | None" = None, replace: bool = False) -> None:
         """Add a repository. ``replace=True`` allows replacing an already-
         added repository at the same key (URL or local path) -- otherwise
         an existing entry is a hard error.

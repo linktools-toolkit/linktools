@@ -140,7 +140,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_up(self, names: "list[str] | None" = None, pull: str = False,
+    def on_command_up(self, names: "list[str] | None" = None, pull: bool = False,
                       dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "up", names=names, pull=pull, dry_run=dry_run, as_json=as_json):
             return
@@ -159,7 +159,7 @@ class Command(StatusCommands, BaseCommandGroup):
                          help="show a per-phase timing/outcome report after completion")
     @subcommand_argument("names", metavar="CONTAINER", nargs="*", help="container name",
                          choices=LazyChoices(_shared.iter_installed_container_names))
-    def on_command_restart(self, names: "list[str] | None" = None, pull: str = False,
+    def on_command_restart(self, names: "list[str] | None" = None, pull: bool = False,
                            dry_run: bool = False, report: bool = False, as_json: bool = False) -> None:
         if maybe_dry_run(_shared.manager, self.logger, "restart", names=names, pull=pull,
                          dry_run=dry_run, as_json=as_json):

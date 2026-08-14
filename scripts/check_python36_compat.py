@@ -137,6 +137,47 @@ def _annotation_violation(node):
     return None
 
 
+def _collect_union_leaves(node):
+    """Flatten a ``X | Y | Z`` union (ast.BinOp/BitOr chain) into its leaf
+    member nodes. A non-BinOp node returns a single-element list."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _collect_union_leaves(node.left) + _collect_union_leaves(node.right)
+    return [node]
+
+
+def _union_member_key(node):
+    """A stable comparison key for a union leaf, or None for members too
+    complex to fingerprint cheaply (subscripts, nested unions, etc.)."""
+    if isinstance(node, ast.Constant):
+        return repr(node.value)
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _duplicate_union_violation(node):
+    """Return a detail string if ``node`` is a union with a repeated member
+    (e.g. ``str | None | None``), else None. Operates on both live
+    annotations and quoted-string annotations -- the latter by parsing the
+    string content into an expression first."""
+    if _is_string_annotation(node):
+        try:
+            node = ast.parse(node.value, mode="eval").body
+        except SyntaxError:
+            return None
+    if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)):
+        return None
+    seen = set()
+    for member in _collect_union_leaves(node):
+        key = _union_member_key(member)
+        if key is None:
+            continue
+        if key in seen:
+            return "duplicate union member `%s`" % key
+        seen.add(key)
+    return None
+
+
 def scan_file(path):
     violations = []
     try:
@@ -191,6 +232,12 @@ def scan_file(path):
         if detail:
             violations.append(_Violation(str(path), getattr(annotation, "lineno", 0),
                                          "unquoted-annotation", detail))
+
+    for annotation in _annotation_nodes(tree):
+        detail = _duplicate_union_violation(annotation)
+        if detail:
+            violations.append(_Violation(str(path), getattr(annotation, "lineno", 0),
+                                         "duplicate-union", detail))
 
     return violations
 

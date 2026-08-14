@@ -61,14 +61,14 @@ class RepoGit(object):
         self._warned = True
         self.logger.warning(self._warning_message(action))
 
-    def clone(self, url: "str | None", repo_path: str, branch: "str | None" = None) -> None:
+    def clone(self, url: str, repo_path: str, branch: "str | None" = None) -> None:
         if not self.available:
             self.warn_unavailable("Cloning a Git repository")
             raise ContainerError(self._warning_message("Cloning a Git repository"))
 
         GitRepository.clone(self.manager.environ, url, repo_path, branch)
 
-    def update(self, url: "str | None", repo_path: str, branch: "str | None" = None, reset: bool = False) -> "RepoGitResult":
+    def update(self, url: str, repo_path: str, branch: "str | None" = None, reset: bool = False) -> "RepoGitResult":
         if not self.available:
             self.warn_unavailable("Updating Git repositories")
             return RepoGitResult(

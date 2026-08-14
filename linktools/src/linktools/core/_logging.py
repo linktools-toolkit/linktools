@@ -384,40 +384,37 @@ class LoggingManager(object):
         handler = self.get_handler()
         return handler.show_level if handler is not None else False
 
-    def _create_display_handler(self, show_level: bool, show_time: bool) -> "_LogHandlerMixin":
-        if _active_handler_mode == "rich" or (_rich_terminal_available() and _active_handler_mode in (None, "rich")):
+    def _create_display_handler(self, mode: str, show_level: bool, show_time: bool) -> "_LogHandlerMixin":
+        """Pure factory: create a display handler for the given mode."""
+        if mode == "rich":
             return _get_rich_log_handler_class()(show_level=show_level, show_time=show_time)
-        else:
+        elif mode == "plain":
             return _get_plain_log_handler_class()(show_level=show_level, show_time=show_time)
+        else:
+            raise ValueError("unknown display handler mode: %r" % (mode,))
 
-    def _replace_display_handler(self, show_level: bool, show_time: bool) -> None:
-        """Rollback-safe display handler replacement.
+    def _replace_display_handler(self, *, show_level: "bool | None" = None, show_time: "bool | None" = None) -> None:
+        """Rollback-safe display handler toggle, fully inside _handler_lock."""
+        global _active_handler
 
-        Constructs a complete candidate before mutating root/global state.
-        On any failure the old handler, root configuration, and globals
-        remain unchanged.
-        """
-        global _active_handler, _active_handler_mode
-
-        old_mode = _active_handler_mode
-        if old_mode not in ("plain", "rich"):
-            return
-
-        old_handler = _active_handler
-        if not isinstance(old_handler, _LogHandlerMixin):
-            return
-
-        old_show_level = old_handler.show_level
-        old_show_time = old_handler.show_time
-
-        if show_level == old_show_level and show_time == old_show_time:
-            return
-
-        # Construct candidate first; if this fails, nothing changes.
-        candidate = self._create_display_handler(show_level=show_level, show_time=show_time)
-
-        root = logging.getLogger()
         with _handler_lock:
+            mode = _active_handler_mode
+            if mode not in ("plain", "rich"):
+                return
+
+            old_handler = _active_handler
+            if not isinstance(old_handler, _LogHandlerMixin):
+                return
+
+            target_show_level = old_handler.show_level if show_level is None else show_level
+            target_show_time = old_handler.show_time if show_time is None else show_time
+
+            if target_show_level == old_handler.show_level and target_show_time == old_handler.show_time:
+                return
+
+            candidate = self._create_display_handler(mode, target_show_level, target_show_time)
+
+            root = logging.getLogger()
             try:
                 root.addHandler(candidate)
             except Exception:
@@ -444,22 +441,10 @@ class LoggingManager(object):
                 pass
 
     def set_show_time(self, value: bool) -> None:
-        handler = self.get_handler()
-        if handler is None:
-            return
-        self._replace_display_handler(
-            show_level=handler.show_level,
-            show_time=value,
-        )
+        self._replace_display_handler(show_time=value)
 
     def set_show_level(self, value: bool) -> None:
-        handler = self.get_handler()
-        if handler is None:
-            return
-        self._replace_display_handler(
-            show_level=value,
-            show_time=handler.show_time,
-        )
+        self._replace_display_handler(show_level=value)
 
     # -- two-phase lifecycle -----------------------------------------------
 
@@ -467,17 +452,31 @@ class LoggingManager(object):
         global _bootstrap_handler
         if self._bootstrapped:
             return
-        root = logging.getLogger()
-        with _handler_lock:
-            if not root.handlers:
-                handler = logging.StreamHandler()
-                handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-                root.addHandler(handler)
-                _bootstrap_handler = handler
-        if root.level == logging.NOTSET:
-            root.setLevel(logging.WARNING)
         self.install_filter()
-        self._bootstrapped = True
+        with _handler_lock:
+            if self._bootstrapped:
+                return
+            root = logging.getLogger()
+            old_level = root.level
+            old_bootstrap = _bootstrap_handler
+            added_handler = None
+            try:
+                if not root.handlers:
+                    handler = logging.StreamHandler()
+                    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+                    root.addHandler(handler)
+                    _bootstrap_handler = handler
+                    added_handler = handler
+                if root.level == logging.NOTSET:
+                    root.setLevel(logging.WARNING)
+            except Exception:
+                if added_handler is not None:
+                    root.removeHandler(added_handler)
+                    added_handler.close()
+                _bootstrap_handler = old_bootstrap
+                root.setLevel(old_level)
+                raise
+            self._bootstrapped = True
 
     def configure(
         self,
@@ -489,8 +488,9 @@ class LoggingManager(object):
     ) -> None:
         """Phase 2 -- configure root logging with rollback-safe replacement.
 
-        Constructs the candidate handler fully before mutating any root or
-        global state. On failure, the old handler, root level, and globals
+        Candidate is constructed outside the lock (no dependency on current
+        state). All old-state capture and root mutation happens inside
+        _handler_lock. On failure, old handlers, root level, and globals
         are restored.
         """
         global _bootstrap_handler, _active_handler, _active_handler_mode
@@ -511,23 +511,18 @@ class LoggingManager(object):
             new_mode = "plain"
 
         root = logging.getLogger()
-        old_level = root.level
-        old_bootstrap = _bootstrap_handler
-        old_active = _active_handler
-        old_mode = _active_handler_mode
-
         with _handler_lock:
+            old_level = root.level
+            old_bootstrap = _bootstrap_handler
+            old_active = _active_handler
+
             try:
                 root.addHandler(candidate)
                 root.setLevel(level)
-
-                # Remove old linktools handlers.
                 for old in (old_bootstrap, old_active):
                     if old is not None:
                         root.removeHandler(old)
-
             except Exception:
-                # Rollback: remove candidate, re-add old handlers, restore level.
                 try:
                     root.removeHandler(candidate)
                 except Exception:
@@ -542,7 +537,6 @@ class LoggingManager(object):
                 root.setLevel(old_level)
                 raise
 
-            # Success: close old handlers, commit globals.
             for old in (old_bootstrap, old_active):
                 if old is not None:
                     try:

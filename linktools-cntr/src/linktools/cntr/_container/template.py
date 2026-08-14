@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from ..container import BaseContainer
 
 
-def render_template(container: "BaseContainer", source: "PathType | None", destination: "PathType | None" = None, **kwargs: "Any") -> str:
+def render_template(container: "BaseContainer", source: "PathType", destination: "PathType | None" = None, **kwargs: "Any") -> str:
     config = container.env_config
 
     def mkdir(path: "PathType") -> str:

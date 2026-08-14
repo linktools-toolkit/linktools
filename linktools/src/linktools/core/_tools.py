@@ -122,7 +122,7 @@ class InstallSpec(object):
             _error(name, source, "install.size must be a non-negative integer")
 
     @classmethod
-    def from_mapping(cls, data: "dict | None" = None, name: "str | None" = "<unknown>", source: "str | None" = None) -> "InstallSpec":
+    def from_mapping(cls, data: "dict | None" = None, name: str = "<unknown>", source: "str | None" = None) -> "InstallSpec":
         data = _mapping(data, name, source, "install")
         unknown = set(data) - _SPEC_KEYS["install"]
         if unknown:
@@ -156,7 +156,7 @@ class RunSpec(object):
         self.environment = dict(self.environment)
 
     @classmethod
-    def from_mapping(cls, data: "dict | None" = None, name: "str | None" = "<unknown>", source: "str | None" = None) -> "RunSpec":
+    def from_mapping(cls, data: "dict | None" = None, name: str = "<unknown>", source: "str | None" = None) -> "RunSpec":
         data = _mapping(data, name, source, "run")
         unknown = set(data) - _SPEC_KEYS["run"]
         if unknown:
@@ -185,7 +185,7 @@ class ToolDefinition(object):
         self.variants = tuple(variants or ())
 
     @classmethod
-    def from_mapping(cls, name: "str | None", data: dict, source: "str | None" = None,
+    def from_mapping(cls, name: str, data: dict, source: "str | None" = None,
                      platform: str = "linux", architecture: str = "x86_64") -> "ToolDefinition":
         if not isinstance(name, str) or not _NAME.match(name):
             _error(name, source, "invalid tool name")

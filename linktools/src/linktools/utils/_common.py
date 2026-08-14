@@ -51,17 +51,17 @@ def ignore_errors(
         fn: "Callable[P, T]", *,
         args: "P.args | None" = None, kwargs: "P.kwargs | None" = None,
         default: "T | None" = None
-) -> "T":
+) -> "T | None":
     """Run a callable and suppress the selected exception types.
 
     Args:
         fn (Callable[P, T]): Callable to invoke.
         args (P.args): Arguments passed to the operation.
         kwargs (P.kwargs): Keyword arguments passed to the operation.
-        default (T): Value returned when no explicit value is available.
+        default (T): Fallback returned when the callable raises Exception.
 
     Returns:
-        T: The operation result.
+        The callable's return value, or ``default`` on Exception.
     """
     try:
         if args is not None:

@@ -381,7 +381,7 @@ class GitRepository(object):
     # -- clone ( atomic) ---------------------------------------------
 
     @classmethod
-    def clone(cls, environ: "Any", url: "str | None", repo_path: "str | None" = None,
+    def clone(cls, environ: "Any", url: str, repo_path: "str | None" = None,
               branch: "str | None" = None) -> "GitRepository":
         """Shallow-clone, atomically: clone to staging -> rename.
 
