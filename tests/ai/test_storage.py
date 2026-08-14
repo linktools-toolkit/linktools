@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.schema_api import build_runtime_sql_metadata
-from linktools.ai.runtime.state import RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.runtime import RuntimeDomain
+from linktools.ai.runtime.state import RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
 from linktools.ai.storage import (
     FilesystemContentCache,
     InMemoryContentCache,
@@ -23,14 +23,13 @@ from linktools.ai.storage import (
     StorageDeleteResult,
     StorageEntryRevision,
     StorageLayer,
-    StorageOwnedInfo,
     StorageOverlay,
+    StorageOwnedInfo,
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
     StorageValueValidator,
 )
-
 
 
 @dataclass(frozen=True, slots=True)

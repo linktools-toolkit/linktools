@@ -2,20 +2,19 @@
 # -*- coding: utf-8 -*-
 """Execution-scoped Pydantic AI infrastructure capabilities."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from linktools.core import environ
-from pydantic_ai.capabilities import AbstractCapability, AgentCapability as PydanticAgentCapability
-from pydantic_ai.capabilities import WrapToolExecuteHandler
+from pydantic_ai.capabilities import AbstractCapability, WrapToolExecuteHandler
+from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.exceptions import ModelRetry, ToolRetryError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     DeduplicateFileReads,
@@ -26,7 +25,7 @@ from pydantic_ai_harness.memory import Memory, SearchableMemoryStore
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.step_persistence import StepPersistence, StepStore
 
-from ..capability.names_api import SKILL_TOOL_NAMES
+from ..capability import SKILL_TOOL_NAMES
 from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 

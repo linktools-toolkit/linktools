@@ -30,8 +30,8 @@ from ._contracts import (
     RuntimeRepository,
     TaskState,
 )
+from ._filesystem import _build_filesystem_domain, _FilesystemDomainBackend
 from ._memory import _build_in_memory_domains
-from ._filesystem import _FilesystemDomainBackend, _build_filesystem_domain
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
 from ._retention import RuntimeRetentionController
 from ._steps import InMemoryStepArchive, RuntimeStepStore, StagingStepStore
@@ -137,6 +137,7 @@ async def materialize_runtime_state(
             states[domain] = backend.state
             cleanup.append(backend.release)
             await _initialize_components(backend.components, cleanup)
+            components = (*components, *backend.components)
 
         for route, domains in _sql_route_groups(plan):
             owns_engine = route.kind == "sqlite"
@@ -160,7 +161,7 @@ async def materialize_runtime_state(
                 item.value: plan.route(item) if item in domains else RuntimeStatePlan().route(item)
                 for item in RuntimeDomain
             })
-            from ..schema_api import build_runtime_sql_metadata
+            from ._schema import build_runtime_sql_metadata
 
             metadata = build_runtime_sql_metadata(
                 group_plan,
@@ -282,10 +283,8 @@ def _build_steps(
         if route.kind == "filesystem":
             from ._steps import FilesystemStepArchive
 
-            archives[domain] = FilesystemStepArchive.from_runtime(
-                route.path,
-                namespace=namespace,
-                tenant_id=tenant_id,
+            archives[domain] = FilesystemStepArchive._from_runtime_scope(
+                filesystem_backends[domain].physical_root,
                 runtime_domain=domain,
                 object_store=objects.object_store(domain),
                 writer_lock=filesystem_backends[domain].writer_lock,

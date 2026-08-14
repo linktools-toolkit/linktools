@@ -6,12 +6,12 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from ..asset import build_asset_sql_metadata
-from ..runtime.state import RuntimeDomain
-from ..runtime.schema_api import build_runtime_sql_metadata
+from ..runtime.state import RuntimeDomain, build_runtime_sql_metadata
 from ..storage import provision_sql
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
+
     from ..storage import ObjectStore
 
 

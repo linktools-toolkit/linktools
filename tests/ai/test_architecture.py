@@ -195,11 +195,60 @@ def test_private_cross_package_import_gate_covers_runtime_type_checking_and_nest
     )
     result = ArchitecturePolicyChecker().check(source_root)
     assert sum("private cross-package import:" in error for error in result.errors) == 3
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    policy["private_imports"] = {"app.foo": ["adapter._persistence"]}
+    policy_path.write_text(json.dumps(policy), encoding="utf-8")
+    forbidden = ArchitecturePolicyChecker().check(source_root)
+    assert any(error == "private_imports policy is forbidden" for error in forbidden.errors)
+    assert sum("private cross-package import:" in error for error in forbidden.errors) == 3
     app.write_text("from ..adapter import build_in_memory_runtime\n", encoding="utf-8")
     worker.write_text("from .workflow import ExecutionWorkflow\n", encoding="utf-8")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check(source_root).errors)
     (source_root / "temporal" / "workflow" / "__init__.py").write_text("from ._execution import ExecutionWorkflow\n", encoding="utf-8")
     assert not any("private cross-package import:" in error for error in ArchitecturePolicyChecker().check(source_root).errors)
+
+
+def test_private_import_policy_is_forbidden(tmp_path: Path) -> None:
+    package_root = tmp_path / "package"
+    source_root = package_root / "src" / "linktools" / "ai"
+    for directory in (source_root / "app", source_root / "adapter"):
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text("__all__ = []\n", encoding="utf-8")
+    (source_root / "app" / "foo.py").write_text(
+        "from ..adapter._persistence import VALUE\n",
+        encoding="utf-8",
+    )
+    (source_root / "adapter" / "_persistence.py").write_text("VALUE = 1\n", encoding="utf-8")
+    policy_path = package_root / "scripts" / "build" / "matrix" / "linktools-ai-package-policy.json"
+    policy_path.parent.mkdir(parents=True)
+    policy_path.write_text(
+        json.dumps(
+            {
+                "top_level_packages": ["app", "adapter"],
+                "dependencies": {"app": ["adapter"], "adapter": []},
+                "public_modules": ["app.foo"],
+                "private_imports": {
+                    "app.missing": ["adapter._persistence"],
+                    "app.foo": ["adapter._*"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = ArchitecturePolicyChecker().check(source_root)
+    assert "private_imports policy is forbidden" in result.errors
+    assert any("private cross-package import:" in error for error in result.errors)
+
+
+def test_forwarding_marker_does_not_bypass_cohesion_gate(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    module = root / "app.py"
+    root.mkdir()
+    module.write_text(
+        "from .runtime import Value\n__public_boundary__ = True\n",
+        encoding="utf-8",
+    )
+    assert any("empty forwarding module" in error for error in check_files(root))
 
 
 def test_private_conversion_tree_is_exact() -> None:
@@ -217,18 +266,13 @@ def test_private_conversion_tree_is_exact() -> None:
     assert policy["public_modules"] == [
         "errors",
         "acp",
-        "capability.names_api",
-        "capability.validation_api",
-        "runtime.composition_api",
-        "runtime.contract_api",
-        "runtime.object_api",
-        "runtime.schema_api",
         "runtime.service_api",
     ]
 
 
 def test_package_public_surface_and_optional_dependency_isolation() -> None:
     from linktools.ai import adapter, asset, capability, model, runtime, workspace
+    from linktools.ai.runtime import state as runtime_state
 
     command_modules = tuple(
         importlib.import_module(f"linktools.commands.ai.{name}")
@@ -245,6 +289,34 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "StepExecutionHistoryReader",
     ]
     assert model.__all__ == ["ModelBinding", "ModelRegistry", "ModelResolver"]
+    assert {
+        "DefaultApprovalService",
+        "DefaultArtifactService",
+        "DefaultEvaluationService",
+        "DefaultEventService",
+        "DefaultExecutionService",
+        "DefaultSessionService",
+        "DefaultTaskService",
+        "RuntimeObjectKeyFactory",
+        "RuntimeTaskNodeRunner",
+        "put_runtime_object",
+        "read_runtime_object",
+    } <= set(runtime.__all__)
+    assert {
+        "ExecutionRecord",
+        "ExecutionRepository",
+        "MemoryRecord",
+        "MemoryState",
+        "RecoveryCheckpointState",
+        "RecoveryHandoffPhase",
+        "build_runtime_sql_metadata",
+    } <= set(runtime_state.__all__)
+    assert {
+        "SKILL_TOOL_NAMES",
+        "group_capability_refs",
+        "unresolved_binding",
+        "validate_fingerprint",
+    } <= set(capability.__all__)
     assert workspace.__all__ == [
         "DisabledSandbox",
         "Sandbox",

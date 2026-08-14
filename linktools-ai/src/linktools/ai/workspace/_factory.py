@@ -11,14 +11,29 @@ from contextlib import asynccontextmanager
 from linktools.core import environ
 
 from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
-from ..agent import ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AgentCompiler, AgentDefinition, AgentExecutor, AssistantTextOutput, OutputTypeRegistry
-from ..asset import AssetRef, AssetRepository, AssetStore, AssetTypeRegistry, DirectoryAssetBackend, InMemoryAssetBackend, PrefixAssetPathAdapter
+from ..agent import (
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
+    ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
+    AgentCompiler,
+    AgentDefinition,
+    AgentExecutor,
+    AssistantTextOutput,
+    OutputTypeRegistry,
+)
+from ..asset import (
+    AssetRef,
+    AssetRepository,
+    AssetStore,
+    AssetTypeRegistry,
+    DirectoryAssetBackend,
+    InMemoryAssetBackend,
+    PrefixAssetPathAdapter,
+)
 from ..capability import CapabilityGrant, CapabilityProvider, SkillCapabilityProvider
 from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
-from ..runtime import Runtime
-from ..runtime.composition_api import (
+from ..runtime import (
     DefaultApprovalService,
     DefaultArtifactService,
     DefaultEvaluationService,
@@ -27,10 +42,19 @@ from ..runtime.composition_api import (
     DefaultSessionService,
     DefaultTaskService,
     LocalExecutionBackend,
+    Runtime,
     RuntimeTaskNodeRunner,
 )
-from ..runtime.state import RuntimeDomain, RuntimeRetentionMode, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
-from ..runtime.contract_api import RecoveryCheckpointState, RecoveryHandoffPhase, RecoveryState
+from ..runtime.state import (
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    RecoveryState,
+    RuntimeDomain,
+    RuntimeRetentionMode,
+    RuntimeState,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from ..spec import AgentCapabilityRef, AgentSpec, PromptSpec, builtin_asset_bindings
 from ..storage import StorageLayer, StorageOverlay
 from ..task import LocalTaskGraphLauncher
@@ -245,8 +269,12 @@ async def open_workspace_runtime(
             release_execution_hold=execution._release_dependency_hold,
             request_execution_handoff=execution._request_terminal_handoff,
         )
-        approval = DefaultApprovalService(selected_runtime.recovery, authorization)
-        event = DefaultEventService(selected_runtime.execution, authorization)
+        approval = DefaultApprovalService(selected_runtime.recovery.approvals, authorization)
+        event = DefaultEventService(
+            selected_runtime.execution.executions,
+            selected_runtime.execution.events,
+            authorization,
+        )
         artifact = DefaultArtifactService(selected_runtime.artifact, authorization, grant_key=_grant_key(workspace), cursor_signer=HmacCursorSigner("artifact", _grant_key(workspace)))
         coordinator = _RuntimeCloseCoordinator((task_launcher.shutdown, backend.close, selected_runtime.close))
         runtime_value = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=coordinator.close)

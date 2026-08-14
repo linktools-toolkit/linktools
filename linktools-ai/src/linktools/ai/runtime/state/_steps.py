@@ -26,7 +26,6 @@ from pydantic_ai_harness.step_persistence import (
 
 from ...core import validate_persistence_namespace, validate_tenant_id
 from ...errors import AIError, ErrorCode
-from ._plan import RuntimeDomain, RuntimeRetentionMode
 from ...storage import (
     FilesystemMutationLock,
     FilesystemObjectStore,
@@ -41,7 +40,9 @@ from ...storage import (
     validate_sql,
     write_json_atomic,
 )
-from ..schema_api import build_step_sql_metadata
+from ._filesystem import _filesystem_scope_root
+from ._plan import RuntimeDomain, RuntimeRetentionMode
+from ._schema import build_step_sql_metadata
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -257,50 +258,80 @@ class InMemoryStepArchive(StepStore):
 class FilesystemStepArchive(StagingStepStore):
     """Generation-two append-only Step archive with fixed owner domain."""
 
-    def __init__(self, root: str | Path, *, namespace: str, tenant_id: str, runtime_domain: RuntimeDomain, object_store: ObjectStore | None = None) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        namespace: str,
+        tenant_id: str,
+        runtime_domain: RuntimeDomain,
+        object_store: ObjectStore | None = None,
+    ) -> None:
         validate_persistence_namespace(namespace)
         validate_tenant_id(tenant_id)
         if runtime_domain not in _ARCHIVE_DOMAINS:
             raise ValueError("Step archive owner is invalid")
         super().__init__()
-        scoped_root = Path(root).expanduser().resolve() / _namespace_key(namespace) / _scope_key(tenant_id)
-        self._root = scoped_root / "steps"
-        self._namespace = namespace
-        self._tenant_id = tenant_id
-        self._runtime_domain = runtime_domain
-        physical_root = Path(root).expanduser().resolve() / _namespace_key(namespace) / _scope_key(tenant_id)
-        self._object_store = object_store if object_store is not None else FilesystemObjectStore(physical_root / "objects")
-        self._mutation_lock = FilesystemMutationLock(self._root / "mutation.lock")
-        self._lifetime_lock = FilesystemWriterLock(physical_root / "runtime.lock")
-        self._manage_writer_lock = True
-        self._counters: dict[str, dict[str, int]] = {}
-        self._ready = False
+        physical_root = _filesystem_scope_root(
+            Path(root),
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
+        self._configure_scope(
+            physical_root,
+            runtime_domain=runtime_domain,
+            object_store=object_store,
+            writer_lock=None,
+        )
 
     @property
     def runtime_domain(self) -> RuntimeDomain:
         return self._runtime_domain
 
     @classmethod
-    def from_runtime(
+    def _from_runtime_scope(
         cls,
-        root: str | Path,
+        scope_root: Path,
         *,
-        namespace: str,
-        tenant_id: str,
         runtime_domain: RuntimeDomain,
         object_store: ObjectStore,
         writer_lock: FilesystemWriterLock,
     ) -> "FilesystemStepArchive":
-        archive = cls(
-            root,
-            namespace=namespace,
-            tenant_id=tenant_id,
+        archive = cls.__new__(cls)
+        StagingStepStore.__init__(archive)
+        archive._configure_scope(
+            scope_root,
             runtime_domain=runtime_domain,
             object_store=object_store,
+            writer_lock=writer_lock,
         )
-        archive._lifetime_lock = writer_lock
-        archive._manage_writer_lock = False
         return archive
+
+    def _configure_scope(
+        self,
+        scope_root: Path,
+        *,
+        runtime_domain: RuntimeDomain,
+        object_store: ObjectStore | None,
+        writer_lock: FilesystemWriterLock | None,
+    ) -> None:
+        if runtime_domain not in _ARCHIVE_DOMAINS:
+            raise ValueError("Step archive owner is invalid")
+        physical_root = scope_root.expanduser().resolve(strict=False)
+        self._root = physical_root / "steps"
+        self._namespace_key = physical_root.parent.name
+        self._tenant_scope_key = physical_root.name
+        self._runtime_domain = runtime_domain
+        self._object_store = (
+            object_store
+            if object_store is not None
+            else FilesystemObjectStore(physical_root / "objects")
+        )
+        self._mutation_lock = FilesystemMutationLock(self._root / "mutation.lock")
+        self._lifetime_lock = writer_lock or FilesystemWriterLock(physical_root / "runtime.lock")
+        self._manage_writer_lock = writer_lock is None
+        self._counters: dict[str, dict[str, int]] = {}
+        self._ready = False
 
     async def initialize(self) -> None:
         if self._manage_writer_lock:
@@ -315,7 +346,11 @@ class FilesystemStepArchive(StagingStepStore):
             if self._manage_writer_lock:
                 await self._lifetime_lock.release()
             raise
-        _logger.debug("step archive initialized: domain=%s tenant_scope=%s", self._runtime_domain.value, _scope_key(self._tenant_id))
+        _logger.debug(
+            "step archive initialized: domain=%s tenant_scope=%s",
+            self._runtime_domain.value,
+            self._tenant_scope_key,
+        )
 
     async def close(self) -> None:
         self._ready = False
@@ -473,7 +508,7 @@ class FilesystemStepArchive(StagingStepStore):
         return self._root / "runs" / _digest(run_id)
 
     def _media_prefix(self) -> str:
-        return f"v1/step/{self._runtime_domain.value}/{_namespace_key(self._namespace)}/{_scope_key(self._tenant_id)}"
+        return f"v1/step/{self._runtime_domain.value}/{self._namespace_key}/{self._tenant_scope_key}"
 
     async def _ensure_ready(self) -> None:
         if not self._ready:

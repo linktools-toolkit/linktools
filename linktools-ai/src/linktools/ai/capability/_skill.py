@@ -16,10 +16,10 @@ from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef, SkillSpec
 from ._contract import (
     CapabilityBinding,
-    CapabilityRefResolution,
     CapabilityMaterializationContext,
+    CapabilityRefResolution,
 )
-from .names_api import SKILL_TOOL_NAMES
+from ._names import SKILL_TOOL_NAMES
 
 
 @dataclass(frozen=True, slots=True)

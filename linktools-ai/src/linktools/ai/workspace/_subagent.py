@@ -10,8 +10,12 @@ from pydantic_ai.exceptions import ModelRetry
 from ..agent import AgentCompiler, AgentDefinition, SubagentDelegate
 from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..runtime.composition_api import DefaultExecutionService
-from ..runtime.service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
+from ..runtime import DefaultExecutionService
+from ..runtime.service_api import (
+    CancelExecutionRequest,
+    ExecutionRequest,
+    ExecutionResult,
+)
 
 _logger = environ.get_logger("ai.workspace.subagent")
 
@@ -94,15 +98,24 @@ class SubagentDispatcher:
             )
             try:
                 await asyncio.shield(cleanup)
-            except asyncio.CancelledError as cancellation:
+            except asyncio.CancelledError:
                 try:
                     await asyncio.shield(cleanup)
                 except BaseException:
+                    _logger.error(
+                        "subagent child cleanup failed after cancellation: execution=%s",
+                        child.execution_id,
+                        exc_info=True,
+                    )
                     recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                     raise recovery from primary
-                raise cancellation
-            except BaseException as cleanup_error:
-                _logger.error("subagent child terminal confirmation failed: execution=%s", child.execution_id, exc_info=environ.debug)
+                raise primary
+            except BaseException:
+                _logger.error(
+                    "subagent child terminal confirmation failed: execution=%s",
+                    child.execution_id,
+                    exc_info=True,
+                )
                 recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
                 raise recovery from primary
             raise

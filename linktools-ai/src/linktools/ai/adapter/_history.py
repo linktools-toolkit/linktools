@@ -35,7 +35,7 @@ from ..runtime.service_api import (
     ExecutionTraceItem,
     TranscriptItem,
 )
-from ..runtime.contract_api import ExecutionRecord, ExecutionRepository
+from ..runtime.state import ExecutionRecord, ExecutionRepository
 
 
 class StepExecutionHistoryReader:

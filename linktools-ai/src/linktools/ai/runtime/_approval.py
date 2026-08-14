@@ -17,13 +17,13 @@ from ..core import (
     ResourceRef,
 )
 from ..errors import AIError, ErrorCode
-from .state._contracts import RecoveryState
 from .service_api import (
     ApprovalDecisionRequest,
     ApprovalDecisionResult,
     ApprovalView,
     WorkflowGateway,
 )
+from .state._contracts import ApprovalRepository
 
 _logger = environ.get_logger("ai.runtime.approval")
 
@@ -39,8 +39,13 @@ class ApprovalApi(ApprovalQueryApi, Protocol):
 class DefaultApprovalService:
     """Persist decisions before any optional workflow notification."""
 
-    def __init__(self, state: RecoveryState, authorization: AuthorizationPolicy, workflow_gateway: "WorkflowGateway | None" = None) -> None:
-        self._state = state
+    def __init__(
+        self,
+        approvals: ApprovalRepository,
+        authorization: AuthorizationPolicy,
+        workflow_gateway: "WorkflowGateway | None" = None,
+    ) -> None:
+        self._approvals = approvals
         self._authorization = authorization
         self._workflow_gateway = workflow_gateway
 
@@ -50,19 +55,19 @@ class DefaultApprovalService:
             AuthorizationAction.APPROVAL_READ,
             ResourceRef(ResourceKind.APPROVAL, execution_id, principal.tenant_id),
         )
-        records = await self._state.approvals.list_pending(execution_id, tenant_id=principal.tenant_id)
+        records = await self._approvals.list_pending(execution_id, tenant_id=principal.tenant_id)
         return tuple(ApprovalView(record.approval_id, record.status) for record in records)
 
     async def decide(self, execution_id: str, request: ApprovalDecisionRequest) -> ApprovalDecisionResult:
-        record = await self._state.approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
+        record = await self._approvals.get(request.approval_id, tenant_id=request.principal.tenant_id)
         if record is None or record.execution_id != execution_id:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        header = await self._state.approvals.get_header(request.approval_id, tenant_id=request.principal.tenant_id)
+        header = await self._approvals.get_header(request.approval_id, tenant_id=request.principal.tenant_id)
         if header is None:
             raise AIError(ErrorCode.AUTHORIZATION_DENIED)
         await self._authorization.authorize(request.principal, AuthorizationAction.APPROVAL_DECIDE, header)
         decision_digest = _decision_digest(request)
-        updated = await self._state.approvals.decide(
+        updated = await self._approvals.decide(
             request.approval_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ApprovalStatus.PENDING,

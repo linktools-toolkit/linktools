@@ -8,8 +8,15 @@ from types import MappingProxyType
 from linktools.core import environ
 
 from ..asset import AssetRef, AssetRepository, ResolvedAsset
-from ..capability import CapabilityBinding, CapabilityGrant, CapabilityProvider, CapabilityRefResolution
-from ..capability.validation_api import group_capability_refs, unresolved_binding, validate_fingerprint
+from ..capability import (
+    CapabilityBinding,
+    CapabilityGrant,
+    CapabilityProvider,
+    CapabilityRefResolution,
+    group_capability_refs,
+    unresolved_binding,
+    validate_fingerprint,
+)
 from ..core import canonical_sha256, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..model import ModelResolver

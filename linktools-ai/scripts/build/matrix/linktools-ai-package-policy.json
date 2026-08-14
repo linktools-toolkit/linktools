@@ -164,12 +164,6 @@
   "public_modules": [
     "errors",
     "acp",
-    "capability.names_api",
-    "capability.validation_api",
-    "runtime.composition_api",
-    "runtime.contract_api",
-    "runtime.object_api",
-    "runtime.schema_api",
     "runtime.service_api"
   ],
   "forbidden": [

@@ -22,6 +22,7 @@ from pydantic_ai_harness.memory import (
 
 from ..core import (
     OperationKind,
+    OperationLedgerInput,
     OperationStatus,
     ResourceKind,
     canonical_sha256,
@@ -29,9 +30,13 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..runtime.contract_api import MemoryRecord, MemoryState, OperationLedgerInput
-from ..runtime.object_api import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
-from ..runtime import RuntimeDomain
+from ..runtime import (
+    RuntimeDomain,
+    RuntimeObjectKeyFactory,
+    put_runtime_object,
+    read_runtime_object,
+)
+from ..runtime.state import MemoryRecord, MemoryState
 from ..storage import ObjectStore
 
 _logger = environ.get_logger("ai.adapter.memory")

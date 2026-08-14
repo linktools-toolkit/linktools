@@ -6,9 +6,16 @@ import pytest
 from linktools.ai.core import ExecutionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionResult
-from linktools.ai.runtime.composition_api import DefaultExecutionService
+from linktools.ai.runtime._execution import DefaultExecutionService
 from linktools.ai.task import TaskCompletionLedger
-from linktools.ai.temporal import EvaluationActivity, ExecuteActivity, SessionActivity, TaskActivity, WorkerActivities, production_registration
+from linktools.ai.temporal import (
+    EvaluationActivity,
+    ExecuteActivity,
+    SessionActivity,
+    TaskActivity,
+    WorkerActivities,
+    production_registration,
+)
 
 
 def test_task_completion_uses_owner_fence_and_result_identity() -> None:

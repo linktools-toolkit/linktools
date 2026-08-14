@@ -3,6 +3,7 @@
 """Single-domain generation-1 filesystem runtime backend."""
 
 import asyncio
+import hashlib
 import json
 import re
 import threading
@@ -32,9 +33,18 @@ from ...core import (
     StopReason,
     TaskStatus,
     ToolOperationStatus,
+    validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
-from ...storage import FilesystemObjectStore, FilesystemWriterLock, ObjectRef, ObjectStore, read_json, write_json_atomic
+from ...storage import (
+    FilesystemObjectStore,
+    FilesystemWriterLock,
+    ObjectRef,
+    ObjectStore,
+    namespace_key,
+    read_json,
+    write_json_atomic,
+)
 from ...task import TaskGraph, TaskGraphView, TaskNode, TaskNodeView, TaskTerminalRecord
 from .._tool import ToolOperationRecord
 from ._contracts import (
@@ -65,21 +75,21 @@ from ._memory import (
     _ApprovalRepository,
     _ArtifactRepository,
     _Base,
+    _build_in_memory_domains,
+    _capture_runtime_snapshot,
+    _EvaluationRepository,
     _EventRepository,
     _ExecutionRepository,
-    _EvaluationRepository,
     _ExternalRepository,
     _IdempotencyRepository,
     _MemoryRepository,
     _OperationRepository,
     _RecoveryCheckpointRepository,
+    _restore_runtime_snapshot,
     _SessionRepository,
     _TaskRepository,
     _TerminalCommitRepository,
     _ToolRepository,
-    _build_in_memory_domains,
-    _capture_runtime_snapshot,
-    _restore_runtime_snapshot,
 )
 from ._plan import RuntimeDomain
 from ._transaction import TransactionHub
@@ -87,11 +97,60 @@ from ._transaction import TransactionHub
 _logger = environ.get_logger("ai.runtime.state.filesystem")
 
 
+def _tenant_scope_key(tenant_id: str) -> str:
+    return hashlib.sha256(tenant_id.encode("utf-8")).hexdigest()
+
+
+def _filesystem_scope_root(
+    route_root: Path,
+    *,
+    namespace: str,
+    tenant_id: str,
+) -> Path:
+    return (
+        route_root.expanduser().resolve(strict=False)
+        / namespace_key(namespace)
+        / _tenant_scope_key(validate_tenant_id(tenant_id))
+    )
+
+
+async def _release_lock_after_prepare_failure(
+    lock: FilesystemWriterLock,
+    *,
+    primary: BaseException,
+) -> None:
+    del primary
+    task = asyncio.create_task(
+        lock.release(),
+        name="linktools-filesystem-prepare-lock-release",
+    )
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(task)
+        except BaseException:
+            _logger.error(
+                "filesystem writer lock release failed after prepare cancellation",
+                exc_info=True,
+            )
+    except BaseException:
+        _logger.error(
+            "filesystem writer lock release failed after prepare failure",
+            exc_info=True,
+        )
+
+
 class _FilesystemDomainBackend:
     """Own one durable Runtime domain and its generation-1 files."""
 
     def __init__(self, root: Path, *, namespace: str, tenant_id: str, domain: RuntimeDomain) -> None:
-        self._root = root.expanduser().resolve(strict=False)
+        self._route_root = root.expanduser().resolve(strict=False)
+        self._root = _filesystem_scope_root(
+            self._route_root,
+            namespace=namespace,
+            tenant_id=tenant_id,
+        )
         self._namespace = namespace
         self._tenant_id = tenant_id
         self._domain = domain
@@ -126,6 +185,10 @@ class _FilesystemDomainBackend:
         return self._state
 
     @property
+    def physical_root(self) -> Path:
+        return self._root
+
+    @property
     def object_store(self) -> ObjectStore:
         return self._object_store
 
@@ -138,7 +201,13 @@ class _FilesystemDomainBackend:
         return self._components
 
     async def prepare(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True)
+        try:
+            self._root.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise AIError(
+                ErrorCode.STORAGE_UNAVAILABLE,
+                "failed to prepare filesystem runtime state",
+            ) from error
         await self._writer_lock.acquire()
         try:
             await asyncio.to_thread(self._load)
@@ -146,34 +215,43 @@ class _FilesystemDomainBackend:
             if not self._manifest.is_file():
                 await asyncio.to_thread(self._write_manifest)
             _logger.info("filesystem domain prepared: namespace=%s domain=%s", self._namespace, self._domain.value)
-        except BaseException:
-            await self._writer_lock.release()
+        except BaseException as primary:
+            await _release_lock_after_prepare_failure(
+                self._writer_lock,
+                primary=primary,
+            )
             raise
 
     async def release(self) -> None:
         if self._released:
             return
-        self._released = True
         await self._writer_lock.release()
+        self._released = True
         _logger.debug("filesystem domain released: namespace=%s domain=%s", self._namespace, self._domain.value)
 
     def _load(self) -> None:
         try:
             if not self._manifest.is_file():
+                if any(entry != self._writer_lock.path for entry in self._root.iterdir()):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 self._load_payload(_empty_payload())
+                self._validate_payload()
                 return
             manifest = read_json(self._manifest)
-            if not isinstance(manifest, dict) or (
-                manifest.get("format") != "linktools-ai-runtime-state"
-                or manifest.get("generation") != 1
-                or manifest.get("namespace") != self._namespace
+            if manifest.get("format") != "linktools-ai-runtime-state":
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            if manifest.get("generation") != 1:
+                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+            if (
+                manifest.get("namespace") != self._namespace
                 or manifest.get("tenant_id") != self._tenant_id
                 or manifest.get("domain") != self._domain.value
             ):
-                raise ValueError("runtime state identity mismatch")
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             records = read_json(self._records) if self._records.is_file() else _empty_payload()
             if not isinstance(records, dict):
                 raise ValueError("runtime records must be an object")
+            _validate_record_scope(records, self._tenant_id)
             _validate_state_record_uniqueness(_domain_validation_records(records))
             self._load_payload(records)
             self._validate_payload()
@@ -508,6 +586,19 @@ def _domain_validation_records(records: dict[str, JsonValue]) -> dict[str, JsonV
         if key in records:
             empty[key] = records[key]
     return empty
+
+
+def _validate_record_scope(records: dict[str, JsonValue], tenant_id: str) -> None:
+    allowed = frozenset((*_empty_payload(), "tasks"))
+    unknown = set(records) - allowed
+    if unknown:
+        raise ValueError(f"runtime records contain unknown fields: {sorted(unknown)}")
+    for value in records.values():
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict) and "tenant_id" in item and item["tenant_id"] != tenant_id:
+                raise ValueError("runtime record tenant scope is invalid")
 
 
 def _empty_payload() -> dict[str, JsonValue]:

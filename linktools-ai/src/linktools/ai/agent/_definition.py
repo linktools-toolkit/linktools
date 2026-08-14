@@ -6,8 +6,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel
 
-from ..capability import CapabilityBinding
-from ..capability.validation_api import validate_fingerprint
+from ..capability import CapabilityBinding, validate_fingerprint
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
 from ..spec import AgentSpec, PromptSpec

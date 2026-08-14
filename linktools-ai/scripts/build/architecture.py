@@ -319,13 +319,18 @@ def _private_import_errors(
                         for alias in node.names
                         if alias.name.startswith("_")
                     )
-                if isinstance(node, ast.Call) and _is_dynamic_import_call(
-                    node,
-                    importlib_module_aliases,
-                    import_module_aliases,
+                if (
+                    isinstance(node, ast.Call)
+                    and _is_dynamic_import_call(
+                        node,
+                        importlib_module_aliases,
+                        import_module_aliases,
+                    )
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
                 ):
-                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
-                        targets.append((node.args[0].value, node.lineno))
+                    targets.append((node.args[0].value, node.lineno))
                 for target, lineno in targets:
                     if not _is_supported_source_module(target):
                         continue
@@ -335,7 +340,10 @@ def _private_import_errors(
                     target_parts = target.split(".")
                     private_path = any(part.startswith("_") for part in target_parts[len(owner_parts):])
                     if source_owner != target_owner and private_path:
-                        errors.append(f"private cross-package import: {path}:{lineno}: {current} -> {target}")
+                        errors.append(
+                            f"private cross-package import: {path}:{lineno}: "
+                            f"{current} -> {target}"
+                        )
     return errors
 
 
@@ -351,7 +359,9 @@ def _owner_package(module: str) -> str:
 
 
 def _is_supported_source_module(module: str) -> bool:
-    return module == "linktools.ai" or module.startswith("linktools.ai.") or module == "linktools.commands.ai" or module.startswith("linktools.commands.ai.")
+    return module in {"linktools.ai", "linktools.commands.ai"} or module.startswith(
+        ("linktools.ai.", "linktools.commands.ai.")
+    )
 
 
 def _init_errors(root: Path) -> 'list[str]':
@@ -384,6 +394,8 @@ class ArchitecturePolicyChecker:
     def check(self, source_root: "str | Path") -> ArchitectureCheckResult:
         root = Path(source_root)
         report = build_report(root)
+        commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
+        source_roots = ((root, "linktools.ai"), (commands_root, "linktools.commands.ai"))
         policy_path = (
             root.parents[2]
             / "scripts"
@@ -421,8 +433,9 @@ class ArchitecturePolicyChecker:
             *check_files(root),
         ]
         errors.extend(_public_module_errors(root, public_modules))
-        commands_root = root.parents[2] / "src" / "linktools" / "commands" / "ai"
-        errors.extend(_private_import_errors(((root, "linktools.ai"), (commands_root, "linktools.commands.ai"))))
+        if "private_imports" in policy:
+            errors.append("private_imports policy is forbidden")
+        errors.extend(_private_import_errors(source_roots))
         errors.extend(f"runtime SCC: {component}" for component in report["scc"] if isinstance(component, list))
         errors.extend(f"dependency SCC: {component}" for component in report["dependency_scc"] if isinstance(component, list))
         errors.extend(f"package SCC: {component}" for component in report["package_scc"] if isinstance(component, list))
@@ -433,7 +446,11 @@ class ArchitecturePolicyChecker:
         if isinstance(package_runtime, dict):
             for source_package, targets in package_runtime.items():
                 allowed_value = dependency_map.get(source_package, [])
-                allowed = set(item for item in allowed_value if isinstance(item, str)) if isinstance(allowed_value, list) else set()
+                allowed = (
+                    {item for item in allowed_value if isinstance(item, str)}
+                    if isinstance(allowed_value, list)
+                    else set()
+                )
                 if isinstance(targets, list):
                     errors.extend(
                         f"dependency policy: {source_package} -> {target}"

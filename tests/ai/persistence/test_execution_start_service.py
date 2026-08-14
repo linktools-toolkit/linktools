@@ -6,12 +6,10 @@
 import asyncio
 
 import pytest
-from linktools.ai.runtime import RuntimeState
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime import ExecutionRequest
-from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.composition_api import DefaultExecutionService
+from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
+from linktools.ai.runtime._execution import DefaultExecutionService
 
 
 class _History:

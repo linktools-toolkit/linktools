@@ -220,10 +220,10 @@ class FilesystemWriterLock:
 
     async def release(self) -> None:
         lock = self._lock
-        self._lock = None
         if lock is None:
             return
         await asyncio.to_thread(lock.release)
+        self._lock = None
         _logger.debug("runtime writer lock released: path=%s", self.path)
 
 

@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
 from linktools.ai.core import (
     ExecutionEventType,
     ExecutionLineageKind,
@@ -19,7 +18,7 @@ from linktools.ai.core import (
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.contract_api import ExecutionRecord
+from linktools.ai.runtime.state._contracts import ExecutionRecord
 
 
 def _tool_record() -> ToolOperationRecord:
