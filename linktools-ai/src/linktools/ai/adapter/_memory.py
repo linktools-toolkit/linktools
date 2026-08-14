@@ -43,18 +43,26 @@ _logger = environ.get_logger("ai.adapter.memory")
 _MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
 
 
+def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
+    logical_scope_key = canonical_sha256(memory_scope)
+    return canonical_sha256({"execution_id": execution_id, "memory_scope_key": logical_scope_key})
+
+
 class RuntimeMemoryStore(SearchableMemoryStore):
     """Map Harness memory paths to the bound Runtime memory repositories."""
 
-    def __init__(self, persistence: RuntimeStores, *, tenant_id: str, namespace: str) -> None:
+    def __init__(self, persistence: RuntimeStores, *, tenant_id: str, execution_id: str, memory_scope: str, transient: bool = False) -> None:
         try:
             validate_tenant_id(tenant_id)
-            validate_memory_scope(namespace)
+            validate_memory_scope(memory_scope)
         except AIError as error:
             raise ValueError("memory store identity is invalid") from error
         self._persistence = persistence
         self._tenant_id = tenant_id
-        self._namespace_key = canonical_sha256(namespace)
+        self._execution_id = execution_id
+        self._transient = transient
+        logical_scope_key = canonical_sha256(memory_scope)
+        self._memory_scope_key = _memory_working_scope_key(execution_id, memory_scope) if transient else logical_scope_key
         self._lock = asyncio.Lock()
 
     async def read(self, path: str, *, max_chars: int) -> "MemoryFile | None":
@@ -69,7 +77,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return MemoryFile(content[:max_chars], _version(record.revision), operation_id if isinstance(operation_id, str) else None, len(content) > max_chars)
 
     async def get_operation(self, operation: MemoryOperation) -> MemoryMutation | None:
-        record = await self._persistence.memory.operations.get(_operation_id(self._namespace_key, operation.id), tenant_id=self._tenant_id)
+        record = await self._persistence.memory.operations.get(_operation_id(self._memory_scope_key, operation.id), tenant_id=self._tenant_id)
         if record is None:
             return None
         if record.resource_kind is not ResourceKind.MEMORY or record.request_digest != operation.fingerprint:
@@ -95,7 +103,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             current = await self._record(logical_path)
             _check_version(current, expected_version)
             blob = await put_runtime_object(
-                self._persistence.object_store(RuntimeDomain.MEMORY),
+                self._persistence.working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{self._execution_id}") if self._transient else self._persistence.object_store(RuntimeDomain.MEMORY),
                 RuntimeObjectKeyFactory(self._persistence.namespace),
                 RuntimeDomain.MEMORY,
                 self._tenant_id,
@@ -103,9 +111,9 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             )
             now = datetime.now(timezone.utc)
             next_record = MemoryRecord(
-                _memory_id(self._namespace_key, logical_path),
+                _memory_id(self._memory_scope_key, logical_path),
                 self._tenant_id,
-                self._namespace_key,
+                self._memory_scope_key,
                 blob,
                 hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 {"path": logical_path, **({} if operation is None else {"operation_id": operation.id})},
@@ -114,7 +122,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 now,
             )
             mutation = MemoryMutation(_version(next_record.revision), False, current is not None)
-            operation_input = _operation_input(operation, self._namespace_key, self._tenant_id, mutation, OperationKind.MEMORY_WRITE, _memory_id(self._namespace_key, logical_path))
+            operation_input = _operation_input(operation, self._memory_scope_key, self._tenant_id, mutation, OperationKind.MEMORY_WRITE, _memory_id(self._memory_scope_key, logical_path))
             try:
                 stored, replayed = await self._persistence.memory.records.put_with_operation(
                     next_record,
@@ -132,7 +140,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             if stored is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             mutation = MemoryMutation(_version(stored.revision), False, current is not None)
-            _logger.debug("runtime memory written: namespace_key=%s path_digest=%s replayed=%s", self._namespace_key, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory written: memory_scope=%s path_digest=%s replayed=%s", self._memory_scope_key, canonical_sha256(logical_path), False)
             return mutation
 
     async def delete(
@@ -153,10 +161,10 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 mutation = MemoryMutation(None, False, False)
             else:
                 mutation = MemoryMutation(None, False, True)
-            operation_input = _operation_input(operation, self._namespace_key, self._tenant_id, mutation, OperationKind.MEMORY_DELETE, _memory_id(self._namespace_key, logical_path))
+            operation_input = _operation_input(operation, self._memory_scope_key, self._tenant_id, mutation, OperationKind.MEMORY_DELETE, _memory_id(self._memory_scope_key, logical_path))
             try:
                 deleted, replayed = await self._persistence.memory.records.delete_with_operation(
-                    _memory_id(self._namespace_key, logical_path),
+                    _memory_id(self._memory_scope_key, logical_path),
                     tenant_id=self._tenant_id,
                     expected_revision=None if current is None else current.revision,
                     operation=operation_input,
@@ -171,7 +179,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 return replay
             if deleted != (current is not None):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            _logger.debug("runtime memory deleted: namespace_key=%s path_digest=%s replayed=%s", self._namespace_key, canonical_sha256(logical_path), False)
+            _logger.debug("runtime memory deleted: memory_scope=%s path_digest=%s replayed=%s", self._memory_scope_key, canonical_sha256(logical_path), False)
             return mutation
 
     async def list_paths(self, prefix: str = "", *, limit: int) -> "list[str]":
@@ -247,7 +255,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
             page_limit = 200 if limit is None else min(200, limit - len(records))
             page = await self._persistence.memory.records.list(
                 tenant_id=self._tenant_id,
-                memory_scope_key=self._namespace_key,
+                memory_scope_key=self._memory_scope_key,
                 cursor=cursor,
                 limit=page_limit,
             )
@@ -258,7 +266,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return records if limit is None else records[:limit]
 
     async def _record(self, logical_path: str) -> MemoryRecord | None:
-        return await self._persistence.memory.records.get(_memory_id(self._namespace_key, logical_path), tenant_id=self._tenant_id)
+        return await self._persistence.memory.records.get(_memory_id(self._memory_scope_key, logical_path), tenant_id=self._tenant_id)
 
     async def _content(self, record: MemoryRecord) -> str:
         content = (await read_runtime_object(self._persistence.object_store(RuntimeDomain.MEMORY), record.content_ref)).decode("utf-8")
@@ -273,7 +281,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         if error.code is not ErrorCode.STORAGE_CONFLICT:
             return error
         if operation is not None:
-            existing = await self._persistence.memory.operations.get(_operation_id(self._namespace_key, operation.id), tenant_id=self._tenant_id)
+            existing = await self._persistence.memory.operations.get(_operation_id(self._memory_scope_key, operation.id), tenant_id=self._tenant_id)
             if existing is not None:
                 if existing.request_digest != operation.fingerprint:
                     return MemoryOperationConflictError("memory operation fingerprint conflict")

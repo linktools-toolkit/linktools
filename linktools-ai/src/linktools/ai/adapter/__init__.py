@@ -28,15 +28,15 @@ from ._schema import (
 )
 from ._step import (
     FilesystemStepArchive,
+    InMemoryStepArchive,
     ObjectMediaAdapter,
     RuntimeStepPersistence,
     SqlStepArchive,
     StagingStepStore,
-    StepPromoter,
 )
 
 __all__ = [
-    "FilesystemStepArchive", "FilesystemRuntime", "InMemoryRuntime",
+    "FilesystemStepArchive", "FilesystemRuntime", "InMemoryRuntime", "InMemoryStepArchive",
     "NatsPublisher", "ObjectMediaAdapter", "ProviderClient", "RuntimeMemoryStore", "RuntimeStepPersistence", "SqlStepArchive",
-    "RuntimePersistence", "StaticPrincipalProvider", "StepExecutionHistoryReader", "StepPromoter", "StagingStepStore", "build_filesystem_runtime", "build_in_memory_runtime", "build_runtime_sql_metadata", "build_step_sql_metadata", "open_runtime_persistence", "required_runtime_sql_tables", "runtime_durable_domains", "runtime_storage_engine", "runtime_storage_kind", "runtime_storage_path",
+    "RuntimePersistence", "StaticPrincipalProvider", "StepExecutionHistoryReader", "StagingStepStore", "build_filesystem_runtime", "build_in_memory_runtime", "build_runtime_sql_metadata", "build_step_sql_metadata", "open_runtime_persistence", "required_runtime_sql_tables", "runtime_durable_domains", "runtime_storage_engine", "runtime_storage_kind", "runtime_storage_path",
 ]

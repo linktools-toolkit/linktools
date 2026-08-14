@@ -84,7 +84,7 @@ class DefaultArtifactService:
         payload = {"tenant_id": principal.tenant_id, "principal_id": principal.principal_id, "artifact_id": artifact_id, "artifact_digest": record.digest, "expires_at": expires_at, "nonce": nonce}
         signature = hmac.new(self._grant_key, canonical_json_bytes(payload), hashlib.sha256).hexdigest()
         token = _encode_grant({**payload, "hmac": signature})
-        await self._persistence.artifact.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
+        await self._persistence.artifact.operations.compare_and_swap(nonce, tenant_id=principal.tenant_id, expected_status=OperationStatus.PENDING, next_record=OperationLedgerRecord(operation.operation_id, operation.tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, record.object_ref.key, record.digest, None, operation.compactable, operation.sequence, operation.created_at, datetime.now(timezone.utc)))
         _logger.info("artifact grant issued: artifact=%s tenant=%s", artifact_id, principal.tenant_id)
         return ArtifactDownload(artifact_id, f"{self._entry_path}/{artifact_id}/download?grant={token}", str(expires_at))
 

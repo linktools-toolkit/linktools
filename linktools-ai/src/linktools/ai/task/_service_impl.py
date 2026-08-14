@@ -3,7 +3,8 @@
 """Persistence-backed Task API independent of Runtime composition."""
 
 import asyncio
-from dataclasses import replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -36,6 +37,21 @@ from ._graph import (
 from ._service import TaskApi, TaskGraphLauncher
 
 _logger = environ.get_logger("ai.task.service")
+
+
+class _TaskReleaseCallback(Protocol):
+    async def __call__(self, graph_id: str, *, tenant_id: str) -> None: ...
+
+
+async def _no_release_terminal(graph_id: str, *, tenant_id: str) -> None:
+    del graph_id, tenant_id
+
+
+@dataclass
+class _TaskHandoffState:
+    active_consumers: int = 0
+    release_requested: bool = False
+    release_in_progress: bool = False
 
 
 class _TaskRepository(Protocol):
@@ -73,144 +89,225 @@ class DefaultTaskService(TaskApi):
         persistence: TaskPersistence,
         authorization: AuthorizationPolicy,
         launcher: TaskGraphLauncher | None = None,
+        *,
+        release_terminal: _TaskReleaseCallback | None = None,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
+        self._release_terminal = release_terminal or _no_release_terminal
+        self._handoff_states: dict[tuple[str, str], _TaskHandoffState] = {}
+        self._handoff_condition = asyncio.Condition()
 
     async def run_graph(self, request: TaskGraphRequest) -> TaskGraphResult:
+        return await self._run_graph(request, release_terminal=True)
+
+    async def _run_graph(self, request: TaskGraphRequest, *, release_terminal: bool) -> TaskGraphResult:
         if self._launcher is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        await self._authorization.authorize(
-            request.principal,
-            AuthorizationAction.TASK_RUN,
-            ResourceRef(ResourceKind.TASK_GRAPH, request.graph.graph_id, request.principal.tenant_id),
-        )
-        digest = _graph_digest(request)
-        operation_id = idempotency_key_hash(request.idempotency_key)
-        claimed, operation = await self._claim_operation(
-            operation_id=operation_id,
-            tenant_id=request.principal.tenant_id,
-            graph_id=request.graph.graph_id,
-            kind=OperationKind.TASK_NODE,
-            request_digest=digest,
-        )
-        if not claimed:
-            view = await self._persistence.task.tasks.get_graph(request.graph.graph_id, tenant_id=request.principal.tenant_id)
-            if view is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if not _terminal(view.status):
+        graph_id = request.graph.graph_id
+        tenant_id = request.principal.tenant_id
+        async with self._graph_consumer(graph_id, tenant_id):
+            await self._authorization.authorize(
+                request.principal,
+                AuthorizationAction.TASK_RUN,
+                ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
+            )
+            digest = _graph_digest(request)
+            operation_id = idempotency_key_hash(request.idempotency_key)
+            claimed, operation = await self._claim_operation(
+                operation_id=operation_id,
+                tenant_id=tenant_id,
+                graph_id=graph_id,
+                kind=OperationKind.TASK_NODE,
+                request_digest=digest,
+            )
+            if not claimed:
+                view = await self._persistence.task.tasks.get_graph(graph_id, tenant_id=tenant_id)
+                if view is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if not _terminal(view.status):
+                    await self._launcher.start(request)
+                result = await self._result(view, tenant_id)
+                if release_terminal and _terminal(result.status):
+                    await self._request_graph_release(graph_id, tenant_id)
+                return result
+            created = False
+            try:
+                view = await self._persistence.task.tasks.create_graph(request.graph, tenant_id=tenant_id)
+                created = True
                 await self._launcher.start(request)
-            return await self._result(view, request.principal.tenant_id)
-        created = False
-        try:
-            view = await self._persistence.task.tasks.create_graph(request.graph, tenant_id=request.principal.tenant_id)
-            created = True
-            await self._launcher.start(request)
-        except asyncio.CancelledError:
-            raise
-        except AIError as error:
-            if created:
-                await self._abort_plan(request)
-            current = await self._record_failure(operation, request.principal.tenant_id, error.code.value)
-            if current.status is OperationStatus.SUCCEEDED:
-                return await self._replay_result(request.graph.graph_id, request.principal.tenant_id)
-            raise
-        except Exception:
-            if created:
-                await self._abort_plan(request)
-            current = await self._record_failure(operation, request.principal.tenant_id, ErrorCode.STORAGE_UNAVAILABLE.value)
-            if current.status is OperationStatus.SUCCEEDED:
-                return await self._replay_result(request.graph.graph_id, request.principal.tenant_id)
-            raise
-        current = await self._record_success(operation, request.principal.tenant_id, view)
-        if current.status is not OperationStatus.SUCCEEDED:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.info("task graph submitted: tenant=%s graph=%s", request.principal.tenant_id, view.graph_id)
-        return await self._result(view, request.principal.tenant_id)
+            except asyncio.CancelledError:
+                raise
+            except AIError as error:
+                if created:
+                    await self._abort_plan(request)
+                current = await self._record_failure(operation, tenant_id, error.code.value)
+                if current.status is OperationStatus.SUCCEEDED:
+                    result = await self._replay_result(graph_id, tenant_id)
+                    if release_terminal and _terminal(result.status):
+                        await self._request_graph_release(graph_id, tenant_id)
+                    return result
+                raise
+            except Exception:
+                if created:
+                    await self._abort_plan(request)
+                current = await self._record_failure(operation, tenant_id, ErrorCode.STORAGE_UNAVAILABLE.value)
+                if current.status is OperationStatus.SUCCEEDED:
+                    result = await self._replay_result(graph_id, tenant_id)
+                    if release_terminal and _terminal(result.status):
+                        await self._request_graph_release(graph_id, tenant_id)
+                    return result
+                raise
+            current = await self._record_success(operation, tenant_id, view)
+            if current.status is not OperationStatus.SUCCEEDED:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            _logger.info("task graph submitted: tenant=%s graph=%s", tenant_id, graph_id)
+            result = await self._result(view, tenant_id)
+            if release_terminal and _terminal(result.status):
+                await self._request_graph_release(graph_id, tenant_id)
+            return result
 
     async def run_graph_and_wait(self, request: TaskGraphRequest, *, timeout_seconds: "float | None" = None) -> TaskGraphResult:
-        handle = await self.run_graph(request)
-        return await self.wait_graph(handle.graph_id, principal=request.principal, timeout_seconds=timeout_seconds)
+        submitted = await self._run_graph(request, release_terminal=False)
+        return await self.wait_graph(submitted.graph_id, principal=request.principal, timeout_seconds=timeout_seconds)
 
     async def inspect_graph(self, graph_id: str, *, principal: Principal) -> TaskGraphView:
-        header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
-        return await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
+        async with self._graph_consumer(graph_id, principal.tenant_id):
+            header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
+            return await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
 
     async def wait_graph(self, graph_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> TaskGraphResult:
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        async def poll() -> TaskGraphResult:
-            while True:
-                header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
-                if header is None:
-                    raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
-                view = await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
-                if _terminal(view.status):
-                    return await self._result(view, principal.tenant_id)
-                await asyncio.sleep(0.05)
+        async with self._graph_consumer(graph_id, principal.tenant_id):
+            async def poll() -> TaskGraphResult:
+                while True:
+                    header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+                    if header is None:
+                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+                    await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
+                    view = await self._persistence.task.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
+                    if _terminal(view.status):
+                        result = await self._result(view, principal.tenant_id)
+                        await self._request_graph_release(graph_id, principal.tenant_id)
+                        return result
+                    await asyncio.sleep(0.05)
 
-        try:
-            return await asyncio.wait_for(poll(), timeout_seconds)
-        except asyncio.TimeoutError as error:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "task graph wait timed out") from error
+            try:
+                return await asyncio.wait_for(poll(), timeout_seconds)
+            except asyncio.TimeoutError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "task graph wait timed out") from error
 
     async def cancel_graph(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
-        header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=request.principal.tenant_id)
-        if header is None:
-            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-        await self._authorization.authorize(request.principal, AuthorizationAction.TASK_CANCEL, header)
-        request_digest = canonical_sha256(
-            {
-                "action": "task.cancel",
-                "principal": principal_identity_payload(request.principal),
-                "graph_id": graph_id,
-                "force": request.force,
-            }
-        )
-        finalizer = asyncio.create_task(
-            self._cancel_finalizer(
-                graph_id,
-                request,
-                idempotency_key_hash(request.idempotency_key),
-                request_digest,
+        async with self._graph_consumer(graph_id, request.principal.tenant_id):
+            header = await self._persistence.task.tasks.get_header(graph_id, tenant_id=request.principal.tenant_id)
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(request.principal, AuthorizationAction.TASK_CANCEL, header)
+            request_digest = canonical_sha256(
+                {
+                    "action": "task.cancel",
+                    "principal": principal_identity_payload(request.principal),
+                    "graph_id": graph_id,
+                    "force": request.force,
+                }
             )
-        )
-        caller_cancellation: "asyncio.CancelledError | None" = None
-        finalizer_error: "BaseException | None" = None
-        result: "TaskGraphView | None" = None
-        while not finalizer.done():
-            try:
-                result = await asyncio.shield(finalizer)
-            except asyncio.CancelledError as error:
-                caller_cancellation = caller_cancellation or error
-                continue
-            except BaseException as error:
-                finalizer_error = error
-                break
-        if finalizer.done() and result is None:
-            try:
-                result = finalizer.result()
-            except BaseException as error:
-                finalizer_error = error
-        if caller_cancellation is not None:
-            if finalizer_error is not None:
-                _logger.warning(
-                    "task graph cancel finalizer failed after caller cancellation: graph=%s error=%s",
+            finalizer = asyncio.create_task(
+                self._cancel_finalizer(
                     graph_id,
-                    type(finalizer_error).__name__,
+                    request,
+                    idempotency_key_hash(request.idempotency_key),
+                    request_digest,
                 )
-            raise caller_cancellation
-        if finalizer_error is not None:
-            raise finalizer_error
-        if result is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return result
+            )
+            caller_cancellation: "asyncio.CancelledError | None" = None
+            finalizer_error: "BaseException | None" = None
+            result: "TaskGraphView | None" = None
+            while not finalizer.done():
+                try:
+                    result = await asyncio.shield(finalizer)
+                except asyncio.CancelledError as error:
+                    caller_cancellation = caller_cancellation or error
+                    continue
+                except BaseException as error:
+                    finalizer_error = error
+                    break
+            if finalizer.done() and result is None:
+                try:
+                    result = finalizer.result()
+                except BaseException as error:
+                    finalizer_error = error
+            if caller_cancellation is not None:
+                if finalizer_error is not None:
+                    _logger.warning(
+                        "task graph cancel finalizer failed after caller cancellation: graph=%s error=%s",
+                        graph_id,
+                        type(finalizer_error).__name__,
+                    )
+                raise caller_cancellation
+            if finalizer_error is not None:
+                raise finalizer_error
+            if result is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._request_graph_release(graph_id, request.principal.tenant_id)
+            return result
+
+    @asynccontextmanager
+    async def _graph_consumer(self, graph_id: str, tenant_id: str):
+        key = (tenant_id, graph_id)
+        async with self._handoff_condition:
+            while True:
+                state = self._handoff_states.get(key)
+                if state is None:
+                    state = _TaskHandoffState()
+                    self._handoff_states[key] = state
+                if not state.release_in_progress:
+                    state.active_consumers += 1
+                    break
+                await self._handoff_condition.wait()
+        cleanup_owner = False
+        try:
+            yield
+        finally:
+            async with self._handoff_condition:
+                state.active_consumers -= 1
+                if state.active_consumers < 0:
+                    raise RuntimeError("task graph consumer count became negative")
+                if state.active_consumers == 0:
+                    if state.release_requested and not state.release_in_progress:
+                        state.release_in_progress = True
+                        cleanup_owner = True
+                    elif not state.release_requested and self._handoff_states.get(key) is state:
+                        self._handoff_states.pop(key, None)
+                self._handoff_condition.notify_all()
+            if cleanup_owner:
+                cleanup_succeeded = False
+                try:
+                    await self._release_terminal(graph_id, tenant_id=tenant_id)
+                    cleanup_succeeded = True
+                except BaseException:
+                    _logger.error("task graph transient handoff cleanup failed: graph=%s", graph_id, exc_info=environ.debug)
+                async with self._handoff_condition:
+                    if self._handoff_states.get(key) is state:
+                        if cleanup_succeeded and state.active_consumers == 0:
+                            self._handoff_states.pop(key, None)
+                        else:
+                            state.release_in_progress = False
+                            state.release_requested = True
+                    self._handoff_condition.notify_all()
+
+    async def _request_graph_release(self, graph_id: str, tenant_id: str) -> None:
+        async with self._handoff_condition:
+            state = self._handoff_states.get((tenant_id, graph_id))
+            if state is None:
+                raise RuntimeError("task graph release requested without consumer")
+            state.release_requested = True
+            self._handoff_condition.notify_all()
 
     async def _claim_operation(self, *, operation_id: str, tenant_id: str, graph_id: str, kind: OperationKind, request_digest: str) -> "tuple[bool, OperationLedgerRecord]":
         operation = await self._persistence.task.operations.get(operation_id, tenant_id=tenant_id)

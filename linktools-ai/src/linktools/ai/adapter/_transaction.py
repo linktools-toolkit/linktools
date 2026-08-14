@@ -54,6 +54,18 @@ class TransactionHub:
     def configured(self) -> bool:
         return self._snapshot is not None or self._restore is not None or self._commit is not None or self._rollback is not None
 
+    @property
+    def active_task(self) -> asyncio.Task[object] | None:
+        return self._owner
+
+    @property
+    def active_domain(self) -> RuntimeDomain | None:
+        return self._domain
+
+    @property
+    def depth(self) -> int:
+        return self._depth
+
     async def enter(self, domain: RuntimeDomain) -> None:
         task = asyncio.current_task()
         if task is None:

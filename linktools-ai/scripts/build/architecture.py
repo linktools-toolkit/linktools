@@ -270,11 +270,17 @@ def _private_import_errors(
                 for target, lineno in targets:
                     if not target.startswith("linktools.ai.") or not target.rsplit(".", 1)[-1].startswith("_"):
                         continue
-                    source_parent = current if current_is_package else current.rsplit(".", 1)[0]
-                    target_parent = target.rsplit(".", 1)[0]
-                    if source_parent != target_parent:
+                    source_owner = _owner_package(current)
+                    target_owner = _owner_package(target)
+                    if source_owner != target_owner:
                         errors.append(f"private cross-package import: {path}:{lineno}: {current} -> {target}")
     return errors
+
+
+def _owner_package(module: str) -> str:
+    parts = module.split(".")
+    private_index = next((index for index, part in enumerate(parts) if part.startswith("_") and index >= 2), len(parts))
+    return ".".join(parts[:private_index])
 
 
 def _init_errors(root: Path) -> 'list[str]':

@@ -5,16 +5,14 @@
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._dialects import (
-    MySQLDialect,
-    PostgreSQLDialect,
+    dialect_for_name,
     SqlAlchemyDialect,
-    SQLiteDialect,
 )
 
 if TYPE_CHECKING:
@@ -28,7 +26,7 @@ _PROVISION_LOCK = asyncio.Lock()
 
 
 @dataclass(slots=True)
-class SqlContext:
+class SqlStorageContext:
     """The borrowed-engine boundary used by SQL adapters."""
 
     engine: "AsyncEngine"
@@ -58,16 +56,21 @@ class SqlContext:
         if self.owns_engine:
             await self.engine.dispose()
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
-def create_sql_context(engine: "AsyncEngine", *, owns_engine: bool = False) -> SqlContext:
+
+def create_sql_storage_context(engine: "AsyncEngine", *, owns_engine: bool = False) -> SqlStorageContext:
+    dialect = dialect_for_name(engine.dialect.name)
     from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
     if not isinstance(engine, AsyncEngine):
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    return SqlContext(
+    return SqlStorageContext(
         engine=engine,
         sessions=async_sessionmaker(engine, expire_on_commit=False),
-        dialect=_dialect_for_name(engine.dialect.name),
+        dialect=dialect,
         owns_engine=owns_engine,
     )
 
@@ -75,6 +78,7 @@ def create_sql_context(engine: "AsyncEngine", *, owns_engine: bool = False) -> S
 async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     """Create the explicitly requested metadata without a global schema."""
 
+    dialect_for_name(engine.dialect.name)
     if not metadata.tables:
         return
     if engine.dialect.name == "sqlite":
@@ -89,6 +93,7 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
 async def validate_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     """Validate that required metadata is a compatible subset of the database."""
 
+    dialect_for_name(engine.dialect.name)
     if engine.dialect.name == "sqlite":
         await _configure_sqlite_engine(engine)
     async with engine.connect() as connection:
@@ -135,68 +140,261 @@ def sql_index(index: "Index") -> "Index":
     return index.ddl_if(dialect="mysql")
 
 
-def _dialect_for_name(name: str) -> SqlAlchemyDialect:
-    if name == "sqlite":
-        return SQLiteDialect()
-    if name in {"postgresql", "postgres"}:
-        return PostgreSQLDialect()
-    if name in {"mysql", "mariadb"}:
-        return MySQLDialect()
-    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, f"unsupported SQL dialect: {name}")
-
-
 def _validate_connection_schema(connection: "Connection", metadata: "MetaData") -> None:
-    from sqlalchemy import (
-        UniqueConstraint,
-        inspect,
-    )
+    from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, inspect
 
     inspector = inspect(connection)
-    for table in metadata.tables.values():
-        if table.name not in inspector.get_table_names(schema=table.schema):
-            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"missing SQL table: {table.name}")
-        actual = {column["name"]: column for column in inspector.get_columns(table.name, schema=table.schema)}
-        for column in table.columns:
-            value = actual.get(column.name)
-            if value is None:
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"missing SQL column: {table.name}.{column.name}")
-            if bool(value.get("nullable", True)) != bool(column.nullable):
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"nullable SQL column: {table.name}.{column.name}")
-            if _type_family(column.type) != _type_family(value.get("type")):
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"type mismatch: {table.name}.{column.name}")
-        required_names = {column.name for column in table.columns}
-        for column in actual.values():
-            if column["name"] in required_names:
-                continue
-            if not bool(column.get("nullable", True)) and column.get("default") is None and not column.get("autoincrement") and column.get("computed") is None:
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"required extra SQL column: {table.name}.{column['name']}")
-        actual_pk = inspector.get_pk_constraint(table.name, schema=table.schema).get("constrained_columns", [])
-        required_pk = [column.name for column in table.primary_key.columns]
-        if required_pk and list(actual_pk) != required_pk:
-            raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"primary key mismatch: {table.name}")
-        actual_unique = {
-            tuple(item.get("column_names", ()))
-            for item in inspector.get_unique_constraints(table.name, schema=table.schema)
+    dialect_name = connection.dialect.name
+    actual_tables = set(inspector.get_table_names())
+    for expected_table in metadata.tables.values():
+        if expected_table.name not in actual_tables:
+            _schema_mismatch(table=expected_table.name, category="table")
+        if dialect_name == "mysql":
+            _validate_mysql_options(inspector, expected_table.name, expected_table.schema)
+
+        actual_columns = {
+            str(column["name"]): column
+            for column in inspector.get_columns(expected_table.name, schema=expected_table.schema)
         }
-        actual_unique.update(
-            tuple(item.get("column_names", ()))
-            for item in inspector.get_indexes(table.name, schema=table.schema)
-            if item.get("unique")
-        )
-        for constraint in table.constraints:
-            if not isinstance(constraint, UniqueConstraint):
+        for expected_column in expected_table.columns:
+            actual_column = actual_columns.get(expected_column.name)
+            if actual_column is None:
+                _schema_mismatch(table=expected_table.name, category="column", column=expected_column.name)
+            if bool(actual_column.get("nullable", True)) != bool(expected_column.nullable):
+                _schema_mismatch(table=expected_table.name, category="nullable", column=expected_column.name)
+            _validate_column_compatibility(
+                connection,
+                table_name=expected_table.name,
+                expected=expected_column,
+                actual=actual_column,
+            )
+            _validate_server_default(
+                dialect_name,
+                table_name=expected_table.name,
+                expected=expected_column,
+                actual=actual_column,
+            )
+
+        expected_names = {column.name for column in expected_table.columns}
+        for actual_column in actual_columns.values():
+            if actual_column["name"] in expected_names:
                 continue
-            columns = tuple(column.name for column in constraint.columns)
-            if columns and columns not in actual_unique:
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"unique constraint mismatch: {table.name}")
-        actual_indexes = {
-            tuple(item.get("column_names", ()))
-            for item in inspector.get_indexes(table.name, schema=table.schema)
+            if (
+                not bool(actual_column.get("nullable", True))
+                and actual_column.get("default") is None
+                and not actual_column.get("autoincrement")
+                and actual_column.get("computed") is None
+            ):
+                _schema_mismatch(table=expected_table.name, category="unsafe_extra_column", column=str(actual_column["name"]))
+
+        expected_pk = tuple(column.name for column in expected_table.primary_key.columns)
+        actual_pk = tuple(inspector.get_pk_constraint(expected_table.name, schema=expected_table.schema).get("constrained_columns") or ())
+        if actual_pk != expected_pk:
+            _schema_mismatch(table=expected_table.name, category="primary_key")
+        _validate_autoincrement(dialect_name, expected_table, actual_columns, actual_pk)
+
+        expected_unique = {
+            tuple(column.name for column in constraint.columns)
+            for constraint in expected_table.constraints
+            if isinstance(constraint, UniqueConstraint)
         }
-        for index in table.indexes:
-            columns = tuple(column.name for column in index.columns)
-            if columns and columns not in actual_indexes and columns not in actual_unique:
-                raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, f"index mismatch: {table.name}")
+        actual_unique: set[tuple[str, ...]] = set()
+        for item in inspector.get_unique_constraints(expected_table.name, schema=expected_table.schema):
+            actual_unique.add(_reflected_columns(expected_table.name, item, "unique"))
+        actual_indexes: set[tuple[str, ...]] = set()
+        actual_non_unique: set[tuple[str, ...]] = set()
+        for item in inspector.get_indexes(expected_table.name, schema=expected_table.schema):
+            signature = _reflected_columns(expected_table.name, item, "index")
+            actual_indexes.add(signature)
+            if item.get("unique"):
+                actual_unique.add(signature)
+            else:
+                actual_non_unique.add(signature)
+        if actual_unique != expected_unique:
+            _schema_mismatch(table=expected_table.name, category="unique")
+
+        expected_indexes = {
+            tuple(column.name for column in index.columns)
+            for index in expected_table.indexes
+            if not index.unique
+        }
+        if not expected_indexes.issubset(actual_non_unique):
+            _schema_mismatch(table=expected_table.name, category="index")
+
+        expected_fks = {
+            _foreign_key_signature(
+                constrained_columns=tuple(column.name for column in constraint.columns),
+                referred_schema=next(iter(constraint.elements)).target_fullname.split(".")[0] if next(iter(constraint.elements)).target_fullname.count(".") == 2 else None,
+                referred_table=next(iter(constraint.elements)).column.table.name,
+                referred_columns=tuple(element.column.name for element in constraint.elements),
+                ondelete=next(iter(constraint.elements)).ondelete,
+            )
+            for constraint in expected_table.constraints
+            if isinstance(constraint, ForeignKeyConstraint)
+        }
+        actual_fks = {
+            _foreign_key_signature(
+                constrained_columns=tuple(item.get("constrained_columns") or ()),
+                referred_schema=item.get("referred_schema"),
+                referred_table=str(item.get("referred_table") or ""),
+                referred_columns=tuple(item.get("referred_columns") or ()),
+                ondelete=item.get("options", {}).get("ondelete"),
+            )
+            for item in inspector.get_foreign_keys(expected_table.name, schema=expected_table.schema)
+        }
+        if actual_fks != expected_fks:
+            _schema_mismatch(table=expected_table.name, category="foreign_key")
+
+        expected_checks = {
+            str(constraint.sqltext).strip()
+            for constraint in expected_table.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+        actual_checks = {str(item.get("sqltext", "")).strip() for item in inspector.get_check_constraints(expected_table.name, schema=expected_table.schema)}
+        if actual_checks != expected_checks:
+            _schema_mismatch(table=expected_table.name, category="check")
+
+
+def _schema_mismatch(*, table: str, category: str, column: str | None = None) -> NoReturn:
+    details: dict[str, object] = {"table": table, "category": category}
+    if column is not None:
+        details["column"] = column
+    raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, safe_details=details)
+
+
+def _reflected_columns(table_name: str, item: Mapping[str, Any], category: str) -> tuple[str, ...]:
+    columns = item.get("column_names")
+    if not isinstance(columns, (list, tuple)) or not columns or any(not isinstance(column, str) for column in columns):
+        _schema_mismatch(table=table_name, category=f"{category}_reflection")
+    return tuple(columns)
+
+
+def _validate_column_compatibility(
+    connection: "Connection",
+    *,
+    table_name: str,
+    expected: Any,
+    actual: Mapping[str, Any],
+) -> None:
+    from sqlalchemy import CHAR, JSON, LargeBinary, Numeric, String, Text
+
+    expected_type = expected.type.dialect_impl(connection.dialect)
+    actual_type = actual.get("type")
+    dialect_name = connection.dialect.name
+    if _type_family(expected_type) != _type_family(actual_type) and not _boolean_compatible(dialect_name, expected_type, actual_type):
+        _schema_mismatch(table=table_name, category="type", column=expected.name)
+    if isinstance(expected_type, CHAR):
+        if not _is_fixed_char(actual_type) or _type_length(actual_type) != expected_type.length:
+            _schema_mismatch(table=table_name, category="capacity", column=expected.name)
+    elif isinstance(expected_type, Text):
+        if not _is_unbounded_text(actual_type):
+            _schema_mismatch(table=table_name, category="capacity", column=expected.name)
+    elif isinstance(expected_type, String):
+        expected_length = expected_type.length
+        actual_length = _type_length(actual_type)
+        if expected_length is not None and actual_length is not None and actual_length < expected_length:
+            _schema_mismatch(table=table_name, category="capacity", column=expected.name)
+        if expected_length is not None and actual_length is None and not _is_unbounded_text(actual_type):
+            _schema_mismatch(table=table_name, category="capacity", column=expected.name)
+    elif isinstance(expected_type, LargeBinary):
+        if not _binary_compatible(dialect_name, expected_type, actual_type):
+            _schema_mismatch(table=table_name, category="type", column=expected.name)
+    elif isinstance(expected_type, JSON):
+        if not _json_compatible(expected_type, actual_type):
+            _schema_mismatch(table=table_name, category="type", column=expected.name)
+    elif _type_family(expected_type) == "integer" and not _integer_compatible(dialect_name, expected_type, actual_type):
+        _schema_mismatch(table=table_name, category="type", column=expected.name)
+    expected_precision = expected_type.precision if isinstance(expected_type, Numeric) else None
+    actual_precision = actual_type.precision if isinstance(actual_type, Numeric) else None
+    expected_scale = expected_type.scale if isinstance(expected_type, Numeric) else None
+    actual_scale = actual_type.scale if isinstance(actual_type, Numeric) else None
+    if expected_precision is not None and (actual_precision != expected_precision or actual_scale != expected_scale):
+        _schema_mismatch(table=table_name, category="capacity", column=expected.name)
+    if dialect_name == "mysql" and isinstance(expected_type, String):
+        expected_charset = _type_charset(expected_type)
+        actual_charset = _type_charset(actual_type)
+        expected_collation = _type_collation(expected_type)
+        actual_collation = _type_collation(actual_type)
+        if expected_charset is not None and actual_charset != expected_charset:
+            _schema_mismatch(table=table_name, category="charset", column=expected.name)
+        if expected_collation is not None and actual_collation != expected_collation:
+            _schema_mismatch(table=table_name, category="collation", column=expected.name)
+
+
+def _validate_server_default(
+    dialect_name: str,
+    *,
+    table_name: str,
+    expected: Any,
+    actual: Mapping[str, Any],
+) -> None:
+    if expected.server_default is None:
+        return
+    expected_value = _normalize_current_timestamp_default(dialect_name, expected.server_default.arg)
+    actual_value = _normalize_current_timestamp_default(dialect_name, actual.get("default"))
+    if expected_value != "current_timestamp":
+        _schema_mismatch(table=table_name, category="server_default", column=expected.name)
+    allowed = {"current_timestamp", "current_timestamp()"}
+    if dialect_name == "postgresql":
+        allowed.add("now()")
+    if actual_value not in allowed:
+        _schema_mismatch(table=table_name, category="server_default", column=expected.name)
+
+
+def _foreign_key_signature(
+    *,
+    constrained_columns: tuple[str, ...],
+    referred_schema: str | None,
+    referred_table: str,
+    referred_columns: tuple[str, ...],
+    ondelete: str | None,
+) -> tuple[object, ...]:
+    return (constrained_columns, referred_schema, referred_table, referred_columns, ondelete.upper() if ondelete else None)
+
+
+def _normalize_current_timestamp_default(dialect_name: str, value: object) -> str | None:
+    if value is None:
+        return None
+    text = "".join(str(value).split()).lower()
+    while text.startswith("(") and text.endswith(")"):
+        text = text[1:-1]
+    return text
+
+
+def _validate_mysql_options(inspector: Any, table_name: str, schema: str | None) -> None:
+    options = inspector.get_table_options(table_name, schema=schema)
+    normalized = {
+        "mysql_engine": options.get("mysql_engine", options.get("engine")),
+        "mysql_charset": options.get("mysql_charset", options.get("charset")),
+        "mysql_collate": options.get("mysql_collate", options.get("collation")),
+    }
+    if {key: str(value).lower() if value is not None else None for key, value in normalized.items()} != {
+        "mysql_engine": "innodb",
+        "mysql_charset": "utf8mb4",
+        "mysql_collate": "utf8mb4_bin",
+    }:
+        _schema_mismatch(table=table_name, category="mysql_options")
+
+
+def _validate_autoincrement(dialect_name: str, table: Any, actual_columns: Mapping[str, Any], actual_pk: tuple[str, ...]) -> None:
+    if len(actual_pk) != 1:
+        return
+    expected = table.c[actual_pk[0]]
+    if not expected.primary_key or expected.autoincrement not in (True, "auto") or _type_family(expected.type) != "integer":
+        return
+    actual = actual_columns[actual_pk[0]]
+    if dialect_name == "sqlite":
+        if _type_family(actual.get("type")) != "integer":
+            _schema_mismatch(table=table.name, category="autoincrement", column=actual_pk[0])
+        return
+    value = actual.get("autoincrement")
+    if dialect_name == "postgresql":
+        default = str(actual.get("default") or "").lower()
+        identity = actual.get("identity")
+        if not value and not identity and not default.startswith("nextval("):
+            _schema_mismatch(table=table.name, category="autoincrement", column=actual_pk[0])
+    elif not value and str(value).lower() not in {"auto", "auto_increment", "true"}:
+        _schema_mismatch(table=table.name, category="autoincrement", column=actual_pk[0])
 
 
 def _type_family(value: object) -> str:
@@ -221,6 +419,91 @@ def _type_family(value: object) -> str:
     return name or rendered
 
 
+def _type_length(value: object) -> int | None:
+    from sqlalchemy import CHAR, String
+
+    if not isinstance(value, (CHAR, String)):
+        return None
+    return None if value.length is None else int(value.length)
+
+
+def _type_charset(value: object) -> str | None:
+    from sqlalchemy.dialects.mysql import CHAR, LONGTEXT, MEDIUMTEXT, TEXT, TINYTEXT, VARCHAR
+
+    if not isinstance(value, (CHAR, LONGTEXT, MEDIUMTEXT, TEXT, TINYTEXT, VARCHAR)):
+        return None
+    return value.charset
+
+
+def _type_collation(value: object) -> str | None:
+    from sqlalchemy import String
+
+    return value.collation if isinstance(value, String) else None
+
+
+def _type_name(value: object) -> str:
+    return str(value).replace(" ", "").lower()
+
+
+def _is_fixed_char(value: object) -> bool:
+    return _type_name(value).startswith("char(") or type(value).__name__.lower() == "char"
+
+
+def _is_unbounded_text(value: object) -> bool:
+    name = type(value).__name__.lower()
+    rendered = _type_name(value)
+    return name in {"text", "longtext", "mediumtext", "tinytext", "clob"} or rendered in {"text", "longtext", "mediumtext", "tinytext", "clob"}
+
+
+def _boolean_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    from sqlalchemy import Boolean
+
+    if not isinstance(expected, Boolean):
+        return False
+    rendered = _type_name(actual)
+    if dialect_name == "mysql":
+        if rendered in {"boolean", "bool"}:
+            return True
+        if rendered.startswith("tinyint"):
+            from sqlalchemy.dialects.mysql import TINYINT
+
+            width = actual.display_width if isinstance(actual, TINYINT) else None
+            return width == 1 or rendered == "tinyint(1)"
+    return type(actual).__name__.lower() in {"boolean", "bool"} or rendered in {"boolean", "bool"}
+
+
+def _binary_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    rendered = _type_name(actual)
+    if dialect_name == "mysql":
+        return rendered == "longblob" or type(actual).__name__.lower() == "longblob"
+    if dialect_name == "postgresql":
+        return rendered == "bytea" or type(actual).__name__.lower() == "bytea"
+    return rendered in {"blob", "largebinary"} or type(actual).__name__.lower() in {"blob", "largebinary"}
+
+
+def _json_compatible(expected: object, actual: object) -> bool:
+    expected_name = type(expected).__name__.lower()
+    actual_name = type(actual).__name__.lower()
+    rendered = _type_name(actual)
+    if expected_name == "jsonb":
+        return actual_name == "jsonb" or rendered == "jsonb"
+    return (actual_name == "json" or rendered == "json") and "jsonb" not in rendered
+
+
+def _integer_compatible(dialect_name: str, expected: object, actual: object) -> bool:
+    if _type_family(actual) != "integer":
+        return False
+    if dialect_name == "sqlite":
+        return True
+    expected_name = _type_name(expected)
+    actual_name = _type_name(actual)
+    if "bigint" in expected_name:
+        return "bigint" in actual_name
+    if "smallint" in expected_name:
+        return any(name in actual_name for name in ("smallint", "integer", "int", "bigint"))
+    return any(name in actual_name for name in ("integer", "int", "bigint"))
+
+
 async def _configure_sqlite_engine(engine: "AsyncEngine") -> None:
     def configure(connection: Any) -> None:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
@@ -231,8 +514,8 @@ async def _configure_sqlite_engine(engine: "AsyncEngine") -> None:
 
 
 __all__ = [
-    "SqlContext",
-    "create_sql_context",
+    "SqlStorageContext",
+    "create_sql_storage_context",
     "provision_sql",
     "validate_sql",
     "sql_blob",

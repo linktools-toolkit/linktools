@@ -2,17 +2,20 @@
 # -*- coding: utf-8 -*-
 """Workspace composition root for the public Runtime."""
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from linktools.core import environ
-from pydantic_ai_harness.step_persistence import StepStore
 
 from ..adapter import (
     RuntimeMemoryStore,
+    RuntimePersistence,
+    RuntimeStepPersistence,
     StepExecutionHistoryReader,
     open_runtime_persistence,
     runtime_durable_domains,
@@ -68,6 +71,7 @@ from ..model import (
     StaticModelCredentialProvider,
 )
 from ..runtime import (
+    ConversationCursor,
     DefaultApprovalService,
     DefaultArtifactService,
     DefaultEvaluationService,
@@ -77,6 +81,7 @@ from ..runtime import (
     DefaultTaskService,
     LocalExecutionBackend,
     RecoveryCheckpointState,
+    RecoveryHandoffPhase,
     Runtime,
     RuntimeDomain,
     RuntimeRetention,
@@ -92,12 +97,9 @@ from ..spec import (
 )
 from ..storage import (
     ContentCache,
-    SqlContext,
     StorageLayer,
     StorageOverlay,
     StorageWriter,
-    create_sql_context,
-    provision_sql,
 )
 from ..task import LocalTaskGraphLauncher, TaskNodeRunner
 from ._root import Workspace
@@ -106,16 +108,31 @@ from ._tools import build_workspace_capability_grants
 _logger = environ.get_logger("ai.workspace.runtime")
 
 
+class _RetentionController(Protocol):
+    async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None: ...
+    async def release_session(self, session_id: str, *, tenant_id: str, continuation: "ConversationCursor | None") -> None: ...
+    async def release_task_graph(self, graph_id: str, *, tenant_id: str) -> None: ...
+    async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None: ...
+    async def close(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _RuntimeResources:
-    storage: RuntimeStorage
     namespace: str
-    domain: RuntimeStores
-    steps: StepStore
-    promote_steps: Callable[[RuntimeDomain, str], "Awaitable[None]"]
-    promote_archive: Callable[[RuntimeDomain, RuntimeDomain, str], "Awaitable[None]"]
-    release_transient: Callable[[str], "Awaitable[None]"]
-    sql_context: "SqlContext | None" = None
+    tenant_id: str
+    persistence: RuntimePersistence
+
+    @property
+    def domain(self) -> RuntimeStores:
+        return self.persistence.domain
+
+    @property
+    def steps(self) -> RuntimeStepPersistence:
+        return self.persistence.steps
+
+    @property
+    def retention(self) -> _RetentionController:
+        return self.persistence.retention
 
 
 @asynccontextmanager
@@ -123,10 +140,10 @@ async def _open_resources(
     storage: RuntimeStorage,
     *,
     namespace: str,
-    sql_context: "SqlContext | None" = None,
+    tenant_id: str,
 ) -> "AsyncIterator[_RuntimeResources]":
-    async with open_runtime_persistence(storage, namespace=namespace, tenant_id=namespace, sql_context=sql_context) as persistence:
-        yield _RuntimeResources(storage, namespace, persistence.domain, persistence.steps, persistence.promote, persistence.promote_from, persistence.release_transient, sql_context)
+    async with open_runtime_persistence(storage, namespace=namespace, tenant_id=tenant_id) as persistence:
+        yield _RuntimeResources(namespace, tenant_id, persistence)
 
 
 async def build_asset_store(
@@ -169,36 +186,6 @@ async def build_asset_store(
     return store
 
 
-async def _prepare_sql_context(storage: RuntimeStorage, namespace: str) -> SqlContext:
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    target_kind = runtime_storage_kind(storage)
-    if target_kind == "sqlite":
-        path = runtime_storage_path(storage)
-        if path is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-        context = create_sql_context(engine, owns_engine=True)
-        try:
-            from ..adapter import build_runtime_sql_metadata
-            metadata = build_runtime_sql_metadata(storage.plan)
-            await provision_sql(engine, metadata)
-            await context.initialize(metadata=metadata)
-        except Exception:
-            await context.close()
-            raise
-        return context
-    engine = runtime_storage_engine(storage)
-    if target_kind != "sql" or engine is None:
-        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "SQL runtime engine is required")
-    from ..adapter import build_runtime_sql_metadata
-
-    context = create_sql_context(engine)
-    metadata = build_runtime_sql_metadata(storage.plan)
-    await context.initialize(metadata=metadata)
-    return context
-
-
 def build_workspace_asset_repository(
     store: AssetStore,
     *,
@@ -212,13 +199,20 @@ def build_workspace_asset_repository(
     return AssetRepository(store, registry.freeze())
 
 
-async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], stores: RuntimeStores) -> None:
-    checkpoints = await stores.recovery.checkpoints.list(tenant_id=stores.namespace)
+async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: dict[str, AgentDefinition], stores: RuntimeStores, *, tenant_id: str) -> None:
+    checkpoints = await stores.recovery.checkpoints.list(tenant_id=tenant_id)
     for checkpoint in checkpoints:
-        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+        if checkpoint.state is RecoveryCheckpointState.COMPLETED or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE:
             continue
-        definition = await compiler.compile(agent_id=checkpoint.input.agent_id, prompt_id=checkpoint.input.prompt_id)
-        definitions[definition.digest] = definition
+        try:
+            definition = await compiler.compile(agent_id=checkpoint.input.agent_id, prompt_id=checkpoint.input.prompt_id)
+        except AIError as error:
+            if error.code in {ErrorCode.STORAGE_UNAVAILABLE, ErrorCode.STORAGE_INTEGRITY_ERROR, ErrorCode.STORAGE_DEPENDENCY_NOT_READY, ErrorCode.STORAGE_CLOSED}:
+                raise
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE, safe_details={"execution_id": checkpoint.execution_id}) from error
+        if definition.digest != checkpoint.input.binding_digest:
+            raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE, safe_details={"execution_id": checkpoint.execution_id})
+        definitions[checkpoint.input.binding_digest] = definition
         _logger.debug(
             "recovery definition compiled: execution=%s agent=%s prompt=%s",
             checkpoint.execution_id,
@@ -232,6 +226,7 @@ async def open_workspace_runtime(
     workspace: Workspace,
     *,
     runtime_storage: "RuntimeStorage | None" = None,
+    asset_store: "AssetStore | None" = None,
     model: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
@@ -247,117 +242,149 @@ async def open_workspace_runtime(
     target_kind = runtime_storage_kind(selected_storage)
     durable_domains = runtime_durable_domains(selected_storage)
     registry = _build_asset_registry(extra_asset_bindings)
-    sql_context = None
-    if target_kind in {"sqlite", "sql"}:
-        sql_context = await _prepare_sql_context(selected_storage, namespace)
-    try:
-        selected_assets = await build_asset_store(workspace.storage_root)
+    selected_assets = await build_asset_store(workspace.storage_root) if asset_store is None else asset_store
+    if asset_store is not None:
         await selected_assets.initialize()
-        phase_a_assets = AssetRepository(selected_assets, registry)
-        phase_a_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
-        phase_a_refs = await _bootstrap_refs(phase_a_providers)
-        _logger.debug("workspace capability bootstrap phase A complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_a_refs))
-        await _put_default_asset(phase_a_assets, AssetRef("agent", "default"), AgentSpec("default", 1, "default", phase_a_refs, "assistant-text", 1))
-        final_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
-        phase_b_refs = await _bootstrap_refs(final_providers)
-        if phase_a_refs != phase_b_refs:
-            _logger.error("workspace capability bootstrap changed between phases: workspace=%s", workspace.workspace_id)
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        _logger.debug("workspace capability bootstrap phase B complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_b_refs))
-        output_types = OutputTypeRegistry()
-        output_types.register(ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AssistantTextOutput)
-        output_types.freeze()
-        route_model = model or _configured_model(workspace.config)
-        if route_model is None:
-            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "a model route is required")
-        connection_id = "local-openai"
-        credential_id = "local-openai-api-key" if api_key else None
-        connections = ModelConnectionRegistry((ModelConnectionConfig(connection_id, base_url, credential_id=credential_id),))
-        model_registry = ModelRegistry()
-        snapshot = model_registry.prime({"default": ModelRoute("default", "openai", route_model, connection_id)})
-        resolver: ModelResolver = SnapshotModelResolver(snapshot)
-        materializer: ModelMaterializer = OpenAIModelMaterializer(StaticModelCredentialProvider({} if api_key is None else {credential_id: api_key}))
-        profile = canonical_sha256({"workspace": workspace.root.as_posix(), "grants": 2, "version": 2})
-        grants = (*build_workspace_capability_grants(workspace.root), *capability_grants)
-        compiler = AgentCompiler(
-            phase_a_assets,
-            model_resolver=resolver,
-            model_connections=connections,
-            output_types=output_types,
-            capability_providers=final_providers,
-            capability_grants=grants,
-            execution_profile_fingerprint=profile,
+    phase_a_assets = AssetRepository(selected_assets, registry)
+    phase_a_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
+    phase_a_refs = await _bootstrap_refs(phase_a_providers)
+    _logger.debug("workspace capability bootstrap phase A complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_a_refs))
+    await _put_default_asset(phase_a_assets, AssetRef("agent", "default"), AgentSpec("default", 1, "default", phase_a_refs, "assistant-text", 1))
+    final_providers = _build_capability_providers(phase_a_assets, mcp_runtime, capability_provider_factories)
+    phase_b_refs = await _bootstrap_refs(final_providers)
+    if phase_a_refs != phase_b_refs:
+        _logger.error("workspace capability bootstrap changed between phases: workspace=%s", workspace.workspace_id)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+    _logger.debug("workspace capability bootstrap phase B complete: workspace=%s refs=%s", workspace.workspace_id, len(phase_b_refs))
+    output_types = OutputTypeRegistry()
+    output_types.register(ASSISTANT_TEXT_OUTPUT_SCHEMA_ID, ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION, AssistantTextOutput)
+    output_types.freeze()
+    route_model = model or _configured_model(workspace.config)
+    if route_model is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY, "a model route is required")
+    connection_id = "local-openai"
+    credential_id = "local-openai-api-key" if api_key else None
+    connections = ModelConnectionRegistry((ModelConnectionConfig(connection_id, base_url, credential_id=credential_id),))
+    model_registry = ModelRegistry()
+    snapshot = model_registry.prime({"default": ModelRoute("default", "openai", route_model, connection_id)})
+    resolver: ModelResolver = SnapshotModelResolver(snapshot)
+    materializer: ModelMaterializer = OpenAIModelMaterializer(StaticModelCredentialProvider({} if api_key is None else {credential_id: api_key}))
+    profile = canonical_sha256({"workspace": workspace.root.as_posix(), "grants": 2, "version": 2})
+    grants = (*build_workspace_capability_grants(workspace.root), *capability_grants)
+    compiler = AgentCompiler(
+        phase_a_assets,
+        model_resolver=resolver,
+        model_connections=connections,
+        output_types=output_types,
+        capability_providers=final_providers,
+        capability_grants=grants,
+        execution_profile_fingerprint=profile,
+    )
+    async with _open_resources(selected_storage, namespace=namespace, tenant_id=tenant_id) as resources:
+        definitions: dict[str, AgentDefinition] = {}
+        if RuntimeDomain.RECOVERY in durable_domains:
+            await _compile_recovery_definitions(compiler, definitions, resources.domain, tenant_id=resources.tenant_id)
+        executor = AgentExecutor(materializer, execution_root=workspace.root)
+        backend = LocalExecutionBackend(
+            resources.domain,
+            resources.steps,
+            executor,
+            definitions,
+            tenant_id=tenant_id,
+            execution_root=workspace.root,
+            step_reads={domain: resources.steps.read_store(domain) for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)},
+            step_lifecycle=resources.steps,
+            memory_store_factory=lambda memory_tenant, execution_id, memory_scope: RuntimeMemoryStore(resources.domain, tenant_id=memory_tenant, execution_id=execution_id, memory_scope=memory_scope, transient=selected_storage.plan.route(RuntimeDomain.MEMORY).retention is RuntimeRetention.TRANSIENT),
+            recovery_enabled=RuntimeDomain.RECOVERY in durable_domains,
+            conversation_durable=selected_storage.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetention.DURABLE,
+            handoff_contract_digest=_handoff_contract_digest(selected_storage),
         )
-        async with _open_resources(selected_storage, namespace=namespace, sql_context=sql_context) as resources:
-            definitions: dict[str, AgentDefinition] = {}
-            if RuntimeDomain.RECOVERY in durable_domains:
-                await _compile_recovery_definitions(compiler, definitions, resources.domain)
-            executor = AgentExecutor(materializer, execution_root=workspace.root)
-            backend = LocalExecutionBackend(
-                resources.domain,
-                resources.steps.writer(RuntimeDomain.EXECUTION),
-                executor,
-                definitions,
-                tenant_id=tenant_id,
-                execution_root=workspace.root,
-                promote_steps=resources.promote_steps,
-                promote_archive=resources.promote_archive,
-                release_transient=resources.release_transient,
-                memory_store_factory=lambda tenant_id, namespace: RuntimeMemoryStore(resources.domain, tenant_id=tenant_id, namespace=namespace),
-                recovery_enabled=RuntimeDomain.RECOVERY in durable_domains,
-                conversation_durable=selected_storage.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetention.DURABLE,
-                handoff_contract_digest=_handoff_contract_digest(selected_storage),
-                archive_steps={domain: resources.steps.archive(domain) for domain in resources.steps.archives},
-            )
-            history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps.archives.get(RuntimeDomain.EXECUTION, resources.steps), HmacCursorSigner("execution-history", _grant_key(workspace)))
-            authorization = TenantAuthorizationPolicy(tenant_id)
-            execution = DefaultExecutionService(resources.domain, authorization, backend=backend, history_reader=history)
-            session = DefaultSessionService(resources.domain, authorization, execution, HmacCursorSigner("session", _grant_key(workspace)))
-            task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)
-            task_launcher = LocalTaskGraphLauncher(
-                resources.domain.task.tasks,
-                task_runner,
-                owner=f"workspace:{workspace.workspace_id}",
-            )
-            task = DefaultTaskService(resources.domain, authorization, task_launcher)
-            evaluation = DefaultEvaluationService(resources.domain, authorization, execution)
-            approval = DefaultApprovalService(resources.domain, authorization)
-            event = DefaultEventService(resources.domain, authorization)
-            artifact = DefaultArtifactService(resources.domain, authorization, grant_key=_grant_key(workspace), cursor_signer=HmacCursorSigner("artifact", _grant_key(workspace)))
+        history = StepExecutionHistoryReader(resources.namespace, resources.domain, resources.steps.read_store(RuntimeDomain.EXECUTION), HmacCursorSigner("execution-history", _grant_key(workspace)))
+        authorization = TenantAuthorizationPolicy(tenant_id)
+        execution = DefaultExecutionService(
+            resources.domain,
+            authorization,
+            backend=backend,
+            history_reader=history,
+            release_terminal=resources.retention.release_execution_handoff,
+            terminal_verifier=backend.verify_terminal_projection,
+        )
+        session = DefaultSessionService(
+            resources.domain,
+            authorization,
+            execution,
+            HmacCursorSigner("session", _grant_key(workspace)),
+            release_terminal=resources.retention.release_session,
+        )
+        task_runner = task_node_runner or RuntimeTaskNodeRunner(execution, definitions)
+        task_launcher = LocalTaskGraphLauncher(
+            resources.domain.task.tasks,
+            task_runner,
+            owner=f"workspace:{workspace.workspace_id}",
+        )
+        task = DefaultTaskService(resources.domain, authorization, task_launcher, release_terminal=resources.retention.release_task_graph)
+        evaluation = DefaultEvaluationService(
+            resources.domain,
+            authorization,
+            execution,
+            release_terminal=resources.retention.release_evaluation,
+            acquire_execution_hold=execution._acquire_dependency_hold,
+            release_execution_hold=execution._release_dependency_hold,
+            request_execution_handoff=execution._request_terminal_handoff,
+        )
+        approval = DefaultApprovalService(resources.domain, authorization)
+        event = DefaultEventService(resources.domain, authorization)
+        artifact = DefaultArtifactService(resources.domain, authorization, grant_key=_grant_key(workspace), cursor_signer=HmacCursorSigner("artifact", _grant_key(workspace)))
 
-            async def close_runtime() -> None:
-                await task_launcher.shutdown()
-                await backend.close()
+        async def close_runtime() -> None:
+            async def await_quiesced(coroutine: "Awaitable[None]", *, name: str) -> bool:
+                cleanup_task = asyncio.create_task(coroutine, name=name)
+                cancelled = False
+                while not cleanup_task.done():
+                    try:
+                        await asyncio.shield(cleanup_task)
+                    except asyncio.CancelledError:
+                        cancelled = True
+                await cleanup_task
+                return cancelled
 
-            runtime = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=close_runtime)
-            if RuntimeDomain.RECOVERY in durable_domains:
-                await backend.reconcile()
-            sql_dialect = None if sql_context is None else sql_context.dialect.name
-            engine_ownership = (
-                "linktools"
-                if target_kind == "sqlite"
-                else "caller"
-                if target_kind == "sql"
-                else "none"
+            launcher_cancelled = await await_quiesced(
+                task_launcher.shutdown(),
+                name=f"workspace-task-quiesce-{workspace.workspace_id}",
             )
-            _logger.info(
-                "workspace runtime opened: namespace=%s target_kind=%s storage_root=%s location=%s selected_domains=%s recovery_enabled=%s sql_dialect=%s engine_ownership=%s",
-                namespace,
-                target_kind,
-                workspace.storage_root,
-                _target_location(selected_storage),
-                sorted(domain.value for domain in durable_domains),
-                RuntimeDomain.RECOVERY in durable_domains,
-                sql_dialect,
-                engine_ownership,
+            backend_cancelled = await await_quiesced(
+                backend.close(),
+                name=f"workspace-execution-quiesce-{workspace.workspace_id}",
             )
-            try:
-                yield runtime
-            finally:
-                await runtime.close()
-    finally:
-        if sql_context is not None:
-            await sql_context.close()
+            if launcher_cancelled or backend_cancelled:
+                raise asyncio.CancelledError
+
+        runtime = Runtime(compiler, execution, session, task, evaluation, approval, event, artifact, definitions=definitions, close_callback=close_runtime)
+        if RuntimeDomain.RECOVERY in durable_domains:
+            await backend.reconcile()
+        sql_dialect = None
+        engine_ownership = (
+            "linktools"
+            if target_kind == "sqlite"
+            else "caller"
+            if target_kind == "sql"
+            else "none"
+        )
+        _logger.info(
+            "workspace runtime opened: namespace=%s target_kind=%s storage_root=%s location=%s selected_domains=%s recovery_enabled=%s sql_dialect=%s engine_ownership=%s",
+            namespace,
+            target_kind,
+            workspace.storage_root,
+            _target_location(selected_storage),
+            sorted(domain.value for domain in durable_domains),
+            RuntimeDomain.RECOVERY in durable_domains,
+            sql_dialect,
+            engine_ownership,
+        )
+        try:
+            yield runtime
+        finally:
+            await runtime.close()
 
 def _build_asset_registry(extra_bindings: Sequence[AssetTypeBinding[object]]) -> AssetTypeRegistrySnapshot:
     registry = AssetTypeRegistry()

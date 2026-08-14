@@ -93,13 +93,13 @@ class StepExecutionHistoryReader:
             {
                 "execution_id": execution_id,
                 "items": [
-                    {"kind": item.kind, "content": item.content, "tool_name": item.tool_name, "tool_call_id": item.tool_call_id}
+                    {"item_kind": item.item_kind, "content": item.content, "tool_name": item.tool_name, "tool_call_id": item.tool_call_id}
                     for item in values
                 ],
             }
         )
         start = _history_cursor_offset(cursor, tenant_id, execution_id, source_revision, len(values), self._cursor_signer)
-        selected = tuple(ExecutionHistoryItem(item.execution_id, start + index + 1, item.kind, item.content, item.tool_name, item.tool_call_id) for index, item in enumerate(values[start:start + limit]))
+        selected = tuple(ExecutionHistoryItem(item.execution_id, start + index + 1, item.item_kind, item.content, item.tool_name, item.tool_call_id) for index, item in enumerate(values[start:start + limit]))
         next_offset = start + len(selected)
         next_cursor = _history_cursor(tenant_id, execution_id, source_revision, next_offset, self._cursor_signer) if next_offset < len(values) else None
         return Page(selected, next_cursor)

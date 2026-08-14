@@ -136,15 +136,27 @@ class ExecutionStartReservationResult:
 @dataclass(frozen=True, slots=True)
 class IdempotencyRecord:
     tenant_id: str
+    runtime_domain: RuntimeDomain
     scope: str
     key_hash: str
     request_digest: str
-    execution_id: str
+    resource_kind: ResourceKind
+    resource_id: str
     status: IdempotencyStatus
     result_digest: "str | None"
     error_code: "str | None"
     created_at: datetime
     updated_at: datetime
+
+    def __post_init__(self) -> None:
+        expected = {
+            RuntimeDomain.EXECUTION: ResourceKind.EXECUTION,
+            RuntimeDomain.EVALUATION: ResourceKind.EVALUATION,
+        }.get(self.runtime_domain)
+        if expected is None or self.resource_kind is not expected:
+            raise ValueError("idempotency resource identity does not match runtime domain")
+        if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
+            raise ValueError("idempotency timestamps require timezone awareness")
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,10 +444,22 @@ class RuntimeTransactionCoordinator(Protocol):
     def mark_changed(self) -> None: ...
 
 
-class RuntimeObjectStoreRouter(Protocol):
+class RuntimeObjectRouter(Protocol):
     """Resolve the ObjectStore selected by Runtime composition."""
 
     def object_store(self, domain: RuntimeDomain) -> ObjectStore: ...
+
+    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore: ...
+
+    async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None: ...
+
+
+class RuntimeRetentionController(Protocol):
+    async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None: ...
+    async def release_session(self, session_id: str, *, tenant_id: str, continuation: "ConversationCursor | None") -> None: ...
+    async def release_task_graph(self, graph_id: str, *, tenant_id: str) -> None: ...
+    async def release_evaluation(self, evaluation_id: str, *, tenant_id: str) -> None: ...
+    async def close(self) -> None: ...
 
 
 class SessionRepository(RuntimeRepository, Protocol):
@@ -459,7 +483,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
     async def claim_next_agent_run(self, execution_id: str, *, tenant_id: str, expected_revision: int, expected_agent_run_sequence: int) -> ExecutionRecord: ...
     async def mark_start_unknown(self, commit: ExecutionStartUnknownCommit) -> ExecutionRecord: ...
     async def request_cancel(self, commit: ExecutionCancelRequestCommit) -> ExecutionRecord: ...
-    async def advance_sequence(self, execution_id: str, *, tenant_id: str, kind: str, expected_sequence: int) -> ExecutionRecord: ...
+    async def advance_event_sequence(self, execution_id: str, *, tenant_id: str, expected_sequence: int) -> ExecutionRecord: ...
     async def commit_terminal(self, commit: ExecutionTerminalCommit) -> ExecutionTerminalCommitResult: ...
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None: ...
 
@@ -467,7 +491,7 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
     async def get(self, scope: str, key_hash: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
-    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
+    async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
     async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord: ...
 
 
@@ -639,7 +663,7 @@ class RuntimeStores:
     task: TaskStore
     evaluation: EvaluationStore
     recovery: RecoveryStore
-    object_router: "RuntimeObjectStoreRouter | None" = field(default=None, compare=False, repr=False)
+    object_router: "RuntimeObjectRouter | None" = field(default=None, compare=False, repr=False)
     metrics: StorageMetrics = field(default_factory=StorageMetrics, compare=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -658,6 +682,16 @@ class RuntimeStores:
         if self.object_router is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         return self.object_router.object_store(domain)
+
+    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+        if self.object_router is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        return self.object_router.working_object_store(domain, owner_scope=owner_scope)
+
+    async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
+        if self.object_router is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        await self.object_router.release_object_scope(domain, owner_scope=owner_scope)
 
     async def initialize(self) -> None:
         seen: set[int] = set()
@@ -680,5 +714,5 @@ __all__ = [
     "ExternalCallRepository", "IdempotencyRecord", "IdempotencyRepository", "MemoryRecord", "MemoryRepository", "MemoryStore", "RecoveryCheckpoint", "RecoveryCheckpointRepository", "RecoveryStore",
     "OperationLedgerInput", "OperationLedgerRecord", "OperationLedgerRepository", "ResultRecord", "RuntimeRepository", "RuntimeStores",
     "RecoveryCheckpointState", "RecoveryConversationIntent", "RecoveryExecutionInput", "RecoveryHandoffPhase", "RecoveryIdempotencyInput", "RecoveryTerminalHandoff", "RecoveryTerminalOutcome", "SessionRecord", "SessionRepository", "RuntimeDomain",
-    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus", "RuntimeObjectStoreRouter",
+    "TaskLease", "TaskNodeView", "TaskRepository", "ToolOperationStatus", "RuntimeObjectRouter",
 ]

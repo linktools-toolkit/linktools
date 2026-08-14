@@ -12,7 +12,7 @@ import re
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -107,6 +107,12 @@ from ..task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._transaction import RuntimeTransactionCoordinator, TransactionHub
 
 _logger = environ.get_logger("ai.adapter.persistence")
+
+
+def _transient_scope(domain: RuntimeDomain, owner_scope: str) -> str:
+    if not owner_scope:
+        raise ValueError("owner_scope must not be empty")
+    return f"runtime:{domain.value}:{owner_scope}"
 
 
 class _Base:
@@ -316,7 +322,7 @@ class _ExecutionRepository(_Base):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if current.status is not ExecutionStatus.PENDING_START or current.revision != claim.expected_revision or current.event_sequence != claim.expected_event_sequence or current.agent_run_sequence != 0:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if identity.status is not IdempotencyStatus.RESERVED or identity.execution_id != claim.execution_id or identity.request_digest != claim.request_digest:
+            if identity.status is not IdempotencyStatus.RESERVED or identity.runtime_domain is not RuntimeDomain.EXECUTION or identity.resource_kind is not ResourceKind.EXECUTION or identity.resource_id != claim.execution_id or identity.request_digest != claim.request_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = claim.started_at
             started = replace(current, status=ExecutionStatus.STARTED, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=now, agent_run_sequence=1)
@@ -333,7 +339,7 @@ class _ExecutionRepository(_Base):
         self._check_tenant(reservation.execution.tenant_id)
         if self._idempotency is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        if reservation.execution.tenant_id != reservation.idempotency.tenant_id or reservation.execution.execution_id != reservation.idempotency.execution_id:
+        if reservation.execution.tenant_id != reservation.idempotency.tenant_id or reservation.execution.execution_id != reservation.idempotency.resource_id or reservation.idempotency.runtime_domain is not RuntimeDomain.EXECUTION or reservation.idempotency.resource_kind is not ResourceKind.EXECUTION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         async with self._lock:
             idempotency_key = (reservation.idempotency.tenant_id, reservation.idempotency.scope, reservation.idempotency.key_hash)
@@ -341,7 +347,7 @@ class _ExecutionRepository(_Base):
             if existing_idempotency is not None:
                 if existing_idempotency.request_digest != reservation.idempotency.request_digest:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                existing_execution = self._records.get((existing_idempotency.tenant_id, existing_idempotency.execution_id))
+                existing_execution = self._records.get((existing_idempotency.tenant_id, existing_idempotency.resource_id))
                 if existing_execution is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 return ExecutionStartReservationResult(existing_execution, existing_idempotency, False)
@@ -405,7 +411,7 @@ class _ExecutionRepository(_Base):
             self._mark_changed()
             return updated
 
-    async def advance_sequence(self, execution_id: str, *, tenant_id: str, kind: str, expected_sequence: int) -> ExecutionRecord:
+    async def advance_event_sequence(self, execution_id: str, *, tenant_id: str, expected_sequence: int) -> ExecutionRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         async with self._lock:
@@ -413,8 +419,6 @@ class _ExecutionRepository(_Base):
             current = self._records.get(key)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            if kind != "event":
-                raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
             sequence = current.event_sequence
             if sequence != expected_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -456,13 +460,16 @@ class _ExecutionRepository(_Base):
 
 
 class _IdempotencyRepository(_Base):
-    def __init__(self, namespace: str, coordinator: RuntimeTransactionCoordinator) -> None:
+    def __init__(self, namespace: str, coordinator: RuntimeTransactionCoordinator, runtime_domain: RuntimeDomain) -> None:
         super().__init__(namespace, coordinator)
+        self._runtime_domain = runtime_domain
         self._records: dict[tuple[str, str, str], IdempotencyRecord] = {}
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         self._ensure_open()
         self._check_tenant(record.tenant_id)
+        if record.runtime_domain is not self._runtime_domain:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if re.fullmatch(r"[0-9a-f]{64}", record.key_hash) is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         async with self._lock:
@@ -481,10 +488,10 @@ class _IdempotencyRepository(_Base):
         self._check_tenant(tenant_id)
         return self._records.get((tenant_id, scope, key_hash))
 
-    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
+    async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        return tuple(sorted((record for record in self._records.values() if record.tenant_id == tenant_id and record.execution_id == execution_id), key=lambda record: (record.scope, record.key_hash)))
+        return tuple(sorted((record for record in self._records.values() if record.tenant_id == tenant_id and record.resource_kind is resource_kind and record.resource_id == resource_id), key=lambda record: (record.scope, record.key_hash)))
 
     async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
         self._ensure_open()
@@ -494,7 +501,7 @@ class _IdempotencyRepository(_Base):
             current = self._records.get(store_key)
             if current is None or current.status is not expected_status:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if next_record.tenant_id != tenant_id or next_record.key_hash != key_hash:
+            if next_record.tenant_id != tenant_id or next_record.key_hash != key_hash or next_record.runtime_domain is not self._runtime_domain:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[store_key] = next_record
             self._mark_changed()
@@ -517,7 +524,7 @@ class _EventRepository(_Base):
             if sequence != expected_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             item = ExecutionEventRecord(execution_id, tenant_id, sequence + 1, event_type, payload)
-            await self._executions.advance_sequence(execution_id, tenant_id=tenant_id, kind="event", expected_sequence=expected_sequence)
+            await self._executions.advance_event_sequence(execution_id, tenant_id=tenant_id, expected_sequence=expected_sequence)
             items.append(item)
             self._mark_changed()
             return item
@@ -597,7 +604,7 @@ class _TerminalCommitRepository(_Base):
             return ExecutionTerminalCommitResult(execution, result)
 
     def _find_idempotency(self, commit: ExecutionTerminalCommit, execution: ExecutionRecord) -> IdempotencyRecord | None:
-        records = tuple(record for record in self._idempotency._records.values() if record.tenant_id == execution.tenant_id and record.execution_id == execution.execution_id)
+        records = tuple(record for record in self._idempotency._records.values() if record.tenant_id == execution.tenant_id and record.runtime_domain is RuntimeDomain.EXECUTION and record.resource_kind is ResourceKind.EXECUTION and record.resource_id == execution.execution_id)
         if len(records) > 1:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return records[0] if records else None
@@ -607,7 +614,7 @@ class _TerminalCommitRepository(_Base):
             if current is not None and current.status in {IdempotencyStatus.RESERVED, IdempotencyStatus.STARTED}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        if current is None or current.tenant_id != execution.tenant_id or current.execution_id != execution.execution_id or current.scope != update.scope or current.key_hash != update.key_hash or current.request_digest != update.request_digest or current.status is not update.expected_status:
+        if current is None or current.tenant_id != execution.tenant_id or current.runtime_domain is not RuntimeDomain.EXECUTION or current.resource_kind is not ResourceKind.EXECUTION or current.resource_id != execution.execution_id or current.scope != update.scope or current.key_hash != update.key_hash or current.request_digest != update.request_digest or current.status is not update.expected_status:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _idempotency_matches(self, current: IdempotencyRecord | None, update: IdempotencyTerminalUpdate | None) -> bool:
@@ -932,7 +939,7 @@ class _OperationRepository(_Base):
         sequence = self._counters.get(counter_key, 0) + 1
         created = OperationLedgerRecord(
             record.operation_id, record.tenant_id, record.resource_kind, record.resource_id,
-            record.execution_id, record.kind, record.status, record.request_digest,
+            record.execution_id, record.operation_kind, record.status, record.request_digest,
             record.result_ref, record.result_digest, record.error_code, record.compactable,
             sequence, record.created_at, record.updated_at,
         )
@@ -1227,7 +1234,7 @@ class _ToolRepository(_Base, ToolStateStore):
             current = self._records.get(key)
             if current is not None:
                 if (
-                    current.run_id != record.run_id
+                    current.step_run_id != record.step_run_id
                     or current.tool_call_id != record.tool_call_id
                     or current.idempotency_key_hash != record.idempotency_key_hash
                     or current.tool_name != record.tool_name
@@ -1331,21 +1338,30 @@ class RuntimeObjectRouter:
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
-    def for_domain(self, domain: RuntimeDomain) -> ObjectStore:
-        return self.object_store(domain)
+    def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
+        store = self.object_store(domain)
+        if isinstance(store, TransientObjectStore):
+            return store.scoped(_transient_scope(domain, owner_scope))
+        return store
+
+    async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
+        store = self.object_store(domain)
+        if isinstance(store, TransientObjectStore):
+            await store.release_scope(_transient_scope(domain, owner_scope))
+            return
+        _logger.debug("object scope release skipped for non-transient store: domain=%s scope=%s", domain.value, owner_scope)
+
+    async def _clear_transient(self, domains: frozenset[RuntimeDomain]) -> None:
+        for domain in domains:
+            store = self._stores.get(domain)
+            if isinstance(store, TransientObjectStore):
+                store.clear()
 
     async def initialize(self) -> None:
         return None
 
     async def close(self) -> None:
         return None
-
-    def release(self, domains: frozenset[RuntimeDomain]) -> None:
-        for domain in domains:
-            store = self._stores.get(domain)
-            if isinstance(store, TransientObjectStore):
-                store.clear()
-
 
 class RoutedOperationRepository:
     """Route operation records to the owning domain target."""
@@ -1418,11 +1434,233 @@ class RoutedIdempotencyRepository:
             return record
         return await self._durable.get(scope, key_hash, tenant_id=tenant_id)
 
-    async def list_by_execution(self, execution_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
-        return await self._store().list_by_execution(execution_id, tenant_id=tenant_id)
+    async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
+        return await self._store().list_by_resource(resource_kind, resource_id, tenant_id=tenant_id)
 
     async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
         return await self._store().compare_and_swap(scope, key_hash, tenant_id=tenant_id, expected_status=expected_status, next_record=next_record)
+
+
+class _RuntimeOwnerPruner:
+    """Perform exact owner pruning under each repository coordinator."""
+
+    def __init__(self, persistence: RuntimeStores, transient_domains: frozenset[RuntimeDomain] | None = None) -> None:
+        self._persistence = persistence
+        self._transient_domains = transient_domains or frozenset()
+
+    async def prune_execution_working(
+        self,
+        execution_id: str,
+        tenant_id: str,
+        memory_working_scope_key: str | None,
+        candidate_step_run_ids: frozenset[str],
+        *,
+        domains: frozenset[RuntimeDomain] | None = None,
+    ) -> None:
+        active_domains = self._transient_domains if domains is None else self._transient_domains & domains
+        if RuntimeDomain.MEMORY in active_domains and memory_working_scope_key is not None and isinstance(self._persistence.memory.records, _MemoryRepository):
+            records = self._persistence.memory.records
+            operations = self._operation_repository(self._persistence.memory.operations)
+            async with records._lock:
+                memory_ids = {record.memory_id for record in records._records.values() if record.tenant_id == tenant_id and record.memory_scope_key == memory_working_scope_key}
+                for key in tuple(records._records):
+                    if key[0] == tenant_id and key[1] in memory_ids:
+                        records._records.pop(key, None)
+                self._delete_operations(operations, tenant_id, lambda item: item.execution_id == execution_id or item.resource_kind is ResourceKind.MEMORY and item.resource_id in memory_ids)
+                if memory_ids:
+                    records._mark_changed()
+        if RuntimeDomain.ARTIFACT in active_domains and isinstance(self._persistence.artifact.records, _ArtifactRepository):
+            records = self._persistence.artifact.records
+            operations = self._operation_repository(self._persistence.artifact.operations)
+            async with records._lock:
+                artifact_ids = {record.artifact_id for record in records._records.values() if record.tenant_id == tenant_id and record.execution_id == execution_id}
+                for key in tuple(records._records):
+                    if key[0] == tenant_id and key[1] in artifact_ids:
+                        records._records.pop(key, None)
+                self._delete_operations(operations, tenant_id, lambda item: item.execution_id == execution_id or item.resource_kind is ResourceKind.ARTIFACT and item.resource_id in artifact_ids)
+                if artifact_ids:
+                    records._mark_changed()
+        recovery = self._persistence.recovery
+        if RuntimeDomain.RECOVERY in active_domains and isinstance(recovery.approvals, _ApprovalRepository) and isinstance(recovery.external_calls, _ExternalRepository) and isinstance(recovery.checkpoints, _RecoveryCheckpointRepository) and isinstance(recovery.tools, _ToolRepository):
+            coordinator = recovery.approvals._lock
+            operations = self._operation_repository(recovery.operations)
+            async with coordinator:
+                approval_ids = {record.approval_id for record in recovery.approvals._records.values() if record.tenant_id == tenant_id and record.execution_id == execution_id}
+                call_ids = {record.call_id for record in recovery.external_calls._records.values() if record.tenant_id == tenant_id and record.execution_id == execution_id}
+                checkpoint_ids = {record.execution_id for record in recovery.checkpoints._records.values() if record.tenant_id == tenant_id and record.execution_id == execution_id}
+                for key in tuple(recovery.approvals._records):
+                    if key[0] == tenant_id and key[1] in approval_ids:
+                        recovery.approvals._records.pop(key, None)
+                for key in tuple(recovery.external_calls._records):
+                    if key[0] == tenant_id and key[1] in call_ids:
+                        recovery.external_calls._records.pop(key, None)
+                for key in tuple(recovery.checkpoints._records):
+                    if key[0] == tenant_id and key[1] in checkpoint_ids:
+                        recovery.checkpoints._records.pop(key, None)
+                tool_ids = tuple(sorted(record.tool_operation_id for key, record in recovery.tools._records.items() if key[0] == tenant_id and record.step_run_id in candidate_step_run_ids))
+                for key in tuple(recovery.tools._records):
+                    if key[0] == tenant_id and recovery.tools._records[key].step_run_id in candidate_step_run_ids:
+                        recovery.tools._records.pop(key, None)
+                owned_ids = approval_ids | call_ids | checkpoint_ids | set(tool_ids)
+                self._delete_operations(operations, tenant_id, lambda item: item.execution_id == execution_id or item.resource_kind in {ResourceKind.APPROVAL, ResourceKind.EXTERNAL_CALL, ResourceKind.TOOL_OPERATION} and item.resource_id in owned_ids)
+                if approval_ids or call_ids or checkpoint_ids or tool_ids:
+                    recovery.approvals._mark_changed()
+
+    async def prune_execution_terminal(self, execution_id: str, tenant_id: str) -> None:
+        executions = self._persistence.execution.executions
+        if not isinstance(executions, _ExecutionRepository):
+            return
+        idempotency = self._idempotency_repository(self._persistence.execution.idempotency)
+        events = self._raw_event_repository(self._persistence.execution.events)
+        operations = self._operation_repository(self._persistence.execution.operations)
+        async with executions._lock:
+            executions._records.pop((tenant_id, execution_id), None)
+            if isinstance(executions._terminal, _TerminalCommitRepository):
+                executions._terminal._results.pop((tenant_id, execution_id), None)
+            if events is not None:
+                events._items.pop((tenant_id, execution_id), None)
+            if idempotency is not None:
+                for key in tuple(idempotency._records):
+                    record = idempotency._records[key]
+                    if record.tenant_id == tenant_id and record.runtime_domain is RuntimeDomain.EXECUTION and record.resource_kind is ResourceKind.EXECUTION and record.resource_id == execution_id:
+                        idempotency._records.pop(key, None)
+            self._delete_operations(operations, tenant_id, lambda item: item.execution_id == execution_id or item.resource_kind is ResourceKind.EXECUTION and item.resource_id == execution_id)
+            executions._mark_changed()
+
+    async def prune_session(self, session_id: str, tenant_id: str, continuation_step_run_id: str | None) -> bool:
+        sessions = self._persistence.conversation.sessions
+        if not isinstance(sessions, _SessionRepository):
+            return False
+        operations = self._operation_repository(self._persistence.conversation.operations)
+        async with sessions._lock:
+            sessions._records.pop((tenant_id, session_id), None)
+            self._delete_operations(operations, tenant_id, lambda item: item.resource_kind is ResourceKind.SESSION and item.resource_id == session_id)
+            if continuation_step_run_id is None:
+                return False
+            return not any(record.tenant_id == tenant_id and record.continuation is not None and record.continuation.step_run_id == continuation_step_run_id for record in sessions._records.values())
+
+    async def prune_task_graph(self, graph_id: str, tenant_id: str) -> None:
+        tasks = self._persistence.task.tasks
+        if not isinstance(tasks, _TaskRepository):
+            return
+        operations = self._operation_repository(self._persistence.task.operations)
+        async with tasks._lock:
+            tasks._plans.pop((tenant_id, graph_id), None)
+            for key in tuple(tasks._nodes):
+                if key[:2] == (tenant_id, graph_id):
+                    tasks._nodes.pop(key, None)
+            self._delete_operations(operations, tenant_id, lambda item: item.resource_kind is ResourceKind.TASK_GRAPH and item.resource_id == graph_id)
+            tasks._mark_changed()
+
+    async def prune_evaluation(self, evaluation_id: str, tenant_id: str) -> None:
+        records = self._persistence.evaluation.records
+        if not isinstance(records, _EvaluationRepository):
+            return
+        idempotency = self._idempotency_repository(self._persistence.evaluation.idempotency)
+        operations = self._operation_repository(self._persistence.evaluation.operations)
+        async with records._lock:
+            records._records.pop((tenant_id, evaluation_id), None)
+            if idempotency is not None:
+                for key in tuple(idempotency._records):
+                    item = idempotency._records[key]
+                    if item.tenant_id == tenant_id and item.runtime_domain is RuntimeDomain.EVALUATION and item.resource_kind is ResourceKind.EVALUATION and item.resource_id == evaluation_id:
+                        idempotency._records.pop(key, None)
+            self._delete_operations(operations, tenant_id, lambda item: item.resource_kind is ResourceKind.EVALUATION and item.resource_id == evaluation_id)
+            records._mark_changed()
+
+    async def clear_transient(self, domains: frozenset[RuntimeDomain]) -> None:
+        for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.TASK, RuntimeDomain.EVALUATION, RuntimeDomain.RECOVERY):
+            if domain not in domains:
+                continue
+            await self._clear_domain(domain)
+
+    async def _clear_domain(self, domain: RuntimeDomain) -> None:
+        stores = {
+            RuntimeDomain.CONVERSATION: (self._persistence.conversation.sessions, self._persistence.conversation.operations),
+            RuntimeDomain.EXECUTION: (self._persistence.execution.executions, self._persistence.execution.idempotency, self._persistence.execution.events, self._persistence.execution.operations),
+            RuntimeDomain.MEMORY: (self._persistence.memory.records, self._persistence.memory.operations),
+            RuntimeDomain.ARTIFACT: (self._persistence.artifact.records, self._persistence.artifact.operations),
+            RuntimeDomain.TASK: (self._persistence.task.tasks, self._persistence.task.operations),
+            RuntimeDomain.EVALUATION: (self._persistence.evaluation.records, self._persistence.evaluation.idempotency, self._persistence.evaluation.operations),
+            RuntimeDomain.RECOVERY: (self._persistence.recovery.approvals, self._persistence.recovery.external_calls, self._persistence.recovery.checkpoints, self._persistence.recovery.operations, self._persistence.recovery.tools),
+        }[domain]
+        coordinator = next((item._lock for item in stores if isinstance(item, _Base)), None)
+        if coordinator is None:
+            return
+        async with coordinator:
+            for item in stores:
+                if isinstance(item, _SessionRepository):
+                    item._records.clear()
+                elif isinstance(item, _ExecutionRepository):
+                    item._records.clear()
+                    if isinstance(item._terminal, _TerminalCommitRepository):
+                        item._terminal._results.clear()
+                elif isinstance(item, _EventRepository):
+                    item._items.clear()
+                elif isinstance(item, _IdempotencyRepository):
+                    item._records.clear()
+                elif isinstance(item, _MemoryRepository):
+                    item._records.clear()
+                elif isinstance(item, _ArtifactRepository):
+                    item._records.clear()
+                elif isinstance(item, _TaskRepository):
+                    item._plans.clear()
+                    item._nodes.clear()
+                elif isinstance(item, _EvaluationRepository):
+                    item._records.clear()
+                elif isinstance(item, _ApprovalRepository):
+                    item._records.clear()
+                elif isinstance(item, _ExternalRepository):
+                    item._records.clear()
+                elif isinstance(item, _RecoveryCheckpointRepository):
+                    item._records.clear()
+                elif isinstance(item, _OperationRepository):
+                    item._records.clear()
+                    item._counters.clear()
+                elif isinstance(item, _ToolRepository):
+                    item._records.clear()
+                elif isinstance(item, RoutedOperationRepository):
+                    raw = self._operation_repository(item)
+                    if raw is not None:
+                        raw._records.clear()
+                        raw._counters.clear()
+                elif isinstance(item, RoutedIdempotencyRepository):
+                    raw = self._idempotency_repository(item)
+                    if raw is not None:
+                        raw._records.clear()
+
+    @staticmethod
+    def _operation_repository(repository: OperationLedgerRepository) -> _OperationRepository | None:
+        if isinstance(repository, _OperationRepository):
+            return repository
+        if isinstance(repository, RoutedOperationRepository):
+            return repository._memory if repository._domain not in repository._persist else repository._durable if isinstance(repository._durable, _OperationRepository) else None
+        return None
+
+    @staticmethod
+    def _idempotency_repository(repository: IdempotencyRepository) -> _IdempotencyRepository | None:
+        if isinstance(repository, _IdempotencyRepository):
+            return repository
+        if isinstance(repository, RoutedIdempotencyRepository):
+            return repository._memory if repository._domain not in repository._persist else repository._durable if isinstance(repository._durable, _IdempotencyRepository) else None
+        return None
+
+    @staticmethod
+    def _raw_event_repository(repository: object) -> _EventRepository | None:
+        return repository if isinstance(repository, _EventRepository) else None
+
+    @staticmethod
+    def _delete_operations(repository: _OperationRepository | None, tenant_id: str, predicate: Callable[[OperationLedgerRecord], bool]) -> bool:
+        if repository is None:
+            return False
+        changed = False
+        for key, item in tuple(repository._records.items()):
+            if key[0] == tenant_id and predicate(item):
+                repository._records.pop(key, None)
+                changed = True
+        if changed:
+            repository._mark_changed()
+        return changed
 
 
 def _operation_domain(kind: ResourceKind) -> RuntimeDomain:
@@ -2108,7 +2346,20 @@ def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
     key_hash = str(value["key_hash"])
     if re.fullmatch(r"[0-9a-f]{64}", key_hash) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return IdempotencyRecord(str(value["tenant_id"]), str(value["scope"]), key_hash, str(value["request_digest"]), str(value["execution_id"]), IdempotencyStatus(str(value["status"])), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), _time(value["created_at"]), _time(value["updated_at"]))
+    return IdempotencyRecord(
+        tenant_id=str(value["tenant_id"]),
+        runtime_domain=RuntimeDomain(str(value["runtime_domain"])),
+        scope=str(value["scope"]),
+        key_hash=key_hash,
+        request_digest=str(value["request_digest"]),
+        resource_kind=ResourceKind(str(value["resource_kind"])),
+        resource_id=str(value["resource_id"]),
+        status=IdempotencyStatus(str(value["status"])),
+        result_digest=None if value.get("result_digest") is None else str(value["result_digest"]),
+        error_code=None if value.get("error_code") is None else str(value["error_code"]),
+        created_at=_time(value["created_at"]),
+        updated_at=_time(value["updated_at"]),
+    )
 
 
 def recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckpoint:
@@ -2248,7 +2499,7 @@ def _external_from_json(value: dict[str, JsonValue]) -> ExternalCallRecord:
 
 
 def _operation_from_json(value: dict[str, JsonValue]) -> OperationLedgerRecord:
-    return OperationLedgerRecord(str(value["operation_id"]), str(value["tenant_id"]), ResourceKind(str(value["resource_kind"])), str(value["resource_id"]), None if value.get("execution_id") is None else str(value["execution_id"]), OperationKind(str(value["kind"])), OperationStatus(str(value["status"])), str(value["request_digest"]), None if value.get("result_ref") is None else str(value["result_ref"]), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), bool(value["compactable"]), int(value["sequence"]), _time(str(value["created_at"])), _time(str(value["updated_at"])))
+    return OperationLedgerRecord(str(value["operation_id"]), str(value["tenant_id"]), ResourceKind(str(value["resource_kind"])), str(value["resource_id"]), None if value.get("execution_id") is None else str(value["execution_id"]), OperationKind(str(value["operation_kind"])), OperationStatus(str(value["status"])), str(value["request_digest"]), None if value.get("result_ref") is None else str(value["result_ref"]), None if value.get("result_digest") is None else str(value["result_digest"]), None if value.get("error_code") is None else str(value["error_code"]), bool(value["compactable"]), int(value["sequence"]), _time(str(value["created_at"])), _time(str(value["updated_at"])))
 
 
 def _tool_from_json(value: dict[str, JsonValue]) -> ToolOperationRecord:
@@ -2259,7 +2510,7 @@ def _tool_from_json(value: dict[str, JsonValue]) -> ToolOperationRecord:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         object_ref = ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"]))
     return ToolOperationRecord(
-        tool_operation_id=str(value["tool_operation_id"]), tenant_id=str(value["tenant_id"]), run_id=str(value["run_id"]),
+        tool_operation_id=str(value["tool_operation_id"]), tenant_id=str(value["tenant_id"]), step_run_id=str(value["step_run_id"]),
         tool_call_id=str(value["tool_call_id"]), idempotency_key_hash=str(value["idempotency_key_hash"]), tool_name=str(value["tool_name"]),
         arguments_hash=str(value["arguments_hash"]), binding_fingerprint=str(value["binding_fingerprint"]), replay_safe=bool(value["replay_safe"]),
         status=ToolOperationStatus(str(value["status"])), owner=None if value.get("owner") is None else str(value["owner"]), fence=int(value["fence"]),
@@ -2277,10 +2528,126 @@ def _validate_object_digest(value: str) -> None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
+@dataclass(frozen=True, slots=True)
+class _InMemoryRuntimeParts:
+    components: tuple[RuntimeRepository, ...]
+    operation_repositories: dict[RuntimeDomain, _OperationRepository]
+    object_stores: dict[RuntimeDomain, ObjectStore]
+    sessions: "_SessionRepository | None"
+    executions: "_ExecutionRepository | None"
+    terminal: "_TerminalCommitRepository | None"
+    execution_idempotency: "_IdempotencyRepository | None"
+    events: "_EventRepository | None"
+    tasks: "_TaskRepository | None"
+    evaluations: "_EvaluationRepository | None"
+    evaluation_idempotency: "_IdempotencyRepository | None"
+    memories: "_MemoryRepository | None"
+    artifacts: "_ArtifactRepository | None"
+    approvals: "_ApprovalRepository | None"
+    external_calls: "_ExternalRepository | None"
+    recovery_checkpoint: "_RecoveryCheckpointRepository | None"
+    tools: "_ToolRepository | None"
+
+
+def _build_in_memory_parts(
+    *,
+    namespace: str,
+    domains: frozenset[RuntimeDomain],
+    transaction_binding: RuntimeTransactionBinding,
+    transaction_hub: TransactionHub,
+) -> _InMemoryRuntimeParts:
+    validate_persistence_namespace(namespace)
+    coordinators = {
+        domain: RuntimeTransactionCoordinator(domain, hub=transaction_hub)
+        for domain in domains
+    }
+
+    def coordinator(domain: RuntimeDomain) -> RuntimeTransactionCoordinator:
+        try:
+            return coordinators[domain]
+        except KeyError as error:
+            raise RuntimeError("in-memory repository domain was not selected") from error
+
+    operations = {
+        domain: _OperationRepository(namespace, coordinator(domain))
+        for domain in domains
+    }
+    sessions = _SessionRepository(namespace, coordinator(RuntimeDomain.CONVERSATION)) if RuntimeDomain.CONVERSATION in domains else None
+    executions = _ExecutionRepository(namespace, coordinator(RuntimeDomain.EXECUTION)) if RuntimeDomain.EXECUTION in domains else None
+    terminal = _TerminalCommitRepository(executions, namespace, coordinator(RuntimeDomain.EXECUTION)) if executions is not None else None
+    execution_idempotency = _IdempotencyRepository(namespace, coordinator(RuntimeDomain.EXECUTION), RuntimeDomain.EXECUTION) if executions is not None else None
+    events = _EventRepository(executions, namespace, coordinator(RuntimeDomain.EXECUTION)) if executions is not None else None
+    tasks = _TaskRepository(namespace, coordinator(RuntimeDomain.TASK)) if RuntimeDomain.TASK in domains else None
+    evaluations = _EvaluationRepository(namespace, coordinator(RuntimeDomain.EVALUATION)) if RuntimeDomain.EVALUATION in domains else None
+    evaluation_idempotency = _IdempotencyRepository(namespace, coordinator(RuntimeDomain.EVALUATION), RuntimeDomain.EVALUATION) if evaluations is not None else None
+    memories = _MemoryRepository(namespace, coordinator(RuntimeDomain.MEMORY)) if RuntimeDomain.MEMORY in domains else None
+    artifacts = _ArtifactRepository(namespace, coordinator(RuntimeDomain.ARTIFACT)) if RuntimeDomain.ARTIFACT in domains else None
+    approvals = _ApprovalRepository(namespace, coordinator(RuntimeDomain.RECOVERY)) if RuntimeDomain.RECOVERY in domains else None
+    external_calls = _ExternalRepository(namespace, coordinator(RuntimeDomain.RECOVERY)) if RuntimeDomain.RECOVERY in domains else None
+    recovery_checkpoint = _RecoveryCheckpointRepository(namespace, coordinator(RuntimeDomain.RECOVERY)) if RuntimeDomain.RECOVERY in domains else None
+    tools = _ToolRepository(namespace, coordinator(RuntimeDomain.RECOVERY)) if RuntimeDomain.RECOVERY in domains else None
+    if executions is not None and terminal is not None and execution_idempotency is not None and events is not None:
+        executions.bind_start_repositories(execution_idempotency, events, operations[RuntimeDomain.EXECUTION])
+        executions.bind_terminal_repository(terminal)
+        terminal.bind_terminal_repositories(execution_idempotency, events, operations[RuntimeDomain.EXECUTION])
+    if memories is not None:
+        memories.bind_operation_repository(operations[RuntimeDomain.MEMORY])
+    components: list[RuntimeRepository] = [*operations.values()]
+    components.extend(
+        item
+        for item in (
+            sessions,
+            executions,
+            terminal,
+            execution_idempotency,
+            events,
+            tasks,
+            evaluations,
+            evaluation_idempotency,
+            memories,
+            artifacts,
+            approvals,
+            external_calls,
+            recovery_checkpoint,
+            tools,
+        )
+        if item is not None
+    )
+    object_store = InMemoryObjectStore() if domains else None
+    object_stores = {} if object_store is None else {domain: object_store for domain in domains}
+    transaction_binding.bind_components(tuple(components))
+    if not transaction_hub.configured:
+        transaction_hub.configure(
+            snapshot=transaction_binding.snapshot,
+            restore=transaction_binding.restore,
+            commit=transaction_binding.commit,
+            rollback=transaction_binding.rollback,
+        )
+    return _InMemoryRuntimeParts(
+        tuple(components),
+        operations,
+        object_stores,
+        sessions,
+        executions,
+        terminal,
+        execution_idempotency,
+        events,
+        tasks,
+        evaluations,
+        evaluation_idempotency,
+        memories,
+        artifacts,
+        approvals,
+        external_calls,
+        recovery_checkpoint,
+        tools,
+    )
+
+
 def _operation_immutable(record: OperationLedgerRecord) -> tuple[object, ...]:
     return (
         record.tenant_id, record.resource_kind, record.resource_id, record.execution_id,
-        record.kind, record.request_digest, record.result_ref, record.result_digest,
+        record.operation_kind, record.request_digest, record.result_ref, record.result_digest,
         record.error_code, record.compactable,
     )
 
@@ -2288,7 +2655,7 @@ def _operation_immutable(record: OperationLedgerRecord) -> tuple[object, ...]:
 def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ...]:
     return (
         record.tenant_id, record.resource_kind, record.resource_id, record.execution_id,
-        record.kind, record.request_digest, record.result_ref, record.result_digest,
+        record.operation_kind, record.request_digest, record.result_ref, record.result_digest,
         record.error_code, record.compactable,
     )
 
@@ -2382,8 +2749,8 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
     }
     sessions = _SessionRepository(namespace, coordinators[RuntimeDomain.CONVERSATION])
     executions = _ExecutionRepository(namespace, coordinators[RuntimeDomain.EXECUTION])
-    execution_idempotency = _IdempotencyRepository(namespace, coordinators[RuntimeDomain.EXECUTION])
-    evaluation_idempotency = _IdempotencyRepository(namespace, coordinators[RuntimeDomain.EVALUATION])
+    execution_idempotency = _IdempotencyRepository(namespace, coordinators[RuntimeDomain.EXECUTION], RuntimeDomain.EXECUTION)
+    evaluation_idempotency = _IdempotencyRepository(namespace, coordinators[RuntimeDomain.EVALUATION], RuntimeDomain.EVALUATION)
     recovery_checkpoint = _RecoveryCheckpointRepository(namespace, coordinators[RuntimeDomain.RECOVERY])
     if filesystem and state_path is not None:
         object_store: ObjectStore = FilesystemObjectStore(Path(state_path).parent / "objects")
@@ -2474,9 +2841,17 @@ def _build_runtime(*, filesystem: bool, namespace: str, state_path: "str | None"
     return runtime
 
 
-def build_in_memory_runtime(*, namespace: "str | None" = None, transaction_binding: RuntimeTransactionBinding | None = None) -> InMemoryRuntime:
+def build_in_memory_runtime(*, namespace: "str | None" = None, transaction_binding: RuntimeTransactionBinding | None = None, transaction_hub: TransactionHub | None = None) -> InMemoryRuntime:
     selected_namespace = f"memory-{uuid.uuid4().hex}" if namespace is None else namespace
-    return _build_runtime(filesystem=False, namespace=selected_namespace, transaction_binding=transaction_binding)
+    return _build_runtime(filesystem=False, namespace=selected_namespace, transaction_binding=transaction_binding, transaction_hub=transaction_hub)
+
+
+def _select_in_memory_components(runtime: InMemoryRuntime, domains: frozenset[RuntimeDomain]) -> tuple[RuntimeRepository, ...]:
+    return tuple(
+        component
+        for component in runtime.components
+        if isinstance(component, _Base) and component._lock.owner_domain in domains
+    )
 
 
 def build_filesystem_runtime(root: str, *, namespace: str, persist: "frozenset[RuntimeDomain] | RuntimeDomain | None" = None, writer_lock: "FilesystemWriterLock | None" = None) -> FilesystemRuntime:

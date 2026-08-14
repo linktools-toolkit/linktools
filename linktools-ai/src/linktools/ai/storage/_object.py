@@ -17,6 +17,7 @@ from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._database import (
+    dialect_for_name,
     sql_blob,
     sql_digest,
     sql_integer_id,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
     from sqlalchemy import MetaData
     from sqlalchemy.ext.asyncio import AsyncEngine
 
-    from ._database import SqlContext
+    from ._database import SqlStorageContext
 
 
 _logger = environ.get_logger("ai.storage.object")
@@ -110,13 +111,16 @@ class _MemoryObjectStore:
         data = await _collect(chunks, expected_size, expected_digest)
         value = ObjectStat(key, expected_digest, expected_size)
         async with self._lock:
-            current = self._objects.get(key)
-            if current is not None and current != data:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._objects[key] = data
-            self._stats[key] = value
+            self._put_data(key, data, value)
         _logger.debug("object stored: store=%s key_digest=%s size=%s", self.store_id, _key_digest(key), expected_size)
         return value
+
+    def _put_data(self, key: str, data: bytes, value: ObjectStat) -> None:
+        current = self._objects.get(key)
+        if current is not None and current != data:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._objects[key] = data
+        self._stats[key] = value
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)
@@ -156,6 +160,69 @@ class InMemoryObjectStore(_MemoryObjectStore):
 class TransientObjectStore(_MemoryObjectStore):
     def __init__(self) -> None:
         super().__init__("transient")
+        self._scope_keys: dict[str, set[str]] = {}
+        self._key_scopes: dict[str, set[str]] = {}
+
+    def scoped(self, scope: str) -> ObjectStore:
+        if not scope or "/" in scope:
+            raise ValueError("transient object scope is invalid")
+        return _ScopedTransientObjectStore(self, scope)
+
+    async def release_scope(self, scope: str) -> None:
+        if not scope or "/" in scope:
+            raise ValueError("transient object scope is invalid")
+        async with self._lock:
+            keys = self._scope_keys.pop(scope, set())
+            for key in keys:
+                scopes = self._key_scopes.get(key)
+                if scopes is None:
+                    continue
+                scopes.discard(scope)
+                if not scopes:
+                    self._key_scopes.pop(key, None)
+                    self._objects.pop(key, None)
+                    self._stats.pop(key, None)
+        _logger.debug("transient object scope released: scope=%s keys=%s", scope, len(keys))
+
+    def clear(self) -> None:
+        super().clear()
+        self._scope_keys.clear()
+        self._key_scopes.clear()
+
+
+class _ScopedTransientObjectStore:
+    def __init__(self, parent: TransientObjectStore, scope: str) -> None:
+        self._parent = parent
+        self._scope = scope
+
+    @property
+    def store_id(self) -> str:
+        return self._parent.store_id
+
+    async def put(
+        self,
+        key: str,
+        chunks: AsyncIterator[bytes],
+        *,
+        expected_size: int,
+        expected_digest: str,
+    ) -> ObjectStat:
+        _validate_put(key, expected_size, expected_digest)
+        data = await _collect(chunks, expected_size, expected_digest)
+        value = ObjectStat(key, expected_digest, expected_size)
+        async with self._parent._lock:
+            self._parent._put_data(key, data, value)
+            self._parent._scope_keys.setdefault(self._scope, set()).add(key)
+            self._parent._key_scopes.setdefault(key, set()).add(self._scope)
+        _logger.debug("transient scoped object stored: scope=%s key_digest=%s size=%s", self._scope, _key_digest(key), expected_size)
+        return value
+
+    async def stat(self, key: str) -> ObjectStat | None:
+        _validate_key(key)
+        return await self._parent.stat(key)
+
+    def open(self, key: str) -> AsyncIterator[bytes]:
+        return self._parent.open(key)
 
 
 class FilesystemObjectStore:
@@ -252,6 +319,7 @@ class SqlObjectStore:
     def __init__(self, engine: "AsyncEngine", *, store_id: str = "builtin") -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
+        dialect_for_name(engine.dialect.name)
         if not isinstance(engine, AsyncEngine):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if store_id in _RESERVED_STORE_IDS and store_id != "builtin":
@@ -261,10 +329,10 @@ class SqlObjectStore:
         self._store_id = store_id
         self._metadata = build_object_sql_metadata()
         self._lock = asyncio.Lock()
-        self._context: "SqlContext | None" = None
+        self._context: "SqlStorageContext | None" = None
 
     @classmethod
-    def _from_context(cls, context: "SqlContext", *, store_id: str = "builtin") -> "SqlObjectStore":
+    def _from_context(cls, context: "SqlStorageContext", *, store_id: str = "builtin") -> "SqlObjectStore":
         store = cls(context.engine, store_id=store_id)
         store._context = context
         return store

@@ -15,7 +15,7 @@ class OperationLedgerRecord:
     resource_kind: ResourceKind
     resource_id: str
     execution_id: "str | None"
-    kind: OperationKind
+    operation_kind: OperationKind
     status: OperationStatus
     request_digest: str
     result_ref: "str | None"
@@ -34,7 +34,7 @@ class OperationLedgerInput:
     resource_kind: ResourceKind
     resource_id: str
     execution_id: "str | None"
-    kind: OperationKind
+    operation_kind: OperationKind
     status: OperationStatus
     request_digest: str
     result_ref: "str | None"

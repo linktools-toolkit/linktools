@@ -58,7 +58,7 @@ Compile a named Agent and Prompt with `runtime.compile_agent("coding", prompt_id
 
 ### 2.1 Default workspace loader
 
-`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools` through `Workspace.storage_root`. The asset directory is a read-only `LocalDirectoryAssetBackend`; generated defaults use the selected Asset writer when `StorageDomain.ASSET` is durable, otherwise they live in a writable in-memory layer.
+`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools` through `Workspace.storage_root`. The default Asset source root is exactly `Workspace.storage_root`; it is a read-only `LocalDirectoryAssetBackend`, while generated defaults use the selected Asset writer.
 
 ```text
 .linktools/
@@ -124,7 +124,7 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 
 `RuntimeStorage.memory()`, `.filesystem(...)`, `.sqlite(...)`, and `.sql(...)` select the runtime target. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
 
-`persist=None` selects only `StorageDomain.CONVERSATION`; pass an exact domain set for selective durability or `StorageDomain.ALL` for every domain. Unselected domains use process-local stores and are intentionally absent after restart.
+`persist=None` selects only `RuntimeDomain.CONVERSATION`; pass an exact `RuntimeStoragePlan` for selective durability. Unselected domains use process-local stores and are intentionally absent after restart.
 
 The identity fields are intentionally independent:
 
@@ -132,30 +132,31 @@ The identity fields are intentionally independent:
 |---|---|
 | Runtime `namespace` | The workspace identity that isolates one Runtime data set inside a target |
 | `tenant_id` | Authorization and resource ownership boundary inside that data set |
-| `memory_namespace` | Selects a memory collection inside one tenant |
+| `memory_scope` | Selects a memory collection inside one tenant |
 | Asset `namespace` | Isolates raw Asset data and is unrelated to Runtime storage |
 | Asset `kind` | Selects a logical Asset type such as `agent`, `prompt`, or `skill` |
 | Task/Tool `owner` | Identifies the current lease holder |
 
-Fields stay short when their declaring type supplies the domain, such as `Principal.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. A qualifier is retained where another meaning is plausible in the same record or flattened storage boundary, such as `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or where it preserves an authorization identity domain, such as `owner_principal_id`.
+Fields stay short when their declaring type supplies the domain, such as `Principal.kind` and `TaskLease.owner`. Explicit qualifiers distinguish meanings that can coexist in the same record or flattened storage boundary, such as `operation_kind`, `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_key`, or preserve an authorization identity domain, such as `owner_principal_id`.
 
 `open_workspace_runtime()` uses `workspace.workspace_id` as both the Runtime namespace and the Workspace tenant boundary. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
 
 External SQL deployments borrow an application-owned async SQLAlchemy `AsyncEngine` and require a pre-provisioned schema. Runtime startup validates tables but never creates or alters them. `RuntimeStorage.sqlite()` creates and owns its SQLite engine and provisions its LinkTools schema:
 
 ```python
-from linktools.ai import RuntimeStorage, StorageDomain
-from linktools.ai.migrate import provision_database
+from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan, RuntimeStorageRoute
 from sqlalchemy.ext.asyncio import create_async_engine
 
 path = "/var/lib/my-app/runtime.db"
 engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
-await provision_database(engine)
 async with open_workspace_runtime(
     workspace,
-    storage=RuntimeStorage.sql(
+    runtime_storage=RuntimeStorage.sql(
         engine,
-        persist={StorageDomain.CONVERSATION, StorageDomain.MEMORY},
+        plan=RuntimeStoragePlan({
+            RuntimeDomain.CONVERSATION: RuntimeStorageRoute.durable(),
+            RuntimeDomain.MEMORY: RuntimeStorageRoute.durable(),
+        }),
     ),
     model="gpt-4o-mini",
 ) as runtime:
@@ -168,7 +169,7 @@ MySQL, PostgreSQL, and SQLite use the same `RuntimeStorage.sql(engine)` contract
 
 The application owns an external engine and must dispose it after the Runtime closes. The engine created by `RuntimeStorage.sqlite()` is disposed by the Runtime.
 
-A non-empty `memory_namespace` enables Runtime memory for an execution. `None` disables it. Classification fields reject empty values, surrounding whitespace, control characters, and values beyond their UTF-8 byte limit.
+A non-empty `memory_scope` enables Runtime memory for an execution. `None` disables it. Classification fields reject empty values, surrounding whitespace, control characters, and values beyond their UTF-8 byte limit.
 
 ## 4. Capability providers
 

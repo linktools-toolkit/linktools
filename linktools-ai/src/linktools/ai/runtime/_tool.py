@@ -23,7 +23,7 @@ from ..storage import ObjectRef
 class ToolOperationRecord:
     tool_operation_id: str
     tenant_id: str
-    run_id: str
+    step_run_id: str
     tool_call_id: str
     idempotency_key_hash: str
     tool_name: str

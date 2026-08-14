@@ -480,18 +480,19 @@ class MySQLDialect(SQLiteDialect):
         return _classify_error(error, ("duplicate entry", "1062"))
 
 
-SqliteDialect = SQLiteDialect
+def dialect_for_name(name: str) -> SqlAlchemyDialect:
+    if name == "sqlite":
+        return SQLiteDialect()
+    if name == "mysql":
+        return MySQLDialect()
+    if name == "postgresql":
+        return PostgreSQLDialect()
+    raise ValueError(f"unsupported SQLAlchemy dialect: {name}")
 
 
 def resolve_dialect(session: "AsyncSession") -> SqlAlchemyDialect:
-    name = session.bind.dialect.name
-    if name == "sqlite":
-        return SQLiteDialect()
-    if name in {"postgresql", "postgres"}:
-        return PostgreSQLDialect()
-    if name in {"mysql", "mariadb"}:
-        return MySQLDialect()
-    raise ValueError(f"unsupported SQLAlchemy dialect: {name}")
+    bind = session.get_bind()
+    return dialect_for_name(bind.dialect.name)
 
 
 def classify_integrity_error_by_message(
@@ -554,9 +555,9 @@ __all__ = [
     "SqlAlchemyDialect",
     "SqlErrorKind",
     "SqlValue",
-    "SqliteDialect",
     "classify_integrity_error_by_message",
     "classify_sql_error",
+    "dialect_for_name",
     "is_retryable_sql_transaction",
     "resolve_dialect",
 ]

@@ -19,6 +19,8 @@ from ..storage import (
     MetadataLoadMode,
     ObjectStore,
     SqlObjectStore,
+    create_sql_storage_context,
+    dialect_for_name,
     StorageBatchResult,
     StorageChange,
     StorageDeleteResult,
@@ -28,7 +30,6 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
-    create_sql_context,
     provision_sql,
     read_object,
     sql_digest,
@@ -134,6 +135,7 @@ class SqlAssetBackend:
     ) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
+        dialect_for_name(engine.dialect.name)
         if not isinstance(engine, AsyncEngine):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         try:
@@ -148,7 +150,7 @@ class SqlAssetBackend:
         self._object_keys = AssetObjectKeyFactory(namespace)
         self._object_store = object_store if object_store is not None else SqlObjectStore(engine)
         self._metadata = build_asset_sql_metadata(object_store=object_store)
-        self._context = create_sql_context(engine)
+        self._context = create_sql_storage_context(engine)
         self._lock = asyncio.Lock()
         self._ready = False
 

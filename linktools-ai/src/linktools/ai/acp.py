@@ -40,7 +40,7 @@ class ACPAgent:
         try:
             validate_memory_scope(memory_scope)
         except AIError as error:
-            raise ValueError("memory namespace is invalid") from error
+            raise ValueError("memory scope is invalid") from error
         self._runtime = runtime
         self._principal = principal
         self._memory_scope = memory_scope

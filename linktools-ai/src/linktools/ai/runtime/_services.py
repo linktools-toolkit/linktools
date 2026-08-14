@@ -126,13 +126,13 @@ class TranscriptItem:
 class ExecutionHistoryItem:
     execution_id: str
     sequence: int
-    kind: str
+    item_kind: str
     content: JsonValue
     tool_name: "str | None" = None
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 0 or self.kind not in {"system", "user", "assistant", "tool_call", "tool_result", "retry"}:
+        if self.sequence < 0 or self.item_kind not in {"system", "user", "assistant", "tool_call", "tool_result", "retry"}:
             raise ValueError("execution history item is invalid")
 
 

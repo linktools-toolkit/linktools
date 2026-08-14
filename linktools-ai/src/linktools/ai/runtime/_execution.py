@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Execution query API and the persistence-backed default service."""
 
 import asyncio
@@ -6,8 +7,11 @@ import json
 import re
 import uuid
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import wraps
 from typing import Protocol
 
 from linktools.core import environ
@@ -67,6 +71,51 @@ from ._services import (
 _logger = environ.get_logger("ai.runtime.execution")
 
 
+def _consumed_query(method: "Callable[..., object]") -> "Callable[..., object]":
+    @wraps(method)
+    async def wrapped(self: "DefaultExecutionService", execution_id: str, *args: object, principal: Principal, **kwargs: object) -> object:
+        async with self._execution_consumer(execution_id, principal.tenant_id):
+            result = await method(self, execution_id, *args, principal=principal, **kwargs)
+            await self._request_handoff_if_terminal(execution_id, principal.tenant_id)
+            return result
+
+    return wrapped
+
+
+def _observed_query(method: "Callable[..., object]") -> "Callable[..., object]":
+    @wraps(method)
+    async def wrapped(self: "DefaultExecutionService", execution_id: str, *args: object, principal: Principal, **kwargs: object) -> object:
+        async with self._execution_consumer(execution_id, principal.tenant_id):
+            return await method(self, execution_id, *args, principal=principal, **kwargs)
+
+    return wrapped
+
+
+class _ExecutionReleaseCallback(Protocol):
+    async def __call__(self, execution_id: str, *, tenant_id: str) -> None: ...
+
+
+class _ExecutionTerminalVerifier(Protocol):
+    async def __call__(self, execution: ExecutionRecord, status: ExecutionStatus, required_step_run_id: "str | None") -> None: ...
+
+
+async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
+    del execution_id, tenant_id
+
+
+async def _missing_terminal_verifier(execution: ExecutionRecord, status: ExecutionStatus, required_step_run_id: "str | None") -> None:
+    del execution, status, required_step_run_id
+    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+@dataclass
+class _ExecutionHandoffState:
+    active_consumers: int = 0
+    dependency_holds: set[str] = field(default_factory=set)
+    release_requested: bool = False
+    release_in_progress: bool = False
+
+
 class ExecutionQueryApi(Protocol):
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView: ...
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult: ...
@@ -105,14 +154,100 @@ class DefaultExecutionService:
         backend: "ExecutionBackend | None" = None,
         operation_ids: "Callable[[], str] | None" = None,
         history_reader: ExecutionHistoryReader,
+        release_terminal: _ExecutionReleaseCallback | None = None,
+        terminal_verifier: "_ExecutionTerminalVerifier | None" = None,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._backend = backend
         self._operation_ids = operation_ids or (lambda: uuid.uuid4().hex)
         self._history_reader = history_reader
+        self._release_terminal = release_terminal or _no_release_terminal
+        self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._session_locks_guard = asyncio.Lock()
+        self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
+        self._handoff_condition = asyncio.Condition()
+
+    async def _acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+        if not hold_id:
+            raise ValueError("execution dependency hold id is required")
+        async with self._handoff_condition:
+            state = self._handoff_states.setdefault((tenant_id, execution_id), _ExecutionHandoffState())
+            while state.release_in_progress:
+                await self._handoff_condition.wait()
+            state.dependency_holds.add(hold_id)
+
+    async def _release_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
+        owner = False
+        state: _ExecutionHandoffState | None = None
+        async with self._handoff_condition:
+            state = self._handoff_states.get((tenant_id, execution_id))
+            if state is None:
+                return
+            state.dependency_holds.discard(hold_id)
+            owner = self._claim_cleanup_locked(state)
+            if not owner and not state.release_requested and not state.dependency_holds and state.active_consumers == 0:
+                self._handoff_states.pop((tenant_id, execution_id), None)
+        if owner and state is not None:
+            await self._run_handoff_cleanup(execution_id, tenant_id, state)
+
+    async def _request_terminal_handoff(self, execution_id: str, *, tenant_id: str) -> None:
+        owner = False
+        state: _ExecutionHandoffState
+        async with self._handoff_condition:
+            state = self._handoff_states.setdefault((tenant_id, execution_id), _ExecutionHandoffState())
+            state.release_requested = True
+            owner = self._claim_cleanup_locked(state)
+        if owner:
+            await self._run_handoff_cleanup(execution_id, tenant_id, state)
+
+    async def _request_handoff_if_terminal(self, execution_id: str, tenant_id: str) -> None:
+        current = await self._persistence.execution.executions.get(execution_id, tenant_id=tenant_id)
+        if current is not None and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            await self._request_terminal_handoff(execution_id, tenant_id=tenant_id)
+
+    def _claim_cleanup_locked(self, state: _ExecutionHandoffState) -> bool:
+        if state.active_consumers == 0 and not state.dependency_holds and state.release_requested and not state.release_in_progress:
+            state.release_in_progress = True
+            return True
+        return False
+
+    async def _run_handoff_cleanup(self, execution_id: str, tenant_id: str, state: _ExecutionHandoffState) -> None:
+        try:
+            await self._release_terminal(execution_id, tenant_id=tenant_id)
+        except BaseException:
+            async with self._handoff_condition:
+                state.release_in_progress = False
+                state.release_requested = True
+                self._handoff_condition.notify_all()
+            _logger.error("execution handoff cleanup failed: execution=%s", execution_id, exc_info=environ.debug)
+            return
+        async with self._handoff_condition:
+            if self._handoff_states.get((tenant_id, execution_id)) is state:
+                self._handoff_states.pop((tenant_id, execution_id), None)
+            self._handoff_condition.notify_all()
+
+    @asynccontextmanager
+    async def _execution_consumer(self, execution_id: str, tenant_id: str):
+        async with self._handoff_condition:
+            state = self._handoff_states.setdefault((tenant_id, execution_id), _ExecutionHandoffState())
+            while state.release_in_progress:
+                await self._handoff_condition.wait()
+            state.active_consumers += 1
+        try:
+            yield
+        finally:
+            owner = False
+            async with self._handoff_condition:
+                state.active_consumers -= 1
+                if state.active_consumers < 0:
+                    raise RuntimeError("execution consumer count underflow")
+                owner = self._claim_cleanup_locked(state)
+                if not owner and not state.release_requested and not state.dependency_holds and state.active_consumers == 0:
+                    self._handoff_states.pop((tenant_id, execution_id), None)
+            if owner:
+                await self._run_handoff_cleanup(execution_id, tenant_id, state)
 
     async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle:
         return await self._start(binding_digest, request, scope="execution.run")
@@ -204,7 +339,20 @@ class DefaultExecutionService:
         reservation = await self._persistence.execution.executions.reserve_start(
             ExecutionStartReservation(
                 execution,
-                IdempotencyRecord(request.principal.tenant_id, scope, key_hash, request_digest, execution_id, IdempotencyStatus.RESERVED, None, None, now, now),
+                IdempotencyRecord(
+                    tenant_id=request.principal.tenant_id,
+                    runtime_domain=RuntimeDomain.EXECUTION,
+                    scope=scope,
+                    key_hash=key_hash,
+                    request_digest=request_digest,
+                    resource_kind=ResourceKind.EXECUTION,
+                    resource_id=execution_id,
+                    status=IdempotencyStatus.RESERVED,
+                    result_digest=None,
+                    error_code=None,
+                    created_at=now,
+                    updated_at=now,
+                ),
             )
         )
         if not reservation.created:
@@ -268,10 +416,12 @@ class DefaultExecutionService:
             _logger.error("execution start outcome unknown: execution=%s", execution_id)
             raise AIError(ErrorCode.EXECUTION_START_UNKNOWN) from error
 
+    @_observed_query
     async def inspect(self, execution_id: str, *, principal: Principal) -> ExecutionView:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return ExecutionView(execution.execution_id, execution.status)
 
+    @_consumed_query
     async def result(self, execution_id: str, *, principal: Principal) -> ExecutionResult:
         execution = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         if execution.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
@@ -303,6 +453,7 @@ class DefaultExecutionService:
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
+    @_consumed_query
     async def wait(self, execution_id: str, *, principal: Principal, timeout_seconds: "float | None" = None) -> ExecutionResult:
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -348,6 +499,12 @@ class DefaultExecutionService:
         return await self._start(binding_digest, fork_request, session_id=previous.session_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
+        async with self._execution_consumer(execution_id, request.principal.tenant_id):
+            result = await self._cancel(execution_id, request)
+            await self._request_handoff_if_terminal(execution_id, request.principal.tenant_id)
+            return result
+
+    async def _cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         execution = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_CANCEL)
         operation_digest = canonical_sha256(
             {
@@ -465,7 +622,7 @@ class DefaultExecutionService:
             now = datetime.now(timezone.utc)
             terminal = _next_execution(cancelling_current, ExecutionStatus.CANCELLED, now, error_code=None, terminal_event=True)
             result = ResultRecord(execution_id, request.principal.tenant_id, None, None, None, None, StopReason.CANCELLED, 0, 0, 0, now)
-            idempotency_records = await self._persistence.execution.idempotency.list_by_execution(execution_id, tenant_id=request.principal.tenant_id)
+            idempotency_records = await self._persistence.execution.idempotency.list_by_resource(ResourceKind.EXECUTION, execution_id, tenant_id=request.principal.tenant_id)
             if len(idempotency_records) > 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             identity = idempotency_records[0] if idempotency_records else None
@@ -483,6 +640,7 @@ class DefaultExecutionService:
             if current_operation.status not in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             operation_update = OperationTerminalUpdate(operation.operation_id, current_operation.status, OperationStatus.SUCCEEDED, execution_id, None, None)
+            await self._terminal_verifier(cancelling_current, ExecutionStatus.CANCELLED, None)
             try:
                 await self._persistence.execution.commit_terminal(
                     ExecutionTerminalCommit(
@@ -579,14 +737,17 @@ class DefaultExecutionService:
         return CancelExecutionResult(execution_id, current.status is ExecutionStatus.CANCELLED)
 
 
+    @_observed_query
     async def trace(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> "Page[ExecutionTraceItem]":
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.trace(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
 
+    @_observed_query
     async def transcript(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> Page[TranscriptItem]:
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.transcript(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
 
+    @_observed_query
     async def history(self, execution_id: str, *, principal: Principal, cursor: "str | None" = None, limit: int = 100) -> "Page[ExecutionHistoryItem]":
         record = await self._load_authorized(execution_id, principal, AuthorizationAction.EXECUTION_READ)
         return await self._history_reader.history(record.execution_id, tenant_id=record.tenant_id, cursor=cursor, limit=limit)
@@ -641,7 +802,7 @@ def _operation_result(
         operation.resource_kind,
         operation.resource_id,
         operation.execution_id,
-        operation.kind,
+        operation.operation_kind,
         OperationStatus.SUCCEEDED,
         operation.request_digest,
         result_ref,
@@ -661,7 +822,7 @@ def _operation_failure(operation: OperationLedgerRecord, error_code: str) -> Ope
         operation.resource_kind,
         operation.resource_id,
         operation.execution_id,
-        operation.kind,
+        operation.operation_kind,
         OperationStatus.FAILED,
         operation.request_digest,
         None,
@@ -681,7 +842,7 @@ def _operation_status(operation: OperationLedgerRecord, status: OperationStatus)
         operation.resource_kind,
         operation.resource_id,
         operation.execution_id,
-        operation.kind,
+        operation.operation_kind,
         status,
         operation.request_digest,
         operation.result_ref,
