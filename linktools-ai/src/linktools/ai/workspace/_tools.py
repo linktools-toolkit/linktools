@@ -31,9 +31,9 @@ class WorkspaceTool(Protocol):
 WorkspaceToolResultValue = str | int | bool | None | list[dict[str, str]]
 
 
-def build_workspace_tools(root: 'str | Path', *, storage_root: 'str | Path | None' = None) -> 'tuple[WorkspaceTool, ...]':
+def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     project_root = Path(root).expanduser().resolve()
-    data_root = (project_root / ".linktools" if storage_root is None else Path(storage_root).expanduser().resolve())
+    data_root = project_root
     shell_slots = asyncio.Semaphore(4)
 
     async def list_dir(path: str = ".", recursive: bool = False) -> 'dict[str, WorkspaceToolResultValue]':
@@ -153,8 +153,8 @@ def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[StaticCapabi
     )
 
 
-def build_workspace_tool_map(root: 'str | Path', *, storage_root: 'str | Path | None' = None) -> 'Mapping[str, WorkspaceTool]':
-    tools = build_workspace_tools(root, storage_root=storage_root)
+def build_workspace_tool_map(root: 'str | Path') -> 'Mapping[str, WorkspaceTool]':
+    tools = build_workspace_tools(root)
     return {
         "list_dir": tools[0],
         "read_file": tools[1],

@@ -22,12 +22,11 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("--project", type=Path, default=None, help="working directory")
-        parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--memory", default=None, help="caller-owned memory scope (default: workspace id)")
 
     def run(self, args: Namespace) -> int:
         try:
-            workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+            workspace = Workspace.discover(Path.cwd(), root=args.project)
             memory_scope = args.memory if args.memory is not None else workspace.workspace_id
             asyncio.run(ACPApplication.for_workspace(workspace).serve(memory_scope=memory_scope))
         except ModuleNotFoundError as error:

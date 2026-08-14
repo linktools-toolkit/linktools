@@ -22,11 +22,10 @@ class Command(BaseCommand):
 
     def init_arguments(self, parser: "CommandParser") -> None:
         parser.add_argument("--project", type=Path, default=None, help="working directory")
-        parser.add_argument("--storage", type=Path, default=None, help="runtime storage directory")
         parser.add_argument("--json", action="store_true", help="emit JSON")
 
     def run(self, args: Namespace) -> int:
-        workspace = Workspace.discover(Path.cwd(), root=args.project, storage_root=args.storage)
+        workspace = Workspace.discover(Path.cwd(), root=args.project)
         application = ACPApplication.for_workspace(workspace)
         report = {
             "ok": application.__class__.__name__ == "ACPApplication",

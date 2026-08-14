@@ -28,7 +28,6 @@ class Command(BaseCommand):
         report = {
             "root": str(workspace.root),
             "workspace_id": workspace.workspace_id,
-            "config": str(workspace.config_path) if workspace.config_path else None,
         }
         if args.json:
             print(json.dumps(report, ensure_ascii=False, sort_keys=True))

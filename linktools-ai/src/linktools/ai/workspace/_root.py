@@ -31,8 +31,6 @@ class WorkspacePolicy:
 @dataclass(frozen=True, slots=True)
 class Workspace:
     root: Path
-    storage_root: Path
-    config_path: "Path | None"
     config: "dict[str, JsonValue]"
     workspace_id: str
 
@@ -42,39 +40,30 @@ class Workspace:
         start: "str | Path",
         *,
         root: "str | Path | None" = None,
-        storage_root: "str | Path | None" = None,
     ) -> "Workspace":
         candidate = Path(root).expanduser().resolve() if root is not None else Path(start).expanduser().resolve()
         if root is None and candidate.is_file():
             candidate = candidate.parent
         if root is None:
             for parent in (candidate, *candidate.parents):
-                config_path = parent / ".linktools" / "config.yaml"
-                if config_path.exists():
-                    return cls._build(parent, config_path, storage_root)
-        config_path = candidate / ".linktools" / "config.yaml"
-        return cls._build(candidate, config_path if config_path.exists() else None, storage_root)
+                config_file = parent / ".linktools" / "config.yaml"
+                if config_file.exists():
+                    return cls._build(parent, config_file)
+        config_file = candidate / ".linktools" / "config.yaml"
+        return cls._build(candidate, config_file if config_file.exists() else None)
 
     @classmethod
-    def load(cls, root: "str | Path", *, storage_root: "str | Path | None" = None) -> "Workspace":
+    def load(cls, root: "str | Path") -> "Workspace":
         candidate = Path(root).expanduser().resolve()
-        config_path = candidate / ".linktools" / "config.yaml"
-        return cls._build(candidate, config_path if config_path.exists() else None, storage_root)
+        config_file = candidate / ".linktools" / "config.yaml"
+        return cls._build(candidate, config_file if config_file.exists() else None)
 
     @classmethod
-    def _build(cls, root: Path, config_path: "Path | None", storage_root: "str | Path | None") -> "Workspace":
+    def _build(cls, root: Path, config_file: "Path | None") -> "Workspace":
         normalized_root = _normalized_root(root)
-        resolved_storage_root = (root / ".linktools") if storage_root is None else Path(storage_root).expanduser().resolve()
-        resolved_config_path = resolved_storage_root / "config.yaml"
-        if storage_root is not None:
-            config_path = resolved_config_path if resolved_config_path.exists() else None
-        elif config_path is None and resolved_config_path.exists():
-            config_path = resolved_config_path
         return cls(
             root=root,
-            storage_root=resolved_storage_root,
-            config_path=config_path,
-            config=load_config(config_path) if config_path else {},
+            config=load_config(config_file) if config_file else {},
             workspace_id=canonical_sha256(["workspace", normalized_root]),
         )
 

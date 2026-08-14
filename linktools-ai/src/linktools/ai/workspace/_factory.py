@@ -224,8 +224,8 @@ async def _compile_recovery_definitions(compiler: AgentCompiler, definitions: di
 async def open_workspace_runtime(
     workspace: Workspace,
     *,
-    runtime_storage: "RuntimeStorage | None" = None,
     asset_store: "AssetStore | None" = None,
+    runtime_storage: "RuntimeStorage | None" = None,
     model: "str | None" = None,
     base_url: "str | None" = None,
     api_key: "str | None" = None,
@@ -235,13 +235,13 @@ async def open_workspace_runtime(
     capability_grants: "Sequence[CapabilityBinding]" = (),
     task_node_runner: "TaskNodeRunner | None" = None,
 ) -> "AsyncIterator[Runtime]":
-    selected_storage = runtime_storage or RuntimeStorage.filesystem(workspace.storage_root / "runtime")
     namespace = workspace.workspace_id
     tenant_id = workspace.workspace_id
+    selected_storage = runtime_storage or RuntimeStorage.filesystem(workspace.root / ".linktools" / "runtime")
     target_kind = runtime_storage_kind(selected_storage)
     durable_domains = runtime_durable_domains(selected_storage)
     registry = _build_asset_registry(extra_asset_bindings)
-    selected_assets = await build_asset_store(workspace.storage_root) if asset_store is None else asset_store
+    selected_assets = await build_asset_store(workspace.root / ".linktools") if asset_store is None else asset_store
     if asset_store is not None:
         await selected_assets.initialize()
     phase_a_assets = AssetRepository(selected_assets, registry)
@@ -370,10 +370,10 @@ async def open_workspace_runtime(
             else "none"
         )
         _logger.info(
-            "workspace runtime opened: namespace=%s target_kind=%s storage_root=%s location=%s selected_domains=%s recovery_enabled=%s sql_dialect=%s engine_ownership=%s",
+            "workspace runtime opened: namespace=%s target_kind=%s workspace_root=%s location=%s selected_domains=%s recovery_enabled=%s sql_dialect=%s engine_ownership=%s",
             namespace,
             target_kind,
-            workspace.storage_root,
+            workspace.root,
             _target_location(selected_storage),
             sorted(domain.value for domain in durable_domains),
             RuntimeDomain.RECOVERY in durable_domains,

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import linktools.ai
 
 from linktools.ai import RuntimeDomain, RuntimeStorage, RuntimeStoragePlan
 from linktools.ai.adapter import SqlStepArchive, build_filesystem_runtime
@@ -104,5 +105,7 @@ async def test_filesystem_domains_are_exact_across_cold_restart(tmp_path: Path) 
 
 def test_public_sql_and_workspace_constructors_use_engine_storage() -> None:
     assert "session_factory" not in inspect.signature(open_workspace_runtime).parameters
+    assert "runtime_storage" in inspect.signature(open_workspace_runtime).parameters
+    assert hasattr(linktools.ai, "RuntimeStorage")
     assert "session_factory" not in inspect.signature(SqlStepArchive).parameters
     assert "session_factory" not in inspect.signature(SqlAssetBackend).parameters

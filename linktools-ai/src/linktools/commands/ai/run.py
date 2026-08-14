@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from linktools.cli import BaseCommand, CommandError
 from linktools.cli.argparse import ConfigAction
-from linktools.core import ConfigField
+from linktools.core import ConfigField, environ
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
 from ...ai.core import ExecutionEventType, ExecutionStatus
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
 OPENAI_BASE_URL = ConfigField(name="OPENAI_BASE_URL", cast=str, default=None)
 OPENAI_MODEL = ConfigField(name="OPENAI_MODEL", cast=str, default=None)
 OPENAI_API_KEY = ConfigField(name="OPENAI_API_KEY", cast=str, default=None, secret=True)
+_logger = environ.get_logger("commands.ai.run")
 
 
 class Command(BaseCommand):
@@ -46,7 +47,14 @@ class Command(BaseCommand):
         workspace = Workspace.discover(Path.cwd(), root=args.project)
         if not isinstance(args.model, str) or not args.model.strip():
             raise CommandError("--model is required")
+        session_id = workspace.workspace_id
         memory_scope = workspace.workspace_id
+        _logger.info(
+            "ai run session selected: workspace=%s session=%s memory_scope=%s",
+            workspace.workspace_id,
+            session_id,
+            memory_scope,
+        )
 
         async def execute() -> int:
             async with open_workspace_runtime(
@@ -55,7 +63,7 @@ class Command(BaseCommand):
                 base_url=args.base_url,
                 api_key=args.api_key,
             ) as runtime:
-                return await _emit_result(runtime, workspace, args.prompt, memory_scope, args.json)
+                return await _emit_result(runtime, workspace, args.prompt, session_id, memory_scope, args.json)
 
         try:
             return asyncio.run(execute())
@@ -63,10 +71,10 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
 
-async def _emit_result(runtime: Runtime, workspace: Workspace, prompt: str, memory_scope: str, as_json: bool) -> int:
+async def _emit_result(runtime: Runtime, workspace: Workspace, prompt: str, session_id: str, memory_scope: str, as_json: bool) -> int:
     principal = _trusted_principal(workspace.workspace_id)
     if as_json:
-        result = await runtime.run(prompt, principal=principal, memory_scope=memory_scope)
+        result = await runtime.run(prompt, principal=principal, session_id=session_id, memory_scope=memory_scope)
         payload = _result_payload(result)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
@@ -74,7 +82,7 @@ async def _emit_result(runtime: Runtime, workspace: Workspace, prompt: str, memo
         return 0
 
     succeeded = False
-    async for event in runtime.stream(prompt, principal=principal, memory_scope=memory_scope):
+    async for event in runtime.stream(prompt, principal=principal, session_id=session_id, memory_scope=memory_scope):
         if event.event_type is ExecutionEventType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
             if isinstance(text, str):
