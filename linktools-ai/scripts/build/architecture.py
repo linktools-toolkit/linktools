@@ -254,7 +254,14 @@ def _layout_errors(root: Path, expected_packages: 'tuple[str, ...]', public_modu
         if not relative or relative[0] not in packages:
             errors.append(f"module outside package: {path}")
         elif relative[0] == "temporal":
-            if len(relative) == 2 and relative[1] in {"_activity.py", "_context.py", "_gateway.py", "_worker.py"}:
+            if len(relative) == 2 and relative[1] in {
+                "_activity.py",
+                "_context.py",
+                "_gateway.py",
+                "_request.py",
+                "_task_operation.py",
+                "_worker.py",
+            }:
                 continue
             if len(relative) != 3 or relative[1] != "workflow":
                 errors.append(f"invalid temporal depth: {path}")

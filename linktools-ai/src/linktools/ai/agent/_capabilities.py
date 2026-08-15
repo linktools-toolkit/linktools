@@ -80,7 +80,7 @@ class AgentRunScope:
 
 
 class SubagentDelegate(Protocol):
-    async def __call__(self, agent_id: str, user_prompt: str) -> JsonValue: ...
+    async def __call__(self, agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue: ...
 
 
 async def compose_platform_capabilities(
@@ -173,7 +173,7 @@ class _SubagentCapability(AbstractCapability[None]):
                 raise ModelRetry("agent_id and task are required")
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            result = await self._delegate(values[0], values[1])
+            result = await self._delegate(values[0], values[1], tool_call_id=ctx.tool_call_id)
             if not isinstance(result, dict):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return result
@@ -217,7 +217,15 @@ def _workspace_file_key(part: ToolCallPart) -> "str | None":
 
 
 __all__ = [
-    "AgentRunScope", "MEMORY_TOOL_NAMES", "PLANNING_TOOL_NAMES", "SKILL_TOOL_NAMES",
-    "WORKSPACE_FILESYSTEM_TOOL_NAMES", "WORKSPACE_SHELL_TOOL_NAMES", "compose_platform_capabilities",
-    "select_platform_tool_names", "tool_name_allowed", "SUBAGENT_TOOL_NAMES", "SubagentDelegate",
+    "MEMORY_TOOL_NAMES",
+    "PLANNING_TOOL_NAMES",
+    "SKILL_TOOL_NAMES",
+    "SUBAGENT_TOOL_NAMES",
+    "WORKSPACE_FILESYSTEM_TOOL_NAMES",
+    "WORKSPACE_SHELL_TOOL_NAMES",
+    "AgentRunScope",
+    "SubagentDelegate",
+    "compose_platform_capabilities",
+    "select_platform_tool_names",
+    "tool_name_allowed",
 ]

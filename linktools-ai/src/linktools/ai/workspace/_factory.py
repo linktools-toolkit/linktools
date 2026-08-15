@@ -157,10 +157,12 @@ def _build_output_types(
         )
         selected.freeze()
     else:
-        selected.resolve(
+        resolved = selected.resolve(
             ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
             ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
         )
+        if resolved is not AssistantTextOutput:
+            raise AIError(ErrorCode.OUTPUT_SCHEMA_DRIFT)
     return selected
 
 

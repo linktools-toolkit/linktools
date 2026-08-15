@@ -90,7 +90,8 @@
       "capability",
       "task",
       "agent",
-      "runtime"
+      "runtime",
+      "storage"
     ],
     "migrate": [
       "core",

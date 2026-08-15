@@ -7,16 +7,19 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import JsonValue, canonical_sha256
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..runtime import (
     CancelExecutionResult,
     ExecutionHandle,
     ExecutionRequest,
+    RuntimeObjectKeyFactory,
     WorkflowQueryResult,
     WorkflowUpdateResult,
 )
+from ..storage import ObjectStore
 from ..task import TaskGraphHandle, TaskGraphRequest, TaskGraphView
+from ._request import put_task_request
 from .workflow import TaskWorkflowInput
 
 _logger = environ.get_logger("ai.temporal.gateway")
@@ -55,11 +58,22 @@ class TemporalClient(Protocol):
 
 
 class WorkflowGateway:
-    def __init__(self, client: TemporalClient, *, worker_build: str) -> None:
+    def __init__(
+        self,
+        client: TemporalClient,
+        *,
+        worker_build: str,
+        request_store: ObjectStore,
+        namespace: str,
+    ) -> None:
         if not isinstance(worker_build, str) or not worker_build.strip():
             raise ValueError("Temporal worker build is required")
+        if not isinstance(namespace, str) or not namespace.strip():
+            raise ValueError("Temporal namespace is required")
         self._client = client
         self._worker_build = worker_build
+        self._request_store = request_store
+        self._request_keys = RuntimeObjectKeyFactory(namespace)
 
     async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle:
         if not workflow_id.strip():
@@ -99,9 +113,14 @@ class WorkflowGateway:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
         _logger.debug("starting durable task workflow: workflow_id=%s", workflow_id)
+        request_ref = await put_task_request(
+            self._request_store,
+            self._request_keys,
+            request,
+        )
         workflow_request = TaskWorkflowInput.from_request(
             request,
-            request_ref=_task_request_ref(request),
+            request_ref=request_ref,
             worker_build=self._worker_build,
         )
         return await self._client.start_task_graph(workflow_request, workflow_id=workflow_id)
@@ -112,14 +131,4 @@ class WorkflowGateway:
         return await self._client.cancel_task_graph(workflow_id, idempotency_key)
 
 
-def _task_request_ref(request: TaskGraphRequest) -> str:
-    return "task-request-" + canonical_sha256(
-        {
-            "tenant_id": request.principal.tenant_id,
-            "graph_id": request.graph.graph_id,
-            "idempotency_key": request.idempotency_key,
-        }
-    )
-
-
-__all__ = ["QUERY_NAMES", "TemporalClient", "UPDATE_NAMES", "WorkflowGateway"]
+__all__ = ["QUERY_NAMES", "UPDATE_NAMES", "TemporalClient", "WorkflowGateway"]

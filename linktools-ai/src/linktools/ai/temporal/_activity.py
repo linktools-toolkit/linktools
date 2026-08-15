@@ -8,6 +8,9 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
+from ..runtime import RuntimeTaskNodeRunner
+from ..runtime.state import TaskState
+from ..storage import ObjectStore
 from ..task import TaskDependencyResult, TaskLease
 from .workflow import (
     EvaluationWorkflowInput,
@@ -142,6 +145,26 @@ class TaskActivity:
         self._operation = operation
 
     options = ActivityOptions(start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15)
+
+    @classmethod
+    def from_runtime(
+        cls,
+        *,
+        task_state: TaskState,
+        runner: RuntimeTaskNodeRunner,
+        request_store: ObjectStore,
+        namespace: str,
+    ) -> "TaskActivity":
+        from ._task_operation import _RuntimeTaskOperation
+
+        return cls(
+            _RuntimeTaskOperation(
+                task_state=task_state,
+                runner=runner,
+                request_store=request_store,
+                namespace=namespace,
+            )
+        )
 
     async def prepare(
         self,

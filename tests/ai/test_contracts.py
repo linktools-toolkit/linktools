@@ -32,6 +32,7 @@ from linktools.ai.runtime.state import (
     RuntimeStatePlan,
 )
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec
+from linktools.ai.storage import InMemoryObjectStore
 from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
 from linktools.ai.temporal import (
     ActivityType,
@@ -327,7 +328,12 @@ async def test_workflow_gateway_validates_contract_and_unknown_operations() -> N
         async def cancel_workflow(self, workflow_id: str):
             return None
 
-    gateway = WorkflowGateway(Client(), worker_build="test-build")
+    gateway = WorkflowGateway(
+        Client(),
+        worker_build="test-build",
+        request_store=InMemoryObjectStore("test-requests"),
+        namespace="test-namespace",
+    )
     local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_scope="test")
     await gateway.start_execution("execution", local)
     with pytest.raises(ValueError):

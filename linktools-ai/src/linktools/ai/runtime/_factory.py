@@ -211,11 +211,22 @@ async def _compile_recovery_definitions(
             or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
         ):
             continue
-        definition = (
-            await compiler.compile_subagent(agent_id=checkpoint.input.agent_id)
-            if checkpoint.input.parent_execution_id is not None
-            else await compiler.compile(agent_id=checkpoint.input.agent_id)
-        )
+        try:
+            definition = (
+                await compiler.compile_subagent(agent_id=checkpoint.input.agent_id)
+                if checkpoint.input.parent_execution_id is not None
+                else await compiler.compile(agent_id=checkpoint.input.agent_id)
+            )
+        except AIError as error:
+            if error.code is ErrorCode.AGENT_NOT_FOUND:
+                raise AIError(
+                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                    safe_details={
+                        "execution_id": checkpoint.execution_id,
+                        "agent_id": checkpoint.input.agent_id,
+                    },
+                ) from error
+            raise
         if definition.digest != checkpoint.input.binding_digest:
             raise AIError(
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,

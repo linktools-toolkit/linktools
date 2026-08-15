@@ -37,7 +37,7 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
     ) -> SubagentDelegate:
-        async def dispatch(agent_id: str, user_prompt: str) -> JsonValue:
+        async def dispatch(agent_id: str, user_prompt: str, *, tool_call_id: str) -> JsonValue:
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
@@ -45,6 +45,7 @@ class SubagentDispatcher:
                 principal=principal,
                 agent_id=agent_id,
                 user_prompt=user_prompt,
+                tool_call_id=tool_call_id,
             )
 
         return dispatch
@@ -58,7 +59,10 @@ class SubagentDispatcher:
         principal: Principal,
         agent_id: str,
         user_prompt: str,
+        tool_call_id: str,
     ) -> "dict[str, JsonValue]":
+        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         try:
             definition = await self._compiler.compile_subagent(agent_id=agent_id)
         except AIError as error:
@@ -68,10 +72,9 @@ class SubagentDispatcher:
         self._definitions[definition.digest] = definition
         idempotency_key = "subagent:" + canonical_sha256(
             {
-                "version": 2,
+                "version": 3,
                 "parent_execution_id": parent_execution_id,
-                "agent_id": agent_id,
-                "user_prompt": user_prompt,
+                "tool_call_id": tool_call_id,
             }
         )
         request = ExecutionRequest(

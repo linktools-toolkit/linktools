@@ -82,7 +82,18 @@ class RuntimeTaskNodeRunner:
             if definition.digest != binding_digest or definition.spec.id != agent_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         else:
-            definition = await self._compiler.compile(agent_id=agent_id)
+            try:
+                definition = await self._compiler.compile(agent_id=agent_id)
+            except AIError as error:
+                if error.code is ErrorCode.AGENT_NOT_FOUND:
+                    raise AIError(
+                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                        safe_details={
+                            "agent_id": agent_id,
+                            "binding_digest": binding_digest,
+                        },
+                    ) from error
+                raise
             if definition.digest != binding_digest:
                 raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
             self._definitions[binding_digest] = definition

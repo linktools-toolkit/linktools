@@ -291,6 +291,7 @@ def _dispatch(dispatcher: SubagentDispatcher) -> object:
         principal=Principal("owner", "tenant"),
         agent_id="agent",
         user_prompt="task",
+        tool_call_id="tool-call",
     )
 
 

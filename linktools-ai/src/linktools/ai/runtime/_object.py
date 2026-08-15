@@ -13,7 +13,16 @@ from ..storage import ObjectRef, ObjectStore, namespace_key, read_object
 from .state._plan import RuntimeDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_OBJECT_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})
+_OBJECT_DOMAINS = frozenset(
+    {
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.MEMORY,
+        RuntimeDomain.ARTIFACT,
+        RuntimeDomain.RECOVERY,
+        RuntimeDomain.TASK,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

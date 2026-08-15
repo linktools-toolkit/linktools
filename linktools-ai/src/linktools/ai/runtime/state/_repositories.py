@@ -77,6 +77,7 @@ if TYPE_CHECKING:
         TaskGraph,
         TaskGraphView,
         TaskLease,
+        TaskNode,
         TaskNodeView,
         TaskTerminalRecord,
     )
@@ -1003,6 +1004,26 @@ class _SqlArtifactRepository(_SqlRepositoryBase):
         return Page(items, items[-1].artifact_id if len(rows) > limit and items else None)
 
 
+def _task_node_from_sql(row: Mapping[str, object]) -> "TaskNode":
+    from ...task import TaskNode
+
+    try:
+        raw_input = row["input_json"]
+        raw_budget = row["budget_cost"]
+        input_value = {} if raw_input is None else raw_input
+        budget_value = 1 if raw_budget is None else raw_budget
+        if not isinstance(budget_value, int) or isinstance(budget_value, bool):
+            raise ValueError("budget_cost")
+        return TaskNode(
+            str(row["node_id"]),
+            tuple(row["dependencies_json"] or ()),
+            input=input_value,
+            budget_cost=budget_value,
+        )
+    except (AIError, KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
 class _SqlTaskRepository(_SqlRepositoryBase):
     async def _graph_rows(self, session: "AsyncSession", graph_id: str, *, lock: bool) -> tuple[Mapping[str, object] | None, tuple[Mapping[str, object], ...]]:
         from sqlalchemy import select
@@ -1019,20 +1040,12 @@ class _SqlTaskRepository(_SqlRepositoryBase):
         return graph_row, node_rows
 
     def _view(self, graph_row: Mapping[str, object], node_rows: tuple[Mapping[str, object], ...]) -> "TaskGraphView":
-        from ...task import TaskGraphView, TaskNode
+        from ...task import TaskGraphView
 
         return TaskGraphView(
             str(graph_row["graph_id"]),
             TaskStatus(str(graph_row["status"])),
-            tuple(
-                TaskNode(
-                    str(row["node_id"]),
-                    tuple(row["dependencies_json"] or ()),
-                    input=row["input_json"] or {},
-                    budget_cost=int(row["budget_cost"] or 1),
-                )
-                for row in node_rows
-            ),
+            tuple(_task_node_from_sql(row) for row in node_rows),
         )
 
     def _node_view(self, row: Mapping[str, object]) -> "TaskNodeView":

@@ -81,6 +81,13 @@ class ExecutionWorkflowInput:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionWorkflowState:
+    execution_id: str
+    tenant_id: str
+    request_ref: str
+    worker_build: str
+    owner: str
+    fence: int
+    operation_id: str
     status: str
     conversation_id: str
     run_id: str
@@ -345,6 +352,13 @@ def _require_request(request: ExecutionWorkflowInput) -> None:
 
 def _initial_state(request: ExecutionWorkflowInput) -> ExecutionWorkflowState:
     return ExecutionWorkflowState(
+        execution_id=request.execution_id,
+        tenant_id=request.tenant_id,
+        request_ref=request.request_ref,
+        worker_build=request.worker_build,
+        owner=request.owner,
+        fence=request.fence,
+        operation_id=request.operation_id,
         status=WorkflowPhase.LOADING.value,
         conversation_id="",
         run_id="",
@@ -371,7 +385,29 @@ def _resume_state(
 ) -> ExecutionWorkflowState:
     if state is None:
         return _initial_state(request)
-    if state.binding_digest != request.binding_digest or state.bundle_digest != request.bundle_digest:
+    pinned_state = (
+        state.execution_id,
+        state.tenant_id,
+        state.request_ref,
+        state.worker_build,
+        state.owner,
+        state.fence,
+        state.operation_id,
+        state.binding_digest,
+        state.bundle_digest,
+    )
+    pinned_request = (
+        request.execution_id,
+        request.tenant_id,
+        request.request_ref,
+        request.worker_build,
+        request.owner,
+        request.fence,
+        request.operation_id,
+        request.binding_digest,
+        request.bundle_digest,
+    )
+    if pinned_state != pinned_request:
         raise ValueError("execution continue snapshot does not match the workflow input")
     return state
 
@@ -385,8 +421,30 @@ def _validate_stage_transition(
     current: ExecutionWorkflowState,
     stage: str,
 ) -> None:
-    if current.binding_digest != previous.binding_digest or current.bundle_digest != previous.bundle_digest:
-        raise ValueError(f"activity {stage} changed the pinned execution binding")
+    previous_identity = (
+        previous.execution_id,
+        previous.tenant_id,
+        previous.request_ref,
+        previous.worker_build,
+        previous.owner,
+        previous.fence,
+        previous.operation_id,
+        previous.binding_digest,
+        previous.bundle_digest,
+    )
+    current_identity = (
+        current.execution_id,
+        current.tenant_id,
+        current.request_ref,
+        current.worker_build,
+        current.owner,
+        current.fence,
+        current.operation_id,
+        current.binding_digest,
+        current.bundle_digest,
+    )
+    if current_identity != previous_identity:
+        raise ValueError(f"activity {stage} changed the pinned execution identity")
     if current.last_event_sequence < previous.last_event_sequence:
         raise ValueError(f"activity {stage} moved the event sequence backwards")
     if current.continue_count < previous.continue_count:
