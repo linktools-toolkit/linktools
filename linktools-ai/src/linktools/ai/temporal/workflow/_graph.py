@@ -132,7 +132,7 @@ class TaskActivity(Protocol):
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> tuple[TaskLease, ExecutionWorkflowInput]: ...
+    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None": ...
 
     async def renew(self, lease: TaskLease) -> TaskLease: ...
 
@@ -227,7 +227,10 @@ class TaskWorkflow:
         node: TaskWorkflowNode,
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> TaskDependencyResult | None:
-        lease, execution_input = await self._prepare(request, node.node_id, dependency_results)
+        prepared = await self._prepare(request, node.node_id, dependency_results)
+        if prepared is None:
+            return None
+        lease, execution_input = prepared
         child = self._start_child(execution_input, request, node)
         self._active_children.append(child)
         try:
@@ -251,11 +254,11 @@ class TaskWorkflow:
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> tuple[TaskLease, ExecutionWorkflowInput]:
+    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
         if self._activity is not None:
             return await self._activity.prepare(request, node_id, dependency_results)
         return cast(
-            tuple[TaskLease, ExecutionWorkflowInput],
+            "tuple[TaskLease, ExecutionWorkflowInput] | None",
             await _execute_task_activity(
                 "task_node_prepare",
                 request,

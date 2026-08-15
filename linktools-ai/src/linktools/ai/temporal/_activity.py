@@ -128,7 +128,7 @@ class TaskOperation(Protocol):
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> tuple[TaskLease, ExecutionWorkflowInput]: ...
+    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None": ...
 
     async def renew(self, lease: TaskLease) -> TaskLease: ...
 
@@ -171,7 +171,7 @@ class TaskActivity:
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> tuple[TaskLease, ExecutionWorkflowInput]:
+    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
         _logger.debug("preparing task node: graph_id=%s node=%s", request.graph_id, node_id)
         return await self._operation.prepare(request, node_id, dependency_results)
 

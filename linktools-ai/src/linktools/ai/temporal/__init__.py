@@ -16,6 +16,7 @@ from ._activity import (
 )
 from ._context import RunContext, TemporalRunContext
 from ._gateway import QUERY_NAMES, UPDATE_NAMES, TemporalClient, WorkflowGateway
+from ._request import load_execution_request
 from ._worker import (
     ActivityType,
     AssetPayloadCodec,
@@ -43,6 +44,7 @@ __all__ = [
     "RunContext", "TemporalRunContext", "WorkerActivities", "WorkerRegistration", "WorkflowGateway", "WorkflowType", "build_production_worker", "build_temporal_components",
     "build_temporal_worker",
     "production_registration",
+    "load_execution_request",
     "ActivityOptions", "EvaluationActivity", "EvaluationOperation", "ExecuteActivity", "ExecutionOperation",
     "ExecutionStageOperation", "SessionActivity", "SessionOperation", "TaskActivity", "TaskOperation",
 ]

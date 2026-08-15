@@ -1753,4 +1753,21 @@ def _restore_runtime_snapshot(snapshot: object) -> None:
                 component._counters = value
 
 
+def _validate_terminal_result(execution: ExecutionRecord, result: ResultRecord) -> None:
+    schema = (
+        result.output_schema_id,
+        result.output_schema_revision,
+        result.output_schema_fingerprint,
+    )
+    has_schema = all(value is not None for value in schema)
+    if execution.status is ExecutionStatus.SUCCEEDED and (
+        not has_schema or result.object_ref is None
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if execution.status is not ExecutionStatus.SUCCEEDED and (
+        has_schema or result.object_ref is not None
+    ):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
 __all__ = []

@@ -207,7 +207,35 @@ async with open_local_task_api(
 
 The runner implements `TaskNodeRunner` and returns a canonical `TaskNodeRunResult`. The local launcher owns leases and heartbeats; durable task state stays in the supplied persistence.
 
-## 6. Development checks
+## 6. Temporal execution request loading
+
+Temporal execution stages load Task-generated requests through the public helper and the same durable ObjectStore used by the Gateway and worker:
+
+```python
+from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.storage import ObjectStore
+from linktools.ai.temporal import load_execution_request
+from linktools.ai.temporal.workflow import ExecutionWorkflowState
+
+
+async def load_stage_request(
+    request_store: ObjectStore,
+    namespace: str,
+    state: ExecutionWorkflowState,
+) -> ExecutionRequest:
+    return await load_execution_request(
+        request_store,
+        namespace=namespace,
+        state=state,
+    )
+```
+
+An `ExecutionStageOperation.load_input(state)` implementation keeps its existing
+signature, stores the shared request store and namespace, and passes the returned
+`ExecutionRequest` to its existing execution-context loader. It must not parse
+request objects or derive prompts from workflow state.
+
+## 7. Development checks
 
 From the repository root:
 

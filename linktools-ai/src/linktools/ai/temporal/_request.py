@@ -19,6 +19,7 @@ from ..runtime import (
 from ..runtime.state import RuntimeDomain
 from ..storage import ObjectRef, ObjectStore
 from ..task import TaskGraph, TaskGraphLimits, TaskGraphRequest, TaskNode
+from .workflow import ExecutionWorkflowState
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _TASK_FIELDS = frozenset({"version", "graph", "principal", "idempotency_key", "limits"})
@@ -136,6 +137,30 @@ async def read_execution_request(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+async def load_execution_request(
+    store: ObjectStore,
+    *,
+    namespace: str,
+    state: ExecutionWorkflowState,
+) -> ExecutionRequest:
+    if not isinstance(namespace, str) or not namespace.strip():
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    request = await read_execution_request(
+        store,
+        RuntimeObjectKeyFactory(namespace),
+        tenant_id=state.tenant_id,
+        request_ref=state.request_ref,
+    )
+    if request.principal.tenant_id != state.tenant_id:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _logger.debug(
+        "execution request loaded: execution=%s request_ref=%s",
+        state.execution_id,
+        state.request_ref,
+    )
+    return request
 
 
 def _principal_payload(principal: Principal) -> dict[str, str]:
@@ -278,6 +303,7 @@ def _require_positive_int(value: object) -> int:
 
 
 __all__ = [
+    "load_execution_request",
     "put_execution_request",
     "put_task_request",
     "read_execution_request",

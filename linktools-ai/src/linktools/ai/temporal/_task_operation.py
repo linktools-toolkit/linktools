@@ -39,7 +39,7 @@ class _RuntimeTaskOperation:
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> tuple[TaskLease, ExecutionWorkflowInput]:
+    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
         stored = await self._load_request(request)
         node = _find_node(stored.graph.nodes, node_id)
         await self._repository.reconcile_graph(
@@ -60,33 +60,35 @@ class _RuntimeTaskOperation:
                 principal=stored.principal,
                 dependency_results=dependency_results,
             )
-            request_ref = await put_execution_request(
-                self._request_store,
-                self._request_keys,
-                execution_request,
-            )
-            operation_id = canonical_sha256(
-                {
-                    "tenant_id": request.tenant_id,
-                    "graph_id": request.graph_id,
-                    "node_id": node_id,
-                    "fence": lease.fence,
-                }
-            )
-            child = ExecutionWorkflowInput(
-                execution_id=f"{request.graph_id}:{node_id}",
-                tenant_id=request.tenant_id,
-                binding_digest=binding_digest,
-                bundle_digest=binding_digest,
-                request_ref=request_ref,
-                worker_build=request.worker_build,
-                owner=lease.owner,
-                fence=lease.fence,
-                operation_id=operation_id,
-            )
-        except BaseException as error:
+        except AIError as error:
+            if error.retryable:
+                raise
             await self._fail_prepare(lease, request.tenant_id, error)
-            raise
+            return None
+        request_ref = await put_execution_request(
+            self._request_store,
+            self._request_keys,
+            execution_request,
+        )
+        operation_id = canonical_sha256(
+            {
+                "tenant_id": request.tenant_id,
+                "graph_id": request.graph_id,
+                "node_id": node_id,
+                "fence": lease.fence,
+            }
+        )
+        child = ExecutionWorkflowInput(
+            execution_id=f"{request.graph_id}:{node_id}",
+            tenant_id=request.tenant_id,
+            binding_digest=binding_digest,
+            bundle_digest=binding_digest,
+            request_ref=request_ref,
+            worker_build=request.worker_build,
+            owner=lease.owner,
+            fence=lease.fence,
+            operation_id=operation_id,
+        )
         _logger.info(
             "Temporal task node prepared: graph=%s node=%s fence=%s request_ref=%s",
             request.graph_id,
@@ -226,28 +228,27 @@ class _RuntimeTaskOperation:
         self,
         lease: TaskLease,
         tenant_id: str,
-        error: BaseException,
+        error: AIError,
     ) -> None:
-        code = error.code.value if isinstance(error, AIError) else ErrorCode.TASK_NODE_FAILED.value
         error_digest = canonical_sha256(
-            {"type": type(error).__name__, "code": code}
+            {"type": type(error).__name__, "code": error.code.value}
         )
-        try:
-            await self._repository.fail(
-                lease,
-                tenant_id=tenant_id,
-                error_code=code,
-                error_digest=error_digest,
-            )
-        except AIError as failure:
-            if failure.code is ErrorCode.TASK_FENCE_STALE:
-                return
-            _logger.warning(
-                "Temporal task prepare failure could not be persisted: graph=%s node=%s error=%s",
-                lease.graph_id,
-                lease.node_id,
-                failure.code.value,
-            )
+        await self._repository.fail(
+            lease,
+            tenant_id=tenant_id,
+            error_code=error.code.value,
+            error_digest=error_digest,
+        )
+        await self._repository.reconcile_graph(
+            lease.graph_id,
+            tenant_id=tenant_id,
+        )
+        _logger.info(
+            "Temporal task node failed during preparation: graph=%s node=%s code=%s",
+            lease.graph_id,
+            lease.node_id,
+            error.code.value,
+        )
 
 
 def _find_node(nodes: tuple[TaskNode, ...], node_id: str) -> TaskNode:

@@ -1016,11 +1016,26 @@ def _task_node_from_sql(row: Mapping[str, object]) -> "TaskNode":
             raise ValueError("budget_cost")
         return TaskNode(
             str(row["node_id"]),
-            tuple(row["dependencies_json"] or ()),
+            _task_dependencies_from_sql(row["dependencies_json"]),
             input=input_value,
             budget_cost=budget_value,
         )
     except (AIError, KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _task_dependencies_from_sql(value: object) -> tuple[str, ...]:
+    try:
+        if type(value) is not list:
+            raise ValueError("task dependencies must be a JSON list")
+        dependencies = tuple(value)
+        if (
+            any(not isinstance(item, str) or not item.strip() for item in dependencies)
+            or len(set(dependencies)) != len(dependencies)
+        ):
+            raise ValueError("task dependencies are invalid")
+        return dependencies
+    except (TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
@@ -1051,7 +1066,20 @@ class _SqlTaskRepository(_SqlRepositoryBase):
     def _node_view(self, row: Mapping[str, object]) -> "TaskNodeView":
         from ...task import TaskNodeView
 
-        return TaskNodeView(str(row["graph_id"]), str(row["node_id"]), tuple(row["dependencies_json"] or ()), TaskStatus(str(row["status"])), row["owner"], int(row["fence"]), _optional_utc(row["lease_expires_at"]), row["result_digest"], row["error_code"], row["error_digest"], row["execution_id"])
+        dependencies = _task_dependencies_from_sql(row["dependencies_json"])
+        return TaskNodeView(
+            str(row["graph_id"]),
+            str(row["node_id"]),
+            dependencies,
+            TaskStatus(str(row["status"])),
+            row["owner"],
+            int(row["fence"]),
+            _optional_utc(row["lease_expires_at"]),
+            row["result_digest"],
+            row["error_code"],
+            row["error_digest"],
+            row["execution_id"],
+        )
 
     async def _locked_graph(self, session: "AsyncSession", graph_id: str) -> Mapping[str, object]:
         from sqlalchemy import select
@@ -1214,7 +1242,7 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                 if status not in {TaskStatus.PENDING, TaskStatus.READY}:
                     updated_nodes.append(row)
                     continue
-                dependencies = tuple(str(item) for item in (row["dependencies_json"] or ()))
+                dependencies = _task_dependencies_from_sql(row["dependencies_json"])
                 dependency_rows = tuple(by_id.get(item) for item in dependencies)
                 if any(item is None for item in dependency_rows):
                     raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
@@ -1276,7 +1304,7 @@ class _SqlTaskRepository(_SqlRepositoryBase):
             expired = status is TaskStatus.RUNNING and _optional_utc(current["lease_expires_at"]) is not None and _optional_utc(current["lease_expires_at"]) <= now
             if status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired:
                 raise AIError(ErrorCode.TASK_NOT_READY)
-            dependencies = tuple(str(item) for item in (current["dependencies_json"] or ()))
+            dependencies = _task_dependencies_from_sql(current["dependencies_json"])
             dependency_rows = await self._locked_dependency_nodes(session, graph_id, dependencies)
             if any(TaskStatus(str(row["status"])) is not TaskStatus.SUCCEEDED for row in dependency_rows.values()):
                 raise AIError(ErrorCode.TASK_NOT_READY)
