@@ -156,9 +156,6 @@ class _RuntimeTaskOperation:
         if lease.graph_id != request.graph_id or lease.tenant_id != request.tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         node = _find_node(stored.graph.nodes, lease.node_id)
-        expected_execution_id = f"{request.graph_id}:{lease.node_id}"
-        if result.execution_id != expected_execution_id:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await self._read_node(request, node, reconcile=False)
         if current.status in _TERMINAL_STATUSES:
             return await self._settle_terminal(
@@ -166,13 +163,14 @@ class _RuntimeTaskOperation:
                 node,
                 stored.principal,
                 current,
-                result,
-                expected_execution_id,
             )
         if current.status is not TaskStatus.RUNNING:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.owner != lease.owner or current.fence != lease.fence:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
+        expected_execution_id = f"{request.graph_id}:{lease.node_id}"
+        if result.execution_id != expected_execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
         if result.status == "SUCCEEDED":
             node_result = await self._runner.result(
@@ -193,8 +191,6 @@ class _RuntimeTaskOperation:
                     request,
                     node,
                     stored.principal,
-                    result,
-                    expected_execution_id,
                     error,
                 )
         elif result.status in {"FAILED", "CANCELLED"}:
@@ -214,8 +210,6 @@ class _RuntimeTaskOperation:
                     request,
                     node,
                     stored.principal,
-                    result,
-                    expected_execution_id,
                     error,
                 )
         else:
@@ -237,8 +231,6 @@ class _RuntimeTaskOperation:
         request: TaskWorkflowInput,
         node: TaskNode,
         principal: Principal,
-        result: ExecutionWorkflowResult,
-        expected_execution_id: str,
         stale_error: AIError,
     ) -> TaskNodeView:
         current = await self._read_node(request, node, reconcile=False)
@@ -246,13 +238,19 @@ class _RuntimeTaskOperation:
             raise stale_error
         if current.status not in _TERMINAL_STATUSES:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "Temporal task stale settle recovered from durable state: "
+            "graph=%s node=%s status=%s fence=%s",
+            request.graph_id,
+            node.node_id,
+            current.status.value,
+            current.fence,
+        )
         return await self._settle_terminal(
             request,
             node,
             principal,
             current,
-            result,
-            expected_execution_id,
         )
 
     async def _settle_terminal(
@@ -261,22 +259,21 @@ class _RuntimeTaskOperation:
         node: TaskNode,
         principal: Principal,
         current: TaskNodeView,
-        result: ExecutionWorkflowResult,
-        expected_execution_id: str,
     ) -> TaskNodeView:
+        _validate_node_view(current, node, request.graph_id)
         if current.status is TaskStatus.SUCCEEDED:
-            if result.status != "SUCCEEDED":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.execution_id != expected_execution_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._validate_execution_result(current, principal)
         elif current.status is TaskStatus.BLOCKED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        elif current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         await self._repository.reconcile_graph(
             request.graph_id,
             tenant_id=request.tenant_id,
         )
         updated = await self._read_node(request, node, reconcile=False)
+        if updated.status is not current.status:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
             "Temporal task node settled from durable state: graph=%s node=%s status=%s",
             request.graph_id,

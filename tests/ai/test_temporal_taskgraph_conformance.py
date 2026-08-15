@@ -339,6 +339,318 @@ async def test_settle_replays_failed_node_without_second_fail(monkeypatch) -> No
         await state.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_status", "child_status"),
+    [
+        (TaskStatus.SUCCEEDED, "FAILED"),
+        (TaskStatus.SUCCEEDED, "CANCELLED"),
+        (TaskStatus.FAILED, "SUCCEEDED"),
+        (TaskStatus.CANCELLED, "SUCCEEDED"),
+    ],
+)
+async def test_terminal_settle_replay_uses_durable_status(
+    monkeypatch,
+    durable_status: TaskStatus,
+    child_status: str,
+) -> None:
+    runner = _ReplayRunner()
+    state, activity, request = await _runtime_activity(runner)
+    try:
+        prepared = await activity.prepare(request, "node", {})
+        assert isinstance(prepared, tuple)
+        lease, _ = prepared
+        if durable_status is TaskStatus.SUCCEEDED:
+            await state.task.tasks.complete(
+                lease,
+                tenant_id="tenant",
+                execution_id="durable-execution",
+                result_digest=runner.result_digest,
+            )
+        elif durable_status is TaskStatus.FAILED:
+            await state.task.tasks.fail(
+                lease,
+                tenant_id="tenant",
+                error_code=ErrorCode.EXECUTION_FAILED.value,
+                error_digest=canonical_sha256({"type": "ExecutionResult"}),
+            )
+        else:
+            await state.task.tasks.cancel_graph("graph", tenant_id="tenant")
+
+        complete_calls = 0
+        fail_calls = 0
+        original_complete = state.task.tasks.complete
+        original_fail = state.task.tasks.fail
+
+        async def count_complete(*args, **kwargs):
+            nonlocal complete_calls
+            complete_calls += 1
+            return await original_complete(*args, **kwargs)
+
+        async def count_fail(*args, **kwargs):
+            nonlocal fail_calls
+            fail_calls += 1
+            return await original_fail(*args, **kwargs)
+
+        monkeypatch.setattr(state.task.tasks, "complete", count_complete)
+        monkeypatch.setattr(state.task.tasks, "fail", count_fail)
+
+        replayed = await activity.settle(
+            request,
+            lease,
+            ExecutionWorkflowResult(
+                "old-child-execution",
+                child_status,
+                None,
+                0,
+            ),
+        )
+
+        assert replayed.status is durable_status
+        assert complete_calls == 0
+        assert fail_calls == 0
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_status", "child_status"),
+    [
+        (TaskStatus.SUCCEEDED, "FAILED"),
+        (TaskStatus.SUCCEEDED, "CANCELLED"),
+        (TaskStatus.FAILED, "SUCCEEDED"),
+        (TaskStatus.CANCELLED, "SUCCEEDED"),
+    ],
+)
+async def test_stale_settle_replay_uses_higher_fence_durable_status(
+    monkeypatch,
+    durable_status: TaskStatus,
+    child_status: str,
+) -> None:
+    runner = _ReplayRunner()
+    state, activity, request = await _runtime_activity(runner)
+    original_list_nodes = state.task.tasks.list_nodes
+    original_reconcile = state.task.tasks.reconcile_graph
+    list_calls = 0
+    mutation_calls = 0
+    try:
+        prepared = await activity.prepare(request, "node", {})
+        assert isinstance(prepared, tuple)
+        lease, _ = prepared
+        durable = _durable_terminal_view(request, durable_status, runner)
+
+        async def list_nodes(graph_id: str, *, tenant_id: str):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return await original_list_nodes(graph_id, tenant_id=tenant_id)
+            return (durable,)
+
+        async def no_op_reconcile(graph_id: str, *, tenant_id: str):
+            return await original_reconcile(graph_id, tenant_id=tenant_id)
+
+        monkeypatch.setattr(state.task.tasks, "list_nodes", list_nodes)
+        monkeypatch.setattr(state.task.tasks, "reconcile_graph", no_op_reconcile)
+
+        async def stale_complete(*args, **kwargs):
+            nonlocal mutation_calls
+            mutation_calls += 1
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        async def stale_fail(*args, **kwargs):
+            nonlocal mutation_calls
+            mutation_calls += 1
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        if child_status == "SUCCEEDED":
+            monkeypatch.setattr(state.task.tasks, "complete", stale_complete)
+        else:
+            monkeypatch.setattr(state.task.tasks, "fail", stale_fail)
+
+        replayed = await activity.settle(
+            request,
+            lease,
+            ExecutionWorkflowResult(
+                f"{request.graph_id}:{lease.node_id}",
+                child_status,
+                None,
+                0,
+            ),
+        )
+
+        assert replayed == durable
+        assert mutation_calls == 1
+        assert list_calls == 3
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_settle_replay_keeps_running_newer_fence_stale(
+    monkeypatch,
+) -> None:
+    runner = _ReplayRunner()
+    state, activity, request = await _runtime_activity(runner)
+    original_list_nodes = state.task.tasks.list_nodes
+    list_calls = 0
+    mutation_calls = 0
+    try:
+        prepared = await activity.prepare(request, "node", {})
+        assert isinstance(prepared, tuple)
+        lease, _ = prepared
+        current = TaskNodeView(
+            request.graph_id,
+            lease.node_id,
+            (),
+            TaskStatus.RUNNING,
+            "new-owner",
+            lease.fence + 1,
+            datetime.now(timezone.utc) + timedelta(seconds=30),
+            None,
+            None,
+            None,
+        )
+
+        async def list_nodes(graph_id: str, *, tenant_id: str):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return await original_list_nodes(graph_id, tenant_id=tenant_id)
+            return (current,)
+
+        async def stale_complete(*args, **kwargs):
+            nonlocal mutation_calls
+            mutation_calls += 1
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        monkeypatch.setattr(state.task.tasks, "list_nodes", list_nodes)
+        monkeypatch.setattr(state.task.tasks, "complete", stale_complete)
+
+        with pytest.raises(AIError) as error:
+            await activity.settle(
+                request,
+                lease,
+                ExecutionWorkflowResult(
+                    f"{request.graph_id}:{lease.node_id}",
+                    "SUCCEEDED",
+                    None,
+                    0,
+                ),
+            )
+
+        assert error.value.code is ErrorCode.TASK_FENCE_STALE
+        assert mutation_calls == 1
+        assert list_calls == 2
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_settle_replay_rejects_blocked_durable_node(monkeypatch) -> None:
+    runner = _ReplayRunner()
+    state, activity, request = await _runtime_activity(runner)
+    original_list_nodes = state.task.tasks.list_nodes
+    list_calls = 0
+    try:
+        prepared = await activity.prepare(request, "node", {})
+        assert isinstance(prepared, tuple)
+        lease, _ = prepared
+        current = _durable_terminal_view(request, TaskStatus.BLOCKED, runner)
+
+        async def list_nodes(graph_id: str, *, tenant_id: str):
+            nonlocal list_calls
+            list_calls += 1
+            if list_calls == 1:
+                return await original_list_nodes(graph_id, tenant_id=tenant_id)
+            return (current,)
+
+        async def stale_complete(*args, **kwargs):
+            raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+        monkeypatch.setattr(state.task.tasks, "list_nodes", list_nodes)
+        monkeypatch.setattr(state.task.tasks, "complete", stale_complete)
+
+        with pytest.raises(AIError) as error:
+            await activity.settle(
+                request,
+                lease,
+                ExecutionWorkflowResult(
+                    f"{request.graph_id}:{lease.node_id}",
+                    "SUCCEEDED",
+                    None,
+                    0,
+                ),
+            )
+
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+        assert list_calls == 2
+    finally:
+        await state.close()
+
+
+def _durable_terminal_view(
+    request: TaskWorkflowInput,
+    status: TaskStatus,
+    runner: _ReplayRunner,
+) -> TaskNodeView:
+    if status is TaskStatus.SUCCEEDED:
+        return TaskNodeView(
+            request.graph_id,
+            "node",
+            (),
+            status,
+            None,
+            2,
+            None,
+            runner.result_digest,
+            None,
+            None,
+            "higher-fence-execution",
+        )
+    if status is TaskStatus.FAILED:
+        return TaskNodeView(
+            request.graph_id,
+            "node",
+            (),
+            status,
+            None,
+            2,
+            None,
+            None,
+            ErrorCode.EXECUTION_FAILED.value,
+            canonical_sha256({"type": "ExecutionResult"}),
+            None,
+        )
+    if status is TaskStatus.CANCELLED:
+        return TaskNodeView(
+            request.graph_id,
+            "node",
+            (),
+            status,
+            None,
+            2,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    return TaskNodeView(
+        request.graph_id,
+        "node",
+        (),
+        status,
+        None,
+        2,
+        None,
+        None,
+        ErrorCode.TASK_DEPENDENCY_FAILED.value,
+        canonical_sha256({"type": "TaskDependency"}),
+        None,
+    )
+
+
 def _workflow_request(
     nodes: tuple[TaskNode, ...],
     *,
