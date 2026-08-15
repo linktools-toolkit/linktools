@@ -1234,35 +1234,90 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                         updated_nodes.append(value)
                     else:
                         updated_nodes.append(row)
+                _logger.debug(
+                    "SQL task graph reconciled: graph=%s status=%s",
+                    graph_id,
+                    graph_row["status"],
+                )
                 return self._view(graph_row, tuple(updated_nodes))
 
-            by_id = {str(row["node_id"]): row for row in node_rows}
-            for row in node_rows:
-                status = TaskStatus(str(row["status"]))
-                if status not in {TaskStatus.PENDING, TaskStatus.READY}:
-                    updated_nodes.append(row)
-                    continue
-                dependencies = _task_dependencies_from_sql(row["dependencies_json"])
-                dependency_rows = tuple(by_id.get(item) for item in dependencies)
-                if any(item is None for item in dependency_rows):
-                    raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
-                dependency_statuses = tuple(TaskStatus(str(item["status"])) for item in dependency_rows if item is not None)
-                if any(item in {TaskStatus.FAILED, TaskStatus.BLOCKED} for item in dependency_statuses):
-                    digest = canonical_sha256({"graph_id": graph_id, "node_id": row["node_id"], "reason": "dependency_failed"})
-                    await self._update_node(session, row, status=TaskStatus.BLOCKED.value, error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value, error_digest=digest)
-                    value = dict(row)
-                    value.update(status=TaskStatus.BLOCKED.value, error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value, error_digest=digest, revision=int(row["revision"]) + 1)
-                    updated_nodes.append(value)
-                elif status is TaskStatus.PENDING and all(item is TaskStatus.SUCCEEDED for item in dependency_statuses):
-                    await self._update_node(session, row, status=TaskStatus.READY.value)
-                    value = dict(row)
-                    value.update(status=TaskStatus.READY.value, revision=int(row["revision"]) + 1)
-                    updated_nodes.append(value)
-                else:
-                    updated_nodes.append(row)
-            next_status = _task_graph_status(tuple(TaskStatus(str(row["status"])) for row in updated_nodes))
+            by_id = {
+                str(row["node_id"]): dict(row)
+                for row in node_rows
+            }
+            changed = True
+            while changed:
+                changed = False
+                for node_id in sorted(by_id):
+                    row = by_id[node_id]
+                    status = TaskStatus(str(row["status"]))
+                    if status not in {TaskStatus.PENDING, TaskStatus.READY}:
+                        continue
+                    dependencies = _task_dependencies_from_sql(
+                        row["dependencies_json"]
+                    )
+                    dependency_rows = tuple(by_id.get(item) for item in dependencies)
+                    if any(item is None for item in dependency_rows):
+                        raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
+                    dependency_statuses = tuple(
+                        TaskStatus(str(item["status"]))
+                        for item in dependency_rows
+                        if item is not None
+                    )
+                    if any(
+                        item in {TaskStatus.FAILED, TaskStatus.BLOCKED}
+                        for item in dependency_statuses
+                    ):
+                        digest = canonical_sha256(
+                            {
+                                "graph_id": graph_id,
+                                "node_id": node_id,
+                                "reason": "dependency_failed",
+                            }
+                        )
+                        await self._update_node(
+                            session,
+                            row,
+                            status=TaskStatus.BLOCKED.value,
+                            error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
+                            error_digest=digest,
+                        )
+                        updated = dict(row)
+                        updated.update(
+                            status=TaskStatus.BLOCKED.value,
+                            error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
+                            error_digest=digest,
+                            revision=int(row["revision"]) + 1,
+                        )
+                    elif status is TaskStatus.PENDING and all(
+                        item is TaskStatus.SUCCEEDED
+                        for item in dependency_statuses
+                    ):
+                        await self._update_node(
+                            session,
+                            row,
+                            status=TaskStatus.READY.value,
+                        )
+                        updated = dict(row)
+                        updated.update(
+                            status=TaskStatus.READY.value,
+                            revision=int(row["revision"]) + 1,
+                        )
+                    else:
+                        continue
+                    by_id[node_id] = updated
+                    changed = True
+            updated_nodes = [by_id[node_id] for node_id in sorted(by_id)]
+            next_status = _task_graph_status(
+                tuple(TaskStatus(str(row["status"])) for row in updated_nodes)
+            )
             if next_status is not TaskStatus(str(graph_row["status"])):
                 graph_row = await self._update_graph(session, graph_row, next_status)
+            _logger.debug(
+                "SQL task graph reconciled: graph=%s status=%s",
+                graph_id,
+                graph_row["status"],
+            )
             return self._view(graph_row, tuple(updated_nodes))
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView":

@@ -3,7 +3,9 @@
 """Focused evidence for the Temporal TaskGraph repair contract."""
 
 from collections.abc import Mapping
+from types import SimpleNamespace
 
+import linktools.ai.temporal._activity as temporal_activity
 import pytest
 from linktools.ai.core import Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
@@ -20,6 +22,7 @@ from linktools.ai.task import (
     TaskGraph,
     TaskGraphRequest,
     TaskNode,
+    TaskNodeView,
 )
 from linktools.ai.temporal import load_execution_request
 from linktools.ai.temporal._activity import TaskActivity
@@ -37,6 +40,15 @@ def _task_request(graph_id: str = "graph") -> TaskGraphRequest:
     principal = Principal("principal", "tenant", "service")
     graph = TaskGraph(graph_id, (TaskNode("node", input={"kind": "test"}),))
     return TaskGraphRequest(graph, principal, idempotency_key=f"request-{graph_id}")
+
+
+@pytest.fixture(autouse=True)
+def temporal_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        temporal_activity._temporal_activity,
+        "info",
+        lambda: SimpleNamespace(workflow_run_id="test-workflow-run"),
+    )
 
 
 class _ExecutionActivity:
@@ -132,7 +144,9 @@ async def test_public_execution_request_loader_uses_persisted_request() -> None:
 @pytest.mark.asyncio
 async def test_public_execution_request_loader_rejects_invalid_namespace() -> None:
     workflow_result = await ExecutionWorkflow(_ExecutionActivity()).run(
-        ExecutionWorkflowInput("execution", "tenant", "binding", "bundle", "request", "worker")
+        ExecutionWorkflowInput(
+            "execution", "tenant", "binding", "bundle", "request", "worker"
+        )
     )
     assert workflow_result.state is not None
 
@@ -147,14 +161,16 @@ async def test_public_execution_request_loader_rejects_invalid_namespace() -> No
 
 
 @pytest.mark.asyncio
-async def test_public_execution_request_loader_preserves_store_availability_errors() -> None:
+async def test_loader_preserves_store_availability_errors() -> None:
     request_ref = RuntimeObjectKeyFactory("temporal-repair").key(
         RuntimeDomain.TASK,
         "tenant",
         "0" * 64,
     )
     workflow_result = await ExecutionWorkflow(_ExecutionActivity()).run(
-        ExecutionWorkflowInput("execution", "tenant", "binding", "bundle", request_ref, "worker")
+        ExecutionWorkflowInput(
+            "execution", "tenant", "binding", "bundle", request_ref, "worker"
+        )
     )
     assert workflow_result.state is not None
 
@@ -174,7 +190,9 @@ async def test_public_execution_request_loader_preserves_store_availability_erro
     [AIError(ErrorCode.STORAGE_UNAVAILABLE), RuntimeError("runner failed")],
     ids=["retryable-ai-error", "non-ai-error"],
 )
-async def test_prepare_propagates_retryable_and_non_ai_errors(failure: BaseException) -> None:
+async def test_prepare_propagates_retryable_and_non_ai_errors(
+    failure: BaseException,
+) -> None:
     state, activity, request = await _task_activity(_TaskRunner(failure))
     try:
         with pytest.raises(type(failure)):
@@ -187,7 +205,9 @@ async def test_prepare_propagates_retryable_and_non_ai_errors(failure: BaseExcep
 
 
 @pytest.mark.asyncio
-async def test_prepare_does_not_terminalize_object_store_write_failure(monkeypatch) -> None:
+async def test_prepare_does_not_terminalize_object_store_write_failure(
+    monkeypatch,
+) -> None:
     state, activity, request = await _task_activity(_TaskRunner())
 
     async def fail_put(
@@ -213,7 +233,7 @@ async def test_prepare_does_not_terminalize_object_store_write_failure(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_nonretryable_prepare_persists_failure_and_returns_none() -> None:
+async def test_nonretryable_prepare_persists_failure_and_returns_view() -> None:
     state, activity, request = await _task_activity(
         _TaskRunner(AIError(ErrorCode.PROMPT_TOO_LARGE))
     )
@@ -248,8 +268,19 @@ async def test_task_workflow_treats_terminal_prepare_as_graph_failure() -> None:
             request: TaskWorkflowInput,
             node_id: str,
             dependency_results: Mapping[str, TaskDependencyResult],
-        ) -> None:
-            return None
+        ) -> TaskNodeView:
+            return TaskNodeView(
+                request.graph_id,
+                node_id,
+                (),
+                TaskStatus.FAILED,
+                None,
+                1,
+                None,
+                None,
+                ErrorCode.PROMPT_TOO_LARGE.value,
+                "a" * 64,
+            )
 
     result = await TaskWorkflow(TerminalPrepareActivity()).run(request)
 

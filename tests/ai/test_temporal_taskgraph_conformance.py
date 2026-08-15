@@ -6,7 +6,9 @@ import asyncio
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import linktools.ai.temporal._activity as temporal_activity
 import pytest
 from linktools.ai.core import Principal, TaskStatus, canonical_sha256
 from linktools.ai.errors import AIError, ErrorCode
@@ -24,6 +26,7 @@ from linktools.ai.task import (
     TaskLease,
     TaskNode,
     TaskNodeRunResult,
+    TaskNodeView,
 )
 from linktools.ai.temporal._activity import TaskActivity
 from linktools.ai.temporal._request import put_task_request
@@ -40,6 +43,15 @@ def _request(graph_id: str = "graph") -> TaskGraphRequest:
     principal = Principal("principal", "tenant", "service")
     graph = TaskGraph(graph_id, (TaskNode("node", input={"kind": "test"}),))
     return TaskGraphRequest(graph, principal, idempotency_key=f"request-{graph_id}")
+
+
+@pytest.fixture(autouse=True)
+def temporal_activity_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        temporal_activity._temporal_activity,
+        "info",
+        lambda: SimpleNamespace(workflow_run_id="test-workflow-run"),
+    )
 
 
 class _ReplayRunner:
@@ -104,6 +116,45 @@ async def _runtime_activity(
 
 
 @pytest.mark.asyncio
+async def test_prepare_requires_temporal_activity_run_context(monkeypatch) -> None:
+    state, activity, request = await _runtime_activity(_ReplayRunner())
+
+    def missing_context():
+        raise RuntimeError("not in activity context")
+
+    monkeypatch.setattr(temporal_activity._temporal_activity, "info", missing_context)
+    try:
+        with pytest.raises(AIError) as error:
+            await activity.prepare(request, "node", {})
+        assert error.value.code is ErrorCode.RUNTIME_DEPENDENCY_NOT_READY
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_new_workflow_run_does_not_take_foreign_active_lease(monkeypatch) -> None:
+    state, activity, request = await _runtime_activity(_ReplayRunner())
+    try:
+        first = await activity.prepare(request, "node", {})
+        assert isinstance(first, tuple)
+        lease, _ = first
+
+        monkeypatch.setattr(
+            temporal_activity._temporal_activity,
+            "info",
+            lambda: SimpleNamespace(workflow_run_id="new-workflow-run"),
+        )
+        current = await activity.prepare(request, "node", {})
+
+        assert isinstance(current, TaskNodeView)
+        assert current.status is TaskStatus.RUNNING
+        assert current.owner == lease.owner
+        assert current.fence == lease.fence
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
 async def test_prepare_replays_failed_node_after_reconcile_failure(monkeypatch) -> None:
     state, activity, request = await _runtime_activity(
         _ReplayRunner(AIError(ErrorCode.PROMPT_TOO_LARGE))
@@ -124,7 +175,9 @@ async def test_prepare_replays_failed_node_after_reconcile_failure(monkeypatch) 
             await activity.prepare(request, "node", {})
         assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
 
-        assert await activity.prepare(request, "node", {}) is None
+        replayed = await activity.prepare(request, "node", {})
+        assert isinstance(replayed, TaskNodeView)
+        assert replayed.status is TaskStatus.FAILED
         nodes = await state.task.tasks.list_nodes("graph", tenant_id="tenant")
         assert nodes[0].status is TaskStatus.FAILED
         assert nodes[0].fence == 1
@@ -144,7 +197,9 @@ async def test_prepare_rejects_malformed_failed_terminal(monkeypatch) -> None:
         return (replace(nodes[0], error_digest="A" * 64),)
 
     try:
-        assert await activity.prepare(request, "node", {}) is None
+        first = await activity.prepare(request, "node", {})
+        assert isinstance(first, TaskNodeView)
+        assert first.status is TaskStatus.FAILED
         monkeypatch.setattr(state.task.tasks, "list_nodes", malformed_list)
         with pytest.raises(AIError) as error:
             await activity.prepare(request, "node", {})
@@ -194,10 +249,10 @@ async def test_settle_replays_succeeded_node_without_second_complete(
         assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
 
         replayed = await activity.settle(request, lease, child_result)
-        assert replayed == TaskDependencyResult(
-            runner.result_digest,
-            execution.execution_id,
-        )
+        assert isinstance(replayed, TaskNodeView)
+        assert replayed.status is TaskStatus.SUCCEEDED
+        assert replayed.result_digest == runner.result_digest
+        assert replayed.execution_id == execution.execution_id
         assert complete_calls == 1
         assert runner.result_calls == 2
     finally:
@@ -277,7 +332,8 @@ async def test_settle_replays_failed_node_without_second_fail(monkeypatch) -> No
         with pytest.raises(AIError) as error:
             await activity.settle(request, lease, child_result)
         assert error.value.code is ErrorCode.STORAGE_UNAVAILABLE
-        assert await activity.settle(request, lease, child_result) is None
+        replayed = await activity.settle(request, lease, child_result)
+        assert replayed.status is TaskStatus.FAILED
         assert fail_calls == 1
     finally:
         await state.close()
@@ -347,14 +403,35 @@ class _GraphActivity:
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None:
+    ) -> TaskNodeView:
         del request, lease
         self.settled.append(result)
-        if result.status != "SUCCEEDED":
-            return None
-        return TaskDependencyResult(
-            canonical_sha256({"node": result.execution_id}),
-            result.execution_id,
+        if result.status == "SUCCEEDED":
+            return TaskNodeView(
+                "graph",
+                result.execution_id.removeprefix("graph:"),
+                (),
+                TaskStatus.SUCCEEDED,
+                None,
+                1,
+                None,
+                canonical_sha256({"node": result.execution_id}),
+                None,
+                None,
+                result.execution_id,
+            )
+        return TaskNodeView(
+            "graph",
+            result.execution_id.removeprefix("graph:"),
+            (),
+            TaskStatus.FAILED,
+            None,
+            1,
+            None,
+            None,
+            ErrorCode.EXECUTION_FAILED.value,
+            canonical_sha256({"type": "ExecutionResult", "code": result.status}),
+            None,
         )
 
 
@@ -427,9 +504,9 @@ async def test_child_cancellation_propagates_without_remote_recancel() -> None:
     workflow = TaskWorkflow(activity)
     child = _Child(error=asyncio.CancelledError())
 
-    with pytest.raises(asyncio.CancelledError):
-        await workflow._wait_for_child(execution, lease, child)
+    _, result = await workflow._wait_for_child(execution, lease, child)
 
+    assert result.status == "CANCELLED"
     assert child.cancel_calls == 0
 
 
@@ -461,9 +538,9 @@ async def test_renew_failure_race_with_cancel_returns_cancelled() -> None:
     workflow._cancelled = True
     child = _Child(wait_for_cancel=True)
 
-    _, result = await workflow._wait_for_child(execution, lease, child)
+    with pytest.raises(asyncio.CancelledError):
+        await workflow._wait_for_child(execution, lease, child)
 
-    assert result.status == "CANCELLED"
     assert child.cancel_calls == 1
 
 

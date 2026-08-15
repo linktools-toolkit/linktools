@@ -41,20 +41,32 @@ class TemporalClient(Protocol):
         request: TaskWorkflowInput,
         *,
         workflow_id: str,
-    ) -> TaskGraphHandle: ...
+    ) -> TaskGraphHandle:
+        """Start a rearm-safe TaskWorkflow.
+
+        A Temporal SDK adapter implementing this port must use
+        ``WorkflowIDConflictPolicy.USE_EXISTING`` for an open workflow ID and
+        ``WorkflowIDReusePolicy.ALLOW_DUPLICATE`` for a closed workflow ID.
+        It must not use ``TERMINATE_EXISTING``.
+        """
+        ...
 
     async def update_workflow(
         self,
         workflow_id: str,
         operation: str,
-        payload: 'Mapping[str, JsonValue]',
+        payload: "Mapping[str, JsonValue]",
     ) -> WorkflowUpdateResult: ...
 
-    async def query_workflow(self, workflow_id: str, query: str) -> WorkflowQueryResult: ...
+    async def query_workflow(
+        self, workflow_id: str, query: str
+    ) -> WorkflowQueryResult: ...
 
     async def cancel_workflow(self, workflow_id: str) -> CancelExecutionResult: ...
 
-    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView: ...
+    async def cancel_task_graph(
+        self, workflow_id: str, idempotency_key: str
+    ) -> TaskGraphView: ...
 
 
 class WorkflowGateway:
@@ -75,31 +87,57 @@ class WorkflowGateway:
         self._request_store = request_store
         self._request_keys = RuntimeObjectKeyFactory(namespace)
 
-    async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle:
+    async def start_execution(
+        self, workflow_id: str, request: ExecutionRequest
+    ) -> ExecutionHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
-        _logger.debug("starting durable execution workflow: workflow_id=%s", workflow_id)
-        return await self._client.start_workflow("execution", request, workflow_id=workflow_id)
+        _logger.debug(
+            "starting durable execution workflow: workflow_id=%s", workflow_id
+        )
+        return await self._client.start_workflow(
+            "execution", request, workflow_id=workflow_id
+        )
 
     async def update_execution(
         self,
         workflow_id: str,
         operation: str,
-        payload: 'Mapping[str, JsonValue]',
+        payload: "Mapping[str, JsonValue]",
     ) -> WorkflowUpdateResult:
         if not workflow_id.strip() or operation not in UPDATE_NAMES:
             raise ValueError("unsupported execution update")
         if operation == "supply_external_result":
-            required = {"call_id", "idempotency_key", "object_ref", "payload_digest", "principal_id"}
-            if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
+            required = {
+                "call_id",
+                "idempotency_key",
+                "object_ref",
+                "payload_digest",
+                "principal_id",
+            }
+            if set(payload) != required or any(
+                not isinstance(payload[key], str) or not payload[key].strip()
+                for key in required
+            ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if operation == "approve":
-            required = {"approval_id", "idempotency_key", "decision", "principal_id", "decision_digest"}
-            if set(payload) != required or any(not isinstance(payload[key], str) or not payload[key].strip() for key in required):
+            required = {
+                "approval_id",
+                "idempotency_key",
+                "decision",
+                "principal_id",
+                "decision_digest",
+            }
+            if set(payload) != required or any(
+                not isinstance(payload[key], str) or not payload[key].strip()
+                for key in required
+            ):
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._client.update_workflow(workflow_id, operation, payload)
 
-    async def query_execution(self, workflow_id: str, query: str) -> WorkflowQueryResult:
+    async def query_execution(
+        self, workflow_id: str, query: str
+    ) -> WorkflowQueryResult:
         if not workflow_id.strip() or query not in QUERY_NAMES:
             raise ValueError("unsupported execution query")
         return await self._client.query_workflow(workflow_id, query)
@@ -109,7 +147,9 @@ class WorkflowGateway:
             raise ValueError("workflow id is required")
         return await self._client.cancel_workflow(workflow_id)
 
-    async def start_task_graph(self, workflow_id: str, request: TaskGraphRequest) -> TaskGraphHandle:
+    async def start_task_graph(
+        self, workflow_id: str, request: TaskGraphRequest
+    ) -> TaskGraphHandle:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
         _logger.debug("starting durable task workflow: workflow_id=%s", workflow_id)
@@ -123,9 +163,13 @@ class WorkflowGateway:
             request_ref=request_ref,
             worker_build=self._worker_build,
         )
-        return await self._client.start_task_graph(workflow_request, workflow_id=workflow_id)
+        return await self._client.start_task_graph(
+            workflow_request, workflow_id=workflow_id
+        )
 
-    async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView:
+    async def cancel_task_graph(
+        self, workflow_id: str, idempotency_key: str
+    ) -> TaskGraphView:
         if not workflow_id.strip() or not idempotency_key.strip():
             raise ValueError("workflow and idempotency keys are required")
         return await self._client.cancel_task_graph(workflow_id, idempotency_key)

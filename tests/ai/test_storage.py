@@ -72,9 +72,9 @@ class WritableBackend(Backend):
         key: str,
         value: Value,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StoragePutResult[Info]":
-        del expected_entry_revision
+        del expected_revision
         self.values[key] = value
         self.revision = StorageRevision(str(int(self.revision.value) + 1))
         return StoragePutResult(
@@ -88,9 +88,9 @@ class WritableBackend(Backend):
         self,
         key: str,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageDeleteResult[str]":
-        del expected_entry_revision
+        del expected_revision
         value = self.values.pop(key, None)
         self.revision = StorageRevision(str(int(self.revision.value) + 1))
         return StorageDeleteResult(
@@ -104,11 +104,11 @@ class WritableBackend(Backend):
         self,
         key: str,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageResetResult[str]":
         value = self.values.get(key)
-        if expected_entry_revision is not None and (
-            value is None or value.revision != expected_entry_revision.value
+        if expected_revision is not None and (
+            value is None or value.revision != expected_revision.value
         ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         if value is None:

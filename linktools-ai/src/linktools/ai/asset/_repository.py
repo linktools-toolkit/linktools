@@ -336,7 +336,7 @@ class AssetRepository:
         value: "object",
         *,
         variant: "str | None" = None,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "ResolvedAsset[object]":
         """Encode and write one logical asset while preserving its layout."""
         binding = self._binding_for(ref)
@@ -357,7 +357,7 @@ class AssetRepository:
             _validate_value_type(binding, value)
             _validate_identity(binding, ref, value)
             encoded = _encode_value(selected, ref, value, binding.value_type)
-            new_info = await self._store.put(key, encoded, expected_revision=expected_entry_revision)
+            new_info = await self._store.put(key, encoded, expected_revision=expected_revision)
             post = await self._probe(ref, binding)
             takeover = is_new_directory and await self._has_descendant_candidates(ref, binding, exclude_key=key)
             if (

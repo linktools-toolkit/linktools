@@ -56,7 +56,7 @@ class StorageChange(Generic[KeyT, ValueT]):
     operation: StorageOperation
     key: KeyT
     value: "ValueT | None"
-    expected_entry_revision: "StorageEntryRevision | None"
+    expected_revision: "StorageEntryRevision | None"
 
     def __post_init__(self) -> None:
         if self.operation is StorageOperation.PUT and self.value is None:
@@ -175,21 +175,21 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         key: KeyT,
         value: ValueT,
         *,
-        expected_entry_revision: 'StorageEntryRevision | None' = None,
+        expected_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StoragePutResult[InfoT]': ...
 
     async def delete(
         self,
         key: KeyT,
         *,
-        expected_entry_revision: 'StorageEntryRevision | None' = None,
+        expected_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StorageDeleteResult[KeyT]': ...
 
     async def reset(
         self,
         key: KeyT,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageResetResult[KeyT]":
         """Mark one writer entry RESET so a lower read layer can become effective."""
         ...

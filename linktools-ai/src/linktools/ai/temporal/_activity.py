@@ -8,10 +8,11 @@ from typing import Protocol, cast
 
 from linktools.core import environ
 
+from ..errors import AIError, ErrorCode
 from ..runtime import RuntimeTaskNodeRunner
 from ..runtime.state import TaskState
 from ..storage import ObjectStore
-from ..task import TaskDependencyResult, TaskLease
+from ..task import TaskDependencyResult, TaskLease, TaskNodeView
 from .workflow import (
     EvaluationWorkflowInput,
     EvaluationWorkflowResult,
@@ -41,69 +42,119 @@ class ActivityOptions:
 
 
 class ExecutionOperation(Protocol):
-    async def execute(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult: ...
+    async def execute(
+        self, request: ExecutionWorkflowInput
+    ) -> ExecutionWorkflowResult: ...
 
 
 class ExecutionStageOperation(Protocol):
-    async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def fix_bundle_route(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def fix_binding(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def process_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def commit_result(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def settle_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
+    async def load_input(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def fix_bundle_route(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def fix_binding(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def reserve_budget(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def run_agent(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def process_deferred(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def commit_result(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
+    async def settle_budget(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState: ...
 
 
 class ExecuteActivity:
-    options = ActivityOptions(start_to_close_seconds=300, retry_max_attempts=3, heartbeat_timeout_seconds=30)
+    options = ActivityOptions(
+        start_to_close_seconds=300, retry_max_attempts=3, heartbeat_timeout_seconds=30
+    )
 
     def __init__(self, operation: ExecutionOperation) -> None:
         self._operation = operation
 
     async def run(self, request: ExecutionWorkflowInput) -> ExecutionWorkflowResult:
-        _logger.debug("executing durable activity: execution_id=%s", request.execution_id)
+        _logger.debug(
+            "executing durable activity: execution_id=%s", request.execution_id
+        )
         result = await self._operation.execute(request)
-        _logger.debug("durable activity completed: execution_id=%s status=%s", request.execution_id, result.status)
+        _logger.debug(
+            "durable activity completed: execution_id=%s status=%s",
+            request.execution_id,
+            result.status,
+        )
         return result
 
     async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).load_input(state)
 
-    async def fix_bundle_route(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).fix_bundle_route(state)
+    async def fix_bundle_route(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
+        return await cast(ExecutionStageOperation, self._operation).fix_bundle_route(
+            state
+        )
 
-    async def fix_binding(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+    async def fix_binding(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).fix_binding(state)
 
-    async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).reserve_budget(state)
+    async def reserve_budget(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
+        return await cast(ExecutionStageOperation, self._operation).reserve_budget(
+            state
+        )
 
     async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).run_agent(state)
 
-    async def process_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).process_deferred(state)
+    async def process_deferred(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
+        return await cast(ExecutionStageOperation, self._operation).process_deferred(
+            state
+        )
 
-    async def commit_result(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+    async def commit_result(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).commit_result(state)
 
-    async def settle_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
+    async def settle_budget(
+        self, state: ExecutionWorkflowState
+    ) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).settle_budget(state)
 
 
 class EvaluationOperation(Protocol):
-    async def execute(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult: ...
+    async def execute(
+        self, request: EvaluationWorkflowInput
+    ) -> EvaluationWorkflowResult: ...
 
 
 class EvaluationActivity:
-    options = ActivityOptions(start_to_close_seconds=1800, retry_max_attempts=2, heartbeat_timeout_seconds=60)
+    options = ActivityOptions(
+        start_to_close_seconds=1800, retry_max_attempts=2, heartbeat_timeout_seconds=60
+    )
 
     def __init__(self, operation: EvaluationOperation) -> None:
         self._operation = operation
 
     async def run(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
-        _logger.debug("executing evaluation activity: evaluation_id=%s", request.evaluation_id)
+        _logger.debug(
+            "executing evaluation activity: evaluation_id=%s", request.evaluation_id
+        )
         return await self._operation.execute(request)
 
 
@@ -112,13 +163,19 @@ class SessionOperation(Protocol):
 
 
 class SessionActivity:
-    options = ActivityOptions(start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15)
+    options = ActivityOptions(
+        start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15
+    )
 
     def __init__(self, operation: SessionOperation) -> None:
         self._operation = operation
 
     async def run(self, request: SessionWorkflowInput) -> SessionWorkflowResult:
-        _logger.debug("executing session activity: session_id=%s idempotency_key=%s", request.session_id, request.idempotency_key)
+        _logger.debug(
+            "executing session activity: session_id=%s idempotency_key=%s",
+            request.session_id,
+            request.idempotency_key,
+        )
         return await self._operation.execute(request)
 
 
@@ -128,23 +185,27 @@ class TaskOperation(Protocol):
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None": ...
+        *,
+        workflow_run_id: str,
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]": ...
 
-    async def renew(self, lease: TaskLease) -> TaskLease: ...
+    async def renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView": ...
 
     async def settle(
         self,
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None: ...
+    ) -> TaskNodeView: ...
 
 
 class TaskActivity:
     def __init__(self, operation: TaskOperation) -> None:
         self._operation = operation
 
-    options = ActivityOptions(start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15)
+    options = ActivityOptions(
+        start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15
+    )
 
     @classmethod
     def from_runtime(
@@ -171,11 +232,19 @@ class TaskActivity:
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
-        _logger.debug("preparing task node: graph_id=%s node=%s", request.graph_id, node_id)
-        return await self._operation.prepare(request, node_id, dependency_results)
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]":
+        _logger.debug(
+            "preparing task node: graph_id=%s node=%s", request.graph_id, node_id
+        )
+        workflow_run_id = _workflow_run_id()
+        return await self._operation.prepare(
+            request,
+            node_id,
+            dependency_results,
+            workflow_run_id=workflow_run_id,
+        )
 
-    async def renew(self, lease: TaskLease) -> TaskLease:
+    async def renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView":
         _logger.debug(
             "renewing task node lease: graph_id=%s node=%s fence=%s",
             lease.graph_id,
@@ -189,7 +258,7 @@ class TaskActivity:
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None:
+    ) -> TaskNodeView:
         _logger.debug(
             "settling task node: graph_id=%s node=%s status=%s",
             request.graph_id,
@@ -199,25 +268,70 @@ class TaskActivity:
         return await self._operation.settle(request, lease, result)
 
 
+def _workflow_run_id() -> str:
+    if _temporal_activity is None:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    try:
+        workflow_run_id = _temporal_activity.info().workflow_run_id
+    except (AttributeError, RuntimeError) as error:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+    if not isinstance(workflow_run_id, str) or not workflow_run_id.strip():
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    return workflow_run_id
+
+
 if _temporal_activity is not None:
     ExecuteActivity.run = _temporal_activity.defn(name="execute")(ExecuteActivity.run)
-    ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(ExecuteActivity.load_input)
-    ExecuteActivity.fix_bundle_route = _temporal_activity.defn(name="fix_bundle_route")(ExecuteActivity.fix_bundle_route)
-    ExecuteActivity.fix_binding = _temporal_activity.defn(name="fix_binding")(ExecuteActivity.fix_binding)
-    ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(ExecuteActivity.reserve_budget)
-    ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(ExecuteActivity.run_agent)
-    ExecuteActivity.process_deferred = _temporal_activity.defn(name="process_deferred")(ExecuteActivity.process_deferred)
-    ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(ExecuteActivity.commit_result)
-    ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(ExecuteActivity.settle_budget)
-    EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(EvaluationActivity.run)
-    SessionActivity.run = _temporal_activity.defn(name="session_mutation")(SessionActivity.run)
-    TaskActivity.prepare = _temporal_activity.defn(name="task_node_prepare")(TaskActivity.prepare)
-    TaskActivity.renew = _temporal_activity.defn(name="task_node_renew")(TaskActivity.renew)
-    TaskActivity.settle = _temporal_activity.defn(name="task_node_settle")(TaskActivity.settle)
+    ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(
+        ExecuteActivity.load_input
+    )
+    ExecuteActivity.fix_bundle_route = _temporal_activity.defn(name="fix_bundle_route")(
+        ExecuteActivity.fix_bundle_route
+    )
+    ExecuteActivity.fix_binding = _temporal_activity.defn(name="fix_binding")(
+        ExecuteActivity.fix_binding
+    )
+    ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(
+        ExecuteActivity.reserve_budget
+    )
+    ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(
+        ExecuteActivity.run_agent
+    )
+    ExecuteActivity.process_deferred = _temporal_activity.defn(name="process_deferred")(
+        ExecuteActivity.process_deferred
+    )
+    ExecuteActivity.commit_result = _temporal_activity.defn(name="commit_result")(
+        ExecuteActivity.commit_result
+    )
+    ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(
+        ExecuteActivity.settle_budget
+    )
+    EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(
+        EvaluationActivity.run
+    )
+    SessionActivity.run = _temporal_activity.defn(name="session_mutation")(
+        SessionActivity.run
+    )
+    TaskActivity.prepare = _temporal_activity.defn(name="task_node_prepare")(
+        TaskActivity.prepare
+    )
+    TaskActivity.renew = _temporal_activity.defn(name="task_node_renew")(
+        TaskActivity.renew
+    )
+    TaskActivity.settle = _temporal_activity.defn(name="task_node_settle")(
+        TaskActivity.settle
+    )
 
 
 __all__ = [
-    "ActivityOptions", "EvaluationActivity", "EvaluationOperation", "ExecuteActivity",
-    "ExecutionOperation", "ExecutionStageOperation", "SessionActivity", "SessionOperation",
-    "TaskActivity", "TaskOperation",
+    "ActivityOptions",
+    "EvaluationActivity",
+    "EvaluationOperation",
+    "ExecuteActivity",
+    "ExecutionOperation",
+    "ExecutionStageOperation",
+    "SessionActivity",
+    "SessionOperation",
+    "TaskActivity",
+    "TaskOperation",
 ]

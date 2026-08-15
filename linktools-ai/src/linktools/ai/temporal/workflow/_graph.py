@@ -12,16 +12,20 @@ from typing import Protocol, cast
 try:
     from temporalio import workflow as _temporal_workflow
     from temporalio.common import RetryPolicy as _TemporalRetryPolicy
+    from temporalio.common import (
+        WorkflowIDReusePolicy as _TemporalWorkflowIDReusePolicy,
+    )
 except ModuleNotFoundError as error:
     if error.name != "temporalio":
         raise
     _temporal_workflow = None
     _TemporalRetryPolicy = None
+    _TemporalWorkflowIDReusePolicy = None
 
 from ...core import (
     JsonValue,
+    TaskStatus,
     canonical_json_bytes,
-    canonical_sha256,
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
@@ -32,6 +36,7 @@ from ...task import (
     TaskGraphRequest,
     TaskLease,
     TaskNode,
+    TaskNodeView,
 )
 from ._execution import (
     ExecutionWorkflow,
@@ -138,16 +143,16 @@ class TaskActivity(Protocol):
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None": ...
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]": ...
 
-    async def renew(self, lease: TaskLease) -> TaskLease: ...
+    async def renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView": ...
 
     async def settle(
         self,
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None: ...
+    ) -> TaskNodeView: ...
 
 
 class _ChildWorkflowHandle(Protocol):
@@ -156,16 +161,13 @@ class _ChildWorkflowHandle(Protocol):
     async def result(self) -> ExecutionWorkflowResult: ...
 
 
-class _ChildTaskCancelled(Exception):
-    pass
-
-
 class TaskWorkflow:
     def __init__(self, activity: "TaskActivity | None" = None) -> None:
         self._activity = activity
         self._cancelled = False
         self._graph_id = ""
         self._active_children: list[_ChildWorkflowHandle] = []
+        self._active_node_tasks: set["asyncio.Task[TaskNodeView]"] = set()
 
     async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
         self._graph_id = request.graph_id
@@ -221,22 +223,42 @@ class TaskWorkflow:
                     )
                     for node in batch
                 )
+                self._active_node_tasks.update(batch_tasks)
                 try:
                     results = await asyncio.gather(*batch_tasks)
                 except BaseException:
-                    for child in tuple(self._active_children):
-                        child.cancel()
-                    for task in batch_tasks:
-                        if not task.done():
-                            task.cancel()
-                    await asyncio.gather(*batch_tasks, return_exceptions=True)
+                    await self._cleanup_batch(batch_tasks)
+                    if self._cancelled:
+                        return TaskWorkflowResult(
+                            request.graph_id,
+                            "CANCELLED",
+                            tuple(sorted(completed_results)),
+                        )
                     raise
+                finally:
+                    self._active_node_tasks.difference_update(batch_tasks)
                 for node, result in zip(batch, results):
                     pending.pop(node.node_id)
-                    if result is None:
+                    if result.status is TaskStatus.SUCCEEDED:
+                        if result.execution_id is None or result.result_digest is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        completed_results[node.node_id] = TaskDependencyResult(
+                            result.result_digest,
+                            result.execution_id,
+                        )
+                    elif result.status in {
+                        TaskStatus.FAILED,
+                        TaskStatus.BLOCKED,
+                    }:
                         failed.add(node.node_id)
+                    elif result.status is TaskStatus.CANCELLED:
+                        return TaskWorkflowResult(
+                            request.graph_id,
+                            "CANCELLED",
+                            tuple(sorted(completed_results)),
+                        )
                     else:
-                        completed_results[node.node_id] = result
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 if self._cancelled:
                     return TaskWorkflowResult(
                         request.graph_id,
@@ -262,6 +284,9 @@ class TaskWorkflow:
         self._cancelled = True
         for child in tuple(self._active_children):
             child.cancel()
+        for task in tuple(self._active_node_tasks):
+            if not task.done():
+                task.cancel()
         return TaskWorkflowResult(self._graph_id, "CANCELLED", ())
 
     async def _run_node(
@@ -269,29 +294,47 @@ class TaskWorkflow:
         request: TaskWorkflowInput,
         node: TaskWorkflowNode,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> TaskDependencyResult | None:
-        prepared = await self._prepare(request, node.node_id, dependency_results)
-        if prepared is None or self._cancelled:
-            return None
-        lease, execution_input = prepared
-        child = self._start_child(execution_input, request, node)
-        self._active_children.append(child)
-        try:
-            lease, result = await self._wait_for_child(execution_input, lease, child)
-        finally:
-            self._active_children.remove(child)
-        return await self._settle(request, lease, result)
+    ) -> TaskNodeView:
+        while True:
+            prepared = await self._prepare(request, node.node_id, dependency_results)
+            if isinstance(prepared, TaskNodeView):
+                if prepared.status is TaskStatus.RUNNING:
+                    await _wait_for_foreign_lease(prepared)
+                    continue
+                if prepared.status in {
+                    TaskStatus.SUCCEEDED,
+                    TaskStatus.FAILED,
+                    TaskStatus.BLOCKED,
+                    TaskStatus.CANCELLED,
+                }:
+                    return prepared
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            lease, execution_input = prepared
+            child = self._start_child(execution_input, request, node)
+            self._active_children.append(child)
+            try:
+                waited = await self._wait_for_child(
+                    execution_input,
+                    lease,
+                    child,
+                )
+            finally:
+                self._active_children.remove(child)
+            if isinstance(waited, TaskNodeView):
+                continue
+            lease, result = waited
+            return await self._settle(request, lease, result)
 
     async def _prepare(
         self,
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]":
         if self._activity is not None:
             return await self._activity.prepare(request, node_id, dependency_results)
         return cast(
-            "tuple[TaskLease, ExecutionWorkflowInput] | None",
+            "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]",
             await _execute_task_activity(
                 "task_node_prepare",
                 request,
@@ -305,22 +348,33 @@ class TaskWorkflow:
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None:
+    ) -> TaskNodeView:
         if self._activity is not None:
             return await self._activity.settle(request, lease, result)
         return cast(
-            "TaskDependencyResult | None",
+            "TaskNodeView",
             await _execute_task_activity("task_node_settle", request, lease, result),
         )
+
+    async def _cleanup_batch(
+        self,
+        batch_tasks: tuple["asyncio.Task[TaskNodeView]", ...],
+    ) -> None:
+        for child in tuple(self._active_children):
+            child.cancel()
+        for task in batch_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*batch_tasks, return_exceptions=True)
 
     async def _wait_for_child(
         self,
         execution_input: ExecutionWorkflowInput,
         lease: TaskLease,
         child: _ChildWorkflowHandle,
-    ) -> tuple[TaskLease, ExecutionWorkflowResult]:
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowResult]":
         child_task = asyncio.create_task(child.result())
-        renew_task: asyncio.Task[TaskLease] | None = None
+        renew_task: "asyncio.Task[TaskLease | TaskNodeView] | None" = None
         try:
             current_lease = lease
             while True:
@@ -335,45 +389,51 @@ class TaskWorkflow:
                     except BaseException as error:
                         if not isinstance(error, Exception):
                             raise
-                        if self._cancelled:
-                            child.cancel()
-                            await _cancel_local_tasks(child_task, renew_task)
-                            return current_lease, _cancelled_result(execution_input)
-                        child.cancel()
                         await _cancel_local_tasks(child_task, renew_task)
+                        if self._cancelled:
+                            raise asyncio.CancelledError from error
+                        child.cancel()
                         raise
                     renew_task = None
+                    if isinstance(current_lease, TaskNodeView):
+                        child.cancel()
+                        await _cancel_local_tasks(child_task)
+                        return current_lease
                     if self._cancelled:
                         child.cancel()
                         await _cancel_local_tasks(child_task)
-                        return current_lease, _cancelled_result(execution_input)
+                        raise asyncio.CancelledError
                     if child_task not in done:
                         continue
                 else:
                     renew_task.cancel()
                     await asyncio.gather(renew_task, return_exceptions=True)
                     renew_task = None
-                return current_lease, _read_child_result(
-                    child_task,
-                    self._cancelled,
-                    execution_input,
-                )
-        except _ChildTaskCancelled as error:
-            await _cancel_local_tasks(child_task, renew_task)
-            raise asyncio.CancelledError from error
+                if self._cancelled:
+                    await _cancel_local_tasks(child_task)
+                    raise asyncio.CancelledError
+                return current_lease, _read_child_result(child_task, execution_input)
         except asyncio.CancelledError:
             child.cancel()
             await _cancel_local_tasks(child_task, renew_task)
             raise
         except BaseException:
+            child.cancel()
             await _cancel_local_tasks(child_task, renew_task)
             raise
 
-    async def _renew(self, lease: TaskLease) -> TaskLease:
+    async def _renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView":
         if self._activity is not None:
             return await self._activity.renew(lease)
-        await asyncio.sleep(30)
-        return cast(TaskLease, await _execute_task_activity("task_node_renew", lease))
+        if _temporal_workflow is None:
+            raise RuntimeError(
+                "Temporal SDK is required for production workflow execution"
+            )
+        await _temporal_workflow.sleep(30)
+        return cast(
+            "TaskLease | TaskNodeView",
+            await _execute_task_activity("task_node_renew", lease),
+        )
 
     def _start_child(
         self,
@@ -381,23 +441,24 @@ class TaskWorkflow:
         request: TaskWorkflowInput,
         node: TaskWorkflowNode,
     ) -> _ChildWorkflowHandle:
-        if _temporal_workflow is None or _TemporalRetryPolicy is None:
+        if (
+            _temporal_workflow is None
+            or _TemporalRetryPolicy is None
+            or _TemporalWorkflowIDReusePolicy is None
+        ):
             raise RuntimeError(
                 "Temporal SDK is required for production workflow execution"
             )
-        workflow_id = "task-node-" + canonical_sha256(
-            {
-                "tenant_id": request.tenant_id,
-                "graph_id": request.graph_id,
-                "node_id": node.node_id,
-            }
-        )
+        del request, node
+        workflow_id = "task-node-" + execution_input.operation_id
         return cast(
             _ChildWorkflowHandle,
             _temporal_workflow.start_child_workflow(
                 ExecutionWorkflow,
                 execution_input,
                 id=workflow_id,
+                parent_close_policy=_temporal_workflow.ParentClosePolicy.TERMINATE,
+                id_reuse_policy=_TemporalWorkflowIDReusePolicy.ALLOW_DUPLICATE,
                 retry_policy=_TemporalRetryPolicy(maximum_attempts=1),
             ),
         )
@@ -426,39 +487,38 @@ async def _cancel_local_tasks(
         await asyncio.gather(*pending, return_exceptions=True)
 
 
-def _cancelled_result(
-    execution_input: ExecutionWorkflowInput,
-) -> ExecutionWorkflowResult:
-    return ExecutionWorkflowResult(
-        execution_input.execution_id,
-        "CANCELLED",
-        None,
-        0,
-    )
-
-
 def _read_child_result(
     child_task: "asyncio.Task[ExecutionWorkflowResult]",
-    cancelled: bool,
     execution_input: ExecutionWorkflowInput,
 ) -> ExecutionWorkflowResult:
     try:
         return child_task.result()
     except asyncio.CancelledError:
-        if cancelled:
-            return _cancelled_result(execution_input)
-        raise _ChildTaskCancelled from None
+        return ExecutionWorkflowResult(
+            execution_input.execution_id,
+            "CANCELLED",
+            None,
+            0,
+        )
     except BaseException as error:
         if not isinstance(error, Exception):
             raise
-        if cancelled:
-            return _cancelled_result(execution_input)
         return ExecutionWorkflowResult(
             execution_input.execution_id,
             "FAILED",
             None,
             0,
         )
+
+
+async def _wait_for_foreign_lease(node: TaskNodeView) -> None:
+    if _temporal_workflow is None or node.lease_expires_at is None:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    delay = max(
+        (node.lease_expires_at - _temporal_workflow.now()).total_seconds(),
+        1.0,
+    )
+    await _temporal_workflow.sleep(delay)
 
 
 def _task_node(node: TaskWorkflowNode) -> TaskNode:

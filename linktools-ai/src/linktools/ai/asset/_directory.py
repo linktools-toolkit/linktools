@@ -220,7 +220,7 @@ class DirectoryAssetBackend:
         key: AssetKey,
         value: bytes,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StoragePutResult[AssetInfo]":
         async with self._lock:
             self._require_writable()
@@ -228,7 +228,7 @@ class DirectoryAssetBackend:
             exists = path.is_file()
             current = await asyncio.to_thread(read_bytes, path) if exists else None
             current_revision = None if current is None else _entry_revision(current)
-            self._check_revision(current_revision, expected_entry_revision)
+            self._check_revision(current_revision, expected_revision)
             if current is not None and _etag(current) == _etag(value):
                 entries = await asyncio.to_thread(self._scan)
                 revision = _store_revision(entries)
@@ -251,7 +251,7 @@ class DirectoryAssetBackend:
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageDeleteResult[AssetKey]":
         async with self._lock:
             self._require_writable()
@@ -259,7 +259,7 @@ class DirectoryAssetBackend:
             exists = path.is_file()
             current = await asyncio.to_thread(read_bytes, path) if exists else None
             current_revision = None if current is None else _entry_revision(current)
-            self._check_revision(current_revision, expected_entry_revision)
+            self._check_revision(current_revision, expected_revision)
             if not exists:
                 return StorageDeleteResult(key, False, None, _store_revision(await asyncio.to_thread(self._scan)))
             await asyncio.to_thread(path.unlink)
@@ -272,14 +272,14 @@ class DirectoryAssetBackend:
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageResetResult[AssetKey]":
         async with self._lock:
             self._require_writable()
             path = self._file_path(key)
             content = await asyncio.to_thread(read_bytes, path) if path.is_file() else None
             current_revision = None if content is None else _entry_revision(content)
-            self._check_revision(current_revision, expected_entry_revision)
+            self._check_revision(current_revision, expected_revision)
             if content is None:
                 return StorageResetResult(key, False, _store_revision(await asyncio.to_thread(self._scan)))
             await asyncio.to_thread(path.unlink)
@@ -305,21 +305,21 @@ class DirectoryAssetBackend:
                     await self.put(
                         change.key,
                         bytes(change.value or b""),
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
                 )
             elif change.operation is StorageOperation.DELETE:
                 results.append(
                     await self.delete(
                         change.key,
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
                 )
             else:
                 results.append(
                     await self.reset(
                         change.key,
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
                 )
         return StorageBatchResult(await self.head_revision(), False, tuple(results))

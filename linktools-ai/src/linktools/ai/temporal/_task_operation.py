@@ -19,6 +19,14 @@ from .workflow import ExecutionWorkflowInput, ExecutionWorkflowResult, TaskWorkf
 
 _logger = environ.get_logger("ai.temporal.task_operation")
 _LEASE_SECONDS = 60
+_TERMINAL_STATUSES = frozenset(
+    {
+        TaskStatus.SUCCEEDED,
+        TaskStatus.FAILED,
+        TaskStatus.BLOCKED,
+        TaskStatus.CANCELLED,
+    }
+)
 
 
 class _RuntimeTaskOperation:
@@ -40,27 +48,30 @@ class _RuntimeTaskOperation:
         request: TaskWorkflowInput,
         node_id: str,
         dependency_results: Mapping[str, TaskDependencyResult],
-    ) -> "tuple[TaskLease, ExecutionWorkflowInput] | None":
+        *,
+        workflow_run_id: str,
+    ) -> "TaskNodeView | tuple[TaskLease, ExecutionWorkflowInput]":
+        if not isinstance(workflow_run_id, str) or not workflow_run_id.strip():
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         stored = await self._load_request(request)
         node = _find_node(stored.graph.nodes, node_id)
-        await self._repository.reconcile_graph(
-            request.graph_id,
-            tenant_id=request.tenant_id,
-        )
-        nodes = await self._repository.list_nodes(
-            request.graph_id,
-            tenant_id=request.tenant_id,
-        )
-        current = _find_node_view(nodes, node_id)
-        if current.status is TaskStatus.FAILED:
-            _validate_prepare_failure(current)
-            _logger.info(
-                "replaying failed Temporal task node: graph=%s node=%s",
-                request.graph_id,
-                node_id,
-            )
-            return None
-        owner = _task_owner(request, node_id)
+        current = await self._read_node(request, node, reconcile=True)
+        if current.status is TaskStatus.SUCCEEDED:
+            await self._validate_execution_result(current, stored.principal)
+            return current
+        if current.status in {
+            TaskStatus.FAILED,
+            TaskStatus.BLOCKED,
+            TaskStatus.CANCELLED,
+        }:
+            return current
+        if current.status is TaskStatus.PENDING:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        owner = _task_owner(request, node_id, workflow_run_id)
+        if current.status is TaskStatus.RUNNING:
+            if current.owner != owner and _lease_is_active(current):
+                return current
         lease = await self._acquire_lease(current, request, owner)
         try:
             binding_digest, execution_request = await self._runner.prepare(
@@ -72,8 +83,7 @@ class _RuntimeTaskOperation:
         except AIError as error:
             if error.retryable:
                 raise
-            await self._fail_prepare(lease, request.tenant_id, error)
-            return None
+            return await self._fail_prepare(request, node, lease, error)
         request_ref = await put_execution_request(
             self._request_store,
             self._request_keys,
@@ -99,49 +109,71 @@ class _RuntimeTaskOperation:
             operation_id=operation_id,
         )
         _logger.info(
-            "Temporal task node prepared: graph=%s node=%s fence=%s request_ref=%s",
+            "Temporal task node prepared: graph=%s node=%s fence=%s owner=%s",
             request.graph_id,
             node_id,
             lease.fence,
-            request_ref,
+            lease.owner,
         )
         return lease, child
 
-    async def renew(self, lease: TaskLease) -> TaskLease:
-        return await self._repository.renew(
-            lease,
-            tenant_id=lease.tenant_id,
-            lease_seconds=_LEASE_SECONDS,
-        )
+    async def renew(self, lease: TaskLease) -> "TaskLease | TaskNodeView":
+        try:
+            return await self._repository.renew(
+                lease,
+                tenant_id=lease.tenant_id,
+                lease_seconds=_LEASE_SECONDS,
+            )
+        except AIError as error:
+            if error.code is not ErrorCode.TASK_FENCE_STALE:
+                raise
+            nodes = await self._repository.list_nodes(
+                lease.graph_id,
+                tenant_id=lease.tenant_id,
+            )
+            current = _find_node_view(nodes, lease.node_id)
+            _validate_node_view_shape(current)
+            if current.status in _TERMINAL_STATUSES:
+                _logger.info(
+                    "Temporal task lease reached durable terminal state: "
+                    "graph=%s node=%s status=%s",
+                    lease.graph_id,
+                    lease.node_id,
+                    current.status.value,
+                )
+                return current
+            if current.status is TaskStatus.RUNNING:
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def settle(
         self,
         request: TaskWorkflowInput,
         lease: TaskLease,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None:
+    ) -> TaskNodeView:
         stored = await self._load_request(request)
         if lease.graph_id != request.graph_id or lease.tenant_id != request.tenant_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _find_node(stored.graph.nodes, lease.node_id)
+        node = _find_node(stored.graph.nodes, lease.node_id)
         expected_execution_id = f"{request.graph_id}:{lease.node_id}"
         if result.execution_id != expected_execution_id:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        nodes = await self._repository.list_nodes(
-            request.graph_id,
-            tenant_id=request.tenant_id,
-        )
-        current = _find_node_view(nodes, lease.node_id)
-        if current.status is not TaskStatus.RUNNING:
+        current = await self._read_node(request, node, reconcile=False)
+        if current.status in _TERMINAL_STATUSES:
             return await self._settle_terminal(
                 request,
+                node,
                 stored.principal,
                 current,
-                expected_execution_id,
                 result,
+                expected_execution_id,
             )
+        if current.status is not TaskStatus.RUNNING:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if current.owner != lease.owner or current.fence != lease.fence:
             raise AIError(ErrorCode.TASK_FENCE_STALE)
+
         if result.status == "SUCCEEDED":
             node_result = await self._runner.result(
                 result.execution_id,
@@ -155,25 +187,17 @@ class _RuntimeTaskOperation:
                     result_digest=node_result.result_digest,
                 )
             except AIError as error:
-                if error.code is ErrorCode.TASK_FENCE_STALE:
-                    return await self._recover_stale_settle(
-                        request,
-                        stored.principal,
-                        lease,
-                        expected_execution_id,
-                        result,
-                        error,
-                    )
-                raise
-            await self._repository.reconcile_graph(
-                request.graph_id,
-                tenant_id=request.tenant_id,
-            )
-            return _dependency_result(
-                node_result.result_digest,
-                node_result.execution_id,
-            )
-        if result.status in {"FAILED", "CANCELLED"}:
+                if error.code is not ErrorCode.TASK_FENCE_STALE:
+                    raise
+                return await self._recover_stale_settle(
+                    request,
+                    node,
+                    stored.principal,
+                    result,
+                    expected_execution_id,
+                    error,
+                )
+        elif result.status in {"FAILED", "CANCELLED"}:
             try:
                 await self._repository.fail(
                     lease,
@@ -184,126 +208,150 @@ class _RuntimeTaskOperation:
                     ),
                 )
             except AIError as error:
-                if error.code is ErrorCode.TASK_FENCE_STALE:
-                    return await self._recover_stale_settle(
-                        request,
-                        stored.principal,
-                        lease,
-                        expected_execution_id,
-                        result,
-                        error,
-                    )
-                raise
-            await self._repository.reconcile_graph(
-                request.graph_id,
-                tenant_id=request.tenant_id,
-            )
-            return None
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if error.code is not ErrorCode.TASK_FENCE_STALE:
+                    raise
+                return await self._recover_stale_settle(
+                    request,
+                    node,
+                    stored.principal,
+                    result,
+                    expected_execution_id,
+                    error,
+                )
+        else:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._repository.reconcile_graph(
+            request.graph_id,
+            tenant_id=request.tenant_id,
+        )
+        updated = await self._read_node(request, node, reconcile=False)
+        expected_status = (
+            TaskStatus.SUCCEEDED if result.status == "SUCCEEDED" else TaskStatus.FAILED
+        )
+        if updated.status is not expected_status:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return updated
 
     async def _recover_stale_settle(
         self,
         request: TaskWorkflowInput,
+        node: TaskNode,
         principal: Principal,
-        lease: TaskLease,
-        expected_execution_id: str,
         result: ExecutionWorkflowResult,
+        expected_execution_id: str,
         stale_error: AIError,
-    ) -> TaskDependencyResult | None:
-        nodes = await self._repository.list_nodes(
-            request.graph_id,
-            tenant_id=request.tenant_id,
-        )
-        current = _find_node_view(nodes, lease.node_id)
+    ) -> TaskNodeView:
+        current = await self._read_node(request, node, reconcile=False)
         if current.status is TaskStatus.RUNNING:
             raise stale_error
-        if current.status not in {
-            TaskStatus.SUCCEEDED,
-            TaskStatus.FAILED,
-            TaskStatus.CANCELLED,
-        }:
+        if current.status not in _TERMINAL_STATUSES:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return await self._settle_terminal(
             request,
+            node,
             principal,
             current,
-            expected_execution_id,
             result,
+            expected_execution_id,
         )
 
     async def _settle_terminal(
         self,
         request: TaskWorkflowInput,
+        node: TaskNode,
         principal: Principal,
         current: TaskNodeView,
-        expected_execution_id: str,
         result: ExecutionWorkflowResult,
-    ) -> TaskDependencyResult | None:
+        expected_execution_id: str,
+    ) -> TaskNodeView:
         if current.status is TaskStatus.SUCCEEDED:
-            if (
-                current.owner is not None
-                or current.lease_expires_at is not None
-                or current.execution_id != expected_execution_id
-                or not current.result_digest
-                or current.error_code is not None
-                or current.error_digest is not None
-                or result.status != "SUCCEEDED"
-            ):
+            if result.status != "SUCCEEDED":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            node_result = await self._runner.result(
-                current.execution_id,
-                principal=principal,
-            )
-            if (
-                node_result.execution_id != current.execution_id
-                or node_result.result_digest != current.result_digest
-            ):
+            if current.execution_id != expected_execution_id:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._validate_execution_result(current, principal)
+        elif current.status is TaskStatus.BLOCKED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._repository.reconcile_graph(
+            request.graph_id,
+            tenant_id=request.tenant_id,
+        )
+        updated = await self._read_node(request, node, reconcile=False)
+        _logger.info(
+            "Temporal task node settled from durable state: graph=%s node=%s status=%s",
+            request.graph_id,
+            node.node_id,
+            updated.status.value,
+        )
+        return updated
+
+    async def _fail_prepare(
+        self,
+        request: TaskWorkflowInput,
+        node: TaskNode,
+        lease: TaskLease,
+        error: AIError,
+    ) -> TaskNodeView:
+        error_digest = canonical_sha256(
+            {"type": type(error).__name__, "code": error.code.value}
+        )
+        await self._repository.fail(
+            lease,
+            tenant_id=request.tenant_id,
+            error_code=error.code.value,
+            error_digest=error_digest,
+        )
+        await self._repository.reconcile_graph(
+            lease.graph_id,
+            tenant_id=request.tenant_id,
+        )
+        current = await self._read_node(request, node, reconcile=False)
+        if current.status is not TaskStatus.FAILED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "Temporal task node failed during preparation: graph=%s node=%s code=%s",
+            lease.graph_id,
+            lease.node_id,
+            error.code.value,
+        )
+        return current
+
+    async def _read_node(
+        self,
+        request: TaskWorkflowInput,
+        node: TaskNode,
+        *,
+        reconcile: bool,
+    ) -> TaskNodeView:
+        if reconcile:
             await self._repository.reconcile_graph(
                 request.graph_id,
                 tenant_id=request.tenant_id,
             )
-            _logger.info(
-                "replayed succeeded Temporal task node: graph=%s node=%s",
-                request.graph_id,
-                current.node_id,
-            )
-            return _dependency_result(current.result_digest, current.execution_id)
-        if current.status is TaskStatus.FAILED:
-            expected_error_digest = canonical_sha256(
-                {"type": "ExecutionResult", "code": result.status}
-            )
-            if (
-                current.owner is not None
-                or current.lease_expires_at is not None
-                or current.result_digest is not None
-                or current.error_code != ErrorCode.EXECUTION_FAILED.value
-                or result.status not in {"FAILED", "CANCELLED"}
-                or current.error_digest != expected_error_digest
-            ):
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            await self._repository.reconcile_graph(
-                request.graph_id,
-                tenant_id=request.tenant_id,
-            )
-            _logger.info(
-                "replayed failed Temporal task node: graph=%s node=%s",
-                request.graph_id,
-                current.node_id,
-            )
-            return None
-        if current.status is TaskStatus.CANCELLED:
-            await self._repository.reconcile_graph(
-                request.graph_id,
-                tenant_id=request.tenant_id,
-            )
-            _logger.info(
-                "replayed cancelled Temporal task node: graph=%s node=%s",
-                request.graph_id,
-                current.node_id,
-            )
-            return None
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        nodes = await self._repository.list_nodes(
+            request.graph_id,
+            tenant_id=request.tenant_id,
+        )
+        current = _find_node_view(nodes, node.node_id)
+        _validate_node_view(current, node, request.graph_id)
+        return current
+
+    async def _validate_execution_result(
+        self,
+        current: TaskNodeView,
+        principal: Principal,
+    ) -> None:
+        if current.execution_id is None or current.result_digest is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        node_result = await self._runner.result(
+            current.execution_id,
+            principal=principal,
+        )
+        if (
+            node_result.execution_id != current.execution_id
+            or node_result.result_digest != current.result_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _load_request(self, request: TaskWorkflowInput):
         stored = await read_task_request(
@@ -339,10 +387,19 @@ class _RuntimeTaskOperation:
                 owner=owner,
                 lease_seconds=_LEASE_SECONDS,
             )
+        if current.status is TaskStatus.RUNNING and (
+            current.lease_expires_at is not None and current.lease_expires_at <= now
+        ):
+            return await self._repository.claim(
+                request.graph_id,
+                current.node_id,
+                tenant_id=request.tenant_id,
+                owner=owner,
+                lease_seconds=_LEASE_SECONDS,
+            )
         if (
             current.status is TaskStatus.RUNNING
             and current.owner == owner
-            and current.fence > 0
             and current.lease_expires_at is not None
             and current.lease_expires_at > now
         ):
@@ -354,43 +411,7 @@ class _RuntimeTaskOperation:
                 current.fence,
                 current.lease_expires_at,
             )
-        if current.status is TaskStatus.RUNNING and (
-            current.lease_expires_at is None or current.lease_expires_at <= now
-        ):
-            return await self._repository.claim(
-                request.graph_id,
-                current.node_id,
-                tenant_id=request.tenant_id,
-                owner=owner,
-                lease_seconds=_LEASE_SECONDS,
-            )
         raise AIError(ErrorCode.TASK_NOT_READY)
-
-    async def _fail_prepare(
-        self,
-        lease: TaskLease,
-        tenant_id: str,
-        error: AIError,
-    ) -> None:
-        error_digest = canonical_sha256(
-            {"type": type(error).__name__, "code": error.code.value}
-        )
-        await self._repository.fail(
-            lease,
-            tenant_id=tenant_id,
-            error_code=error.code.value,
-            error_digest=error_digest,
-        )
-        await self._repository.reconcile_graph(
-            lease.graph_id,
-            tenant_id=tenant_id,
-        )
-        _logger.info(
-            "Temporal task node failed during preparation: graph=%s node=%s code=%s",
-            lease.graph_id,
-            lease.node_id,
-            error.code.value,
-        )
 
 
 def _find_node(nodes: tuple[TaskNode, ...], node_id: str) -> TaskNode:
@@ -407,39 +428,117 @@ def _find_node_view(nodes: tuple[TaskNodeView, ...], node_id: str) -> TaskNodeVi
     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
-def _validate_prepare_failure(current: TaskNodeView) -> None:
+def _validate_node_view(
+    current: TaskNodeView,
+    node: TaskNode,
+    graph_id: str,
+) -> None:
     if (
-        current.owner is not None
-        or current.lease_expires_at is not None
-        or current.result_digest is not None
-        or current.execution_id is not None
-        or not current.error_code
-        or current.error_code == ErrorCode.EXECUTION_FAILED.value
-        or not _is_digest(current.error_digest)
+        current.graph_id != graph_id
+        or current.node_id != node.node_id
+        or current.dependencies != node.dependencies
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    _validate_node_view_shape(current)
+
+
+def _validate_node_view_shape(current: TaskNodeView) -> None:
+    if current.fence < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if current.status in {TaskStatus.PENDING, TaskStatus.READY}:
+        if (
+            current.owner is not None
+            or current.lease_expires_at is not None
+            or current.execution_id is not None
+            or current.result_digest is not None
+            or current.error_code is not None
+            or current.error_digest is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if current.status is TaskStatus.RUNNING:
+        if (
+            not current.owner
+            or current.fence < 1
+            or current.lease_expires_at is None
+            or current.execution_id is not None
+            or current.result_digest is not None
+            or current.error_code is not None
+            or current.error_digest is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if current.status is TaskStatus.SUCCEEDED:
+        if (
+            current.owner is not None
+            or current.lease_expires_at is not None
+            or current.fence < 1
+            or not current.execution_id
+            or not _is_digest(current.result_digest)
+            or current.error_code is not None
+            or current.error_digest is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if current.status is TaskStatus.FAILED:
+        if (
+            current.owner is not None
+            or current.lease_expires_at is not None
+            or current.fence < 1
+            or current.execution_id is not None
+            or current.result_digest is not None
+            or not current.error_code
+            or not _is_digest(current.error_digest)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if current.status is TaskStatus.BLOCKED:
+        if (
+            current.owner is not None
+            or current.lease_expires_at is not None
+            or current.execution_id is not None
+            or current.result_digest is not None
+            or current.error_code != ErrorCode.TASK_DEPENDENCY_FAILED.value
+            or not _is_digest(current.error_digest)
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    if current.status is TaskStatus.CANCELLED:
+        if (
+            current.owner is not None
+            or current.lease_expires_at is not None
+            or current.execution_id is not None
+            or current.result_digest is not None
+            or current.error_code is not None
+            or current.error_digest is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 def _is_digest(value: "str | None") -> bool:
     return value is not None and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
 
-def _dependency_result(
-    result_digest: str,
-    execution_id: "str | None",
-) -> TaskDependencyResult:
-    try:
-        return TaskDependencyResult(result_digest, execution_id)
-    except (TypeError, ValueError) as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+def _lease_is_active(current: TaskNodeView) -> bool:
+    return (
+        current.lease_expires_at is not None
+        and current.lease_expires_at > datetime.now(timezone.utc)
+    )
 
 
-def _task_owner(request: TaskWorkflowInput, node_id: str) -> str:
+def _task_owner(
+    request: TaskWorkflowInput,
+    node_id: str,
+    workflow_run_id: str,
+) -> str:
     return "temporal-" + canonical_sha256(
         {
             "tenant_id": request.tenant_id,
             "graph_id": request.graph_id,
             "node_id": node_id,
+            "workflow_run_id": workflow_run_id,
         }
     )
 

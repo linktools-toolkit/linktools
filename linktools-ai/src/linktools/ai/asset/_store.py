@@ -97,7 +97,7 @@ class AssetStore:
         result = await self._storage.put(
             key,
             bytes(value),
-            expected_entry_revision=expected_revision,
+            expected_revision=expected_revision,
         )
         _logger.debug(
             "asset file put: kind=%s id=%s revision=%s changed=%s",
@@ -116,7 +116,7 @@ class AssetStore:
     ) -> "StorageDeleteResult[AssetKey]":
         """Delete one file with an optional current-revision check."""
         self._ensure_ready()
-        result = await self._storage.delete(key, expected_entry_revision=expected_revision)
+        result = await self._storage.delete(key, expected_revision=expected_revision)
         _logger.debug("asset file delete: kind=%s id=%s deleted=%s", key.kind, key.id, result.deleted)
         return result
 
@@ -128,7 +128,7 @@ class AssetStore:
     ) -> "StorageResetResult[AssetKey]":
         """Reset one file so a lower read layer becomes effective."""
         self._ensure_ready()
-        result = await self._storage.reset(key, expected_entry_revision=expected_revision)
+        result = await self._storage.reset(key, expected_revision=expected_revision)
         _logger.debug("asset file reset: kind=%s id=%s reset=%s", key.kind, key.id, result.reset)
         return result
 

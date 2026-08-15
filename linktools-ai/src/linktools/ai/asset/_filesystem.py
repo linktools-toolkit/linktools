@@ -144,25 +144,25 @@ class FilesystemAssetBackend:
         key: AssetKey,
         value: bytes,
         *,
-        expected_entry_revision: StorageEntryRevision | None = None,
+        expected_revision: StorageEntryRevision | None = None,
     ) -> StoragePutResult[AssetInfo]:
-        return await self._mutate(StorageOperation.PUT, key, bytes(value), expected_entry_revision=expected_entry_revision)
+        return await self._mutate(StorageOperation.PUT, key, bytes(value), expected_revision=expected_revision)
 
     async def delete(
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: StorageEntryRevision | None = None,
+        expected_revision: StorageEntryRevision | None = None,
     ) -> StorageDeleteResult[AssetKey]:
-        return await self._mutate(StorageOperation.DELETE, key, None, expected_entry_revision=expected_entry_revision)
+        return await self._mutate(StorageOperation.DELETE, key, None, expected_revision=expected_revision)
 
     async def reset(
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: StorageEntryRevision | None = None,
+        expected_revision: StorageEntryRevision | None = None,
     ) -> StorageResetResult[AssetKey]:
-        return await self._mutate(StorageOperation.RESET, key, None, expected_entry_revision=expected_entry_revision)
+        return await self._mutate(StorageOperation.RESET, key, None, expected_revision=expected_revision)
 
     async def apply_batch(
         self,
@@ -186,7 +186,7 @@ class FilesystemAssetBackend:
                 await self._put_content(value)
             previous = {change.key: self._entries.get(change.key) for change in changes}
             for change in changes:
-                _check_entry_revision(previous[change.key], change.expected_entry_revision)
+                _check_entry_revision(previous[change.key], change.expected_revision)
             mutates = tuple(_mutates(change.operation, previous[change.key], prepared.get(change.key, b"")) for change in changes)
             next_revision = self._revision + (1 if any(mutates) else 0)
             before = self._snapshot()
@@ -233,14 +233,14 @@ class FilesystemAssetBackend:
         key: AssetKey,
         value: bytes | None,
         *,
-        expected_entry_revision: StorageEntryRevision | None,
+        expected_revision: StorageEntryRevision | None,
     ) -> object:
         await self._ensure_ready()
         async with self._process_lock, FilesystemMutationLock(self._lock_path):
             await self._load_state()
             self._require_writable()
             current = self._entries.get(key)
-            _check_entry_revision(current, expected_entry_revision)
+            _check_entry_revision(current, expected_revision)
             content = value or b""
             if not _mutates(operation, current, content):
                 return _result(operation, key, current, StorageRevision(str(self._revision)), changed=False)

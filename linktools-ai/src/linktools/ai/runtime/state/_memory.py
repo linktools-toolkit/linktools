@@ -39,6 +39,11 @@ from ...core import (
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
+from ...storage import (
+    ObjectRef,
+)
+from ...task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from .._tool import ToolOperationRecord, ToolStateRepository
 from ._contracts import (
     ApprovalRecord,
     ArtifactRecord,
@@ -83,11 +88,6 @@ from ._contracts import (
     TaskNodeView,
     TaskState,
 )
-from .._tool import ToolOperationRecord, ToolStateRepository
-from ...storage import (
-    ObjectRef,
-)
-from ...task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
 from ._plan import RuntimeDomain
 from ._transaction import RuntimeTransactionCoordinator, TransactionHub
 
@@ -1013,15 +1013,50 @@ class _TaskRepository(_Base):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             nodes = {key[2]: value for key, value in self._nodes.items() if key[:2] == (tenant_id, graph_id)}
             if current.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-                for node_id, node in tuple(nodes.items()):
-                    if node.status in {TaskStatus.PENDING, TaskStatus.READY}:
-                        dependencies = tuple(nodes[dependency] for dependency in node.dependencies)
-                        if any(dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED} for dependency in dependencies):
-                            nodes[node_id] = replace(node, status=TaskStatus.BLOCKED, error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value, error_digest=canonical_sha256({"graph_id": graph_id, "node_id": node_id, "reason": "dependency_failed"}))
-                        elif node.status is TaskStatus.PENDING and all(dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies):
-                            nodes[node_id] = replace(node, status=TaskStatus.READY)
+                changed = True
+                while changed:
+                    changed = False
+                    for node_id in sorted(nodes):
+                        node = nodes[node_id]
+                        if node.status not in {TaskStatus.PENDING, TaskStatus.READY}:
+                            continue
+                        dependencies = tuple(
+                            nodes.get(dependency) for dependency in node.dependencies
+                        )
+                        if any(dependency is None for dependency in dependencies):
+                            raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
+                        if any(
+                            dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED}
+                            for dependency in dependencies
+                            if dependency is not None
+                        ):
+                            updated = replace(
+                                node,
+                                status=TaskStatus.BLOCKED,
+                                error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
+                                error_digest=canonical_sha256(
+                                    {
+                                        "graph_id": graph_id,
+                                        "node_id": node_id,
+                                        "reason": "dependency_failed",
+                                    }
+                                ),
+                            )
+                        elif node.status is TaskStatus.PENDING and all(
+                            dependency.status is TaskStatus.SUCCEEDED
+                            for dependency in dependencies
+                            if dependency is not None
+                        ):
+                            updated = replace(node, status=TaskStatus.READY)
+                        else:
+                            continue
+                        if updated != node:
+                            nodes[node_id] = updated
+                            changed = True
                 for node_id, node in nodes.items():
-                    self._nodes[(tenant_id, graph_id, node_id)] = node
+                    if self._nodes[(tenant_id, graph_id, node_id)] != node:
+                        self._nodes[(tenant_id, graph_id, node_id)] = node
+                        self._mark_changed()
                 statuses = tuple(node.status for node in nodes.values())
                 if not statuses:
                     status = TaskStatus.SUCCEEDED
@@ -1040,14 +1075,20 @@ class _TaskRepository(_Base):
                     status = TaskStatus.READY
                 else:
                     status = TaskStatus.PENDING
-                current = replace(current, status=status)
-                self._plans[(tenant_id, graph_id)] = current
-                self._mark_changed()
+                if current.status is not status:
+                    current = replace(current, status=status)
+                    self._plans[(tenant_id, graph_id)] = current
+                    self._mark_changed()
             else:
                 for key, node in tuple(self._nodes.items()):
                     if key[:2] == (tenant_id, graph_id) and node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
                         self._nodes[key] = replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None)
                         self._mark_changed()
+            _logger.debug(
+                "memory task graph reconciled: graph=%s status=%s",
+                graph_id,
+                current.status.value,
+            )
             return current
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:

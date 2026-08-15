@@ -105,12 +105,12 @@ class InMemoryAssetBackend:
         key: AssetKey,
         value: bytes,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StoragePutResult[AssetInfo]":
         async with self._lock:
             self._require_writable()
             previous = self._entries.get(key)
-            self._check_revision(previous, expected_entry_revision)
+            self._check_revision(previous, expected_revision)
             if previous is not None and previous[0].status is StorageEntryStatus.NORMAL and previous[0].etag == _etag(value):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
@@ -123,12 +123,12 @@ class InMemoryAssetBackend:
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageDeleteResult[AssetKey]":
         async with self._lock:
             self._require_writable()
             previous = self._entries.get(key)
-            self._check_revision(previous, expected_entry_revision)
+            self._check_revision(previous, expected_revision)
             if previous is None or previous[0].status is StorageEntryStatus.DELETED:
                 return StorageDeleteResult(key, False, None, self._store_revision())
             self._revision += 1
@@ -141,12 +141,12 @@ class InMemoryAssetBackend:
         self,
         key: AssetKey,
         *,
-        expected_entry_revision: "StorageEntryRevision | None" = None,
+        expected_revision: "StorageEntryRevision | None" = None,
     ) -> "StorageResetResult[AssetKey]":
         async with self._lock:
             self._require_writable()
             previous = self._entries.get(key)
-            self._check_revision(previous, expected_entry_revision)
+            self._check_revision(previous, expected_revision)
             if previous is None or previous[0].status is StorageEntryStatus.RESET:
                 return StorageResetResult(key, False, self._store_revision())
             self._revision += 1
@@ -169,7 +169,7 @@ class InMemoryAssetBackend:
                 raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
             previous = {change.key: self._entries.get(change.key) for change in changes}
             for change in changes:
-                self._check_revision(previous[change.key], change.expected_entry_revision)
+                self._check_revision(previous[change.key], change.expected_revision)
             mutates = any(_change_mutates(change, previous[change.key]) for change in changes)
             if mutates:
                 self._revision += 1

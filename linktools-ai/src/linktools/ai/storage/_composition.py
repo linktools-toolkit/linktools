@@ -576,10 +576,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         key: KeyT,
         value: ValueT,
         *,
-        expected_entry_revision: 'StorageEntryRevision | None' = None,
+        expected_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StoragePutResult[InfoT]':
         writer = self._require_writer()
-        result = await writer.put(key, value, expected_entry_revision=expected_entry_revision)
+        result = await writer.put(key, value, expected_revision=expected_revision)
         self._validate_value(key, value, result.info)
         self._after_put(key, result.info, result.store_revision)
         if result.changed:
@@ -590,10 +590,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self,
         key: KeyT,
         *,
-        expected_entry_revision: 'StorageEntryRevision | None' = None,
+        expected_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StorageDeleteResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.delete(key, expected_entry_revision=expected_entry_revision)
+        result = await writer.delete(key, expected_revision=expected_revision)
         self._preloaded.pop(key, None)
         if result.deleted:
             self._invalidate_writer_view()
@@ -604,10 +604,10 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self,
         key: KeyT,
         *,
-        expected_entry_revision: 'StorageEntryRevision | None' = None,
+        expected_revision: 'StorageEntryRevision | None' = None,
     ) -> 'StorageResetResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.reset(key, expected_entry_revision=expected_entry_revision)
+        result = await writer.reset(key, expected_revision=expected_revision)
         self._preloaded.pop(key, None)
         if result.reset:
             self._invalidate_writer_view()
@@ -661,17 +661,17 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     item = await self.put(
                         change.key,
                         value,
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
                 elif change.operation is StorageOperation.DELETE:
                     item = await self.delete(
                         change.key,
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
                 else:
                     item = await self.reset(
                         change.key,
-                        expected_entry_revision=change.expected_entry_revision,
+                        expected_revision=change.expected_revision,
                     )
             except Exception as exc:
                 failure_revision = revision if revision is not None else await self.current_revision()

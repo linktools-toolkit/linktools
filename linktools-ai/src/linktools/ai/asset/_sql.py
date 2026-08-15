@@ -240,14 +240,14 @@ class SqlAssetBackend:
         row = await self._current_row(key)
         return None if row is None else self._info_from_row(row)
 
-    async def put(self, key: AssetKey, value: bytes, *, expected_entry_revision: StorageEntryRevision | None = None) -> StoragePutResult[AssetInfo]:
-        return await self._mutate("put", key, value, expected_entry_revision=expected_entry_revision)
+    async def put(self, key: AssetKey, value: bytes, *, expected_revision: StorageEntryRevision | None = None) -> StoragePutResult[AssetInfo]:
+        return await self._mutate("put", key, value, expected_revision=expected_revision)
 
-    async def delete(self, key: AssetKey, *, expected_entry_revision: StorageEntryRevision | None = None) -> StorageDeleteResult[AssetKey]:
-        return await self._mutate("delete", key, None, expected_entry_revision=expected_entry_revision)
+    async def delete(self, key: AssetKey, *, expected_revision: StorageEntryRevision | None = None) -> StorageDeleteResult[AssetKey]:
+        return await self._mutate("delete", key, None, expected_revision=expected_revision)
 
-    async def reset(self, key: AssetKey, *, expected_entry_revision: StorageEntryRevision | None = None) -> StorageResetResult[AssetKey]:
-        return await self._mutate("reset", key, None, expected_entry_revision=expected_entry_revision)
+    async def reset(self, key: AssetKey, *, expected_revision: StorageEntryRevision | None = None) -> StorageResetResult[AssetKey]:
+        return await self._mutate("reset", key, None, expected_revision=expected_revision)
 
     async def apply_batch(self, changes: Sequence[StorageChange[AssetKey, bytes]], *, expected_revision: StorageRevision | None = None) -> StorageBatchResult[AssetInfo, AssetKey]:
         await self._ensure_ready()
@@ -282,7 +282,7 @@ class SqlAssetBackend:
     async def get_at_version(self, key: AssetKey, version: int) -> bytes | None:
         return await self.get_at_revision(key, StorageEntryRevision(version))
 
-    async def _mutate(self, operation: str, key: AssetKey, value: bytes | None, *, expected_entry_revision: StorageEntryRevision | None) -> object:
+    async def _mutate(self, operation: str, key: AssetKey, value: bytes | None, *, expected_revision: StorageEntryRevision | None) -> object:
         await self._ensure_ready()
         if operation == "put" and value is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -302,7 +302,7 @@ class SqlAssetBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 current_row = (await connection.execute(select(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash == _asset_key_hash(key)).with_for_update())).mappings().first()
                 current = None if current_row is None else self._info_from_row(current_row)
-                _check_entry_revision(current, expected_entry_revision)
+                _check_entry_revision(current, expected_revision)
                 if not _operation_mutates(operation, current, _etag(content)):
                     return _mutation_result(operation, key, current, StorageRevision(str(int(revision_row[0]))), changed=False)
                 store_revision = StorageRevision(str(int(revision_row[0]) + 1))
@@ -348,7 +348,7 @@ class SqlAssetBackend:
             rows = (await connection.execute(select(entry_table).where(entry_table.c.namespace_key == self._namespace_key, entry_table.c.asset_key_hash.in_([_asset_key_hash(change.key) for change in changes])))).mappings().all()
             current = {AssetKey(str(row["asset_kind"]), str(row["asset_id"])): self._info_from_row(row) for row in rows}
             for change in changes:
-                _check_entry_revision(current.get(change.key), change.expected_entry_revision)
+                _check_entry_revision(current.get(change.key), change.expected_revision)
             mutates = tuple(_operation_mutates(change.operation.name.lower(), current.get(change.key), _etag(prepared.get(change.key, b""))) for change in changes)
             if not any(mutates):
                 return StorageBatchResult(current_revision, True, tuple(_mutation_result(change.operation.name.lower(), change.key, current.get(change.key), current_revision, changed=False) for change in changes))
