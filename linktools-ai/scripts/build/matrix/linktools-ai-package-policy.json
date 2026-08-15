@@ -131,7 +131,8 @@
     ],
     "runtime._runtime_service": [
       "core",
-      "agent"
+      "agent",
+      "task"
     ],
     "runtime._local": [
       "agent",

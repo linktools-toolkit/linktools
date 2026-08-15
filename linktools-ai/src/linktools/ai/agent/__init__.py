@@ -2,14 +2,15 @@
 # -*- coding: utf-8 -*-
 """Agent definition compilation and execution."""
 
+from ._builder import build_pydantic_agent
 from ._capabilities import (
     MEMORY_TOOL_NAMES,
     PLANNING_TOOL_NAMES,
     SKILL_TOOL_NAMES,
     SUBAGENT_TOOL_NAMES,
-    SubagentDelegate,
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
+    SubagentDelegate,
     select_platform_tool_names,
     tool_name_allowed,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "ASSISTANT_TEXT_OUTPUT_SCHEMA_ID",
     "ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION",
     "AgentCompiler",
+    "build_pydantic_agent",
     "AgentDefinition",
     "AgentExecutionResult",
     "AgentExecutor",

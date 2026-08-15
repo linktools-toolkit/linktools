@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from ...core import (
     ApprovalDecision,
@@ -30,11 +30,19 @@ from ...core import (
     ResourceRef,
     SessionStatus,
     StopReason,
-    ToolOperationStatus,
 )
 from ...storage import ObjectRef
-from ...task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
+from ...task import (
+    TaskGraph,
+    TaskGraphView,
+    TaskLease,
+    TaskNodeView,
+    TaskTerminalRecord,
+)
 from ._plan import RuntimeDomain
+
+if TYPE_CHECKING:
+    from .._tool import ToolStateRepository
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,13 +364,12 @@ class RecoveryHandoffPhase(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class RecoveryExecutionInput:
-    prompt: str
+    user_prompt: str
     principal_id: str
     principal_kind: str
     session_id: "str | None"
     memory_scope: "str | None"
     agent_id: str
-    prompt_id: str
     binding_digest: str
     lineage_kind: str
     parent_execution_id: "str | None"

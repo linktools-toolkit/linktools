@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from ..capability import CapabilityBinding, validate_fingerprint
 from ..errors import AIError, ErrorCode
 from ..model import ModelBinding
-from ..spec import AgentSpec, PromptSpec
+from ..spec import AgentSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +18,6 @@ class AgentDefinition:
 
     digest: str
     spec: AgentSpec
-    prompt: PromptSpec
     model: ModelBinding
     output_type: "type[BaseModel]"
     output_schema_fingerprint: str

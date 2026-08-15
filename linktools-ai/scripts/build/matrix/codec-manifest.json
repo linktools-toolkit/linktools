@@ -1,5 +1,5 @@
 {
-  "digest": "956dc059a3070fa3d4809321ce83321b2eab466755e98a2a9906bb207edc0f38",
+  "digest": "e716ad27ee500fd4a2c497745105aaf703fcd1f8afdc3fa294a7c773d00ede80",
   "entries": [
     {
       "kind": "agent",
@@ -11,12 +11,6 @@
       "kind": "mcp",
       "value_type": "linktools.ai.spec._contract.MCPServerSpec",
       "fingerprint": "mcp-server-spec",
-      "codec_version": 1
-    },
-    {
-      "kind": "prompt",
-      "value_type": "linktools.ai.spec._contract.PromptSpec",
-      "fingerprint": "prompt-spec",
       "codec_version": 1
     },
     {

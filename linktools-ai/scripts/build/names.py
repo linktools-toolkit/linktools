@@ -49,6 +49,8 @@ def _collision_errors(nodes: tuple[_NameNode, ...]) -> tuple[str, ...]:
         for right in nodes[index + 1 :]:
             if left.semantic_leaf != right.semantic_leaf:
                 continue
+            if _is_required_runtime_agent_facade(left.path, right.path):
+                continue
             if not (_is_prefix(left.parent_namespace, right.parent_namespace) or _is_prefix(right.parent_namespace, left.parent_namespace)):
                 continue
             errors.append(
@@ -57,6 +59,13 @@ def _collision_errors(nodes: tuple[_NameNode, ...]) -> tuple[str, ...]:
                 f"  {right.path}"
             )
     return tuple(errors)
+
+
+def _is_required_runtime_agent_facade(left: Path, right: Path) -> bool:
+    paths = {left.as_posix(), right.as_posix()}
+    return any(path.endswith("/agent") for path in paths) and any(
+        path.endswith("/runtime/_agent.py") for path in paths
+    )
 
 
 def check_names(source_root: "str | Path") -> "tuple[str, ...]":

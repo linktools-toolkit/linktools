@@ -102,7 +102,39 @@ def build_runtime_sql_metadata(plan: "RuntimeStatePlan | frozenset[RuntimeDomain
     if "runtime_task_graphs" in tables:
         table("runtime_task_graphs", {**common, "graph_id": sql_text_key(), "status": sql_text_key(64), "revision": sql_integer_id()}, ("namespace_key", "tenant_id", "graph_id"))
     if "runtime_task_nodes" in tables:
-        table("runtime_task_nodes", {**common, "graph_id": sql_text_key(), "node_id": sql_text_key(), "dependencies_json": JSON(), "status": sql_text_key(64), "revision": sql_integer_id(), "owner": sql_text_key(), "fence": sql_integer_id(), "lease_expires_at": DateTime(timezone=True), "execution_id": sql_text_key(), "result_digest": sql_digest(), "error_code": sql_text_key(128), "error_digest": sql_digest()}, ("namespace_key", "tenant_id", "graph_id", "node_id"), nullable=frozenset({"owner", "lease_expires_at", "execution_id", "result_digest", "error_code", "error_digest"}))
+        table(
+            "runtime_task_nodes",
+            {
+                **common,
+                "graph_id": sql_text_key(),
+                "node_id": sql_text_key(),
+                "dependencies_json": JSON(),
+                "input_json": JSON(),
+                "budget_cost": sql_integer_id(),
+                "status": sql_text_key(64),
+                "revision": sql_integer_id(),
+                "owner": sql_text_key(),
+                "fence": sql_integer_id(),
+                "lease_expires_at": DateTime(timezone=True),
+                "execution_id": sql_text_key(),
+                "result_digest": sql_digest(),
+                "error_code": sql_text_key(128),
+                "error_digest": sql_digest(),
+            },
+            ("namespace_key", "tenant_id", "graph_id", "node_id"),
+            nullable=frozenset(
+                {
+                    "input_json",
+                    "budget_cost",
+                    "owner",
+                    "lease_expires_at",
+                    "execution_id",
+                    "result_digest",
+                    "error_code",
+                    "error_digest",
+                }
+            ),
+        )
     if "runtime_evaluations" in tables:
         table("runtime_evaluations", {**common, "evaluation_id": sql_text_key(), "execution_id": sql_text_key(), "dataset_id": sql_text_key(), "dataset_revision": sql_integer_id(), "evaluator_id": sql_text_key(), "evaluator_revision": sql_integer_id(), "binding_digest": sql_digest(), "output_schema_fingerprint": sql_digest(), "artifact_digest": sql_digest(), "status": sql_text_key(64), "revision": sql_integer_id(), "metrics_json": JSON()}, ("namespace_key", "tenant_id", "evaluation_id"), nullable=frozenset({"artifact_digest"}))
     if "runtime_memories" in tables:

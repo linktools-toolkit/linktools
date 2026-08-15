@@ -46,7 +46,12 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
         operation_ids=iter(("execution-a", "execution-b")).__next__,
         history_reader=_History(),
     )
-    request = ExecutionRequest(prompt="hello", principal=Principal("owner", "tenant"), idempotency_key="same", memory_scope="test")
+    request = ExecutionRequest(
+        user_prompt="hello",
+        principal=Principal("owner", "tenant"),
+        idempotency_key="same",
+        memory_scope="test",
+    )
     first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
     assert first.execution_id == second.execution_id
     assert launcher.calls == 1

@@ -1,5 +1,5 @@
 {
-  "registration_order": ["AgentSpec", "PromptSpec", "SkillSpec", "MCPServerSpec"],
+  "registration_order": ["AgentSpec", "SkillSpec", "MCPServerSpec"],
   "capabilities": ["mcp", "skill", "retrieval"],
   "production_rules": [
     "resolver registry is immutable after composition",

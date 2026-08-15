@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Workspace-owned subagent dispatch and cancellation coordination."""
+"""Runtime-owned one-level subagent dispatch and cancellation."""
 
 import asyncio
 
@@ -10,14 +10,10 @@ from pydantic_ai.exceptions import ModelRetry
 from ..agent import AgentCompiler, AgentDefinition, SubagentDelegate
 from ..core import ExecutionStatus, JsonValue, Principal, canonical_sha256
 from ..errors import AIError, ErrorCode
-from ..runtime import DefaultExecutionService
-from ..runtime.service_api import (
-    CancelExecutionRequest,
-    ExecutionRequest,
-    ExecutionResult,
-)
+from ._execution import DefaultExecutionService
+from .service_api import CancelExecutionRequest, ExecutionRequest, ExecutionResult
 
-_logger = environ.get_logger("ai.workspace.subagent")
+_logger = environ.get_logger("ai.runtime.subagent")
 
 
 class SubagentDispatcher:
@@ -26,7 +22,7 @@ class SubagentDispatcher:
     def __init__(
         self,
         compiler: AgentCompiler,
-        definitions: "dict[str, AgentDefinition]",
+        definitions: dict[str, AgentDefinition],
         execution: DefaultExecutionService,
     ) -> None:
         self._compiler = compiler
@@ -41,16 +37,14 @@ class SubagentDispatcher:
         memory_scope: "str | None",
         principal: Principal,
     ) -> SubagentDelegate:
-        async def dispatch(*, tool_call_id: str, agent_id: str, prompt_id: str, task: str) -> "dict[str, JsonValue]":
+        async def dispatch(agent_id: str, user_prompt: str) -> JsonValue:
             return await self.dispatch(
                 parent_execution_id=parent_execution_id,
                 root_execution_id=root_execution_id,
                 memory_scope=memory_scope,
                 principal=principal,
-                tool_call_id=tool_call_id,
                 agent_id=agent_id,
-                prompt_id=prompt_id,
-                task=task,
+                user_prompt=user_prompt,
             )
 
         return dispatch
@@ -62,23 +56,26 @@ class SubagentDispatcher:
         root_execution_id: str,
         memory_scope: "str | None",
         principal: Principal,
-        tool_call_id: str,
         agent_id: str,
-        prompt_id: str,
-        task: str,
+        user_prompt: str,
     ) -> "dict[str, JsonValue]":
         try:
-            definition = await self._compiler.compile_subagent(agent_id=agent_id, prompt_id=prompt_id)
+            definition = await self._compiler.compile_subagent(agent_id=agent_id)
         except AIError as error:
             if error.code is ErrorCode.AGENT_NOT_FOUND:
-                raise ModelRetry("requested subagent agent or prompt is unavailable") from error
+                raise ModelRetry("requested subagent Agent is unavailable") from error
             raise
         self._definitions[definition.digest] = definition
         idempotency_key = "subagent:" + canonical_sha256(
-            {"version": 1, "parent_execution_id": parent_execution_id, "tool_call_id": tool_call_id}
+            {
+                "version": 2,
+                "parent_execution_id": parent_execution_id,
+                "agent_id": agent_id,
+                "user_prompt": user_prompt,
+            }
         )
         request = ExecutionRequest(
-            prompt=task,
+            user_prompt=user_prompt,
             principal=principal,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
@@ -93,32 +90,34 @@ class SubagentDispatcher:
             result = await self._execution.wait(child.execution_id, principal=principal)
         except BaseException as primary:
             cleanup = asyncio.create_task(
-                self.cancel_child(child.execution_id, parent_execution_id=parent_execution_id, principal=principal),
+                self.cancel_child(
+                    child.execution_id,
+                    parent_execution_id=parent_execution_id,
+                    principal=principal,
+                ),
                 name=f"ai-subagent-cleanup-{child.execution_id}",
             )
             try:
                 await asyncio.shield(cleanup)
             except asyncio.CancelledError:
                 try:
-                    await asyncio.shield(cleanup)
+                    await cleanup
                 except BaseException:
                     _logger.error(
                         "subagent child cleanup failed after cancellation: execution=%s",
                         child.execution_id,
                         exc_info=True,
                     )
-                    recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                    raise recovery from primary
+                    raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
                 raise primary
             except BaseException:
                 _logger.error(
-                    "subagent child terminal confirmation failed: execution=%s",
+                    "subagent child cleanup failed: execution=%s",
                     child.execution_id,
                     exc_info=True,
                 )
-                recovery = AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                raise recovery from primary
-            raise
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from primary
+            raise primary
         return _subagent_result(result)
 
     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None:
@@ -130,9 +129,19 @@ class SubagentDispatcher:
                 ExecutionStatus.CANCELLED,
             }:
                 continue
-            await self.cancel_child(child.execution_id, parent_execution_id=parent_execution_id, principal=principal)
+            await self.cancel_child(
+                child.execution_id,
+                parent_execution_id=parent_execution_id,
+                principal=principal,
+            )
 
-    async def cancel_child(self, execution_id: str, *, parent_execution_id: str, principal: Principal) -> None:
+    async def cancel_child(
+        self,
+        execution_id: str,
+        *,
+        parent_execution_id: str,
+        principal: Principal,
+    ) -> None:
         current = await self._execution.inspect(execution_id, principal=principal)
         if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             return

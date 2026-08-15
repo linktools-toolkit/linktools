@@ -37,7 +37,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
         TaskActivity(operation),
         EvaluationActivity(operation),
     )
-    registration = production_registration(activities)
+    registration = production_registration(activities, build_id="test-build")
     assert len(registration.activities) == 4
     assert len(registration.workflows) == 4
 

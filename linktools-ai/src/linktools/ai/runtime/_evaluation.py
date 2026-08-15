@@ -5,8 +5,8 @@
 import asyncio
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import datetime, timezone
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Protocol
 
 from linktools.core import environ
@@ -24,8 +24,6 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
-from .state._contracts import EvaluationRecord, EvaluationState, ExecutionRepository, IdempotencyRecord
-from .state._plan import RuntimeDomain
 from .service_api import (
     CompareEvaluationRequest,
     EvaluationComparison,
@@ -37,6 +35,13 @@ from .service_api import (
     ReplayEvaluationRequest,
     RunEvaluationRequest,
 )
+from .state._contracts import (
+    EvaluationRecord,
+    EvaluationState,
+    ExecutionRepository,
+    IdempotencyRecord,
+)
+from .state._plan import RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.evaluation")
 
@@ -160,7 +165,7 @@ class DefaultEvaluationService:
                 execution = await self._execution.run(
                     binding_digest,
                     ExecutionRequest(
-                        prompt=f"evaluation:{request.dataset_digest}",
+                        user_prompt=f"evaluation:{request.dataset_digest}",
                         principal=request.principal,
                         idempotency_key=f"evaluation:{request.idempotency_key}",
                         memory_scope=request.memory_scope,
@@ -258,7 +263,7 @@ class DefaultEvaluationService:
             handle = await self._execution.run(
                 binding_digest,
                 ExecutionRequest(
-                    prompt=f"replay:{record.evaluation_id}",
+                    user_prompt=f"replay:{record.evaluation_id}",
                     principal=request.principal,
                     idempotency_key=request.idempotency_key,
                     memory_scope=request.memory_scope,

@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Temporal activity adapters with stable registered names."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, cast
 
 from linktools.core import environ
 
+from ..task import TaskDependencyResult, TaskLease
 from .workflow import (
     EvaluationWorkflowInput,
     EvaluationWorkflowResult,
@@ -16,7 +18,6 @@ from .workflow import (
     SessionWorkflowInput,
     SessionWorkflowResult,
     TaskWorkflowInput,
-    TaskWorkflowResult,
 )
 
 try:
@@ -44,7 +45,6 @@ class ExecutionStageOperation(Protocol):
     async def load_input(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
     async def fix_bundle_route(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
     async def fix_binding(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
-    async def load_prompt(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
     async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
     async def run_agent(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
     async def process_deferred(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState: ...
@@ -72,9 +72,6 @@ class ExecuteActivity:
 
     async def fix_binding(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).fix_binding(state)
-
-    async def load_prompt(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
-        return await cast(ExecutionStageOperation, self._operation).load_prompt(state)
 
     async def reserve_budget(self, state: ExecutionWorkflowState) -> ExecutionWorkflowState:
         return await cast(ExecutionStageOperation, self._operation).reserve_budget(state)
@@ -123,18 +120,60 @@ class SessionActivity:
 
 
 class TaskOperation(Protocol):
-    async def execute(self, request: TaskWorkflowInput) -> TaskWorkflowResult: ...
+    async def prepare(
+        self,
+        request: TaskWorkflowInput,
+        node_id: str,
+        dependency_results: Mapping[str, TaskDependencyResult],
+    ) -> tuple[TaskLease, ExecutionWorkflowInput]: ...
+
+    async def renew(self, lease: TaskLease) -> TaskLease: ...
+
+    async def settle(
+        self,
+        request: TaskWorkflowInput,
+        lease: TaskLease,
+        result: ExecutionWorkflowResult,
+    ) -> TaskDependencyResult | None: ...
 
 
 class TaskActivity:
-    options = ActivityOptions(start_to_close_seconds=900, retry_max_attempts=3, heartbeat_timeout_seconds=30)
-
     def __init__(self, operation: TaskOperation) -> None:
         self._operation = operation
 
-    async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
-        _logger.debug("executing task activity: graph_id=%s", request.graph_id)
-        return await self._operation.execute(request)
+    options = ActivityOptions(start_to_close_seconds=60, retry_max_attempts=3, heartbeat_timeout_seconds=15)
+
+    async def prepare(
+        self,
+        request: TaskWorkflowInput,
+        node_id: str,
+        dependency_results: Mapping[str, TaskDependencyResult],
+    ) -> tuple[TaskLease, ExecutionWorkflowInput]:
+        _logger.debug("preparing task node: graph_id=%s node=%s", request.graph_id, node_id)
+        return await self._operation.prepare(request, node_id, dependency_results)
+
+    async def renew(self, lease: TaskLease) -> TaskLease:
+        _logger.debug(
+            "renewing task node lease: graph_id=%s node=%s fence=%s",
+            lease.graph_id,
+            lease.node_id,
+            lease.fence,
+        )
+        return await self._operation.renew(lease)
+
+    async def settle(
+        self,
+        request: TaskWorkflowInput,
+        lease: TaskLease,
+        result: ExecutionWorkflowResult,
+    ) -> TaskDependencyResult | None:
+        _logger.debug(
+            "settling task node: graph_id=%s node=%s status=%s",
+            request.graph_id,
+            lease.node_id,
+            result.status,
+        )
+        return await self._operation.settle(request, lease, result)
 
 
 if _temporal_activity is not None:
@@ -142,7 +181,6 @@ if _temporal_activity is not None:
     ExecuteActivity.load_input = _temporal_activity.defn(name="load_input")(ExecuteActivity.load_input)
     ExecuteActivity.fix_bundle_route = _temporal_activity.defn(name="fix_bundle_route")(ExecuteActivity.fix_bundle_route)
     ExecuteActivity.fix_binding = _temporal_activity.defn(name="fix_binding")(ExecuteActivity.fix_binding)
-    ExecuteActivity.load_prompt = _temporal_activity.defn(name="load_prompt")(ExecuteActivity.load_prompt)
     ExecuteActivity.reserve_budget = _temporal_activity.defn(name="reserve_budget")(ExecuteActivity.reserve_budget)
     ExecuteActivity.run_agent = _temporal_activity.defn(name="run_agent")(ExecuteActivity.run_agent)
     ExecuteActivity.process_deferred = _temporal_activity.defn(name="process_deferred")(ExecuteActivity.process_deferred)
@@ -150,7 +188,9 @@ if _temporal_activity is not None:
     ExecuteActivity.settle_budget = _temporal_activity.defn(name="settle_budget")(ExecuteActivity.settle_budget)
     EvaluationActivity.run = _temporal_activity.defn(name="evaluation")(EvaluationActivity.run)
     SessionActivity.run = _temporal_activity.defn(name="session_mutation")(SessionActivity.run)
-    TaskActivity.run = _temporal_activity.defn(name="task_graph")(TaskActivity.run)
+    TaskActivity.prepare = _temporal_activity.defn(name="task_node_prepare")(TaskActivity.prepare)
+    TaskActivity.renew = _temporal_activity.defn(name="task_node_renew")(TaskActivity.renew)
+    TaskActivity.settle = _temporal_activity.defn(name="task_node_settle")(TaskActivity.settle)
 
 
 __all__ = [

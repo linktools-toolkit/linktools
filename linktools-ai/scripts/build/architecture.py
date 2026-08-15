@@ -220,7 +220,7 @@ def build_report(source_root: "str | Path") -> "dict[str, JsonValue]":
         "scc": [list(component) for component in _scc(runtime)],
         "dependency_scc": [
             list(component)
-            for component in _scc({key: runtime[key] | type_checking[key] for key in modules})
+            for component in _scc(runtime)
         ],
         "package_scc": [list(component) for component in _scc(package_runtime)],
         "dynamic_imports": sorted(dynamic_imports),

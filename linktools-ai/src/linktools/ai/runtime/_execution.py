@@ -8,8 +8,8 @@ import re
 import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import StrEnum
 from functools import wraps
 from typing import Protocol
@@ -37,23 +37,6 @@ from ..core import (
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, read_object
-from .state._contracts import (
-    ExecutionCancelRequestCommit,
-    ExecutionRecord,
-    ExecutionStartClaim,
-    ExecutionStartReservation,
-    ExecutionStartUnknownCommit,
-    ExecutionTerminalCommit,
-    IdempotencyRecord,
-    IdempotencyTerminalUpdate,
-    OperationLedgerInput,
-    OperationLedgerRecord,
-    OperationTerminalUpdate,
-    ResultRecord,
-    ExecutionState,
-    SessionRepository,
-)
-from .state._plan import RuntimeDomain
 from .service_api import (
     CancelExecutionRequest,
     CancelExecutionResult,
@@ -68,6 +51,23 @@ from .service_api import (
     RetryExecutionRequest,
     TranscriptItem,
 )
+from .state._contracts import (
+    ExecutionCancelRequestCommit,
+    ExecutionRecord,
+    ExecutionStartClaim,
+    ExecutionStartReservation,
+    ExecutionStartUnknownCommit,
+    ExecutionState,
+    ExecutionTerminalCommit,
+    IdempotencyRecord,
+    IdempotencyTerminalUpdate,
+    OperationLedgerInput,
+    OperationLedgerRecord,
+    OperationTerminalUpdate,
+    ResultRecord,
+    SessionRepository,
+)
+from .state._plan import RuntimeDomain
 
 _logger = environ.get_logger("ai.runtime.execution")
 
@@ -527,7 +527,7 @@ class DefaultExecutionService:
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         retry_request = ExecutionRequest(
-            prompt=request.prompt,
+            user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
@@ -539,7 +539,7 @@ class DefaultExecutionService:
         if previous.binding_digest != binding_digest:
             raise AIError(ErrorCode.RUNTIME_SERVICE_MISMATCH)
         fork_request = ExecutionRequest(
-            prompt=request.prompt,
+            user_prompt=request.user_prompt,
             principal=request.principal,
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
@@ -826,7 +826,7 @@ def _request_digest(
 ) -> str:
     return canonical_sha256(
         {
-            "prompt": request.prompt,
+            "user_prompt": request.user_prompt,
             "binding_digest": binding_digest,
             "scope": session_id or "execution",
             "principal": principal_identity_payload(request.principal),

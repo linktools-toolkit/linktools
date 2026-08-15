@@ -6,7 +6,7 @@
 from dataclasses import dataclass
 
 from linktools.ai.core import canonical_sha256
-from linktools.ai.spec import AgentSpec, PromptSpec
+from linktools.ai.spec import AgentSpec
 
 from .agent_bundle import AgentBundle, build_bundle
 
@@ -66,7 +66,6 @@ class AgentBundleCompiler:
         *,
         capability_modes: 'dict[str, str] | None' = None,
         model_name: 'str | None' = None,
-        prompt: 'PromptSpec | None' = None,
         codec_manifest_digest: str = "",
         output_schema_fingerprint: str = "",
     ) -> BundleCompilation:
@@ -91,10 +90,8 @@ class AgentBundleCompiler:
                     canonical_sha256(capability),
                 )
             )
-        selected_prompt = prompt or PromptSpec("bundle", 1, "", ())
         bundle = build_bundle(
             spec,
-            selected_prompt,
             CapabilityAssemblyPlan(tuple(entries)).digest,
             codec_manifest_digest=codec_manifest_digest,
             output_schema_fingerprint=output_schema_fingerprint,
@@ -117,11 +114,15 @@ def _bundle_source(bundle: AgentBundle, model_name: str) -> str:
         f"OUTPUT_SCHEMA_ID = {bundle.output_schema_id!r}\n"
         f"OUTPUT_SCHEMA_REVISION = {bundle.output_schema_revision!r}\n"
         f"OUTPUT_SCHEMA_FINGERPRINT = {bundle.output_schema_fingerprint!r}\n"
+        f"SYSTEM_PROMPT = {bundle.system_prompt!r}\n"
         f"CODEC_MANIFEST_DIGEST = {bundle.codec_manifest_digest!r}\n"
         f"HARNESS_VERSION = {bundle.harness_version!r}\n"
         f"PYDANTIC_AI_VERSION = {bundle.pydantic_ai_version!r}\n"
         f"INSTRUCTIONS = {bundle.instructions!r}\n"
-        "AGENT = Agent(MODEL_ROUTE, name=AGENT_ID, instructions=INSTRUCTIONS, output_type=str, defer_model_check=True)\n"
+        "AGENT = Agent(\n"
+        "    MODEL_ROUTE, name=AGENT_ID, system_prompt=SYSTEM_PROMPT,\n"
+        "    instructions=INSTRUCTIONS, output_type=str, defer_model_check=True,\n"
+        ")\n"
     )
 
 

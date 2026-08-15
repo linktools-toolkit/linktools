@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Immutable declaration contracts for Agents, Prompts, and capabilities."""
+"""Immutable declaration contracts for Agents and capabilities."""
 
 import json
 import math
@@ -90,6 +90,7 @@ class AgentSpec:
     capabilities: "tuple[AgentCapabilityRef, ...]"
     output_schema: str
     output_schema_revision: int
+    system_prompt: str = ""
     instructions: "tuple[str, ...]" = ()
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
@@ -98,10 +99,15 @@ class AgentSpec:
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
             raise ValueError("agent spec is incomplete")
+        if not isinstance(self.system_prompt, str):
+            raise ValueError("agent system prompt must be a string")
+        instructions = tuple(self.instructions)
+        if any(not isinstance(item, str) for item in instructions):
+            raise ValueError("agent instructions must be strings")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "allow_tools", canonical_string_tuple(self.allow_tools, field="allow_tools"))
         object.__setattr__(self, "allow_skills", canonical_string_tuple(self.allow_skills, field="allow_skills"))
-        object.__setattr__(self, "instructions", tuple(self.instructions))
+        object.__setattr__(self, "instructions", instructions)
         object.__setattr__(self, "metadata", _ImmutableJsonMapping(self.metadata))
         unique: dict[tuple[str, str], AgentCapabilityRef] = {}
         for capability in self.capabilities:
@@ -112,19 +118,6 @@ class AgentSpec:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             unique[key] = capability
         object.__setattr__(self, "capabilities", tuple(unique.values()))
-
-
-@dataclass(frozen=True, slots=True)
-class PromptSpec:
-    id: str
-    revision: int
-    system: str
-    instructions: "tuple[str, ...]"
-
-    def __post_init__(self) -> None:
-        if not self.id.strip() or self.revision < 1:
-            raise ValueError("prompt spec is incomplete")
-        object.__setattr__(self, "instructions", tuple(self.instructions))
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,4 +144,4 @@ class MCPServerSpec:
         object.__setattr__(self, "args", tuple(self.args))
 
 
-__all__ = ["AgentCapabilityRef", "AgentSpec", "MCPServerSpec", "PromptSpec", "SkillSpec"]
+__all__ = ["AgentCapabilityRef", "AgentSpec", "MCPServerSpec", "SkillSpec"]

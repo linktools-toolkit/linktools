@@ -545,8 +545,21 @@ def _graph_digest(request: TaskGraphRequest) -> str:
         {
             "principal": principal_identity_payload(request.principal),
             "graph_id": request.graph.graph_id,
-            "nodes": [{"node_id": node.node_id, "dependencies": sorted(node.dependencies), "binding_digest": node.binding_digest, "budget_cost": node.budget_cost} for node in sorted(request.graph.nodes, key=lambda item: item.node_id)],
-            "limits": {"max_nodes": request.limits.max_nodes, "max_depth": request.limits.max_depth, "max_budget": request.limits.max_budget, "max_concurrency": request.limits.max_concurrency},
+            "nodes": [
+                {
+                    "node_id": node.node_id,
+                    "dependencies": sorted(node.dependencies),
+                    "input": node.input,
+                    "budget_cost": node.budget_cost,
+                }
+                for node in sorted(request.graph.nodes, key=lambda item: item.node_id)
+            ],
+            "limits": {
+                "max_nodes": request.limits.max_nodes,
+                "max_depth": request.limits.max_depth,
+                "max_budget": request.limits.max_budget,
+                "max_concurrency": request.limits.max_concurrency,
+            },
         }
     )
 

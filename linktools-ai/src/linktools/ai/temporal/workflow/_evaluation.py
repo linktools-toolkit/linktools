@@ -27,8 +27,12 @@ class EvaluationWorkflowInput:
     dataset_digest: str
     target_revision: int
     case_ids: "tuple[str, ...]"
+    worker_build: str
     binding_digest: str = ""
-    worker_build: str = "linktools-ai"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.worker_build, str) or not self.worker_build.strip():
+            raise ValueError("evaluation workflow worker build is required")
 
 
 @dataclass(frozen=True, slots=True)

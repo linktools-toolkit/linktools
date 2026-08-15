@@ -17,10 +17,10 @@ from ..capability import (
     unresolved_binding,
     validate_fingerprint,
 )
-from ..core import canonical_sha256, validate_capability_provider
+from ..core import canonical_sha256, validate_agent_id, validate_capability_provider
 from ..errors import AIError, ErrorCode
 from ..model import ModelResolver
-from ..spec import AgentCapabilityRef, AgentSpec, PromptSpec
+from ..spec import AgentCapabilityRef, AgentSpec
 from ._definition import AgentDefinition
 from ._output import OutputTypeRegistry
 
@@ -58,33 +58,26 @@ class AgentCompiler:
         self._grants = grants
         self._execution_profile_fingerprint = execution_profile_fingerprint
 
-    async def compile(self, *, agent_id: str, prompt_id: str) -> AgentDefinition:
-        return await self._compile(agent_id=agent_id, prompt_id=prompt_id, direct_grants=self._grants, missing_definition_asset_code=None)
+    async def compile(self, *, agent_id: str) -> AgentDefinition:
+        return await self._compile(agent_id=agent_id, direct_grants=self._grants)
 
-    async def compile_subagent(self, *, agent_id: str, prompt_id: str) -> AgentDefinition:
+    async def compile_subagent(self, *, agent_id: str) -> AgentDefinition:
         return await self._compile(
             agent_id=agent_id,
-            prompt_id=prompt_id,
             direct_grants=tuple(grant for grant in self._grants if grant.inherit_to_subagents),
-            missing_definition_asset_code=ErrorCode.AGENT_NOT_FOUND,
         )
 
     async def _compile(
         self,
         *,
         agent_id: str,
-        prompt_id: str,
         direct_grants: "Sequence[CapabilityGrant]",
-        missing_definition_asset_code: ErrorCode | None,
     ) -> AgentDefinition:
-        if not agent_id.strip() or not prompt_id.strip():
-            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        agent = await self._resolve_definition_asset(AssetRef("agent", agent_id), missing_definition_asset_code)
-        prompt = await self._resolve_definition_asset(AssetRef("prompt", prompt_id), missing_definition_asset_code)
-        if type(agent.spec) is not AgentSpec or type(prompt.spec) is not PromptSpec:
+        validate_agent_id(agent_id)
+        agent = await self._resolve_definition_asset(AssetRef("agent", agent_id))
+        if type(agent.spec) is not AgentSpec:
             raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
         spec = agent.spec
-        prompt_spec = prompt.spec
         grants = tuple(direct_grants)
         grant_providers = {grant.provider for grant in grants}
         if any(ref.provider in grant_providers for ref in spec.capabilities):
@@ -105,19 +98,24 @@ class AgentCompiler:
         model = self._model_resolver.resolve(spec.model)
         output_type = self._output_types.resolve(spec.output_schema, spec.output_schema_revision)
         output_fingerprint = self._output_types.fingerprint(spec.output_schema, spec.output_schema_revision)
-        digest = _definition_digest(spec, prompt_spec, model, output_fingerprint, effective, self._execution_profile_fingerprint)
-        definition = AgentDefinition(digest, spec, prompt_spec, model, output_type, output_fingerprint, effective)
-        _logger.debug("agent definition compiled: agent=%s prompt=%s digest=%s capabilities=%s", agent_id, prompt_id, digest, tuple(capability.id for capability in effective))
+        digest = _definition_digest(spec, model, output_fingerprint, effective, self._execution_profile_fingerprint)
+        definition = AgentDefinition(digest, spec, model, output_type, output_fingerprint, effective)
+        _logger.debug(
+            "agent definition compiled: agent=%s digest=%s capabilities=%s",
+            agent_id,
+            digest,
+            tuple(capability.id for capability in effective),
+        )
         return definition
 
-    async def _resolve_definition_asset(self, ref: AssetRef, missing_code: ErrorCode | None) -> ResolvedAsset:
+    async def _resolve_definition_asset(self, ref: AssetRef) -> ResolvedAsset:
         try:
             return await self._assets.resolve(ref)
         except AIError as error:
-            if missing_code is not None and error.code is ErrorCode.STORAGE_NOT_FOUND:
+            if error.code is ErrorCode.STORAGE_NOT_FOUND:
                 raise AIError(
-                    missing_code,
-                    "agent definition asset is unavailable",
+                    ErrorCode.AGENT_NOT_FOUND,
+                    "agent definition is unavailable",
                     safe_details={"kind": ref.kind, "id": ref.id},
                 ) from error
             raise
@@ -163,13 +161,13 @@ def _validate_binding_shape(binding: CapabilityBinding) -> None:
 
 def _definition_digest(
     spec: AgentSpec,
-    prompt: PromptSpec,
     model: object,
     output_fingerprint: str,
     capabilities: "Sequence[CapabilityBinding]",
     execution_profile_fingerprint: str,
 ) -> str:
     return canonical_sha256({
+        "version": 2,
         "agent": {
             "id": spec.id,
             "revision": spec.revision,
@@ -177,12 +175,12 @@ def _definition_digest(
             "capabilities": [_ref_payload(ref) for ref in spec.capabilities],
             "output_schema": spec.output_schema,
             "output_schema_revision": spec.output_schema_revision,
+            "system_prompt": spec.system_prompt,
             "instructions": list(spec.instructions),
             "allow_tools": spec.allow_tools,
             "allow_skills": spec.allow_skills,
             "metadata": dict(spec.metadata),
         },
-        "prompt": {"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions)},
         "model_fingerprint": model.fingerprint,
         "output_schema_fingerprint": output_fingerprint,
         "capabilities": [_binding_payload(binding) for binding in capabilities],

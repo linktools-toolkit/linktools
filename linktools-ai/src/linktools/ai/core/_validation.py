@@ -60,7 +60,7 @@ def validate_agent_id(value: str) -> str:
     return value
 
 
-def validate_prompt(value: str) -> str:
+def validate_user_prompt(value: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value.encode("utf-8")) > 1024 * 1024:
         raise AIError(ErrorCode.PROMPT_TOO_LARGE)
     return value
@@ -125,6 +125,7 @@ __all__ = [
     "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
     "validate_external_payload", "validate_idempotency_key", "validate_lease_owner",
     "validate_memory_scope", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
-    "validate_principal_id", "validate_principal_kind", "validate_prompt", "validate_resource_id", "validate_shell_timeout",
+    "validate_principal_id", "validate_principal_kind", "validate_resource_id", "validate_shell_timeout",
+    "validate_user_prompt",
     "validate_tenant_id", "validate_tool_arguments",
 ]

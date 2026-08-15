@@ -13,7 +13,12 @@ from ._execution import (
     ExecutionWorkflowResult,
     ExecutionWorkflowState,
 )
-from ._graph import TaskWorkflow, TaskWorkflowInput, TaskWorkflowResult
+from ._graph import (
+    TaskWorkflow,
+    TaskWorkflowInput,
+    TaskWorkflowNode,
+    TaskWorkflowResult,
+)
 from ._session import SessionWorkflow, SessionWorkflowInput, SessionWorkflowResult
 
 __all__ = [
@@ -29,5 +34,6 @@ __all__ = [
     "SessionWorkflowResult",
     "TaskWorkflow",
     "TaskWorkflowInput",
+    "TaskWorkflowNode",
     "TaskWorkflowResult",
 ]

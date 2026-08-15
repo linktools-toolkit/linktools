@@ -222,7 +222,7 @@ class LocalExecutionBackend:
                 )
                 await self._execution.executions.create(execution)
             request = ExecutionRequest(
-                prompt=recovery_input.prompt,
+                user_prompt=recovery_input.user_prompt,
                 principal=principal,
                 idempotency_key=f"recovery:{checkpoint.execution_id}",
                 memory_scope=recovery_input.memory_scope,
@@ -524,13 +524,12 @@ class LocalExecutionBackend:
                         execution_id=execution_id,
                         tenant_id=current.tenant_id,
                         input=RecoveryExecutionInput(
-                            prompt=request.prompt,
+                            user_prompt=request.user_prompt,
                             principal_id=request.principal.principal_id,
                             principal_kind=request.principal.kind,
                             session_id=current.session_id,
                             memory_scope=current.memory_scope,
                             agent_id=definition.spec.id,
-                            prompt_id=definition.prompt.id,
                             binding_digest=current.binding_digest,
                             lineage_kind=current.lineage_kind.value,
                             parent_execution_id=current.parent_execution_id,
@@ -566,10 +565,14 @@ class LocalExecutionBackend:
             if selected_memory:
                 if self._memory_store_factory is None:
                     raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                memory = self._memory_store_factory(current.tenant_id, current.execution_id, current.memory_scope or "default")
+                memory = self._memory_store_factory(
+                    current.tenant_id,
+                    current.execution_id,
+                    current.memory_scope or "default",
+                )
             result = await self._executor.execute(
                 definition,
-                request.prompt,
+                request.user_prompt,
                 history,
                 conversation_id,
                 step_store=self._steps,

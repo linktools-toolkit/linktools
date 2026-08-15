@@ -13,11 +13,11 @@ import pytest
 from linktools.ai.core import Principal, SessionStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.runtime._subagent import SubagentDispatcher
 from linktools.ai.runtime.state import _materializer as materializer
 from linktools.ai.runtime.state._contracts import SessionRecord
 from linktools.ai.runtime.state._filesystem import _FilesystemDomainBackend
 from linktools.ai.runtime.state._plan import RuntimeDomain
-from linktools.ai.workspace._subagent import SubagentDispatcher
 
 
 def _scope(root: Path, namespace: str, tenant_id: str) -> Path:
@@ -268,8 +268,8 @@ async def test_filesystem_prepare_preserves_primary_when_release_fails(
 
 
 class _Compiler:
-    async def compile_subagent(self, *, agent_id: str, prompt_id: str) -> SimpleNamespace:
-        return SimpleNamespace(digest=f"{agent_id}:{prompt_id}")
+    async def compile_subagent(self, *, agent_id: str) -> SimpleNamespace:
+        return SimpleNamespace(digest=agent_id)
 
 
 class _Execution:
@@ -289,10 +289,8 @@ def _dispatch(dispatcher: SubagentDispatcher) -> object:
         root_execution_id="root",
         memory_scope=None,
         principal=Principal("owner", "tenant"),
-        tool_call_id="call",
         agent_id="agent",
-        prompt_id="prompt",
-        task="task",
+        user_prompt="task",
     )
 
 

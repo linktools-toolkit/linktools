@@ -42,11 +42,11 @@ from ._validation import (
     validate_persistence_namespace,
     validate_principal_id,
     validate_principal_kind,
-    validate_prompt,
     validate_resource_id,
     validate_shell_timeout,
     validate_tenant_id,
     validate_tool_arguments,
+    validate_user_prompt,
 )
 from ._value import (
     ApprovalDecision,
@@ -97,6 +97,7 @@ __all__ = [
     "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
     "validate_external_payload", "validate_idempotency_key", "validate_lease_owner",
     "validate_memory_scope", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
-    "validate_principal_id", "validate_principal_kind", "validate_prompt", "validate_resource_id", "validate_shell_timeout",
+    "validate_principal_id", "validate_principal_kind", "validate_resource_id", "validate_shell_timeout",
+    "validate_user_prompt",
     "validate_tenant_id", "validate_tool_arguments",
 ]

@@ -16,8 +16,12 @@ from linktools.ai.core import (
     service_principal,
 )
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime._tool import AllowAllToolPolicy, ToolAuthorization, ToolDescriptor
-from linktools.ai.spec import PromptSpec, PromptSpecCodec
+from linktools.ai.runtime._tool import (
+    AllowAllToolPolicy,
+    ToolAuthorization,
+    ToolDescriptor,
+)
+from linktools.ai.spec import AgentSpec, AgentSpecCodec
 from linktools.ai.workspace import DisabledSandbox
 from linktools.ai.workspace._tools import build_workspace_tool_map
 
@@ -58,11 +62,11 @@ async def test_service_principal_keeps_tenant_authorization() -> None:
     assert error.value.code is ErrorCode.AUTHORIZATION_DENIED
 
 
-def test_prompt_spec_codec_rejects_legacy_variables() -> None:
-    prompt = PromptSpec("prompt", 1, "system", ("instruction",))
-    assert "variables" not in json.loads(PromptSpecCodec().encode(prompt))
-    with pytest.raises(TypeError):
-        PromptSpec("prompt", 1, "system", (), variables=("name",))
+def test_agent_spec_codec_preserves_system_prompt_and_instructions() -> None:
+    spec = AgentSpec("agent", 1, "model", (), "text", 1, "system", ("instruction",))
+    payload = json.loads(AgentSpecCodec().encode(spec))
+    assert payload["system_prompt"] == "system"
+    assert payload["instructions"] == ["instruction"]
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,6 @@ from ._contract import (
     AgentCapabilityRef,
     AgentSpec,
     MCPServerSpec,
-    PromptSpec,
     SkillSpec,
 )
 
@@ -46,6 +45,7 @@ class AgentSpecCodec:
                 ],
                 "output_schema": value.output_schema,
                 "output_schema_revision": value.output_schema_revision,
+                "system_prompt": value.system_prompt,
                 "instructions": list(value.instructions),
                 "allow_tools": value.allow_tools,
                 "allow_skills": value.allow_skills,
@@ -57,6 +57,12 @@ class AgentSpecCodec:
         raw = _decode(data)
         if "output_schema_revision" not in raw:
             raise AIError(ErrorCode.OUTPUT_SCHEMA_REVISION_REQUIRED)
+        system_prompt = raw.get("system_prompt", "")
+        if not isinstance(system_prompt, str):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "system_prompt must be a string")
+        instructions = raw.get("instructions", [])
+        if not isinstance(instructions, list) or any(not isinstance(item, str) for item in instructions):
+            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "instructions must be a string array")
         capabilities = tuple(
             AgentCapabilityRef(
                 str(item["provider"]),
@@ -74,33 +80,11 @@ class AgentSpecCodec:
             capabilities,
             str(raw["output_schema"]),
             int(raw["output_schema_revision"]),
-            tuple(str(item) for item in cast("list[object]", raw.get("instructions", []))),
+            system_prompt,
+            tuple(instructions),
             _strict_allowlist(raw, "allow_tools", ("*",)),
             _strict_allowlist(raw, "allow_skills", ("*",)),
             cast("dict[str, object]", raw.get("metadata", {})),
-        )
-
-
-class PromptSpecCodec:
-    def encode(self, value: PromptSpec) -> bytes:
-        return _encode(
-            {
-                "id": value.id,
-                "revision": value.revision,
-                "system": value.system,
-                "instructions": list(value.instructions),
-            }
-        )
-
-    def decode(self, data: bytes) -> PromptSpec:
-        raw = _decode(data)
-        if "variables" in raw:
-            raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "PromptSpec.variables is unsupported")
-        return PromptSpec(
-            str(raw["id"]),
-            int(raw["revision"]),
-            str(raw["system"]),
-            tuple(str(item) for item in cast("list[object]", raw["instructions"])),
         )
 
 
@@ -274,7 +258,6 @@ def _parse_skill_markdown(content: str) -> tuple[dict[str, object], int]:
 __all__ = [
     "AgentSpecCodec",
     "MCPServerSpecCodec",
-    "PromptSpecCodec",
     "SkillMarkdownSpecAdapter",
     "SkillMarkdownSpecCodec",
     "SkillSpecCodec",

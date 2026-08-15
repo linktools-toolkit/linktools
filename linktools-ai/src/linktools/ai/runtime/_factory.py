@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Runtime-internal service graph construction."""
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from linktools.core import environ
+from pydantic_ai_harness.memory import SearchableMemoryStore
+
+from ..agent import AgentCompiler, AgentDefinition, AgentExecutor
+from ..core import AuthorizationPolicy
+from ..errors import AIError, ErrorCode
+from ..storage import ObjectStore
+from ..task import LocalTaskGraphLauncher
+from ._approval import DefaultApprovalService
+from ._artifact import DefaultArtifactService
+from ._evaluation import DefaultEvaluationService
+from ._event import DefaultEventService
+from ._execution import DefaultExecutionService
+from ._local import LocalExecutionBackend
+from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
+from ._runtime_service import Runtime
+from ._session import DefaultSessionService
+from ._subagent import SubagentDispatcher
+from .service_api import ExecutionHistoryReader
+from .state import (
+    RecoveryCheckpointState,
+    RecoveryHandoffPhase,
+    RuntimeDomain,
+    RuntimeRetentionMode,
+    RuntimeState,
+)
+
+_logger = environ.get_logger("ai.runtime.factory")
+
+
+async def build_local_runtime(
+    *,
+    state: RuntimeState,
+    compiler: AgentCompiler,
+    authorization: AuthorizationPolicy,
+    tenant_id: str,
+    namespace: str,
+    execution_root: Path,
+    history_reader: ExecutionHistoryReader,
+    memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
+    grant_key: bytes,
+) -> Runtime:
+    if not state.ready:
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+    definitions: dict[str, AgentDefinition] = {}
+    execution = DefaultExecutionService(
+        state.execution,
+        state._object_store(RuntimeDomain.EXECUTION),
+        authorization,
+        sessions=state.conversation.sessions,
+        history_reader=history_reader,
+        release_terminal=state.retention.release_execution_handoff,
+    )
+    dispatcher = SubagentDispatcher(compiler, definitions, execution)
+    executor = AgentExecutor(execution_root=execution_root)
+
+    def build_memory_store(
+        memory_tenant: str,
+        execution_id: str,
+        memory_scope: str,
+    ) -> SearchableMemoryStore:
+        if memory_store_factory is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        route = state.plan.route(RuntimeDomain.MEMORY)
+        transient = route.retention is RuntimeRetentionMode.TRANSIENT
+        store = (
+            state._working_object_store(RuntimeDomain.MEMORY, owner_scope=f"execution:{execution_id}")
+            if transient
+            else state._object_store(RuntimeDomain.MEMORY)
+        )
+        return memory_store_factory(
+            memory_tenant,
+            execution_id,
+            memory_scope,
+            store,
+            transient,
+        )
+
+    backend: LocalExecutionBackend | None = None
+    task_launcher: LocalTaskGraphLauncher | None = None
+    try:
+        backend = LocalExecutionBackend(
+            state.conversation,
+            state.execution,
+            state.recovery,
+            state._object_store(RuntimeDomain.EXECUTION),
+            state._object_store(RuntimeDomain.RECOVERY),
+            state._metrics,
+            namespace,
+            state.steps,
+            executor,
+            definitions,
+            tenant_id=tenant_id,
+            execution_root=execution_root,
+            step_reads={
+                domain: state.steps.read_store(domain)
+                for domain in (
+                    RuntimeDomain.CONVERSATION,
+                    RuntimeDomain.EXECUTION,
+                    RuntimeDomain.RECOVERY,
+                )
+            },
+            step_lifecycle=state.steps,
+            memory_store_factory=build_memory_store,
+            recovery_enabled=RuntimeDomain.RECOVERY in state.plan.durable_domains,
+            conversation_durable=state.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE,
+            handoff_contract_digest=state.handoff_contract_digest,
+            subagent_dispatcher=dispatcher,
+        )
+        execution.bind_backend(backend)
+        execution.bind_subagent_cancellation(dispatcher)
+        session = DefaultSessionService(
+            state.conversation,
+            state.execution.executions,
+            authorization,
+            execution,
+            _cursor_signer("session", grant_key),
+            release_terminal=state.retention.release_session,
+        )
+        task_runner = RuntimeTaskNodeRunner(execution, definitions, compiler)
+        task_launcher = LocalTaskGraphLauncher(
+            state.task.tasks,
+            task_runner,
+            owner=f"runtime:{tenant_id}",
+        )
+        task = DefaultTaskService(
+            state.task,
+            authorization,
+            task_launcher,
+            release_terminal=state.retention.release_task_graph,
+        )
+        evaluation = DefaultEvaluationService(
+            state.evaluation,
+            state.execution.executions,
+            authorization,
+            execution,
+            release_terminal=state.retention.release_evaluation,
+            acquire_execution_hold=execution._acquire_dependency_hold,
+            release_execution_hold=execution._release_dependency_hold,
+            request_execution_handoff=execution._request_terminal_handoff,
+        )
+        approval = DefaultApprovalService(state.recovery.approvals, authorization)
+        event = DefaultEventService(
+            state.execution.executions,
+            state.execution.events,
+            authorization,
+        )
+        artifact = DefaultArtifactService(
+            state.artifact,
+            authorization,
+            grant_key=grant_key,
+            cursor_signer=_cursor_signer("artifact", grant_key),
+        )
+        coordinator = _RuntimeCloseCoordinator(
+            (task_launcher.shutdown, backend.close, state.close)
+        )
+        runtime = Runtime(
+            compiler,
+            execution,
+            session,
+            task,
+            evaluation,
+            approval,
+            event,
+            artifact,
+            definitions=definitions,
+            close_callback=coordinator.close,
+        )
+        await _compile_recovery_definitions(
+            compiler,
+            definitions,
+            state,
+            tenant_id=tenant_id,
+        )
+        if RuntimeDomain.RECOVERY in state.plan.durable_domains:
+            await backend.reconcile()
+    except BaseException:
+        if task_launcher is not None:
+            await task_launcher.shutdown()
+        if backend is not None:
+            await backend.close()
+        raise
+    _logger.info(
+        "local Runtime built: namespace=%s tenant=%s durable_domains=%s",
+        namespace,
+        tenant_id,
+        sorted(domain.value for domain in state.plan.durable_domains),
+    )
+    return runtime
+
+
+async def _compile_recovery_definitions(
+    compiler: AgentCompiler,
+    definitions: dict[str, AgentDefinition],
+    state: RuntimeState,
+    *,
+    tenant_id: str,
+) -> None:
+    checkpoints = await state.recovery.checkpoints.list(tenant_id=tenant_id)
+    for checkpoint in checkpoints:
+        if (
+            checkpoint.state is RecoveryCheckpointState.COMPLETED
+            or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
+        ):
+            continue
+        definition = (
+            await compiler.compile_subagent(agent_id=checkpoint.input.agent_id)
+            if checkpoint.input.parent_execution_id is not None
+            else await compiler.compile(agent_id=checkpoint.input.agent_id)
+        )
+        if definition.digest != checkpoint.input.binding_digest:
+            raise AIError(
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                safe_details={"execution_id": checkpoint.execution_id},
+            )
+        definitions[checkpoint.input.binding_digest] = definition
+
+
+def _cursor_signer(name: str, grant_key: bytes):
+    from ..core import HmacCursorSigner
+
+    return HmacCursorSigner(name, grant_key)
+
+
+class _RuntimeCloseCoordinator:
+    def __init__(self, actions: tuple[Callable[[], Awaitable[None]], ...]) -> None:
+        self._actions = actions
+        self._cursor = 0
+        self._task: asyncio.Task[None] | None = None
+        self._lock = asyncio.Lock()
+
+    async def close(self) -> None:
+        async with self._lock:
+            if self._cursor >= len(self._actions):
+                return
+            task = self._task
+            if task is None or task.done():
+                task = asyncio.create_task(self._run(), name="linktools-runtime-close")
+                self._task = task
+        await asyncio.shield(task)
+
+    async def _run(self) -> None:
+        while self._cursor < len(self._actions):
+            await self._actions[self._cursor]()
+            self._cursor += 1
+
+
+__all__ = ["build_local_runtime"]

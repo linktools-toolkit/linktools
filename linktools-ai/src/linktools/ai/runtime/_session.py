@@ -30,14 +30,6 @@ from ..core import (
     idempotency_key_hash,
 )
 from ..errors import AIError, ErrorCode
-from .state._contracts import (
-    OperationLedgerInput,
-    OperationLedgerRecord,
-    ConversationCursor,
-    ConversationState,
-    ExecutionRepository,
-    SessionRecord,
-)
 from .service_api import (
     CancelExecutionRequest,
     CloseSessionRequest,
@@ -51,6 +43,14 @@ from .service_api import (
     ResumeSessionRequest,
     SessionView,
     UpdateSessionRequest,
+)
+from .state._contracts import (
+    ConversationCursor,
+    ConversationState,
+    ExecutionRepository,
+    OperationLedgerInput,
+    OperationLedgerRecord,
+    SessionRecord,
 )
 
 _logger = environ.get_logger("ai.runtime.session")
@@ -174,7 +174,12 @@ class DefaultSessionService:
             return await self._execution.run_for_session(
                 binding_digest,
                 session_id,
-                ExecutionRequest(prompt=request.prompt, principal=request.principal, idempotency_key=request.idempotency_key, memory_scope=request.memory_scope),
+                ExecutionRequest(
+                    user_prompt=request.user_prompt,
+                    principal=request.principal,
+                    idempotency_key=request.idempotency_key,
+                    memory_scope=request.memory_scope,
+                ),
             )
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:

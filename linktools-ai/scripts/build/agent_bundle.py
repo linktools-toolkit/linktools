@@ -5,7 +5,7 @@
 from dataclasses import dataclass
 
 from linktools.ai.core import canonical_sha256
-from linktools.ai.spec import AgentSpec, PromptSpec
+from linktools.ai.spec import AgentSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,11 +20,11 @@ class AgentBundle:
     output_schema_id: str
     output_schema_revision: int
     output_schema_fingerprint: str
+    system_prompt: str
     codec_manifest_digest: str
     harness_version: str
     pydantic_ai_version: str
     spec_fingerprint: str
-    prompt_fingerprint: str
     capability_manifest_digest: str
     instructions: "tuple[str, ...]" = ()
 
@@ -35,7 +35,6 @@ class AgentBundle:
 
 def build_bundle(
     spec: AgentSpec,
-    prompt: PromptSpec,
     capability_manifest_digest: str,
     *,
     codec_manifest_digest: str = "",
@@ -64,11 +63,11 @@ def build_bundle(
             ],
             "output_schema": spec.output_schema,
             "output_schema_revision": spec.output_schema_revision,
+            "system_prompt": spec.system_prompt,
             "metadata": dict(spec.metadata),
             "instructions": list(spec.instructions),
         }
     )
-    prompt_fingerprint = canonical_sha256({"id": prompt.id, "revision": prompt.revision, "system": prompt.system, "instructions": list(prompt.instructions)})
     capability_ids = tuple(f"{capability.provider}:{capability.id}" for capability in spec.capabilities)
     toolset_ids: tuple[str, ...] = ()
     bundle_digest = canonical_sha256(
@@ -85,7 +84,6 @@ def build_bundle(
             "harness_version": harness_version,
             "pydantic_ai_version": pydantic_ai_version,
             "spec_fingerprint": spec_fingerprint,
-            "prompt_fingerprint": prompt_fingerprint,
             "capability_manifest_digest": capability_manifest_digest,
         }
     )
@@ -100,13 +98,13 @@ def build_bundle(
         spec.output_schema,
         spec.output_schema_revision,
         output_schema_fingerprint,
+        spec.system_prompt,
         codec_manifest_digest,
         harness_version,
         pydantic_ai_version,
         spec_fingerprint,
-        prompt_fingerprint,
         capability_manifest_digest,
-        (prompt.system, *prompt.instructions, *spec.instructions),
+        spec.instructions,
     )
 
 

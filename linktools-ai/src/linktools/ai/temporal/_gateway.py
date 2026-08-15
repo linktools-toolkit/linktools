@@ -7,7 +7,7 @@ from typing import Protocol
 
 from linktools.core import environ
 
-from ..core import JsonValue
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..runtime import (
     CancelExecutionResult,
@@ -17,6 +17,7 @@ from ..runtime import (
     WorkflowUpdateResult,
 )
 from ..task import TaskGraphHandle, TaskGraphRequest, TaskGraphView
+from .workflow import TaskWorkflowInput
 
 _logger = environ.get_logger("ai.temporal.gateway")
 QUERY_NAMES = frozenset({"inspect", "pending_approvals", "pending_external_calls"})
@@ -34,7 +35,7 @@ class TemporalClient(Protocol):
 
     async def start_task_graph(
         self,
-        request: TaskGraphRequest,
+        request: TaskWorkflowInput,
         *,
         workflow_id: str,
     ) -> TaskGraphHandle: ...
@@ -54,8 +55,11 @@ class TemporalClient(Protocol):
 
 
 class WorkflowGateway:
-    def __init__(self, client: TemporalClient) -> None:
+    def __init__(self, client: TemporalClient, *, worker_build: str) -> None:
+        if not isinstance(worker_build, str) or not worker_build.strip():
+            raise ValueError("Temporal worker build is required")
         self._client = client
+        self._worker_build = worker_build
 
     async def start_execution(self, workflow_id: str, request: ExecutionRequest) -> ExecutionHandle:
         if not workflow_id.strip():
@@ -95,12 +99,27 @@ class WorkflowGateway:
         if not workflow_id.strip():
             raise ValueError("workflow id is required")
         _logger.debug("starting durable task workflow: workflow_id=%s", workflow_id)
-        return await self._client.start_task_graph(request, workflow_id=workflow_id)
+        workflow_request = TaskWorkflowInput.from_request(
+            request,
+            request_ref=_task_request_ref(request),
+            worker_build=self._worker_build,
+        )
+        return await self._client.start_task_graph(workflow_request, workflow_id=workflow_id)
 
     async def cancel_task_graph(self, workflow_id: str, idempotency_key: str) -> TaskGraphView:
         if not workflow_id.strip() or not idempotency_key.strip():
             raise ValueError("workflow and idempotency keys are required")
         return await self._client.cancel_task_graph(workflow_id, idempotency_key)
+
+
+def _task_request_ref(request: TaskGraphRequest) -> str:
+    return "task-request-" + canonical_sha256(
+        {
+            "tenant_id": request.principal.tenant_id,
+            "graph_id": request.graph.graph_id,
+            "idempotency_key": request.idempotency_key,
+        }
+    )
 
 
 __all__ = ["QUERY_NAMES", "TemporalClient", "UPDATE_NAMES", "WorkflowGateway"]

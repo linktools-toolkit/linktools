@@ -14,10 +14,10 @@ from ...core import (
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
-    ExternalCallStatus,
     ExecutionEventType,
     ExecutionLineageKind,
     ExecutionStatus,
+    ExternalCallStatus,
     IdempotencyStatus,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -26,52 +26,60 @@ from ...core import (
     ResourceKind,
     ResourceRef,
     SessionStatus,
+    StopReason,
     TaskStatus,
     ToolOperationStatus,
-    StopReason,
     canonical_sha256,
     validate_lease_owner,
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
+from ...storage import ObjectRef, SqlStorageContext, namespace_key
+from .._tool import ToolOperationRecord
 from ._contracts import (
-    ConversationCursor,
     ApprovalRecord,
     ArtifactRecord,
+    ConversationCursor,
     EvaluationRecord,
-    ExternalCallRecord,
-    MemoryRecord,
+    ExecutionCancelRequestCommit,
     ExecutionEventRecord,
     ExecutionRecord,
     ExecutionStartClaim,
     ExecutionStartReservation,
     ExecutionStartReservationResult,
     ExecutionStartUnknownCommit,
-    ExecutionCancelRequestCommit,
     ExecutionTerminalCommit,
     ExecutionTerminalCommitResult,
+    ExternalCallRecord,
     IdempotencyRecord,
-    SessionRecord,
+    MemoryRecord,
     RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryConversationIntent,
     RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryCheckpointState,
-    RecoveryTerminalHandoff,
-    RecoveryConversationIntent,
-    RecoveryTerminalOutcome,
     RecoveryIdempotencyInput,
+    RecoveryTerminalHandoff,
+    RecoveryTerminalOutcome,
     ResultRecord,
+    SessionRecord,
 )
-from .._tool import ToolOperationRecord
-from ...storage import ObjectRef, namespace_key
-from ...storage import SqlStorageContext
 from ._plan import RuntimeDomain
+
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
+    from typing import Protocol
+
     from sqlalchemy import MetaData, Table
     from sqlalchemy.ext.asyncio import AsyncSession
-    from typing import Protocol
-    from ...task import TaskGraph, TaskGraphView, TaskLease, TaskNodeView, TaskTerminalRecord
+
+    from ...task import (
+        TaskGraph,
+        TaskGraphView,
+        TaskLease,
+        TaskNodeView,
+        TaskTerminalRecord,
+    )
 
 
     class _SqlTransactionProtocol(Protocol):
@@ -1013,7 +1021,19 @@ class _SqlTaskRepository(_SqlRepositoryBase):
     def _view(self, graph_row: Mapping[str, object], node_rows: tuple[Mapping[str, object], ...]) -> "TaskGraphView":
         from ...task import TaskGraphView, TaskNode
 
-        return TaskGraphView(str(graph_row["graph_id"]), TaskStatus(str(graph_row["status"])), tuple(TaskNode(str(row["node_id"]), tuple(row["dependencies_json"] or ())) for row in node_rows))
+        return TaskGraphView(
+            str(graph_row["graph_id"]),
+            TaskStatus(str(graph_row["status"])),
+            tuple(
+                TaskNode(
+                    str(row["node_id"]),
+                    tuple(row["dependencies_json"] or ()),
+                    input=row["input_json"] or {},
+                    budget_cost=int(row["budget_cost"] or 1),
+                )
+                for row in node_rows
+            ),
+        )
 
     def _node_view(self, row: Mapping[str, object]) -> "TaskNodeView":
         from ...task import TaskNodeView
@@ -1133,7 +1153,21 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             node_table = self._table("runtime_task_nodes")
             for node in graph.nodes:
-                if not await self._insert(session, node_table, self._values({"graph_id": graph_id, "node_id": node.node_id}) | {"dependencies_json": list(node.dependencies), "status": TaskStatus.PENDING.value, "revision": 0, "owner": None, "fence": 0, "lease_expires_at": None, "execution_id": None, "result_digest": None, "error_code": None, "error_digest": None}):
+                values = self._values({"graph_id": graph_id, "node_id": node.node_id}) | {
+                    "dependencies_json": list(node.dependencies),
+                    "input_json": node.input,
+                    "budget_cost": node.budget_cost,
+                    "status": TaskStatus.PENDING.value,
+                    "revision": 0,
+                    "owner": None,
+                    "fence": 0,
+                    "lease_expires_at": None,
+                    "execution_id": None,
+                    "result_digest": None,
+                    "error_code": None,
+                    "error_digest": None,
+                }
+                if not await self._insert(session, node_table, values):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
         return TaskGraphView(graph_id, TaskStatus.PENDING, graph.nodes)
 
@@ -1212,8 +1246,8 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 
     async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> "TaskLease":
         self._check_tenant(tenant_id)
-        from ...task import TaskLease
         from ...core import validate_lease_owner
+        from ...task import TaskLease
 
         validate_lease_owner(owner)
         if not 1 <= lease_seconds <= 3600:
@@ -1732,7 +1766,30 @@ def _tool(row: Mapping[str, object], tenant_id: str) -> ToolOperationRecord:
 
 
 def _input_json(value: RecoveryExecutionInput) -> dict[str, object]:
-    return {"prompt": value.prompt, "principal_id": value.principal_id, "principal_kind": value.principal_kind, "session_id": value.session_id, "memory_scope": value.memory_scope, "agent_id": value.agent_id, "prompt_id": value.prompt_id, "binding_digest": value.binding_digest, "lineage_kind": value.lineage_kind, "parent_execution_id": value.parent_execution_id, "root_execution_id": value.root_execution_id, "source_execution_id": value.source_execution_id, "base_execution_id": value.base_execution_id, "idempotency": None if value.idempotency is None else {"scope": value.idempotency.scope, "key_hash": value.idempotency.key_hash, "request_digest": value.idempotency.request_digest}}
+    return {
+        "version": 2,
+        "user_prompt": value.user_prompt,
+        "principal_id": value.principal_id,
+        "principal_kind": value.principal_kind,
+        "session_id": value.session_id,
+        "memory_scope": value.memory_scope,
+        "agent_id": value.agent_id,
+        "binding_digest": value.binding_digest,
+        "lineage_kind": value.lineage_kind,
+        "parent_execution_id": value.parent_execution_id,
+        "root_execution_id": value.root_execution_id,
+        "source_execution_id": value.source_execution_id,
+        "base_execution_id": value.base_execution_id,
+        "idempotency": (
+            None
+            if value.idempotency is None
+            else {
+                "scope": value.idempotency.scope,
+                "key_hash": value.idempotency.key_hash,
+                "request_digest": value.idempotency.request_digest,
+            }
+        ),
+    }
 
 
 def _handoff_json(value: RecoveryTerminalHandoff | None) -> object:
@@ -1746,7 +1803,24 @@ def _checkpoint(row: Mapping[str, object], tenant_id: str) -> RecoveryCheckpoint
             raise ValueError("input")
         raw_identity = raw_input.get("idempotency")
         identity = None if raw_identity is None else RecoveryIdempotencyInput(str(raw_identity["scope"]), str(raw_identity["key_hash"]), str(raw_identity["request_digest"]))
-        checkpoint_input = RecoveryExecutionInput(str(raw_input["prompt"]), str(raw_input["principal_id"]), str(raw_input["principal_kind"]), raw_input.get("session_id"), raw_input.get("memory_scope"), str(raw_input["agent_id"]), str(raw_input["prompt_id"]), str(raw_input["binding_digest"]), str(raw_input["lineage_kind"]), raw_input.get("parent_execution_id"), str(raw_input["root_execution_id"]), raw_input.get("source_execution_id"), raw_input.get("base_execution_id"), identity)
+        user_prompt = raw_input.get("user_prompt", raw_input.get("prompt"))
+        if not isinstance(user_prompt, str):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        checkpoint_input = RecoveryExecutionInput(
+            user_prompt,
+            str(raw_input["principal_id"]),
+            str(raw_input["principal_kind"]),
+            raw_input.get("session_id"),
+            raw_input.get("memory_scope"),
+            str(raw_input["agent_id"]),
+            str(raw_input["binding_digest"]),
+            str(raw_input["lineage_kind"]),
+            raw_input.get("parent_execution_id"),
+            str(raw_input["root_execution_id"]),
+            raw_input.get("source_execution_id"),
+            raw_input.get("base_execution_id"),
+            identity,
+        )
         handoff = _handoff_from_json(row["terminal_handoff_json"])
         return RecoveryCheckpoint(str(row["execution_id"]), tenant_id, checkpoint_input, str(row["step_run_id"]), int(row["agent_run_sequence"]), RecoveryCheckpointState(str(row["state"])), RecoveryHandoffPhase(str(row["handoff_phase"])), handoff, None if row["handoff_contract_digest"] is None else str(row["handoff_contract_digest"]), None if row["pending_operation_id"] is None else str(row["pending_operation_id"]), int(row["revision"]), _utc(row["created_at"]), _utc(row["updated_at"]))
     except (KeyError, TypeError, ValueError) as error:

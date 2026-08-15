@@ -9,22 +9,30 @@ from datetime import datetime, timezone
 
 import pytest
 from linktools.ai.asset import AssetRef
-from linktools.ai.core import OperationLedgerRecord, Principal, PrincipalKind, ResourceKind, ResourceRef
+from linktools.ai.core import (
+    OperationLedgerRecord,
+    Principal,
+    PrincipalKind,
+    ResourceKind,
+    ResourceRef,
+)
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.model import ModelRegistry
 from linktools.ai.observe import (
     InMemoryTraceRecorder,
     MiddlewarePipeline,
+    RecordedTraceItem,
     RunContext,
     RunSnapshot,
-    RecordedTraceItem,
     snapshot_digest,
 )
 from linktools.ai.runtime import ExecutionRequest
 from linktools.ai.runtime._tool import ToolOperationRecord
-from linktools.ai.runtime.state import RuntimeDomain, RuntimeStatePlan, RuntimeStateRoute
-from linktools.ai.spec import AgentCapabilityRef, AgentSpec, PromptSpec
-from linktools.ai.task import SwarmLimits, TaskGraph, TaskLease, TaskNode
+from linktools.ai.runtime.state import (
+    RuntimeStatePlan,
+)
+from linktools.ai.spec import AgentCapabilityRef, AgentSpec
+from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
 from linktools.ai.temporal import (
     ActivityType,
     EvaluationActivity,
@@ -47,7 +55,6 @@ from linktools.ai.temporal.workflow import (
     SessionWorkflowInput,
     SessionWorkflowResult,
     TaskWorkflowInput,
-    TaskWorkflowResult,
 )
 from linktools.ai.workspace import trusted_workspace_principal
 from scripts.build.agent_bundle import build_bundle
@@ -56,9 +63,17 @@ from scripts.build.agent_bundle import build_bundle
 def test_task_graph_rejects_cycles_and_agent_bundle_is_deterministic() -> None:
     with pytest.raises(ValueError):
         TaskGraph("cycle", (TaskNode("a", ("b",)), TaskNode("b", ("a",))))
-    spec = AgentSpec("agent", 1, "route", (AgentCapabilityRef("tool", "bash"),), "text", 1, ("answer",))
-    prompt = PromptSpec("prompt", 1, "system", ("answer",))
-    assert build_bundle(spec, prompt, "capabilities").digest == build_bundle(spec, prompt, "capabilities").digest
+    spec = AgentSpec(
+        "agent",
+        1,
+        "route",
+        (AgentCapabilityRef("tool", "bash"),),
+        "text",
+        1,
+        "system",
+        ("answer",),
+    )
+    assert build_bundle(spec, "capabilities").digest == build_bundle(spec, "capabilities").digest
 
 
 def test_model_registry_snapshot_is_instance_owned() -> None:
@@ -216,8 +231,14 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
             return SessionWorkflowResult(request.session_id, request.mutation_id, "SUCCEEDED")
 
     class TaskOperation:
-        async def execute(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
-            return TaskWorkflowResult(request.graph_id, "SUCCEEDED", request.task_ids)
+        async def prepare(self, request, node_id, dependency_results):
+            raise AssertionError("not called")
+
+        async def renew(self, lease):
+            raise AssertionError("not called")
+
+        async def settle(self, request, lease, result):
+            raise AssertionError("not called")
 
     class EvaluationOperation:
         async def execute(self, request: EvaluationWorkflowInput) -> EvaluationWorkflowResult:
@@ -229,7 +250,7 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
         task=TaskActivity(TaskOperation()),
         evaluation=EvaluationActivity(EvaluationOperation()),
     )
-    registration = production_registration(activities)
+    registration = production_registration(activities, build_id="test-build")
     assert isinstance(registration, WorkerRegistration)
     assert len(registration.workflows) == len(registration.activities) == 4
     assert tuple(item.__name__ for item in registration.workflows) == ("ExecutionWorkflow", "SessionWorkflow", "TaskWorkflow", "EvaluationWorkflow")
@@ -239,7 +260,6 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     assert ExecuteActivity.load_input.__name__ == "load_input"
     assert ExecuteActivity.fix_bundle_route.__name__ == "fix_bundle_route"
     assert ExecuteActivity.fix_binding.__name__ == "fix_binding"
-    assert ExecuteActivity.load_prompt.__name__ == "load_prompt"
     assert ExecuteActivity.reserve_budget.__name__ == "reserve_budget"
     assert ExecuteActivity.run_agent.__name__ == "run_agent"
     assert ExecuteActivity.process_deferred.__name__ == "process_deferred"
@@ -247,7 +267,9 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
     assert ExecuteActivity.settle_budget.__name__ == "settle_budget"
     assert EvaluationActivity.run.__name__ == "run"
     assert SessionActivity.run.__name__ == "run"
-    assert TaskActivity.run.__name__ == "run"
+    assert TaskActivity.prepare.__name__ == "prepare"
+    assert TaskActivity.renew.__name__ == "renew"
+    assert TaskActivity.settle.__name__ == "settle"
 
     class Worker:
         def configure(
@@ -269,14 +291,14 @@ def test_temporal_registration_has_one_explicit_worker_surface() -> None:
 
     worker = Worker()
     registration.register(worker)
-    assert worker.configuration == ("json", "asset", "linktools-ai", "linktools-ai", "linktools-ai-production")
+    assert worker.configuration == ("json", "asset", "linktools-ai", "test-build", "linktools-ai-production")
     assert len(worker.workflows) == 4
 
 
 @pytest.mark.asyncio
 async def test_temporal_workflow_inputs_apply_canonical_tenant_validation() -> None:
-    with pytest.raises(ValueError, match="task workflow tenant is invalid"):
-        TaskWorkflowInput("graph", " tenant", (), SwarmLimits(), "request", "worker")
+    with pytest.raises(ValueError, match="task workflow graph is invalid"):
+        TaskWorkflowInput("graph", " tenant", (), TaskGraphLimits(), "request", "worker")
 
     with pytest.raises(ValueError, match="execution workflow tenant is invalid"):
         await ExecutionWorkflow().run(
@@ -305,7 +327,7 @@ async def test_workflow_gateway_validates_contract_and_unknown_operations() -> N
         async def cancel_workflow(self, workflow_id: str):
             return None
 
-    gateway = WorkflowGateway(Client())
+    gateway = WorkflowGateway(Client(), worker_build="test-build")
     local = ExecutionRequest("prompt", trusted_workspace_principal("workspace"), idempotency_key="contract-key", memory_scope="test")
     await gateway.start_execution("execution", local)
     with pytest.raises(ValueError):

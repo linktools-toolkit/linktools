@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task, Job and Swarm value objects."""
+"""Generic TaskGraph value objects."""
 
+import json
+import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ..core import (
+    JsonValue,
     Principal,
     TaskStatus,
+    canonical_json_bytes,
     validate_idempotency_key,
     validate_lease_owner,
     validate_tenant_id,
@@ -17,30 +22,84 @@ from ..errors import AIError, ErrorCode
 
 
 @dataclass(frozen=True, slots=True)
-class SwarmLimits:
+class TaskGraphLimits:
     max_concurrency: int = 8
     max_depth: int = 8
     max_nodes: int = 128
     max_budget: int = 1000
 
     def __post_init__(self) -> None:
-        if min(self.max_concurrency, self.max_depth, self.max_nodes, self.max_budget) < 1:
-            raise ValueError("swarm limits must be positive")
+        values = (self.max_concurrency, self.max_depth, self.max_nodes, self.max_budget)
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 1 for value in values):
+            raise ValueError("task graph limits must be positive")
 
 
-@dataclass(frozen=True, slots=True)
+def _normalize_json_mapping(value: Mapping[str, JsonValue]) -> "dict[str, JsonValue]":
+    normalized: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError("task node input keys must be non-empty strings")
+        normalized[key] = _normalize_json_value(item)
+    return normalized
+
+
+def _normalize_json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("task node input numbers must be finite")
+        return value
+    if isinstance(value, list):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, Mapping):
+        return _normalize_json_mapping(value)
+    raise TypeError(f"unsupported task node input value: {type(value).__name__}")
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class TaskNode:
     node_id: str
-    dependencies: "tuple[str, ...]" = ()
-    binding_digest: "str | None" = None
-    budget_cost: int = 1
+    dependencies: tuple[str, ...]
+    budget_cost: int
+    _input_json: bytes = field(repr=False)
 
-    def __post_init__(self) -> None:
-        if not self.node_id.strip() or len(set(self.dependencies)) != len(self.dependencies) or any(not item.strip() for item in self.dependencies) or self.budget_cost < 1:
+    def __init__(
+        self,
+        node_id: str,
+        dependencies: "tuple[str, ...]" = (),
+        *,
+        input: "Mapping[str, JsonValue] | None" = None,
+        budget_cost: int = 1,
+    ) -> None:
+        if isinstance(dependencies, (str, bytes)):
+            raise ValueError("task node dependencies are invalid")
+        try:
+            normalized_dependencies = tuple(dependencies)
+        except TypeError as error:
+            raise ValueError("task node dependencies are invalid") from error
+        if (
+            not isinstance(node_id, str)
+            or not node_id.strip()
+            or any(not isinstance(item, str) or not item.strip() for item in normalized_dependencies)
+            or len(set(normalized_dependencies)) != len(normalized_dependencies)
+            or not isinstance(budget_cost, int)
+            or isinstance(budget_cost, bool)
+            or budget_cost < 1
+        ):
             raise ValueError("task node identity is invalid")
-        if self.binding_digest is not None and re.fullmatch(r"[0-9a-f]{64}", self.binding_digest) is None:
-            raise ValueError("task node binding digest is invalid")
-        object.__setattr__(self, "dependencies", tuple(self.dependencies))
+        values: Mapping[str, JsonValue] = {} if input is None else input
+        if not isinstance(values, Mapping):
+            raise ValueError("task node input must be a mapping")
+        normalized = _normalize_json_mapping(values)
+        object.__setattr__(self, "node_id", node_id)
+        object.__setattr__(self, "dependencies", normalized_dependencies)
+        object.__setattr__(self, "budget_cost", budget_cost)
+        object.__setattr__(self, "_input_json", canonical_json_bytes(normalized))
+
+    @property
+    def input(self) -> "dict[str, JsonValue]":
+        return json.loads(self._input_json.decode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,7 +171,7 @@ class TaskGraph:
                 dependencies.difference_update(ready)
         return tuple(order)
 
-    def validate_limits(self, limits: SwarmLimits) -> None:
+    def validate_limits(self, limits: TaskGraphLimits) -> None:
         if len(self.nodes) > limits.max_nodes:
             raise AIError(ErrorCode.TASK_DAG_INVALID, "task graph exceeds node limit")
         depths: dict[str, int] = {}
@@ -217,7 +276,7 @@ class TaskGraphRequest:
     graph: TaskGraph
     principal: Principal
     idempotency_key: str = ""
-    limits: SwarmLimits = field(default_factory=SwarmLimits)
+    limits: TaskGraphLimits = field(default_factory=TaskGraphLimits)
 
     def __post_init__(self) -> None:
         validate_idempotency_key(self.idempotency_key)
@@ -275,20 +334,6 @@ class CancelGraphRequest:
         validate_idempotency_key(self.idempotency_key)
 
 
-@dataclass(frozen=True, slots=True)
-class Job:
-    job_id: str
-    graph: TaskGraph
-    status: TaskStatus = TaskStatus.PENDING
-
-
-@dataclass(frozen=True, slots=True)
-class Swarm:
-    swarm_id: str
-    graph: TaskGraph
-    parent_execution_id: str
-
-
 def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNode, ...]":
     return tuple(
         node for node in graph.nodes if node.node_id not in completed and all(dependency in completed for dependency in node.dependencies)
@@ -296,7 +341,7 @@ def ready_nodes(graph: TaskGraph, completed: "frozenset[str]") -> "tuple[TaskNod
 
 
 __all__ = [
-    "CancelGraphRequest", "Job", "Swarm", "SwarmLimits", "TaskCompletionLedger", "TaskGraph",
+    "CancelGraphRequest", "TaskGraphLimits", "TaskCompletionLedger", "TaskGraph",
     "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode",
     "TaskDependencyResult", "TaskGraphValidationError", "TaskStatus", "TaskTerminalRecord",
     "ready_nodes",

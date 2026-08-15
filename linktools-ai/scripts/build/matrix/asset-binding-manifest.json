@@ -1,5 +1,5 @@
 {
-  "digest": "08a8ba46a1668bccb261126932b171f6949912c1f3de346ef2466e93e0cd80cf",
+  "digest": "9cacf5aa698de33dcada4c5835ff4941492b3f52d88fc007674abd7c1972fbcf",
   "entries": [
     {
       "kind": "agent",
@@ -28,22 +28,6 @@
           "name": "legacy-json",
           "layout": {"type": "single-file", "suffix": ""},
           "codec_fingerprint": "mcp-server-spec",
-          "codec_version": 1,
-          "adapter_fingerprint": null
-        }
-      ]
-    },
-    {
-      "kind": "prompt",
-      "value_type": "linktools.ai.spec._contract.PromptSpec",
-      "allow_nested_id": true,
-      "identity_fingerprint": "exact-id-v1",
-      "default_write_variant": "legacy-json",
-      "variants": [
-        {
-          "name": "legacy-json",
-          "layout": {"type": "single-file", "suffix": ""},
-          "codec_fingerprint": "prompt-spec",
           "codec_version": 1,
           "adapter_fingerprint": null
         }

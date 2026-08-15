@@ -80,7 +80,7 @@ class AgentRunScope:
 
 
 class SubagentDelegate(Protocol):
-    async def __call__(self, *, tool_call_id: str, agent_id: str, prompt_id: str, task: str) -> "dict[str, JsonValue]": ...
+    async def __call__(self, agent_id: str, user_prompt: str) -> JsonValue: ...
 
 
 async def compose_platform_capabilities(
@@ -167,13 +167,16 @@ class _SubagentCapability(AbstractCapability[None]):
         toolset = FunctionToolset[None](id="linktools-subagent")
 
         @toolset.tool
-        async def delegate_task(ctx: RunContext[None], agent_id: str, prompt_id: str, task: str) -> "dict[str, Any]":
-            values = (agent_id.strip(), prompt_id.strip(), task.strip())
+        async def delegate_task(ctx: RunContext[None], agent_id: str, task: str) -> "dict[str, Any]":
+            values = (agent_id.strip(), task.strip())
             if not all(values):
-                raise ModelRetry("agent_id, prompt_id, and task are required")
+                raise ModelRetry("agent_id and task are required")
             if not ctx.tool_call_id:
                 raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-            return await self._delegate(tool_call_id=ctx.tool_call_id, agent_id=values[0], prompt_id=values[1], task=values[2])
+            result = await self._delegate(values[0], values[1])
+            if not isinstance(result, dict):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return result
 
         return toolset
 

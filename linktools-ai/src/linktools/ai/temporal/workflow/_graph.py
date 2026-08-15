@@ -2,9 +2,12 @@
 # -*- coding: utf-8 -*-
 """Deterministic TaskGraph workflow boundary."""
 
-from collections.abc import Callable
+import asyncio
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import timedelta
+from typing import Protocol, cast
 
 try:
     from temporalio import workflow as _temporal_workflow
@@ -15,9 +18,21 @@ except ModuleNotFoundError as error:
     _temporal_workflow = None
     _TemporalRetryPolicy = None
 
-from ...core import validate_lease_owner, validate_tenant_id
+from ...core import (
+    JsonValue,
+    canonical_json_bytes,
+    canonical_sha256,
+    validate_tenant_id,
+)
 from ...errors import AIError, ErrorCode
-from ...task import SwarmLimits
+from ...task import (
+    TaskDependencyResult,
+    TaskGraph,
+    TaskGraphLimits,
+    TaskGraphRequest,
+    TaskLease,
+    TaskNode,
+)
 from ._execution import (
     ExecutionWorkflow,
     ExecutionWorkflowInput,
@@ -28,51 +43,105 @@ from ._execution import (
 @dataclass(frozen=True, slots=True)
 class TaskWorkflowNode:
     node_id: str
-    dependencies: "tuple[str, ...]"
-    binding_digest: str
+    dependencies: tuple[str, ...]
+    input_json: str
     budget_cost: int = 1
-    owner: str = ""
-    fence: int = 0
-    operation_id: str = ""
 
     def __post_init__(self) -> None:
-        if self.owner:
-            try:
-                validate_lease_owner(self.owner)
-            except AIError as error:
-                raise AIError(ErrorCode.TASK_DAG_INVALID) from error
-        if not self.node_id.strip() or not self.binding_digest.strip() or len(self.dependencies) > 256 or len(set(self.dependencies)) != len(self.dependencies) or any(not dependency.strip() for dependency in self.dependencies) or self.budget_cost < 1 or self.fence < 0 or (self.fence and not self.owner.strip()) or (self.operation_id and not self.owner.strip()):
-            raise AIError(ErrorCode.TASK_DAG_INVALID)
+        if (
+            not isinstance(self.input_json, str)
+            or not self.input_json
+            or isinstance(self.dependencies, (str, bytes))
+        ):
+            raise ValueError("task workflow node input is required")
+        try:
+            dependencies = tuple(self.dependencies)
+            value = json.loads(self.input_json)
+            if not isinstance(value, dict) or canonical_json_bytes(value).decode("utf-8") != self.input_json:
+                raise ValueError("task workflow node input is not canonical JSON")
+            TaskNode(
+                self.node_id,
+                dependencies,
+                input=cast(Mapping[str, JsonValue], value),
+                budget_cost=self.budget_cost,
+            )
+            object.__setattr__(self, "dependencies", dependencies)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("task workflow node is invalid") from error
 
 
 @dataclass(frozen=True, slots=True)
 class TaskWorkflowInput:
     graph_id: str
     tenant_id: str
-    nodes: "tuple[TaskWorkflowNode, ...]"
-    limits: SwarmLimits
+    nodes: tuple[TaskWorkflowNode, ...]
+    limits: TaskGraphLimits
     request_ref: str
     worker_build: str
 
     def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (self.graph_id, self.request_ref, self.worker_build)
+        ):
+            raise ValueError("task workflow input is incomplete")
         try:
             validate_tenant_id(self.tenant_id)
-        except AIError as error:
-            raise ValueError("task workflow tenant is invalid") from error
-        if not self.graph_id.strip() or not self.request_ref.strip() or not self.worker_build.strip():
-            raise ValueError("task workflow input is incomplete")
+            graph = TaskGraph(self.graph_id, tuple(_task_node(node) for node in self.nodes))
+            graph.validate_limits(self.limits)
+        except (AIError, AttributeError, TypeError, ValueError) as error:
+            raise ValueError("task workflow graph is invalid") from error
         object.__setattr__(self, "nodes", tuple(self.nodes))
+
+    @classmethod
+    def from_request(
+        cls,
+        request: TaskGraphRequest,
+        *,
+        request_ref: str,
+        worker_build: str,
+    ) -> "TaskWorkflowInput":
+        return cls(
+            request.graph.graph_id,
+            request.principal.tenant_id,
+            tuple(
+                TaskWorkflowNode(
+                    node.node_id,
+                    node.dependencies,
+                    canonical_json_bytes(node.input).decode("utf-8"),
+                    node.budget_cost,
+                )
+                for node in request.graph.nodes
+            ),
+            request.limits,
+            request_ref,
+            worker_build,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class TaskWorkflowResult:
     graph_id: str
     status: str
-    completed_node_ids: "tuple[str, ...]"
+    completed_node_ids: tuple[str, ...]
 
 
 class TaskActivity(Protocol):
-    async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult: ...
+    async def prepare(
+        self,
+        request: TaskWorkflowInput,
+        node_id: str,
+        dependency_results: Mapping[str, TaskDependencyResult],
+    ) -> tuple[TaskLease, ExecutionWorkflowInput]: ...
+
+    async def renew(self, lease: TaskLease) -> TaskLease: ...
+
+    async def settle(
+        self,
+        request: TaskWorkflowInput,
+        lease: TaskLease,
+        result: ExecutionWorkflowResult,
+    ) -> TaskDependencyResult | None: ...
 
 
 class _ChildWorkflowHandle(Protocol):
@@ -82,7 +151,7 @@ class _ChildWorkflowHandle(Protocol):
 
 
 class TaskWorkflow:
-    def __init__(self, activity: 'TaskActivity | None' = None) -> None:
+    def __init__(self, activity: "TaskActivity | None" = None) -> None:
         self._activity = activity
         self._cancelled = False
         self._graph_id = ""
@@ -90,20 +159,59 @@ class TaskWorkflow:
 
     async def run(self, request: TaskWorkflowInput) -> TaskWorkflowResult:
         self._graph_id = request.graph_id
-        if len(set(node.node_id for node in request.nodes)) != len(request.nodes):
-            raise ValueError("task workflow contains duplicate node ids")
-        _validate_graph(request.nodes, request.limits)
         if self._cancelled:
             return TaskWorkflowResult(request.graph_id, "CANCELLED", ())
-        if self._activity is not None:
-            result = await self._activity.run(request)
-        elif _temporal_workflow is not None and _TemporalRetryPolicy is not None:
-            result = await _run_task_children(request, self._is_cancelled, self._active_children)
-        else:
-            raise RuntimeError("Temporal SDK is required for production workflow execution")
-        if result.graph_id != request.graph_id:
-            raise ValueError("task activity returned mismatched graph identity")
-        return result
+        completed_results: dict[str, TaskDependencyResult] = {}
+        failed: set[str] = set()
+        pending = {node.node_id: node for node in request.nodes}
+        while pending:
+            if self._cancelled:
+                return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed_results)))
+            blocked = {
+                node_id
+                for node_id, node in pending.items()
+                if any(dependency in failed for dependency in node.dependencies)
+            }
+            failed.update(blocked)
+            for node_id in blocked:
+                pending.pop(node_id)
+            ready = tuple(
+                sorted(
+                    (
+                        node
+                        for node in pending.values()
+                        if all(dependency in completed_results for dependency in node.dependencies)
+                    ),
+                    key=lambda node: node.node_id,
+                )
+            )
+            if not ready:
+                if pending:
+                    raise AIError(ErrorCode.TASK_GRAPH_DEADLOCK)
+                break
+            for offset in range(0, len(ready), request.limits.max_concurrency):
+                batch = ready[offset : offset + request.limits.max_concurrency]
+                results = await asyncio.gather(
+                    *(
+                        self._run_node(
+                            request,
+                            node,
+                            {
+                                dependency: completed_results[dependency]
+                                for dependency in node.dependencies
+                            },
+                        )
+                        for node in batch
+                    )
+                )
+                for node, result in zip(batch, results):
+                    pending.pop(node.node_id)
+                    if result is None:
+                        failed.add(node.node_id)
+                    else:
+                        completed_results[node.node_id] = result
+        status = "SUCCEEDED" if not failed else "FAILED"
+        return TaskWorkflowResult(request.graph_id, status, tuple(sorted(completed_results)))
 
     def cancel(self, idempotency_key: str) -> TaskWorkflowResult:
         if not idempotency_key.strip():
@@ -113,111 +221,145 @@ class TaskWorkflow:
             child.cancel()
         return TaskWorkflowResult(self._graph_id, "CANCELLED", ())
 
-    def _is_cancelled(self) -> bool:
-        return self._cancelled
+    async def _run_node(
+        self,
+        request: TaskWorkflowInput,
+        node: TaskWorkflowNode,
+        dependency_results: Mapping[str, TaskDependencyResult],
+    ) -> TaskDependencyResult | None:
+        lease, execution_input = await self._prepare(request, node.node_id, dependency_results)
+        child = self._start_child(execution_input, request, node)
+        self._active_children.append(child)
+        try:
+            try:
+                lease, result = await self._wait_for_child(execution_input, lease, child)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                result = ExecutionWorkflowResult(
+                    execution_input.execution_id,
+                    "FAILED",
+                    None,
+                    0,
+                )
+        finally:
+            self._active_children.remove(child)
+        return await self._settle(request, lease, result)
+
+    async def _prepare(
+        self,
+        request: TaskWorkflowInput,
+        node_id: str,
+        dependency_results: Mapping[str, TaskDependencyResult],
+    ) -> tuple[TaskLease, ExecutionWorkflowInput]:
+        if self._activity is not None:
+            return await self._activity.prepare(request, node_id, dependency_results)
+        return cast(
+            tuple[TaskLease, ExecutionWorkflowInput],
+            await _execute_task_activity(
+                "task_node_prepare",
+                request,
+                node_id,
+                dependency_results,
+            ),
+        )
+
+    async def _settle(
+        self,
+        request: TaskWorkflowInput,
+        lease: TaskLease,
+        result: ExecutionWorkflowResult,
+    ) -> TaskDependencyResult | None:
+        if self._activity is not None:
+            return await self._activity.settle(request, lease, result)
+        return cast(
+            "TaskDependencyResult | None",
+            await _execute_task_activity("task_node_settle", request, lease, result),
+        )
+
+    async def _wait_for_child(
+        self,
+        execution_input: ExecutionWorkflowInput,
+        lease: TaskLease,
+        child: _ChildWorkflowHandle,
+    ) -> tuple[TaskLease, ExecutionWorkflowResult]:
+        child_task = asyncio.create_task(child.result())
+        try:
+            current_lease = lease
+            while True:
+                renew_task = asyncio.create_task(self._renew(current_lease))
+                done, _ = await asyncio.wait(
+                    (child_task, renew_task),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if child_task in done:
+                    renew_task.cancel()
+                    await asyncio.gather(renew_task, return_exceptions=True)
+                    return current_lease, child_task.result()
+                current_lease = renew_task.result()
+                if self._cancelled:
+                    child.cancel()
+                    return current_lease, ExecutionWorkflowResult(
+                        execution_input.execution_id,
+                        "CANCELLED",
+                        None,
+                        0,
+                    )
+        except asyncio.CancelledError:
+            child.cancel()
+            raise
+
+    async def _renew(self, lease: TaskLease) -> TaskLease:
+        if self._activity is not None:
+            return await self._activity.renew(lease)
+        await asyncio.sleep(30)
+        return cast(TaskLease, await _execute_task_activity("task_node_renew", lease))
+
+    def _start_child(
+        self,
+        execution_input: ExecutionWorkflowInput,
+        request: TaskWorkflowInput,
+        node: TaskWorkflowNode,
+    ) -> _ChildWorkflowHandle:
+        if _temporal_workflow is None or _TemporalRetryPolicy is None:
+            raise RuntimeError("Temporal SDK is required for production workflow execution")
+        workflow_id = "task-node-" + canonical_sha256(
+            {
+                "tenant_id": request.tenant_id,
+                "graph_id": request.graph_id,
+                "node_id": node.node_id,
+            }
+        )
+        return cast(
+            _ChildWorkflowHandle,
+            _temporal_workflow.start_child_workflow(
+                ExecutionWorkflow,
+                execution_input,
+                id=workflow_id,
+                retry_policy=_TemporalRetryPolicy(maximum_attempts=1),
+            ),
+        )
 
 
-async def _run_task_children(
-    request: TaskWorkflowInput,
-    is_cancelled: 'Callable[[], bool]',
-    active_children: 'list[_ChildWorkflowHandle]',
-) -> TaskWorkflowResult:
+async def _execute_task_activity(name: str, *args: object) -> object:
     if _temporal_workflow is None or _TemporalRetryPolicy is None:
         raise RuntimeError("Temporal SDK is required for production workflow execution")
-    nodes = request.nodes
-    completed: set[str] = set()
-    failed: set[str] = set()
-    pending = {node.node_id: node for node in nodes}
-    while pending:
-        if is_cancelled():
-            return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed)))
-        blocked = {node_id for node_id, node in pending.items() if any(dependency in failed for dependency in node.dependencies)}
-        failed.update(blocked)
-        for node_id in blocked:
-            pending.pop(node_id)
-        ready = tuple(sorted((node for node in pending.values() if all(dependency in completed for dependency in node.dependencies)), key=lambda node: node.node_id))
-        if not ready:
-            if pending:
-                raise AIError(ErrorCode.TASK_GRAPH_DEADLOCK)
-            break
-        limits = request.limits
-        for offset in range(0, len(ready), limits.max_concurrency):
-            batch = ready[offset:offset + limits.max_concurrency]
-            if is_cancelled():
-                return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed)))
-            handles = tuple(_temporal_workflow.start_child_workflow(
-                ExecutionWorkflow,
-                ExecutionWorkflowInput(
-                    execution_id=f"{request.graph_id}:{node.node_id}",
-                    tenant_id=request.tenant_id or "task",
-                    binding_digest=node.binding_digest,
-                    bundle_digest=node.binding_digest,
-                    request_ref=request.request_ref or f"task:{request.graph_id}:{node.node_id}",
-                    worker_build=request.worker_build,
-                    owner=node.owner or f"task-workflow:{request.graph_id}",
-                    fence=node.fence or 1,
-                    operation_id=node.operation_id or f"task:{request.graph_id}:{node.node_id}",
-                ),
-                id=f"{request.graph_id}:{node.node_id}",
-                retry_policy=_TemporalRetryPolicy(maximum_attempts=1),
-            ) for node in batch)
-            active_children.extend(handles)
-            results_list: list[ExecutionWorkflowResult] = []
-            try:
-                for handle in handles:
-                    results_list.append(await handle.result())
-                    if is_cancelled():
-                        for remaining in handles:
-                            remaining.cancel()
-                        return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed)))
-            finally:
-                for handle in handles:
-                    active_children.remove(handle)
-            results = tuple(results_list)
-            for node, result in zip(batch, results):
-                if result.status == "SUCCEEDED":
-                    completed.add(node.node_id)
-                else:
-                    failed.add(node.node_id)
-                pending.pop(node.node_id)
-    status = "SUCCEEDED" if len(completed) == len(nodes) else "FAILED"
-    return TaskWorkflowResult(request.graph_id, status, tuple(sorted(completed)))
+    return await _temporal_workflow.execute_activity(
+        name,
+        args=list(args),
+        start_to_close_timeout=timedelta(seconds=60),
+        heartbeat_timeout=timedelta(seconds=15),
+        retry_policy=_TemporalRetryPolicy(maximum_attempts=3),
+    )
 
 
-def _validate_graph(nodes: tuple[TaskWorkflowNode, ...], limits: SwarmLimits) -> None:
-    if len(nodes) > limits.max_nodes or sum(node.budget_cost for node in nodes) > limits.max_budget:
-        raise AIError(ErrorCode.TASK_DAG_INVALID)
-    identifiers = {node.node_id for node in nodes}
-    if len(identifiers) != len(nodes) or any(dependency not in identifiers for node in nodes for dependency in node.dependencies):
-        raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
-    remaining = {node.node_id: set(node.dependencies) for node in nodes}
-    depth: dict[str, int] = {}
-    while remaining:
-        ready = tuple(sorted(node_id for node_id, dependencies in remaining.items() if not dependencies))
-        if not ready:
-            raise AIError(ErrorCode.TASK_GRAPH_CYCLE)
-        for node_id in ready:
-            node = next(node for node in nodes if node.node_id == node_id)
-            depth[node_id] = 1 + max((depth[item] for item in node.dependencies), default=0)
-            remaining.pop(node_id)
-        for dependencies in remaining.values():
-            dependencies.difference_update(ready)
-    if max(depth.values(), default=0) > limits.max_depth:
-        raise AIError(ErrorCode.TASK_DAG_INVALID)
-
-
-def _validate_child_results(
-    request: TaskWorkflowInput,
-    results: "tuple[ExecutionWorkflowResult, ...]",
-) -> None:
-    if len(results) != len(request.nodes):
-        raise ValueError("task child workflow count does not match the graph")
-    for result, node in zip(results, request.nodes):
-        node_id = node.node_id
-        if result.execution_id != f"{request.graph_id}:{node_id}":
-            raise ValueError("task child workflow returned mismatched identity")
-        if result.status not in {"SUCCEEDED", "FAILED", "CANCELLED", "WAITING"}:
-            raise ValueError("task child workflow returned an invalid status")
+def _task_node(node: TaskWorkflowNode) -> TaskNode:
+    return TaskNode(
+        node.node_id,
+        node.dependencies,
+        input=cast(Mapping[str, JsonValue], json.loads(node.input_json)),
+        budget_cost=node.budget_cost,
+    )
 
 
 if _temporal_workflow is not None:
@@ -226,4 +368,10 @@ if _temporal_workflow is not None:
     TaskWorkflow = _temporal_workflow.defn(name="TaskWorkflow")(TaskWorkflow)
 
 
-__all__ = ["TaskActivity", "TaskWorkflow", "TaskWorkflowInput", "TaskWorkflowNode", "TaskWorkflowResult"]
+__all__ = [
+    "TaskActivity",
+    "TaskWorkflow",
+    "TaskWorkflowInput",
+    "TaskWorkflowNode",
+    "TaskWorkflowResult",
+]

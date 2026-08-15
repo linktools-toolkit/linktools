@@ -47,7 +47,6 @@ ActivityType = ExecuteActivity | SessionActivity | TaskActivity | EvaluationActi
 DATA_CONVERTER = "json"
 PAYLOAD_CODEC = "asset"
 INTERCEPTOR = "linktools-ai"
-BUILD_ID = "linktools-ai"
 TASK_QUEUE = "linktools-ai-production"
 _logger = environ.get_logger("ai.temporal.worker")
 
@@ -176,11 +175,15 @@ class WorkerActivities:
 class WorkerRegistration:
     workflows: "tuple[WorkflowType, ...]"
     activities: "tuple[ActivityType, ...]"
+    build_id: str
     data_converter: str = DATA_CONVERTER
     payload_codec: str = PAYLOAD_CODEC
     interceptor: str = INTERCEPTOR
-    build_id: str = BUILD_ID
     task_queue: str = TASK_QUEUE
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.build_id, str) or not self.build_id.strip():
+            raise ValueError("Temporal worker build_id is required")
 
     def register(self, worker: TemporalWorker) -> None:
         expected_workflows = (ExecutionWorkflow, SessionWorkflow, TaskWorkflow, EvaluationWorkflow)
@@ -313,8 +316,10 @@ def build_temporal_worker(
 def build_production_worker(
     client: TemporalSdkClient,
     activities: WorkerActivities,
+    *,
+    build_id: str,
 ) -> TemporalSdkWorker:
-    registration = production_registration(activities)
+    registration = production_registration(activities, build_id=build_id)
     data_converter, payload_codec, interceptor = build_temporal_components()
     return build_temporal_worker(
         client,
@@ -325,10 +330,11 @@ def build_production_worker(
     )
 
 
-def production_registration(activities: WorkerActivities) -> WorkerRegistration:
+def production_registration(activities: WorkerActivities, *, build_id: str) -> WorkerRegistration:
     return WorkerRegistration(
         (ExecutionWorkflow, SessionWorkflow, TaskWorkflow, EvaluationWorkflow),
         (activities.execution, activities.session, activities.task, activities.evaluation),
+        build_id,
     )
 
 
@@ -354,7 +360,6 @@ def _temporal_activity_functions(activities: Sequence[ActivityType]) -> tuple[Te
                     cast(TemporalActivity, activity.load_input),
                     cast(TemporalActivity, activity.fix_bundle_route),
                     cast(TemporalActivity, activity.fix_binding),
-                    cast(TemporalActivity, activity.load_prompt),
                     cast(TemporalActivity, activity.reserve_budget),
                     cast(TemporalActivity, activity.run_agent),
                     cast(TemporalActivity, activity.process_deferred),
@@ -362,7 +367,17 @@ def _temporal_activity_functions(activities: Sequence[ActivityType]) -> tuple[Te
                     cast(TemporalActivity, activity.settle_budget),
                 )
             )
-        elif isinstance(activity, (SessionActivity, TaskActivity, EvaluationActivity)):
+        elif isinstance(activity, SessionActivity):
+            functions.append(cast(TemporalActivity, activity.run))
+        elif isinstance(activity, TaskActivity):
+            functions.extend(
+                (
+                    cast(TemporalActivity, activity.prepare),
+                    cast(TemporalActivity, activity.renew),
+                    cast(TemporalActivity, activity.settle),
+                )
+            )
+        elif isinstance(activity, EvaluationActivity):
             functions.append(cast(TemporalActivity, activity.run))
         else:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -373,7 +388,6 @@ __all__ = [
     "ActivityType",
     "AssetPayloadCodec",
     "AssetWorkerInterceptor",
-    "BUILD_ID",
     "DATA_CONVERTER",
     "INTERCEPTOR",
     "PAYLOAD_CODEC",

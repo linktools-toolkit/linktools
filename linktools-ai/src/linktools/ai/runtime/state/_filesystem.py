@@ -45,13 +45,12 @@ from ...storage import (
     read_json,
     write_json_atomic,
 )
-from ...task import TaskGraph, TaskGraphView, TaskNode, TaskNodeView, TaskTerminalRecord
+from ...task import TaskGraphView, TaskNode, TaskNodeView
 from .._tool import ToolOperationRecord
 from ._contracts import (
     ApprovalRecord,
     ArtifactRecord,
     ConversationCursor,
-    ConversationState,
     EvaluationRecord,
     ExecutionEventRecord,
     ExecutionRecord,
@@ -74,9 +73,7 @@ from ._memory import (
     RuntimeTransactionBinding,
     _ApprovalRepository,
     _ArtifactRepository,
-    _Base,
     _build_in_memory_domains,
-    _capture_runtime_snapshot,
     _EvaluationRepository,
     _EventRepository,
     _ExecutionRepository,
@@ -310,11 +307,11 @@ class _FilesystemDomainBackend:
         if isinstance(tasks, _TaskRepository):
             for raw in payload["task_plans"]:
                 if isinstance(raw, dict):
-                    view = _task_plan_from_json(raw)
+                    view = _task_plan_from_json(raw.get("view", raw))
                     tasks._plans[(self._tenant_id, view.graph_id)] = view
             for raw in payload["task_nodes"]:
                 if isinstance(raw, dict):
-                    node = _task_node_from_json(raw)
+                    node = _task_node_from_json(raw.get("node", raw))
                     tasks._nodes[(self._tenant_id, node.graph_id, node.node_id)] = node
         if isinstance(evaluations, _EvaluationRepository):
             for raw in payload["evaluations"]:
@@ -456,7 +453,10 @@ class _FilesystemDomainBackend:
             values["artifacts"] = [_json_record(item) for item in artifacts._records.values()]
         elif self._domain is RuntimeDomain.TASK and isinstance(tasks, _TaskRepository):
             values["tasks"] = [
-                *({"record_type": "plan", "tenant_id": tenant, "view": _json_record(view)} for (tenant, _), view in tasks._plans.items()),
+                *(
+                    {"record_type": "plan", "tenant_id": tenant, "view": _task_view_json(view)}
+                    for (tenant, _), view in tasks._plans.items()
+                ),
                 *({"record_type": "node", "tenant_id": tenant, "node": _json_record(node)} for (tenant, _, _), node in tasks._nodes.items()),
             ]
         elif self._domain is RuntimeDomain.EVALUATION:
@@ -739,14 +739,16 @@ def recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckp
     raw_input = value["input"]
     if not isinstance(raw_input, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    user_prompt = raw_input.get("user_prompt", raw_input.get("prompt"))
+    if not isinstance(user_prompt, str):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     recovery_input = RecoveryExecutionInput(
-        prompt=str(raw_input["prompt"]),
+        user_prompt=user_prompt,
         principal_id=str(raw_input["principal_id"]),
         principal_kind=str(raw_input["principal_kind"]),
         session_id=None if raw_input.get("session_id") is None else str(raw_input["session_id"]),
         memory_scope=None if raw_input.get("memory_scope") is None else str(raw_input["memory_scope"]),
         agent_id=str(raw_input["agent_id"]),
-        prompt_id=str(raw_input["prompt_id"]),
         binding_digest=str(raw_input["binding_digest"]),
         lineage_kind=str(raw_input["lineage_kind"]),
         parent_execution_id=None if raw_input.get("parent_execution_id") is None else str(raw_input["parent_execution_id"]),
@@ -837,8 +839,32 @@ def _event_from_json(value: dict[str, JsonValue]) -> ExecutionEventRecord:
 
 
 def _task_plan_from_json(value: dict[str, JsonValue]) -> TaskGraphView:
-    nodes = tuple(TaskNode(str(item["node_id"]), tuple(item.get("dependencies", [])), None if item.get("binding_digest") is None else str(item["binding_digest"]), int(item.get("budget_cost", 1))) for item in value.get("nodes", []))
+    nodes = tuple(
+        TaskNode(
+            str(item["node_id"]),
+            tuple(item.get("dependencies", [])),
+            input=item.get("input", {}),
+            budget_cost=int(item.get("budget_cost", 1)),
+        )
+        for item in value.get("nodes", [])
+    )
     return TaskGraphView(str(value["graph_id"]), TaskStatus(str(value["status"])), nodes)
+
+
+def _task_view_json(value: TaskGraphView) -> dict[str, JsonValue]:
+    return {
+        "graph_id": value.graph_id,
+        "status": value.status.value,
+        "nodes": [
+            {
+                "node_id": node.node_id,
+                "dependencies": list(node.dependencies),
+                "input": node.input,
+                "budget_cost": node.budget_cost,
+            }
+            for node in value.nodes
+        ],
+    }
 
 
 def _task_node_from_json(value: dict[str, JsonValue]) -> TaskNodeView:

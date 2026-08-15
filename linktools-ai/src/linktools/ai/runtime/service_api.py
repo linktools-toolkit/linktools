@@ -18,8 +18,8 @@ from ..core import (
     SessionStatus,
     validate_idempotency_key,
     validate_memory_scope,
-    validate_prompt,
     validate_resource_id,
+    validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
@@ -35,13 +35,13 @@ from ..task import (
 
 @dataclass(frozen=True, slots=True)
 class ExecutionRequest:
-    prompt: str
+    user_prompt: str
     principal: Principal
     idempotency_key: "str | None" = None
     memory_scope: "str | None" = None
 
     def __post_init__(self) -> None:
-        validate_prompt(self.prompt)
+        validate_user_prompt(self.user_prompt)
         if self.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         validate_idempotency_key(self.idempotency_key)
@@ -51,23 +51,23 @@ class ExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class RetryExecutionRequest:
-    prompt: str
+    user_prompt: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        validate_prompt(self.prompt)
+        validate_user_prompt(self.user_prompt)
         validate_idempotency_key(self.idempotency_key)
 
 
 @dataclass(frozen=True, slots=True)
 class ForkExecutionRequest:
-    prompt: str
+    user_prompt: str
     principal: Principal
     idempotency_key: str
 
     def __post_init__(self) -> None:
-        validate_prompt(self.prompt)
+        validate_user_prompt(self.user_prompt)
         validate_idempotency_key(self.idempotency_key)
 
 
@@ -187,12 +187,12 @@ class ListSessionRequest:
 @dataclass(frozen=True, slots=True)
 class ResumeSessionRequest:
     principal: Principal
-    prompt: str
+    user_prompt: str
     idempotency_key: str = ""
     memory_scope: "str | None" = None
 
     def __post_init__(self) -> None:
-        validate_prompt(self.prompt)
+        validate_user_prompt(self.user_prompt)
         validate_idempotency_key(self.idempotency_key)
         if self.memory_scope is not None:
             validate_memory_scope(self.memory_scope)

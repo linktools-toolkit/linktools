@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Public runtime contracts."""
 
+from ._agent import AgentHandle
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService
 from ._execution import DefaultExecutionService
+from ._factory import build_local_runtime
 from ._local import LocalExecutionBackend
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
@@ -75,10 +77,12 @@ from .state import (
 
 __all__ = [
     "DefaultApprovalService",
+    "AgentHandle",
     "DefaultArtifactService",
     "DefaultEvaluationService",
     "DefaultEventService",
     "DefaultExecutionService",
+    "build_local_runtime",
     "DefaultSessionService",
     "DefaultTaskService",
     "LocalExecutionBackend",

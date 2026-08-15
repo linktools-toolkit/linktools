@@ -9,11 +9,11 @@ Each package owns one concern:
 | `core` | Pure values, IDs, JSON, paging, principals, and canonical hashing |
 | `storage` | Generic overlays, caches, revisions, files, locks, SQL dialects, schema manifests, and database initialization |
 | `asset` | Raw Asset keys, metadata, logical bindings, `AssetStore`, `AssetRepository`, and Asset backends |
-| `spec` | Agent, Prompt, Skill, and MCP declaration DTOs and codecs |
+| `spec` | Agent, Skill, and MCP declaration DTOs and codecs |
 | `model` | Model routes, connections, credentials, registries, and materializers |
 | `observe` | Vendor-neutral run context, middleware, traces, and snapshots |
 | `capability` | Capability resolution, grants, bindings, and Pydantic AI materialization contracts |
-| `task` | Task, Job, Swarm, DAG, lease, and local launcher contracts |
+| `task` | Generic TaskGraph, DAG, lease, and local launcher contracts |
 | `agent` | Agent compilation, output schemas, execution binding, and the Pydantic AI runner |
 | `runtime` | Persistence contracts and the execution, session, task, evaluation, approval, event, and artifact APIs |
 | `workspace` | Workspace discovery, local tools, persistence selection, and the library composition root |
@@ -40,7 +40,7 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 
 ## 3. Composition and lifecycle
 
-Keep common construction paths short. Callers should pass `RuntimeStorage` and domain inputs; they should not assemble registries, table collections, manifests, or internal storage bundles.
+Keep common construction paths short. Callers should pass `RuntimeState` and domain inputs; they should not assemble registries, table collections, manifests, or internal storage bundles.
 
 The current SQL entry points follow this rule:
 
@@ -77,7 +77,7 @@ Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `init
 
 `AssetBackend` and the public storage protocols are the extension boundary for custom loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, call `initialize()`, then create an `AssetRepository` from a frozen `AssetTypeRegistry` snapshot.
 
-The default workspace loader reads `<workspace>/.linktools/assets` through a read-only `LocalDirectoryAssetBackend`. `PrefixAssetPathAdapter` maps the logical `skill` kind to `skills`; generated Agent and Prompt defaults use the selected Asset writer when durable, otherwise they live in a writable in-memory layer. Do not hard-code that policy into generic Asset or Storage code.
+The default workspace loader reads `<workspace>/.linktools/assets` through a read-only `DirectoryAssetBackend`. `PrefixAssetPathAdapter` maps Agent, Skill, and MCP kinds to their nested physical directories; only the workspace-owned repository bootstraps `agent/default`. Do not hard-code that policy into generic Asset or Storage code.
 
 Register custom logical representations with `AssetTypeBinding` and `AssetVariantBinding`. Codecs validate bytes at the repository boundary. Backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
 

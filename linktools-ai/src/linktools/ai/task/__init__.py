@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Task graph and swarm contracts."""
+"""Generic TaskGraph contracts and local scheduling."""
 
 from ._api import open_local_task_api
 from ._graph import (
     CancelGraphRequest,
-    Job,
-    Swarm,
-    SwarmLimits,
     TaskCompletionLedger,
     TaskDependencyResult,
     TaskGraph,
     TaskGraphHandle,
+    TaskGraphLimits,
     TaskGraphRequest,
     TaskGraphResult,
     TaskGraphView,
@@ -32,7 +30,10 @@ from ._service import TaskApi, TaskGraphLauncher, TaskQueryApi
 from ._service_impl import DefaultTaskService, TaskPersistence
 
 __all__ = [
-    "CancelGraphRequest", "DefaultTaskService", "Job", "Swarm", "SwarmLimits", "TaskApi", "TaskCompletionLedger", "TaskDependencyResult", "TaskGraph", "TaskGraphLauncher", "TaskLease", "TaskPersistence",
-    "LocalTaskGraphLauncher", "TaskGraphHandle", "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode", "TaskNodeResult", "TaskNodeRunResult", "TaskNodeRunner", "TaskNodeView", "TaskQueryApi", "open_local_task_api",
+    "CancelGraphRequest", "DefaultTaskService", "TaskGraphLimits", "TaskApi",
+    "TaskCompletionLedger", "TaskDependencyResult", "TaskGraph", "TaskGraphLauncher",
+    "TaskLease", "TaskPersistence", "LocalTaskGraphLauncher", "TaskGraphHandle",
+    "TaskGraphRequest", "TaskGraphResult", "TaskGraphView", "TaskNode", "TaskNodeResult",
+    "TaskNodeRunResult", "TaskNodeRunner", "TaskNodeView", "TaskQueryApi", "open_local_task_api",
     "TaskStatus", "TaskTerminalRecord", "ready_nodes",
 ]

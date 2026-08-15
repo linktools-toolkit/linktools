@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from linktools.core import environ
-from pydantic import BaseModel
-from pydantic_ai import Agent, AgentRunResultEvent, TextOutput
+from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 from pydantic_ai.messages import (
@@ -26,7 +25,6 @@ from pydantic_ai.messages import (
     ThinkingPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.models import Model
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
@@ -34,6 +32,7 @@ from pydantic_ai_harness.step_persistence import StepStore
 from ..capability import CapabilityMaterializationContext
 from ..core import ExecutionEventType, JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ._builder import build_pydantic_agent
 from ._capabilities import (
     AgentRunScope,
     SubagentDelegate,
@@ -41,7 +40,6 @@ from ._capabilities import (
     tool_name_allowed,
 )
 from ._definition import AgentDefinition
-from ._output import AssistantTextOutput
 
 EventSink = Callable[[ExecutionEventType, JsonValue], Awaitable[None]]
 
@@ -64,7 +62,7 @@ class AgentExecutor:
     async def execute(
         self,
         definition: AgentDefinition,
-        prompt: str,
+        user_prompt: str,
         history: "list[ModelMessage]",
         conversation_id: str,
         *,
@@ -84,7 +82,7 @@ class AgentExecutor:
         if await step_store.get_run(run_id=step_run_id) is not None:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         model = definition.model.materialize()
-        agent = self._build_agent(definition, model)
+        agent = build_pydantic_agent(definition, model=model)
         materialized: "list[PydanticAgentCapability[None]]" = []
         for binding in definition.effective_capabilities:
             materialized.extend(await binding.materialize(capability_context))
@@ -117,7 +115,7 @@ class AgentExecutor:
         )
         final_result = None
         async with agent.run_stream_events(
-            prompt,
+            user_prompt,
             message_history=history or None,
             conversation_id=conversation_id,
             capabilities=capabilities,
@@ -142,22 +140,6 @@ class AgentExecutor:
         payload = cast(dict[str, JsonValue], output.model_dump(mode="json"))
         _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)
         return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages())
-
-    def _build_agent(self, definition: AgentDefinition, model: "Model | str") -> "Agent[None, object]":
-        output_type: "type[BaseModel] | TextOutput" = definition.output_type
-        if output_type is AssistantTextOutput:
-            output_type = TextOutput(_assistant_text_output)
-        return cast(
-            "Agent[None, object]",
-            Agent(
-                model,
-                name=definition.spec.id,
-                system_prompt=definition.prompt.system,
-                instructions="\n".join((*definition.spec.instructions, *definition.prompt.instructions)),
-                output_type=output_type,
-            ),
-        )
-
 
 class _AllowlistPresentation(AbstractCapability[None]):
     def __init__(self, allow_tools: "tuple[str, ...]") -> None:
@@ -185,10 +167,6 @@ def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
         return False
     selector = f"mcp__{server}"
     return selector in allow_tools or f"{selector}__*" in allow_tools
-
-
-def _assistant_text_output(value: str) -> AssistantTextOutput:
-    return AssistantTextOutput(text=value)
 
 
 def _map_event(

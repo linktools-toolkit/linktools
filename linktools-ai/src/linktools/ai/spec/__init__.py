@@ -6,7 +6,6 @@ from ._assets import builtin_asset_bindings
 from ._codec import (
     AgentSpecCodec,
     MCPServerSpecCodec,
-    PromptSpecCodec,
     SkillMarkdownSpecAdapter,
     SkillMarkdownSpecCodec,
     SkillSpecCodec,
@@ -16,12 +15,11 @@ from ._contract import (
     AgentCapabilityRef,
     AgentSpec,
     MCPServerSpec,
-    PromptSpec,
     SkillSpec,
 )
 
 __all__ = [
     "AgentCapabilityRef", "AgentSpec", "AgentSpecCodec", "MCPServerSpec", "MCPServerSpecCodec",
-    "PromptSpec", "PromptSpecCodec", "SkillMarkdownSpecAdapter", "SkillMarkdownSpecCodec",
+    "SkillMarkdownSpecAdapter", "SkillMarkdownSpecCodec",
     "SkillSpec", "SkillSpecCodec", "SpecCodec", "builtin_asset_bindings",
 ]

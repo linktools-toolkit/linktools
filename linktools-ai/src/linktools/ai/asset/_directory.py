@@ -38,6 +38,8 @@ _logger = environ.get_logger("ai.asset.directory")
 class AssetPathAdapter(Protocol):
     """Map Asset keys to files under a local directory."""
 
+    def validate(self, kinds: Sequence[str]) -> None: ...
+
     def to_path(self, key: AssetKey) -> str: ...
 
     def from_path(self, path: str) -> "AssetKey | None": ...
@@ -48,22 +50,80 @@ class PrefixAssetPathAdapter:
 
     def __init__(self, prefixes: "Mapping[str, str] | None" = None) -> None:
         values = dict(prefixes or {})
-        if (
-            len(set(values.values())) != len(values)
-            or any(not kind or not prefix or "/" in prefix or "\\" in prefix for kind, prefix in values.items())
-        ):
-            raise ValueError("asset path prefixes must be non-empty and unique")
+        if any(not isinstance(kind, str) or not kind for kind in values):
+            raise ValueError("asset path kinds must be non-empty strings")
+        for prefix in values.values():
+            _validate_prefix(prefix)
         self._prefixes = values
-        self._kinds = {prefix: kind for kind, prefix in values.items()}
+        self._validate_effective_prefixes(tuple(values))
+
+    def validate(self, kinds: Sequence[str]) -> None:
+        values = tuple(kinds)
+        if len(set(values)) != len(values) or any(not isinstance(kind, str) or not kind for kind in values):
+            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        unknown = set(self._prefixes).difference(values)
+        if unknown:
+            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        self._validate_effective_prefixes(values)
+        for kind in values:
+            probe = AssetKey(kind, "linktools-probe")
+            try:
+                if self.from_path(self.to_path(probe)) != probe:
+                    raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+            except (AIError, ValueError) as error:
+                if isinstance(error, AIError):
+                    raise
+                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT) from error
 
     def to_path(self, key: AssetKey) -> str:
         return f"{self._prefixes.get(key.kind, key.kind)}/{key.id}"
 
     def from_path(self, path: str) -> "AssetKey | None":
-        prefix, separator, identifier = path.partition("/")
-        if not separator or not prefix or not identifier:
+        if not isinstance(path, str) or not path or "\\" in path or "\x00" in path:
             return None
-        return AssetKey(self._kinds.get(prefix, prefix), identifier)
+        parts = path.split("/")
+        if any(not part or part in {".", ".."} for part in parts):
+            return None
+        for prefix, kind in sorted(
+            ((prefix, kind) for kind, prefix in self._prefixes.items()),
+            key=lambda item: len(item[0].split("/")),
+            reverse=True,
+        ):
+            prefix_parts = prefix.split("/")
+            if parts[: len(prefix_parts)] == prefix_parts and len(parts) > len(prefix_parts):
+                return _asset_key(kind, "/".join(parts[len(prefix_parts) :]))
+        return _asset_key(parts[0], "/".join(parts[1:])) if len(parts) > 1 else None
+
+    def _validate_effective_prefixes(self, kinds: Sequence[str]) -> None:
+        effective = {kind: self._prefixes.get(kind, kind) for kind in kinds}
+        prefixes = tuple(effective.values())
+        if len(set(prefixes)) != len(prefixes):
+            raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+        segments = {kind: prefix.split("/") for kind, prefix in effective.items()}
+        for prefix in segments.values():
+            if any(prefix != other and _is_parent_path(prefix, other) for other in segments.values()):
+                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+
+
+def _validate_prefix(prefix: str) -> None:
+    if not isinstance(prefix, str) or not prefix or prefix.startswith("/") or prefix.endswith("/"):
+        raise ValueError("asset path prefix is invalid")
+    if "\\" in prefix or "\x00" in prefix:
+        raise ValueError("asset path prefix is invalid")
+    parts = prefix.split("/")
+    if any(not part or part in {".", ".."} for part in parts):
+        raise ValueError("asset path prefix is invalid")
+
+
+def _is_parent_path(parent: Sequence[str], child: Sequence[str]) -> bool:
+    return len(parent) < len(child) and tuple(child[: len(parent)]) == tuple(parent)
+
+
+def _asset_key(kind: str, identifier: str) -> "AssetKey | None":
+    try:
+        return AssetKey(kind, identifier)
+    except ValueError:
+        return None
 
 
 class DirectoryAssetBackend:
