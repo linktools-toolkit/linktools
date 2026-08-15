@@ -57,7 +57,10 @@ class TaskWorkflowNode:
         try:
             dependencies = tuple(self.dependencies)
             value = json.loads(self.input_json)
-            if not isinstance(value, dict) or canonical_json_bytes(value).decode("utf-8") != self.input_json:
+            if (
+                not isinstance(value, dict)
+                or canonical_json_bytes(value).decode("utf-8") != self.input_json
+            ):
                 raise ValueError("task workflow node input is not canonical JSON")
             TaskNode(
                 self.node_id,
@@ -87,7 +90,10 @@ class TaskWorkflowInput:
             raise ValueError("task workflow input is incomplete")
         try:
             validate_tenant_id(self.tenant_id)
-            graph = TaskGraph(self.graph_id, tuple(_task_node(node) for node in self.nodes))
+            graph = TaskGraph(
+                self.graph_id,
+                tuple(_task_node(node) for node in self.nodes),
+            )
             graph.validate_limits(self.limits)
         except (AIError, AttributeError, TypeError, ValueError) as error:
             raise ValueError("task workflow graph is invalid") from error
@@ -150,6 +156,10 @@ class _ChildWorkflowHandle(Protocol):
     async def result(self) -> ExecutionWorkflowResult: ...
 
 
+class _ChildTaskCancelled(Exception):
+    pass
+
+
 class TaskWorkflow:
     def __init__(self, activity: "TaskActivity | None" = None) -> None:
         self._activity = activity
@@ -166,7 +176,11 @@ class TaskWorkflow:
         pending = {node.node_id: node for node in request.nodes}
         while pending:
             if self._cancelled:
-                return TaskWorkflowResult(request.graph_id, "CANCELLED", tuple(sorted(completed_results)))
+                return TaskWorkflowResult(
+                    request.graph_id,
+                    "CANCELLED",
+                    tuple(sorted(completed_results)),
+                )
             blocked = {
                 node_id
                 for node_id, node in pending.items()
@@ -180,7 +194,10 @@ class TaskWorkflow:
                     (
                         node
                         for node in pending.values()
-                        if all(dependency in completed_results for dependency in node.dependencies)
+                        if all(
+                            dependency in completed_results
+                            for dependency in node.dependencies
+                        )
                     ),
                     key=lambda node: node.node_id,
                 )
@@ -191,8 +208,8 @@ class TaskWorkflow:
                 break
             for offset in range(0, len(ready), request.limits.max_concurrency):
                 batch = ready[offset : offset + request.limits.max_concurrency]
-                results = await asyncio.gather(
-                    *(
+                batch_tasks = tuple(
+                    asyncio.create_task(
                         self._run_node(
                             request,
                             node,
@@ -201,17 +218,43 @@ class TaskWorkflow:
                                 for dependency in node.dependencies
                             },
                         )
-                        for node in batch
                     )
+                    for node in batch
                 )
+                try:
+                    results = await asyncio.gather(*batch_tasks)
+                except BaseException:
+                    for child in tuple(self._active_children):
+                        child.cancel()
+                    for task in batch_tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*batch_tasks, return_exceptions=True)
+                    raise
                 for node, result in zip(batch, results):
                     pending.pop(node.node_id)
                     if result is None:
                         failed.add(node.node_id)
                     else:
                         completed_results[node.node_id] = result
+                if self._cancelled:
+                    return TaskWorkflowResult(
+                        request.graph_id,
+                        "CANCELLED",
+                        tuple(sorted(completed_results)),
+                    )
+        if self._cancelled:
+            return TaskWorkflowResult(
+                request.graph_id,
+                "CANCELLED",
+                tuple(sorted(completed_results)),
+            )
         status = "SUCCEEDED" if not failed else "FAILED"
-        return TaskWorkflowResult(request.graph_id, status, tuple(sorted(completed_results)))
+        return TaskWorkflowResult(
+            request.graph_id,
+            status,
+            tuple(sorted(completed_results)),
+        )
 
     def cancel(self, idempotency_key: str) -> TaskWorkflowResult:
         if not idempotency_key.strip():
@@ -228,23 +271,13 @@ class TaskWorkflow:
         dependency_results: Mapping[str, TaskDependencyResult],
     ) -> TaskDependencyResult | None:
         prepared = await self._prepare(request, node.node_id, dependency_results)
-        if prepared is None:
+        if prepared is None or self._cancelled:
             return None
         lease, execution_input = prepared
         child = self._start_child(execution_input, request, node)
         self._active_children.append(child)
         try:
-            try:
-                lease, result = await self._wait_for_child(execution_input, lease, child)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                result = ExecutionWorkflowResult(
-                    execution_input.execution_id,
-                    "FAILED",
-                    None,
-                    0,
-                )
+            lease, result = await self._wait_for_child(execution_input, lease, child)
         finally:
             self._active_children.remove(child)
         return await self._settle(request, lease, result)
@@ -287,6 +320,7 @@ class TaskWorkflow:
         child: _ChildWorkflowHandle,
     ) -> tuple[TaskLease, ExecutionWorkflowResult]:
         child_task = asyncio.create_task(child.result())
+        renew_task: asyncio.Task[TaskLease] | None = None
         try:
             current_lease = lease
             while True:
@@ -295,21 +329,44 @@ class TaskWorkflow:
                     (child_task, renew_task),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if child_task in done:
+                if renew_task in done:
+                    try:
+                        current_lease = renew_task.result()
+                    except BaseException as error:
+                        if not isinstance(error, Exception):
+                            raise
+                        if self._cancelled:
+                            child.cancel()
+                            await _cancel_local_tasks(child_task, renew_task)
+                            return current_lease, _cancelled_result(execution_input)
+                        child.cancel()
+                        await _cancel_local_tasks(child_task, renew_task)
+                        raise
+                    renew_task = None
+                    if self._cancelled:
+                        child.cancel()
+                        await _cancel_local_tasks(child_task)
+                        return current_lease, _cancelled_result(execution_input)
+                    if child_task not in done:
+                        continue
+                else:
                     renew_task.cancel()
                     await asyncio.gather(renew_task, return_exceptions=True)
-                    return current_lease, child_task.result()
-                current_lease = renew_task.result()
-                if self._cancelled:
-                    child.cancel()
-                    return current_lease, ExecutionWorkflowResult(
-                        execution_input.execution_id,
-                        "CANCELLED",
-                        None,
-                        0,
-                    )
+                    renew_task = None
+                return current_lease, _read_child_result(
+                    child_task,
+                    self._cancelled,
+                    execution_input,
+                )
+        except _ChildTaskCancelled as error:
+            await _cancel_local_tasks(child_task, renew_task)
+            raise asyncio.CancelledError from error
         except asyncio.CancelledError:
             child.cancel()
+            await _cancel_local_tasks(child_task, renew_task)
+            raise
+        except BaseException:
+            await _cancel_local_tasks(child_task, renew_task)
             raise
 
     async def _renew(self, lease: TaskLease) -> TaskLease:
@@ -325,7 +382,9 @@ class TaskWorkflow:
         node: TaskWorkflowNode,
     ) -> _ChildWorkflowHandle:
         if _temporal_workflow is None or _TemporalRetryPolicy is None:
-            raise RuntimeError("Temporal SDK is required for production workflow execution")
+            raise RuntimeError(
+                "Temporal SDK is required for production workflow execution"
+            )
         workflow_id = "task-node-" + canonical_sha256(
             {
                 "tenant_id": request.tenant_id,
@@ -354,6 +413,52 @@ async def _execute_task_activity(name: str, *args: object) -> object:
         heartbeat_timeout=timedelta(seconds=15),
         retry_policy=_TemporalRetryPolicy(maximum_attempts=3),
     )
+
+
+async def _cancel_local_tasks(
+    *tasks: "asyncio.Task[object] | None",
+) -> None:
+    pending = tuple(task for task in tasks if task is not None)
+    for task in pending:
+        if not task.done():
+            task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+
+def _cancelled_result(
+    execution_input: ExecutionWorkflowInput,
+) -> ExecutionWorkflowResult:
+    return ExecutionWorkflowResult(
+        execution_input.execution_id,
+        "CANCELLED",
+        None,
+        0,
+    )
+
+
+def _read_child_result(
+    child_task: "asyncio.Task[ExecutionWorkflowResult]",
+    cancelled: bool,
+    execution_input: ExecutionWorkflowInput,
+) -> ExecutionWorkflowResult:
+    try:
+        return child_task.result()
+    except asyncio.CancelledError:
+        if cancelled:
+            return _cancelled_result(execution_input)
+        raise _ChildTaskCancelled from None
+    except BaseException as error:
+        if not isinstance(error, Exception):
+            raise
+        if cancelled:
+            return _cancelled_result(execution_input)
+        return ExecutionWorkflowResult(
+            execution_input.execution_id,
+            "FAILED",
+            None,
+            0,
+        )
 
 
 def _task_node(node: TaskWorkflowNode) -> TaskNode:
