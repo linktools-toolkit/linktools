@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
-from ..core import JsonValue, validate_asset_namespace
+from ..core import JsonValue, canonical_identity_digest, validate_asset_namespace
 from ..errors import AIError, ErrorCode
 from ..storage import (
     MetadataChange,
@@ -54,7 +54,6 @@ _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 def build_asset_sql_metadata(
     *,
     metadata: "MetaData | None" = None,
-    object_store: ObjectStore | None = None,
 ) -> "MetaData":
     """Build the Asset-owned tables in the supplied metadata collection."""
 
@@ -130,7 +129,6 @@ def build_asset_sql_metadata(
         *history_columns,
         UniqueConstraint("namespace_digest", "asset_key_digest", "entry_revision", name="uk_ai_asset_changes_revision"),
         Index("ix_ai_asset_changes_revision", "namespace_digest", "store_revision"),
-        Index("ix_ai_asset_changes_history", "namespace_digest", "asset_key_digest", "entry_revision"),
         **sql_table_options(),
     )
     for table in (_revision, _entry, _change):
@@ -167,7 +165,7 @@ class SqlAssetBackend:
         self._object_store = object_store if object_store is not None else SqlObjectStore(engine)
         from sqlalchemy import MetaData
 
-        self._metadata = build_asset_sql_metadata(metadata=MetaData(), object_store=object_store)
+        self._metadata = build_asset_sql_metadata(metadata=MetaData())
         if object_store is None:
             build_object_sql_metadata(metadata=self._metadata)
         self._context = create_sql_storage_context(engine)
@@ -574,7 +572,7 @@ def _mutation_result(operation: str, key: AssetKey, info: AssetInfo | None, stor
 
 
 def _asset_key_digest(key: AssetKey) -> str:
-    return hashlib.sha256(f"{key.kind}\0{key.id}".encode("utf-8")).hexdigest()
+    return canonical_identity_digest("asset-key", {"kind": key.kind, "id": key.id})
 
 
 def _etag(value: bytes) -> str:

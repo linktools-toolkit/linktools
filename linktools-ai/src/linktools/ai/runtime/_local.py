@@ -460,6 +460,7 @@ class LocalExecutionBackend:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._captured_usage.clear()
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
         execution_id = original.execution_id
@@ -621,6 +622,7 @@ class LocalExecutionBackend:
         finally:
             self._metrics.operation("execution", "runtime", operation_result, operation_started_at)
             self._tasks.pop(execution_id, None)
+            self._captured_usage.pop(execution_id, None)
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:

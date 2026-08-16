@@ -9,14 +9,20 @@ import pytest
 from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.migrate import provision_asset_database, provision_runtime_database
 from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
+from linktools.ai.runtime.state._schema import build_runtime_sql_metadata, build_step_sql_metadata
+from linktools.ai.storage import build_object_sql_metadata
+from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
 def _expected_tables() -> set[str]:
-    runtime = build_runtime_sql_metadata(frozenset(RuntimeDomain))
-    assets = build_asset_sql_metadata()
-    return set(runtime.tables) | set(assets.tables)
+    metadata = MetaData()
+    build_runtime_sql_metadata(frozenset(RuntimeDomain), metadata=metadata)
+    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+        build_step_sql_metadata(domain, metadata=metadata)
+    build_object_sql_metadata(metadata=metadata)
+    build_asset_sql_metadata(metadata=metadata)
+    return set(metadata.tables)
 
 
 @pytest.mark.asyncio

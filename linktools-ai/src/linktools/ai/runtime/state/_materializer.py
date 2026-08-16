@@ -16,6 +16,7 @@ from ...storage import (
     SqlStorageContext,
     StorageMetrics,
     TransientObjectStore,
+    build_object_sql_metadata,
     create_sql_storage_context,
 )
 from ._contracts import (
@@ -159,12 +160,17 @@ async def materialize_runtime_state(
                 item.value: plan.route(item) if item in domains else RuntimeStatePlan().route(item)
                 for item in RuntimeDomain
             })
-            from ._schema import build_runtime_sql_metadata
+            from sqlalchemy import MetaData
 
-            metadata = build_runtime_sql_metadata(
-                group_plan,
-                include_object_tables=object_store is None,
-            )
+            from ._schema import build_runtime_sql_metadata, build_step_sql_metadata
+
+            metadata = MetaData()
+            build_runtime_sql_metadata(group_plan, metadata=metadata)
+            for step_domain in _STEP_DOMAINS:
+                if step_domain in domains:
+                    build_step_sql_metadata(step_domain, metadata=metadata)
+            if object_store is None and domains & _OBJECT_DOMAINS:
+                build_object_sql_metadata(metadata=metadata)
             await context.initialize(metadata=metadata)
             sql_contexts.update({domain: context for domain in domains})
             from ._sql import _build_sql_domains

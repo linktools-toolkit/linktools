@@ -13,6 +13,7 @@ from ..runtime.state import (
     RuntimeStatePlan,
     RuntimeStateRoute,
     build_runtime_sql_metadata,
+    build_step_sql_metadata,
 )
 from ..storage import build_object_sql_metadata, provision_sql
 
@@ -34,11 +35,10 @@ def build_sql_schema_metadata() -> "MetaData":
         domain.value: RuntimeStateRoute.filesystem(f"runtime-{domain.value}")
         for domain in RuntimeDomain
     }
-    build_runtime_sql_metadata(
-        RuntimeStatePlan(**routes),
-        metadata=metadata,
-        include_object_tables=True,
-    )
+    build_runtime_sql_metadata(RuntimeStatePlan(**routes), metadata=metadata)
+    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+        build_step_sql_metadata(domain, metadata=metadata)
+    build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
     if len(metadata.tables) != 24:
         raise RuntimeError("complete SQL schema must contain exactly 24 tables")
@@ -62,22 +62,23 @@ async def provision_runtime_database(
         raise ValueError("at least one RuntimeDomain is required")
     if not selected.issubset(frozenset(RuntimeDomain)):
         raise ValueError("domains must contain RuntimeDomain values")
-    metadata = build_runtime_sql_metadata(
-        selected,
-        include_object_tables=object_store is None
-        and bool(
-            selected
-            & frozenset(
-                {
-                    RuntimeDomain.CONVERSATION,
-                    RuntimeDomain.EXECUTION,
-                    RuntimeDomain.MEMORY,
-                    RuntimeDomain.ARTIFACT,
-                    RuntimeDomain.RECOVERY,
-                }
-            )
-        ),
-    )
+    from sqlalchemy import MetaData
+
+    metadata = MetaData()
+    build_runtime_sql_metadata(selected, metadata=metadata)
+    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
+        if domain in selected:
+            build_step_sql_metadata(domain, metadata=metadata)
+    if object_store is None and selected & frozenset(
+        {
+            RuntimeDomain.CONVERSATION,
+            RuntimeDomain.EXECUTION,
+            RuntimeDomain.MEMORY,
+            RuntimeDomain.ARTIFACT,
+            RuntimeDomain.RECOVERY,
+        }
+    ):
+        build_object_sql_metadata(metadata=metadata)
     await provision_sql(engine, metadata)
 
 

@@ -13,7 +13,7 @@ from linktools.ai.asset import build_asset_sql_metadata
 from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
+from linktools.ai.runtime.state._schema import build_runtime_sql_metadata, build_step_sql_metadata
 from linktools.ai.storage import (
     FilesystemContentCache,
     InMemoryContentCache,
@@ -29,6 +29,7 @@ from linktools.ai.storage import (
     StorageResetResult,
     StorageRevision,
     StorageValueValidator,
+    build_object_sql_metadata,
 )
 
 
@@ -226,8 +227,13 @@ async def test_composition_writer_must_be_readable() -> None:
 def test_sql_metadata_builders_are_owner_scoped() -> None:
     runtime_metadata = build_runtime_sql_metadata(frozenset(RuntimeDomain))
     asset_metadata = build_asset_sql_metadata()
+    step_metadata = build_step_sql_metadata(RuntimeDomain.EXECUTION)
+    object_metadata = build_object_sql_metadata()
 
-    assert {"ai_runtime_sessions", "ai_runtime_executions", "ai_step_runs", "ai_step_events", "ai_step_effects"} <= set(runtime_metadata.tables)
+    assert all(name.startswith("ai_runtime_") for name in runtime_metadata.tables)
+    assert {"ai_runtime_sessions", "ai_runtime_executions"} <= set(runtime_metadata.tables)
+    assert set(step_metadata.tables) == {"ai_step_runs", "ai_step_events", "ai_step_snapshots"}
+    assert set(object_metadata.tables) == {"ai_storage_objects", "ai_storage_object_chunks"}
     assert set(asset_metadata.tables) == {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"}
     assert "ai_asset_entries" not in runtime_metadata.tables
     assert "ai_runtime_sessions" not in asset_metadata.tables
@@ -235,7 +241,7 @@ def test_sql_metadata_builders_are_owner_scoped() -> None:
     recovery_metadata = build_runtime_sql_metadata(
         frozenset({RuntimeDomain.RECOVERY})
     )
-    assert "ai_step_effects" in recovery_metadata.tables
+    assert "ai_step_effects" not in recovery_metadata.tables
     assert "ai_runtime_sessions" not in recovery_metadata.tables
 
 @pytest.mark.asyncio

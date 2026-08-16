@@ -5,7 +5,6 @@
 from typing import TYPE_CHECKING
 
 from ...storage import (
-    build_object_sql_metadata,
     sql_digest,
     sql_integer_id,
     sql_index,
@@ -22,29 +21,16 @@ from ._plan import (
 if TYPE_CHECKING:
     from sqlalchemy import MetaData
 
-    from ...storage import ObjectStore
-
 
 _STEP_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY})
-_OBJECT_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})
 
 
-def required_runtime_sql_tables(plan: RuntimeStatePlan, *, include_object_tables: bool | None = None) -> frozenset[str]:
+def required_runtime_sql_tables(plan: RuntimeStatePlan) -> frozenset[str]:
     names: set[str] = set()
     for domain in RuntimeDomain:
         if plan.route(domain).retention is not RuntimeRetentionMode.DURABLE:
             continue
-        names.update(_DOMAIN_TABLES[domain])
-    if include_object_tables is None:
-        include_object_tables = any(
-            plan.route(domain).retention is RuntimeRetentionMode.DURABLE
-            for domain in _OBJECT_DOMAINS
-        )
-    if include_object_tables and any(
-        plan.route(domain).retention is RuntimeRetentionMode.DURABLE
-        for domain in _OBJECT_DOMAINS
-    ):
-        names.update({"ai_storage_objects", "ai_storage_object_chunks"})
+        names.update(_RUNTIME_DOMAIN_TABLES[domain])
     return frozenset(names)
 
 
@@ -52,7 +38,6 @@ def build_runtime_sql_metadata(
     plan: "RuntimeStatePlan | frozenset[RuntimeDomain]",
     *,
     metadata: "MetaData | None" = None,
-    include_object_tables: bool | None = None,
 ) -> "MetaData":
     from sqlalchemy import (
         JSON,
@@ -74,7 +59,7 @@ def build_runtime_sql_metadata(
         plan = RuntimeStatePlan(**routes)
     if metadata is None:
         metadata = MetaData()
-    tables = required_runtime_sql_tables(plan, include_object_tables=include_object_tables)
+    tables = required_runtime_sql_tables(plan)
     common = {
         "namespace_digest": sql_digest(),
         "tenant_id": sql_text_key(128),
@@ -91,8 +76,22 @@ def build_runtime_sql_metadata(
         columns = [Column("id", sql_integer_id(), primary_key=True, autoincrement=True)]
         for field, value in fields.items():
             columns.append(Column(field, value, nullable=field in nullable))
-        columns.append(Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()))
-        columns.append(Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()))
+        columns.append(
+            Column(
+                "updated_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.current_timestamp(),
+            )
+        )
+        columns.append(
+            Column(
+                "created_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.current_timestamp(),
+            )
+        )
         constraints = [
             UniqueConstraint(
                 *unique,
@@ -167,33 +166,163 @@ def build_runtime_sql_metadata(
         table("ai_runtime_operation_counters", {**common, "runtime_domain": sql_text_key(64), "resource_kind": sql_text_key(128), "resource_id": sql_text_key(), "stream_digest": sql_digest(), "last_sequence": sql_integer_id()}, ("namespace_digest", "tenant_id", "stream_digest"))
     if "ai_runtime_operations" in tables:
         table("ai_runtime_operations", {**common, "runtime_domain": sql_text_key(64), "resource_kind": sql_text_key(128), "resource_id": sql_text_key(), "stream_digest": sql_digest(), "operation_kind": sql_text_key(128), "operation_id": sql_text_key(), "operation_digest": sql_digest(), "sequence": sql_integer_id(), "stream_sequence_digest": sql_digest(), "status": sql_text_key(64), "execution_id": sql_text_key(), "request_digest": sql_digest(), "result_ref": Text(), "result_digest": sql_digest(), "error_code": sql_text_key(128), "compactable": Boolean()}, ("namespace_digest", "tenant_id", "operation_digest"), nullable=frozenset({"execution_id", "result_ref", "result_digest", "error_code"}), extra_constraints=(UniqueConstraint("namespace_digest", "tenant_id", "stream_sequence_digest", name="uk_ai_runtime_operations_stream"),))
-    if "ai_step_runs" in tables:
-        table("ai_step_runs", {**common, "runtime_domain": sql_text_key(64), "run_id": sql_text_key(), "run_digest": sql_digest(), "conversation_id": sql_text_key(), "parent_run_id": sql_text_key(), "agent_name": sql_text_key(), "metadata": JSON(), "last_event_index": sql_integer_id(), "last_snapshot_index": sql_integer_id(), "last_effect_index": sql_integer_id(), "started_at": DateTime(timezone=True)}, ("namespace_digest", "tenant_id", "run_digest"), nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}))
-    if "ai_step_events" in tables:
-        table("ai_step_events", {**common, "run_id": sql_text_key(), "event_index": sql_integer_id(), "identity_digest": sql_digest(), "kind": sql_text_key(), "step_index": sql_integer_id(), "timestamp": DateTime(timezone=True), "conversation_id": sql_text_key(), "parent_run_id": sql_text_key(), "agent_name": sql_text_key(), "tool_call_id": sql_text_key(), "tool_name": sql_text_key(), "error": Text(), "metadata": JSON()}, ("namespace_digest", "tenant_id", "identity_digest"), nullable=frozenset({"conversation_id", "parent_run_id", "agent_name", "tool_call_id", "tool_name", "error"}))
-    if "ai_step_snapshots" in tables:
-        table("ai_step_snapshots", {**common, "runtime_domain": sql_text_key(64), "run_id": sql_text_key(), "snapshot_index": sql_integer_id(), "identity_digest": sql_digest(), "step_index": sql_integer_id(), "state": sql_text_key(64), "conversation_id": sql_text_key(), "parent_run_id": sql_text_key(), "agent_name": sql_text_key(), "timestamp": DateTime(timezone=True), "object_store_id": sql_text_key(128), "messages": JSON()}, ("namespace_digest", "tenant_id", "identity_digest"), nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}))
-    if "ai_step_effects" in tables:
-        table("ai_step_effects", {**common, "run_id": sql_text_key(), "effect_index": sql_integer_id(), "identity_digest": sql_digest(), "tool_call_id": sql_text_key(), "tool_name": sql_text_key(), "status": sql_text_key(64), "started_at": DateTime(timezone=True), "ended_at": DateTime(timezone=True), "idempotency_key": sql_text_key(), "effect_summary": Text()}, ("namespace_digest", "tenant_id", "identity_digest"), nullable=frozenset({"ended_at", "idempotency_key", "effect_summary"}))
-        Index("ix_ai_step_effects_tool", metadata.tables["ai_step_effects"].c.namespace_digest, metadata.tables["ai_step_effects"].c.tenant_id, metadata.tables["ai_step_effects"].c.run_id)
-    if "ai_storage_objects" in tables:
-        build_object_sql_metadata(metadata=metadata)
     return metadata
+
+
+def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
+    from sqlalchemy import JSON, Column, DateTime, Index, Table, Text, UniqueConstraint, func
+
+    common = {
+        "namespace_digest": sql_digest(),
+        "tenant_id": sql_text_key(128),
+    }
+
+    def table(
+        name: str,
+        fields: dict[str, object],
+        unique: tuple[str, ...],
+        *,
+        nullable: frozenset[str] = frozenset(),
+    ) -> None:
+        if name in metadata.tables:
+            return
+        columns = [Column("id", sql_integer_id(), primary_key=True, autoincrement=True)]
+        for field, value in fields.items():
+            columns.append(Column(field, value, nullable=field in nullable))
+        columns.append(
+            Column(
+                "updated_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.current_timestamp(),
+            )
+        )
+        columns.append(
+            Column(
+                "created_at",
+                DateTime(timezone=True),
+                nullable=False,
+                server_default=func.current_timestamp(),
+            )
+        )
+        owner_table = Table(
+            name,
+            metadata,
+            *columns,
+            UniqueConstraint(*unique, name=f"uk_{name}_{'_'.join(unique)}"),
+            **sql_table_options(),
+        )
+        sql_index(Index("ix_updated_at", owner_table.c.updated_at))
+        sql_index(Index("ix_created_at", owner_table.c.created_at))
+
+    if "ai_step_runs" in names:
+        table(
+            "ai_step_runs",
+            {
+                **common,
+                "runtime_domain": sql_text_key(64),
+                "run_id": sql_text_key(),
+                "run_digest": sql_digest(),
+                "conversation_id": sql_text_key(),
+                "parent_run_id": sql_text_key(),
+                "agent_name": sql_text_key(),
+                "metadata": JSON(),
+                "last_event_index": sql_integer_id(),
+                "last_snapshot_index": sql_integer_id(),
+                "last_effect_index": sql_integer_id(),
+                "started_at": DateTime(timezone=True),
+            },
+            ("namespace_digest", "tenant_id", "run_digest"),
+            nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}),
+        )
+    if "ai_step_events" in names:
+        table(
+            "ai_step_events",
+            {
+                **common,
+                "run_id": sql_text_key(),
+                "event_index": sql_integer_id(),
+                "identity_digest": sql_digest(),
+                "kind": sql_text_key(),
+                "step_index": sql_integer_id(),
+                "timestamp": DateTime(timezone=True),
+                "conversation_id": sql_text_key(),
+                "parent_run_id": sql_text_key(),
+                "agent_name": sql_text_key(),
+                "tool_call_id": sql_text_key(),
+                "tool_name": sql_text_key(),
+                "error": Text(),
+                "metadata": JSON(),
+            },
+            ("namespace_digest", "tenant_id", "identity_digest"),
+            nullable=frozenset(
+                {
+                    "conversation_id",
+                    "parent_run_id",
+                    "agent_name",
+                    "tool_call_id",
+                    "tool_name",
+                    "error",
+                }
+            ),
+        )
+    if "ai_step_snapshots" in names:
+        table(
+            "ai_step_snapshots",
+            {
+                **common,
+                "runtime_domain": sql_text_key(64),
+                "run_id": sql_text_key(),
+                "snapshot_index": sql_integer_id(),
+                "identity_digest": sql_digest(),
+                "step_index": sql_integer_id(),
+                "state": sql_text_key(64),
+                "conversation_id": sql_text_key(),
+                "parent_run_id": sql_text_key(),
+                "agent_name": sql_text_key(),
+                "timestamp": DateTime(timezone=True),
+                "object_store_id": sql_text_key(128),
+                "messages": JSON(),
+            },
+            ("namespace_digest", "tenant_id", "identity_digest"),
+            nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}),
+        )
+    if "ai_step_effects" in names:
+        table(
+            "ai_step_effects",
+            {
+                **common,
+                "run_id": sql_text_key(),
+                "effect_index": sql_integer_id(),
+                "identity_digest": sql_digest(),
+                "tool_call_id": sql_text_key(),
+                "tool_name": sql_text_key(),
+                "status": sql_text_key(64),
+                "started_at": DateTime(timezone=True),
+                "ended_at": DateTime(timezone=True),
+                "idempotency_key": sql_text_key(),
+                "effect_summary": Text(),
+            },
+            ("namespace_digest", "tenant_id", "identity_digest"),
+            nullable=frozenset({"ended_at", "idempotency_key", "effect_summary"}),
+        )
+        sql_index(
+            Index(
+                "ix_ai_step_effects_tool",
+                metadata.tables["ai_step_effects"].c.namespace_digest,
+                metadata.tables["ai_step_effects"].c.tenant_id,
+                metadata.tables["ai_step_effects"].c.run_id,
+            )
+        )
 
 
 def build_step_sql_metadata(
     runtime_domain: RuntimeDomain,
     *,
     metadata: "MetaData | None" = None,
-    object_store: "ObjectStore | None" = None,
 ) -> "MetaData":
     if runtime_domain not in _STEP_DOMAINS:
         raise ValueError("Step archive owner is invalid")
-    route = RuntimeStateRoute.filesystem("runtime")
-    routes = {domain.value: RuntimeStateRoute.memory() for domain in RuntimeDomain}
-    routes[runtime_domain.value] = route
-    plan = RuntimeStatePlan(**routes)
-    full_metadata = build_runtime_sql_metadata(plan, include_object_tables=False)
     from sqlalchemy import MetaData
 
     if metadata is None:
@@ -203,26 +332,37 @@ def build_step_sql_metadata(
         names.add("ai_step_events")
     if runtime_domain is RuntimeDomain.RECOVERY:
         names.add("ai_step_effects")
-    for name in names:
-        if name not in metadata.tables:
-            full_metadata.tables[name].to_metadata(metadata)
-    for table in metadata.tables.values():
-        for index in table.indexes:
-            if index.name in {"ix_updated_at", "ix_created_at"}:
-                sql_index(index)
-    if object_store is None and "ai_storage_objects" not in metadata.tables:
-        build_object_sql_metadata(metadata=metadata)
+    _build_step_tables(metadata, names)
     return metadata
 
 
-_DOMAIN_TABLES = {
-    RuntimeDomain.CONVERSATION: frozenset({"ai_runtime_sessions", "ai_runtime_operation_counters", "ai_runtime_operations", "ai_step_runs", "ai_step_snapshots"}),
-    RuntimeDomain.EXECUTION: frozenset({"ai_runtime_executions", "ai_runtime_idempotency", "ai_runtime_events", "ai_runtime_operation_counters", "ai_runtime_operations", "ai_step_runs", "ai_step_events", "ai_step_snapshots"}),
+_RUNTIME_DOMAIN_TABLES = {
+    RuntimeDomain.CONVERSATION: frozenset(
+        {"ai_runtime_sessions", "ai_runtime_operation_counters", "ai_runtime_operations"}
+    ),
+    RuntimeDomain.EXECUTION: frozenset(
+        {
+            "ai_runtime_executions",
+            "ai_runtime_idempotency",
+            "ai_runtime_events",
+            "ai_runtime_operation_counters",
+            "ai_runtime_operations",
+        }
+    ),
     RuntimeDomain.MEMORY: frozenset({"ai_runtime_memories", "ai_runtime_operation_counters", "ai_runtime_operations"}),
     RuntimeDomain.ARTIFACT: frozenset({"ai_runtime_artifacts", "ai_runtime_operation_counters", "ai_runtime_operations"}),
     RuntimeDomain.TASK: frozenset({"ai_runtime_task_graphs", "ai_runtime_task_nodes", "ai_runtime_operation_counters", "ai_runtime_operations"}),
     RuntimeDomain.EVALUATION: frozenset({"ai_runtime_evaluations", "ai_runtime_idempotency", "ai_runtime_operation_counters", "ai_runtime_operations"}),
-    RuntimeDomain.RECOVERY: frozenset({"ai_runtime_approvals", "ai_runtime_external_calls", "ai_runtime_recovery_checkpoints", "ai_runtime_tool_operations", "ai_runtime_operation_counters", "ai_runtime_operations", "ai_step_runs", "ai_step_snapshots", "ai_step_effects"}),
+    RuntimeDomain.RECOVERY: frozenset(
+        {
+            "ai_runtime_approvals",
+            "ai_runtime_external_calls",
+            "ai_runtime_recovery_checkpoints",
+            "ai_runtime_tool_operations",
+            "ai_runtime_operation_counters",
+            "ai_runtime_operations",
+        }
+    ),
 }
 
 __all__ = ["build_runtime_sql_metadata", "build_step_sql_metadata", "required_runtime_sql_tables"]

@@ -22,6 +22,7 @@ from ..storage import (
     StorageOwnedInfo,
     StorageResetResult,
     StorageRevision,
+    StorageWriteState,
     VersionSummary,
 )
 from ._domain import AssetInfo, AssetKey
@@ -166,6 +167,14 @@ class AssetStore:
             changes,
             expected_revision=expected_revision,
         )
+
+    async def write_states(
+        self,
+        keys: "Sequence[AssetKey]",
+    ) -> "Mapping[AssetKey, StorageWriteState[AssetInfo]]":
+        """Return effective and writer-local state for raw Asset keys."""
+        self._ensure_ready()
+        return await self._storage.write_states(keys)
 
     async def list_info(
         self,

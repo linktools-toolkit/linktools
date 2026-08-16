@@ -23,6 +23,7 @@ from ..storage import (
     StorageEntryStatus,
     StorageOperation,
     StorageResetResult,
+    StorageWriteState,
 )
 from ._domain import AssetInfo, AssetKey
 from ._logical import (
@@ -47,6 +48,14 @@ class _Candidate:
     variant: AssetVariantBinding[object]
     ref: AssetRef
     info: AssetInfo
+
+
+@dataclass(frozen=True, slots=True)
+class _RenameEntry:
+    source_info: AssetInfo
+    target_key: AssetKey
+    source_expected_revision: StorageEntryRevision
+    target_expected_revision: StorageEntryRevision | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,12 +475,77 @@ class AssetRepository:
                 raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
 
             infos = await self._rename_source_infos(source, source_candidate.variant)
-            changes = await self._rename_changes(
-                source,
-                target,
+            source_keys = tuple(info.key for info in infos)
+            target_keys = tuple(
+                AssetKey(target.kind, target.id + _rename_suffix(source, info.key))
+                for info in infos
+            )
+            states = await self._store.write_states((*source_keys, *target_keys))
+            entries: list[_RenameEntry] = []
+            for info, target_key in zip(infos, target_keys):
+                source_state = states[info.key]
+                writer_info = source_state.writer
+                if source_state.effective is not None and not source_state.effective.writable:
+                    raise AIError(ErrorCode.STORAGE_READ_ONLY)
+                if (
+                    source_state.effective is None
+                    or source_state.effective.info != info
+                    or writer_info is None
+                    or writer_info != info
+                    or info.status is not StorageEntryStatus.NORMAL
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                entries.append(
+                    _RenameEntry(
+                        info,
+                        target_key,
+                        writer_info.revision,
+                        None,
+                    )
+                )
+            entries = self._validate_rename_targets(entries, states)
+            source_bytes = await self._read_rename_sources(entries)
+            source_entry = next(
+                entry
+                for entry in entries
+                if entry.source_info.key == source_candidate.variant.layout.entry_key(source)
+            )
+            value = _decode_value(
                 source_candidate.variant,
-                binding,
-                infos,
+                source,
+                source_bytes[source_entry.source_info.key],
+                binding.value_type,
+            )
+            if not _identity_matches(binding, target, value):
+                if binding.retargeter is None:
+                    raise AIError(
+                        ErrorCode.STORAGE_CAPABILITY_MISSING,
+                        safe_details={"capability": "asset_retarget"},
+                    )
+                try:
+                    value = binding.retargeter(
+                        source,
+                        target,
+                        source_candidate.variant.name,
+                        value,
+                    )
+                except AIError:
+                    raise
+                except Exception as error:
+                    raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+                _validate_value_type(binding, value)
+                _validate_identity(binding, target, value)
+            encoded_entry = _encode_value(
+                source_candidate.variant,
+                target,
+                value,
+                binding.value_type,
+            )
+            changes = self._rename_changes(
+                entries,
+                source_bytes,
+                source_entry.source_info.key,
+                encoded_entry,
                 metadata,
             )
             result = await self._store.apply_batch(changes, expected_revision=batch_revision)
@@ -487,6 +561,46 @@ class AssetRepository:
                 result.store_revision,
             )
         return await self.resolve(target)
+
+    def _validate_rename_targets(
+        self,
+        entries: Sequence[_RenameEntry],
+        states: Mapping[AssetKey, StorageWriteState[AssetInfo]],
+    ) -> tuple[_RenameEntry, ...]:
+        validated: list[_RenameEntry] = []
+        for entry in entries:
+            state = states[entry.target_key]
+            if state.effective is not None:
+                status = state.effective.info.status
+                if status is StorageEntryStatus.NORMAL:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if status is not StorageEntryStatus.DELETED:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if not state.writer_can_own:
+                    raise AIError(ErrorCode.STORAGE_READ_ONLY)
+            elif not state.writer_can_own:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            validated.append(
+                _RenameEntry(
+                    entry.source_info,
+                    entry.target_key,
+                    entry.source_expected_revision,
+                    _target_expected_revision(state),
+                )
+            )
+        return tuple(validated)
+
+    async def _read_rename_sources(
+        self,
+        entries: Sequence[_RenameEntry],
+    ) -> dict[AssetKey, bytes]:
+        source_bytes: dict[AssetKey, bytes] = {}
+        for entry in entries:
+            data = await self._store.get(entry.source_info.key)
+            if data is None or hashlib.sha256(data).hexdigest() != entry.source_info.etag:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            source_bytes[entry.source_info.key] = data
+        return source_bytes
 
     async def _rename_source_infos(
         self,
@@ -508,65 +622,39 @@ class AssetRepository:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         return tuple(sorted(selected, key=lambda info: info.key.id))
 
-    async def _rename_changes(
+    def _rename_changes(
         self,
-        source: AssetRef,
-        target: AssetRef,
-        variant: AssetVariantBinding[object],
-        binding: AssetTypeBinding[object],
-        infos: Sequence[AssetInfo],
+        entries: Sequence[_RenameEntry],
+        source_bytes: Mapping[AssetKey, bytes],
+        source_entry_key: AssetKey,
+        encoded_entry: bytes,
         metadata: "Mapping[str, JsonValue] | None",
     ) -> tuple[StorageChange[AssetKey, bytes], ...]:
-        entry_key = variant.layout.entry_key(source)
-        source_entry = next(info for info in infos if info.key == entry_key)
-        source_bytes = await self._store.get(source_entry.key)
-        if source_bytes is None or hashlib.sha256(source_bytes).hexdigest() != source_entry.etag:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        value = _decode_value(variant, source, source_bytes, binding.value_type)
-        if not _identity_matches(binding, target, value):
-            if binding.retargeter is None:
-                raise AIError(
-                    ErrorCode.STORAGE_CAPABILITY_MISSING,
-                    safe_details={"capability": "asset_retarget"},
-                )
-            try:
-                value = binding.retargeter(source, target, variant.name, value)
-            except AIError:
-                raise
-            except Exception as error:
-                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
-            _validate_value_type(binding, value)
-            _validate_identity(binding, target, value)
-        target_entry_key = variant.layout.entry_key(target)
-        target_existing = await self._store.stat(target_entry_key)
         changes: list[StorageChange[AssetKey, bytes]] = []
-        for info in infos:
-            data = await self._store.get(info.key)
-            if data is None or hashlib.sha256(data).hexdigest() != info.etag:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            suffix = _rename_suffix(source, variant, info.key)
-            target_key = AssetKey(target.kind, target.id + suffix)
-            if info.key == source_entry.key:
-                data = _encode_value(variant, target, value, binding.value_type)
-            existing = target_existing if target_key == target_entry_key else await self._store.stat(target_key)
+        for entry in entries:
+            data = (
+                encoded_entry
+                if entry.source_info.key == source_entry_key
+                else source_bytes[entry.source_info.key]
+            )
             changes.append(
                 StorageChange(
                     StorageOperation.PUT,
-                    target_key,
+                    entry.target_key,
                     data,
-                    None if existing is None else existing.revision,
+                    entry.target_expected_revision,
                     metadata or {},
                 )
             )
         changes.extend(
             StorageChange(
                 StorageOperation.DELETE,
-                info.key,
+                entry.source_info.key,
                 None,
-                info.revision,
+                entry.source_expected_revision,
                 metadata or {},
             )
-            for info in infos
+            for entry in entries
         )
         return tuple(changes)
 
@@ -771,6 +859,19 @@ async def _load_all(store: AssetStore, *, kind: str) -> tuple[AssetInfo, ...]:
         cursor = page.next_cursor
 
 
+def _target_expected_revision(
+    state: StorageWriteState[AssetInfo],
+) -> StorageEntryRevision | None:
+    writer = state.writer
+    if writer is None:
+        return None
+    if writer.status is StorageEntryStatus.NORMAL:
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+    if writer.status in {StorageEntryStatus.DELETED, StorageEntryStatus.RESET}:
+        return writer.revision
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
 def _raw_candidates(
     binding: AssetTypeBinding[object],
     infos: Sequence[AssetInfo],
@@ -921,8 +1022,7 @@ def _identity_matches(binding: AssetTypeBinding[object], ref: AssetRef, value: o
         raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
 
 
-def _rename_suffix(source: AssetRef, variant: AssetVariantBinding[object], key: AssetKey) -> str:
-    del variant
+def _rename_suffix(source: AssetRef, key: AssetKey) -> str:
     if not key.id.startswith(source.id):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return key.id[len(source.id) :]

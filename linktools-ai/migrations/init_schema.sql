@@ -29,7 +29,6 @@ CREATE TABLE `ai_asset_changes` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_changes.created_at',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_ai_asset_changes_revision` (`namespace_digest`, `asset_key_digest`, `entry_revision`),
-  KEY `ix_ai_asset_changes_history` (`namespace_digest`, `asset_key_digest`, `entry_revision`),
   KEY `ix_ai_asset_changes_revision` (`namespace_digest`, `store_revision`),
   KEY `ix_created_at` (`created_at`),
   KEY `ix_updated_at` (`updated_at`)

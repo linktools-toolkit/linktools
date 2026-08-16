@@ -30,7 +30,6 @@ def test_step_schema_registers_only_owned_tables_in_shared_metadata() -> None:
     result = build_step_sql_metadata(
         RuntimeDomain.EXECUTION,
         metadata=metadata,
-        object_store=object(),
     )
 
     assert result is metadata

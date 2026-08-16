@@ -38,7 +38,12 @@ from ._contracts import (
     VersionSummary,
 )
 from ._layer import LayerRefreshPolicy, StorageLayer
-from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
+from ._revision import (
+    LayerMetadataView,
+    MetadataState,
+    RevisionSource,
+    StorageRevisionSource,
+)
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
@@ -70,6 +75,19 @@ class EffectiveMetadataState(Generic[KeyT, InfoT]):
     revision: StorageRevision
     entries: "Mapping[KeyT, InfoT]"
     owners: "Mapping[KeyT, int]"
+
+
+@dataclass(frozen=True, slots=True)
+class _OverlaySnapshot(Generic[KeyT, InfoT]):
+    effective: EffectiveMetadataState[KeyT, InfoT]
+    writer_state: "MetadataState[KeyT, InfoT] | None"
+
+
+@dataclass(frozen=True, slots=True)
+class StorageWriteState(Generic[InfoT]):
+    effective: "StorageOwnedInfo[InfoT] | None"
+    writer: InfoT | None
+    writer_can_own: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +144,16 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             LayerMetadataView(primary, LayerRefreshPolicy.REVISIONED, revision_source=source),
             *(LayerMetadataView(layer.backend, layer.refresh) for layer in layer_values),
         )
+        self._writer_index = next(
+            (
+                index
+                for index, view in enumerate(self._views)
+                if view.backend is writer
+            ),
+            None,
+        )
+        if writer is not None and self._writer_index is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._preloaded: dict[KeyT, str] = {}
         self._initialize_lock = asyncio.Lock()
         self._initialized = False
@@ -173,21 +201,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         _logger.debug("storage overlay initialized: layers=%s", len(self._views))
 
     async def refresh(self) -> StorageRevision:
-        states = await asyncio.gather(*(view.refresh() for view in self._views))
-        entries: dict[KeyT, InfoT] = {}
-        owners: dict[KeyT, int] = {}
-        revisions: list[str] = []
-        for index, state in enumerate(states):
-            revisions.append(str(state.revision))
-            for key, info in state.entries.items():
-                if _is_reset(info):
-                    continue
-                if key not in entries:
-                    entries[key] = info
-                    owners[key] = index
-        return EffectiveMetadataState(self._effective_revision(revisions, states[0].revision), entries, owners).revision
+        return (await self._snapshot()).effective.revision
 
     async def _state(self) -> 'EffectiveMetadataState[KeyT, InfoT]':
+        return (await self._snapshot()).effective
+
+    async def _snapshot(self) -> "_OverlaySnapshot[KeyT, InfoT]":
         states = await asyncio.gather(*(view.refresh() for view in self._views))
         entries: dict[KeyT, InfoT] = {}
         owners: dict[KeyT, int] = {}
@@ -201,7 +220,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     entries[key] = info
                     owners[key] = index
         revision = self._effective_revision(revisions, states[0].revision)
-        return EffectiveMetadataState(revision, entries, owners)
+        writer_state = None if self._writer_index is None else states[self._writer_index]
+        return _OverlaySnapshot(
+            EffectiveMetadataState(revision, entries, owners),
+            writer_state,
+        )
 
     def _validate_value(self, key: KeyT, value: ValueT, info: InfoT) -> None:
         if self.validator is not None:
@@ -497,6 +520,32 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
             for key in sorted(state.entries, key=str)
         )
 
+    async def write_states(
+        self,
+        keys: "Sequence[KeyT]",
+    ) -> "Mapping[KeyT, StorageWriteState[InfoT]]":
+        self._require_writer()
+        snapshot = await self._snapshot()
+        if snapshot.writer_state is None or self._writer_index is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result: dict[KeyT, StorageWriteState[InfoT]] = {}
+        for key in dict.fromkeys(keys):
+            owner_index = snapshot.effective.owners.get(key)
+            effective_info = snapshot.effective.entries.get(key)
+            effective = None
+            if effective_info is not None and owner_index is not None:
+                effective = StorageOwnedInfo(
+                    effective_info,
+                    self._owner_id(owner_index),
+                    owner_index == self._writer_index,
+                )
+            result[key] = StorageWriteState(
+                effective,
+                snapshot.writer_state.entries.get(key),
+                owner_index is None or self._writer_index <= owner_index,
+            )
+        return result
+
     def _owner_id(self, index: int) -> str:
         return "primary" if index == 0 else self.layers[index - 1].id
 
@@ -645,7 +694,18 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self._validate_batch(changes)
         writer = self._require_writer()
         if isinstance(writer, BatchStorageWriter):
-            result = await writer.apply_batch(changes, expected_revision=expected_revision)
+            writer_expected_revision = None
+            if expected_revision is not None:
+                snapshot = await self._snapshot()
+                if snapshot.effective.revision != expected_revision:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if snapshot.writer_state is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                writer_expected_revision = snapshot.writer_state.revision
+            result = await writer.apply_batch(
+                changes,
+                expected_revision=writer_expected_revision,
+            )
             self._validate_writer_batch_result(changes, result)
             for change in changes:
                 self._preloaded.pop(change.key, None)
@@ -833,5 +893,6 @@ __all__ = [
     "StorageLayer",
     "StorageLocation",
     "StorageOverlay",
+    "StorageWriteState",
     "StorageValueValidator",
 ]

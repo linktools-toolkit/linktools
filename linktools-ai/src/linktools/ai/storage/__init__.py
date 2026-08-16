@@ -13,6 +13,7 @@ from ._composition import (
     StorageLayer,
     StorageLocation,
     StorageOverlay,
+    StorageWriteState,
     StorageValueValidator,
 )
 from ._contracts import (
@@ -170,6 +171,7 @@ __all__ = [
     "StorageRevisionSource",
     "StorageValueValidator",
     "StorageWriter",
+    "StorageWriteState",
     "SqlStorageContext",
     "create_sql_storage_context",
     "dialect_for_name",

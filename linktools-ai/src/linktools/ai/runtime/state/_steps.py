@@ -33,6 +33,7 @@ from ...storage import (
     ObjectStore,
     SqlObjectStore,
     SqlStorageContext,
+    build_object_sql_metadata,
     create_sql_storage_context,
     dialect_for_name,
     read_object,
@@ -526,18 +527,20 @@ class SqlStepArchive(StepStore):
         validate_tenant_id(tenant_id)
         if runtime_domain not in _ARCHIVE_DOMAINS:
             raise ValueError("Step archive owner is invalid")
+        builtin_object_store = object_store is None
         self.engine = engine
         self.namespace = namespace
         self.tenant_id = tenant_id
         self._runtime_domain = runtime_domain
-        self.object_store = object_store or SqlObjectStore(engine)
-        self._provision = True
+        self.object_store = SqlObjectStore(engine) if object_store is None else object_store
         self._context = create_sql_storage_context(engine)
         self._owns_context = True
-        self._metadata = build_step_sql_metadata(
-            runtime_domain,
-            object_store=None if self.object_store.store_id == "builtin" else self.object_store,
-        )
+        from sqlalchemy import MetaData
+
+        self._metadata = MetaData()
+        build_step_sql_metadata(runtime_domain, metadata=self._metadata)
+        if builtin_object_store:
+            build_object_sql_metadata(metadata=self._metadata)
         self._ready = False
 
     @property
@@ -565,13 +568,12 @@ class SqlStepArchive(StepStore):
         archive.tenant_id = tenant_id
         archive._runtime_domain = runtime_domain
         archive.object_store = object_store
-        archive._provision = False
         archive._context = context
         archive._owns_context = False
-        archive._metadata = build_step_sql_metadata(
-            runtime_domain,
-            object_store=None if object_store.store_id == "builtin" else object_store,
-        )
+        from sqlalchemy import MetaData
+
+        archive._metadata = MetaData()
+        build_step_sql_metadata(runtime_domain, metadata=archive._metadata)
         archive._ready = False
         return archive
 
