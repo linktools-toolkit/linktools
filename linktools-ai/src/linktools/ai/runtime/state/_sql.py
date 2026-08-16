@@ -18,7 +18,6 @@ from ._transaction import TransactionHub
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from ...storage import ObjectStore
 
 
 _logger = environ.get_logger("ai.runtime.state.sql")

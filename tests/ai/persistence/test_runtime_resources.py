@@ -7,20 +7,25 @@ import asyncio
 import pytest
 
 from linktools.ai.runtime.state import RuntimeDomain, RuntimeState, RuntimeStatePlan, RuntimeStateRoute
+from linktools.ai.migrate import provision_database
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 @pytest.mark.asyncio
 async def test_sqlite_runtime_state_owns_and_reopens_database(tmp_path) -> None:
     path = tmp_path / "runtime.db"
-    state = RuntimeState.sqlite(path)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    await provision_database(engine)
+    state = RuntimeState.sql(engine)
     await state.initialize(namespace="runtime", tenant_id="tenant")
     assert state.ready is True
     await state.close()
 
-    reopened = RuntimeState.sqlite(path)
+    reopened = RuntimeState.sql(engine)
     await reopened.initialize(namespace="runtime", tenant_id="tenant")
     assert reopened.ready is True
     await reopened.close()
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

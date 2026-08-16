@@ -4,6 +4,7 @@
 
 import hashlib
 import uuid
+from collections.abc import Mapping
 
 from ._json import JsonValue, canonical_json_bytes
 from ._validation import (
@@ -19,7 +20,14 @@ def canonical_sha256(value: JsonValue) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
-def idempotency_key_hash(value: str) -> str:
+def canonical_identity_digest(tag: str, identity: Mapping[str, JsonValue]) -> str:
+    """Hash a named identity object without relying on field concatenation."""
+    if not isinstance(tag, str) or not tag:
+        raise ValueError("identity digest tag must not be empty")
+    return canonical_sha256({"tag": tag, "identity": dict(identity)})
+
+
+def idempotency_key_digest(value: str) -> str:
     if not value:
         raise ValueError("idempotency key must not be empty")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -61,8 +69,9 @@ def principal_identity_payload(principal: Principal) -> dict[str, str]:
 
 __all__ = [
     "canonical_sha256",
+    "canonical_identity_digest",
     "deterministic_id",
-    "idempotency_key_hash",
+    "idempotency_key_digest",
     "principal_identity_payload",
     "step_conversation_id",
     "step_run_id",

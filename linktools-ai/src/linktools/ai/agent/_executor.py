@@ -5,7 +5,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 from linktools.core import environ
 from pydantic_ai import AgentRunResultEvent
@@ -26,12 +26,14 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.usage import RunUsage, UsageLimitExceeded, UsageLimits
 from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
 from ..capability import CapabilityMaterializationContext
-from ..core import ExecutionEventType, JsonValue, canonical_sha256
+from ..core import ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
 from ..errors import AIError, ErrorCode
+from ..spec import AgentUsageLimits
 from ._builder import build_pydantic_agent
 from ._capabilities import (
     AgentRunScope,
@@ -43,6 +45,10 @@ from ._definition import AgentDefinition
 
 EventSink = Callable[[ExecutionEventType, JsonValue], Awaitable[None]]
 
+
+class UsageSink(Protocol):
+    async def __call__(self, usage: UsageMetrics) -> None: ...
+
 _logger = environ.get_logger("ai.agent.executor")
 
 
@@ -51,6 +57,7 @@ class AgentExecutionResult:
     run_id: str
     output: JsonValue
     messages: "list[ModelMessage]"
+    usage: UsageMetrics
 
 
 class AgentExecutor:
@@ -76,6 +83,64 @@ class AgentExecutor:
         parent_step_run_id: "str | None" = None,
         subagent_delegate: "SubagentDelegate | None" = None,
         event_sink: EventSink,
+        usage_sink: "UsageSink | None" = None,
+    ) -> AgentExecutionResult:
+        run_usage = RunUsage()
+        usage_limits = _to_usage_limits(definition.spec.usage_limits)
+        result: AgentExecutionResult | None = None
+        try:
+            result = await self._execute(
+                definition,
+                user_prompt,
+                history,
+                conversation_id,
+                step_store=step_store,
+                step_run_id=step_run_id,
+                segment_sequence=segment_sequence,
+                capability_context=capability_context,
+                memory_scope=memory_scope,
+                memory_store=memory_store,
+                platform_tool_names=platform_tool_names,
+                parent_step_run_id=parent_step_run_id,
+                subagent_delegate=subagent_delegate,
+                event_sink=event_sink,
+                run_usage=run_usage,
+                usage_limits=usage_limits,
+            )
+            return result
+        except UsageLimitExceeded as error:
+            raise AIError(
+                ErrorCode.EXECUTION_USAGE_LIMIT_EXCEEDED,
+                retryable=False,
+                safe_details={
+                    "limits": _limit_details(usage_limits),
+                    "usage": _usage_details(run_usage),
+                },
+            ) from error
+        finally:
+            if usage_sink is not None:
+                usage = result.usage if result is not None else _usage_metrics(run_usage)
+                await usage_sink(usage)
+
+    async def _execute(
+        self,
+        definition: AgentDefinition,
+        user_prompt: str,
+        history: "list[ModelMessage]",
+        conversation_id: str,
+        *,
+        step_store: StepStore,
+        step_run_id: str,
+        segment_sequence: int,
+        capability_context: CapabilityMaterializationContext,
+        memory_scope: "str | None",
+        memory_store: "SearchableMemoryStore | None",
+        platform_tool_names: "tuple[str, ...]",
+        parent_step_run_id: "str | None",
+        subagent_delegate: "SubagentDelegate | None",
+        event_sink: EventSink,
+        run_usage: RunUsage,
+        usage_limits: UsageLimits,
     ) -> AgentExecutionResult:
         if not self._execution_root.is_dir():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -118,6 +183,8 @@ class AgentExecutor:
             user_prompt,
             message_history=history or None,
             conversation_id=conversation_id,
+            usage_limits=usage_limits,
+            usage=run_usage,
             capabilities=capabilities,
         ) as events:
             async for event in events:
@@ -139,7 +206,8 @@ class AgentExecutor:
             raise AIError(ErrorCode.OUTPUT_VALIDATION_FAILED)
         payload = cast(dict[str, JsonValue], output.model_dump(mode="json"))
         _logger.debug("agent execution completed: definition=%s step=%s", definition.digest, step_run_id)
-        return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages())
+        usage = _usage_metrics(run_usage)
+        return AgentExecutionResult(final_result.run_id, payload, final_result.all_messages(), usage)
 
 class _AllowlistPresentation(AbstractCapability[None]):
     def __init__(self, allow_tools: "tuple[str, ...]") -> None:
@@ -211,4 +279,56 @@ def _map_event(
     return None
 
 
-__all__ = ["AgentExecutionResult", "AgentExecutor", "EventSink"]
+def _to_usage_limits(value: AgentUsageLimits | None) -> UsageLimits:
+    if value is None:
+        return UsageLimits(
+            cost_limit=None,
+            request_limit=None,
+            tool_calls_limit=None,
+            input_tokens_limit=None,
+            output_tokens_limit=None,
+            total_tokens_limit=None,
+        )
+    return UsageLimits(
+        cost_limit=None,
+        request_limit=value.model_requests,
+        tool_calls_limit=value.tool_calls,
+        input_tokens_limit=value.input_tokens,
+        output_tokens_limit=value.output_tokens,
+        total_tokens_limit=value.total_tokens,
+    )
+
+
+def _usage_metrics(value: RunUsage) -> UsageMetrics:
+    return UsageMetrics(
+        model_requests=value.requests,
+        tool_calls=value.tool_calls,
+        input_tokens=value.input_tokens,
+        output_tokens=value.output_tokens,
+        cache_read_tokens=value.cache_read_tokens,
+        cache_write_tokens=value.cache_write_tokens,
+    )
+
+
+def _limit_details(value: UsageLimits) -> dict[str, int | None]:
+    return {
+        "model_requests": value.request_limit,
+        "tool_calls": value.tool_calls_limit,
+        "input_tokens": value.input_tokens_limit,
+        "output_tokens": value.output_tokens_limit,
+        "total_tokens": value.total_tokens_limit,
+    }
+
+
+def _usage_details(value: RunUsage) -> dict[str, int]:
+    metrics = _usage_metrics(value)
+    return {
+        "model_requests": metrics.model_requests,
+        "tool_calls": metrics.tool_calls,
+        "input_tokens": metrics.input_tokens,
+        "output_tokens": metrics.output_tokens,
+        "total_tokens": metrics.total_tokens,
+    }
+
+
+__all__ = ["AgentExecutionResult", "AgentExecutor", "EventSink", "UsageSink"]

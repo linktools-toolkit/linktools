@@ -17,8 +17,6 @@ from ...storage import (
     StorageMetrics,
     TransientObjectStore,
     create_sql_storage_context,
-    provision_sql,
-    validate_sql,
 )
 from ._contracts import (
     ArtifactState,
@@ -167,12 +165,7 @@ async def materialize_runtime_state(
                 group_plan,
                 include_object_tables=object_store is None,
             )
-            if owns_engine:
-                await provision_sql(engine, metadata)
-                await validate_sql(engine, metadata)
-            else:
-                await validate_sql(engine, metadata)
-            await context.initialize()
+            await context.initialize(metadata=metadata)
             sql_contexts.update({domain: context for domain in domains})
             from ._sql import _build_sql_domains
 

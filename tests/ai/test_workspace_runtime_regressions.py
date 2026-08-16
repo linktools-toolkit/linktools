@@ -5,7 +5,6 @@
 import pytest
 
 from linktools.ai.adapter import RuntimeMemoryStore
-from linktools.ai.core import Principal
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.workspace import Workspace, open_workspace_runtime, trusted_workspace_principal

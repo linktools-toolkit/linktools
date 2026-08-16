@@ -5,7 +5,7 @@
 import re
 from dataclasses import dataclass
 
-from ..storage import namespace_key
+from ..storage import namespace_digest
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -19,13 +19,13 @@ class AssetObjectKeyFactory:
             raise ValueError("namespace must be a non-empty string")
 
     @property
-    def namespace_key(self) -> str:
-        return namespace_key(self.namespace)
+    def namespace_digest(self) -> str:
+        return namespace_digest(self.namespace)
 
     def key(self, digest: str) -> str:
         if _DIGEST.fullmatch(digest) is None:
             raise ValueError("Asset object digest is invalid")
-        return f"v1/asset/{self.namespace_key}/{digest}"
+        return f"v1/asset/{self.namespace_digest}/{digest}"
 
 
 __all__ = ["AssetObjectKeyFactory"]

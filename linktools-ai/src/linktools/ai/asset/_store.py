@@ -6,11 +6,11 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from linktools.core import environ
 
-from ..core import Page
+from ..core import JsonValue, Page
 from ..errors import AIError, ErrorCode
 from ..storage import (
     StorageBatchResult,
@@ -62,6 +62,16 @@ class AssetStore:
         """Return whether storage initialization completed successfully."""
         return self._ready
 
+    @property
+    def atomic_batch(self) -> bool:
+        """Return whether the underlying storage commits batches atomically."""
+        return self._storage.atomic_batch
+
+    async def current_revision(self) -> StorageRevision:
+        """Return the current effective storage revision."""
+        self._ensure_ready()
+        return await self._storage.current_revision()
+
     async def initialize(self) -> None:
         """Initialize configured storage backends before serving requests."""
         if self._ready:
@@ -91,6 +101,7 @@ class AssetStore:
         value: bytes,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AssetInfo:
         """Store one file with an optional current-revision check."""
         self._ensure_ready()
@@ -98,6 +109,7 @@ class AssetStore:
             key,
             bytes(value),
             expected_revision=expected_revision,
+            metadata=metadata,
         )
         _logger.debug(
             "asset file put: kind=%s id=%s revision=%s changed=%s",
@@ -113,10 +125,15 @@ class AssetStore:
         key: AssetKey,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageDeleteResult[AssetKey]":
         """Delete one file with an optional current-revision check."""
         self._ensure_ready()
-        result = await self._storage.delete(key, expected_revision=expected_revision)
+        result = await self._storage.delete(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         _logger.debug("asset file delete: kind=%s id=%s deleted=%s", key.kind, key.id, result.deleted)
         return result
 
@@ -125,10 +142,15 @@ class AssetStore:
         key: AssetKey,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[AssetKey]":
         """Reset one file so a lower read layer becomes effective."""
         self._ensure_ready()
-        result = await self._storage.reset(key, expected_revision=expected_revision)
+        result = await self._storage.reset(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         _logger.debug("asset file reset: kind=%s id=%s reset=%s", key.kind, key.id, result.reset)
         return result
 

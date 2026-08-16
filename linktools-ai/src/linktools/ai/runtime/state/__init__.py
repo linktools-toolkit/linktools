@@ -27,7 +27,7 @@ from ._plan import (
     RuntimeStateRoute,
 )
 from ._root import RuntimeState
-from ._schema import build_runtime_sql_metadata
+from ._schema import build_runtime_sql_metadata, build_step_sql_metadata
 
 __all__ = [
     "ApprovalRepository",
@@ -52,4 +52,5 @@ __all__ = [
     "SessionRepository",
     "TaskState",
     "build_runtime_sql_metadata",
+    "build_step_sql_metadata",
 ]

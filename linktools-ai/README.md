@@ -143,16 +143,18 @@ The identity fields are intentionally independent:
 
 Fields stay short when their declaring type supplies the domain, such as `Principal.kind` and `TaskLease.owner`. Explicit qualifiers distinguish meanings that can coexist in the same record or flattened storage boundary, such as `operation_kind`, `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_key`, or preserve an authorization identity domain, such as `owner_principal_id`.
 
-`open_workspace_runtime()` uses `workspace.workspace_id` as both the Runtime namespace and the Workspace tenant boundary. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
+`open_workspace_runtime()` uses `workspace.workspace_id` as the Runtime namespace. Its optional `tenant_id` defaults to that workspace identity and can be set independently after validation. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
 
-External SQL deployments borrow an application-owned async SQLAlchemy `AsyncEngine` and require a pre-provisioned schema. Runtime startup validates tables; explicit migration provisioning adds only the supported task columns:
+External SQL deployments borrow an application-owned async SQLAlchemy `AsyncEngine` and require the explicit 24-table schema to be provisioned first. Runtime startup validates owned tables and never alters them:
 
 ```python
 from linktools.ai.runtime import RuntimeState, RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.model import ModelRegistry
+from linktools.ai.migrate import provision_database
 from sqlalchemy.ext.asyncio import create_async_engine
 
 engine = create_async_engine("sqlite+aiosqlite:////var/lib/my-app/runtime.db")
+await provision_database(engine)
 models = ModelRegistry.openai(model="gpt-4o-mini")
 runtime_state = RuntimeState.from_plan(
     RuntimeStatePlan(
@@ -171,6 +173,22 @@ MySQL, PostgreSQL, and SQLite use the same SQL storage contracts. Every lifecycl
 The application owns an external engine and must dispose it after the Runtime closes.
 
 A non-empty `memory_scope` enables Runtime memory for an execution. `None` disables it. Classification fields reject empty values, surrounding whitespace, control characters, and values beyond their UTF-8 byte limit.
+
+Agent declarations may set `usage_limits` for model requests, tool calls, input tokens, output tokens, and total tokens. `ExecutionResult.usage` reports those counters plus cache-read and cache-write tokens. A `Runtime.run(timeout_seconds=...)` timeout only bounds the caller; use `Runtime.cancel(execution_id, principal=...)` when the execution itself must be cancelled. Cancellation and usage-limit failures preserve usage already accumulated.
+
+Asset mutations accept JSON `metadata`; it is stored on `AssetInfo` and `VersionSummary` and remains unchanged for no-op writes. Logical assets can be renamed without changing kind:
+
+```python
+from linktools.ai.asset import AssetRef
+
+renamed = await assets.rename(
+    AssetRef("skill", "old-name"),
+    AssetRef("skill", "new-name"),
+    metadata={"reason": "curated"},
+)
+```
+
+SQL builders own their tables and can register into shared metadata. Provisioning is explicit through `linktools.ai.migrate.provision_database()`; Runtime and Asset backend initialization only validates. The canonical schema has exactly 24 `ai_`-prefixed tables, including `ai_storage_objects` and `ai_storage_object_chunks`, with no runtime schema auto-create or alter.
 
 ## 4. Capability providers
 

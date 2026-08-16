@@ -17,6 +17,32 @@ from ..core import (
 from ..errors import AIError, ErrorCode
 
 
+@dataclass(frozen=True, slots=True)
+class AgentUsageLimits:
+    model_requests: "int | None" = None
+    tool_calls: "int | None" = None
+    input_tokens: "int | None" = None
+    output_tokens: "int | None" = None
+    total_tokens: "int | None" = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.model_requests,
+            self.tool_calls,
+            self.input_tokens,
+            self.output_tokens,
+            self.total_tokens,
+        )
+        if all(value is None for value in values):
+            raise ValueError("usage limits must define at least one limit")
+        if any(
+            value is not None
+            and (not isinstance(value, int) or isinstance(value, bool) or value <= 0)
+            for value in values
+        ):
+            raise ValueError("usage limits must be positive integers or None")
+
+
 class _ImmutableJsonMapping(Mapping[str, JsonValue]):
     """Store a JSON object as canonical bytes and decode fresh values on read."""
 
@@ -95,6 +121,7 @@ class AgentSpec:
     allow_tools: "tuple[str, ...]" = ("*",)
     allow_skills: "tuple[str, ...]" = ("*",)
     metadata: "Mapping[str, JsonValue]" = field(default_factory=dict)
+    usage_limits: "AgentUsageLimits | None" = None
 
     def __post_init__(self) -> None:
         if not self.id.strip() or self.revision < 1 or not self.model.strip() or not self.output_schema.strip() or self.output_schema_revision < 1:
@@ -144,4 +171,4 @@ class MCPServerSpec:
         object.__setattr__(self, "args", tuple(self.args))
 
 
-__all__ = ["AgentCapabilityRef", "AgentSpec", "MCPServerSpec", "SkillSpec"]
+__all__ = ["AgentCapabilityRef", "AgentSpec", "AgentUsageLimits", "MCPServerSpec", "SkillSpec"]

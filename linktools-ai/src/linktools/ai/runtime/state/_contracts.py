@@ -22,6 +22,7 @@ from ...core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
+    UsageMetrics,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
@@ -97,7 +98,7 @@ class ExecutionStartClaim:
     expected_revision: int
     expected_event_sequence: int
     scope: str
-    key_hash: str
+    key_digest: str
     request_digest: str
     started_at: datetime
 
@@ -109,7 +110,7 @@ class ExecutionStartUnknownCommit:
     expected_revision: int
     expected_event_sequence: int
     scope: str
-    key_hash: str
+    key_digest: str
     request_digest: str
     occurred_at: datetime
 
@@ -142,7 +143,7 @@ class IdempotencyRecord:
     tenant_id: str
     runtime_domain: RuntimeDomain
     scope: str
-    key_hash: str
+    key_digest: str
     request_digest: str
     resource_kind: ResourceKind
     resource_id: str
@@ -172,9 +173,7 @@ class ResultRecord:
     output_schema_fingerprint: "str | None"
     object_ref: "ObjectRef | None"
     stop_reason: StopReason
-    input_tokens: int
-    output_tokens: int
-    total_cost_micros: int
+    usage: UsageMetrics
     created_at: datetime
 
     def __post_init__(self) -> None:
@@ -183,10 +182,8 @@ class ResultRecord:
             raise ValueError("result output schema fields must be all null or all present")
         if self.object_ref is not None and any(value is None for value in output_fields):
             raise ValueError("result object requires output schema")
-        if min(self.input_tokens, self.output_tokens, self.total_cost_micros) < 0:
-            raise ValueError("terminal accounting must be non-negative")
         if self.created_at.tzinfo is None:
-            raise ValueError("terminal accounting requires an aware timestamp")
+            raise ValueError("result requires an aware timestamp")
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,7 +260,7 @@ class ExecutionTerminalCommit:
 @dataclass(frozen=True, slots=True)
 class IdempotencyTerminalUpdate:
     scope: str
-    key_hash: str
+    key_digest: str
     expected_status: IdempotencyStatus
     next_status: IdempotencyStatus
     request_digest: str
@@ -294,7 +291,7 @@ class ApprovalRecord:
     tenant_id: str
     operation_id: str
     status: ApprovalStatus
-    idempotency_key_hash: "str | None"
+    idempotency_key_digest: "str | None"
     decision: "ApprovalDecision | None"
     decided_by: "str | None"
     decision_digest: "str | None"
@@ -309,7 +306,7 @@ class ExternalCallRecord:
     tenant_id: str
     operation_id: str
     status: ExternalCallStatus
-    idempotency_key_hash: "str | None"
+    idempotency_key_digest: "str | None"
     object_ref: "ObjectRef | None"
     payload_digest: "str | None"
     created_at: datetime
@@ -382,7 +379,7 @@ class RecoveryExecutionInput:
 @dataclass(frozen=True, slots=True)
 class RecoveryIdempotencyInput:
     scope: str
-    key_hash: str
+    key_digest: str
     request_digest: str
 
 
@@ -396,9 +393,7 @@ class RecoveryTerminalOutcome:
     output_schema_revision: "int | None"
     output_schema_fingerprint: "str | None"
     recovery_object_ref: "ObjectRef | None"
-    input_tokens: int
-    output_tokens: int
-    total_cost_micros: int
+    usage: UsageMetrics
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
     result_created_at: datetime
@@ -411,8 +406,6 @@ class RecoveryTerminalOutcome:
             raise ValueError("successful recovery outcome requires output")
         if self.terminal_status is not ExecutionStatus.SUCCEEDED and partial_output:
             raise ValueError("failed recovery outcome cannot contain output")
-        if min(self.input_tokens, self.output_tokens, self.total_cost_micros) < 0:
-            raise ValueError("recovery accounting must be non-negative")
         if self.result_created_at.tzinfo is None:
             raise ValueError("recovery outcome requires an aware timestamp")
 
@@ -464,9 +457,9 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
-    async def get(self, scope: str, key_hash: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
+    async def get(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
     async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
-    async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord: ...
+    async def compare_and_swap(self, scope: str, key_digest: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord: ...
 
 
 class EventRepository(RuntimeRepository, Protocol):
@@ -487,7 +480,7 @@ class ApprovalRepository(RuntimeRepository, Protocol):
     async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def create(self, record: ApprovalRecord) -> ApprovalRecord: ...
     async def get(self, approval_id: str, *, tenant_id: str) -> ApprovalRecord | None: ...
-    async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, idempotency_key_hash: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord: ...
+    async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, idempotency_key_digest: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord: ...
     async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ApprovalRecord, ...]: ...
 
 
@@ -495,7 +488,7 @@ class ExternalCallRepository(RuntimeRepository, Protocol):
     async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def create_call(self, record: ExternalCallRecord) -> ExternalCallRecord: ...
     async def get(self, call_id: str, *, tenant_id: str) -> ExternalCallRecord | None: ...
-    async def supply(self, call_id: str, *, tenant_id: str, expected_status: ExternalCallStatus, idempotency_key_hash: str, object_ref: ObjectRef, payload_digest: str, supplied_at: datetime) -> ExternalCallRecord: ...
+    async def supply(self, call_id: str, *, tenant_id: str, expected_status: ExternalCallStatus, idempotency_key_digest: str, object_ref: ObjectRef, payload_digest: str, supplied_at: datetime) -> ExternalCallRecord: ...
     async def list_pending(self, execution_id: str, *, tenant_id: str) -> tuple[ExternalCallRecord, ...]: ...
 
 

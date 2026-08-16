@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 from linktools.ai.core import TaskStatus, canonical_sha256
 from linktools.ai.errors import ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import RuntimeState
 from linktools.ai.task import TaskGraph, TaskNode
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 @pytest.mark.asyncio
@@ -17,11 +19,13 @@ async def test_reconcile_propagates_transitive_blocked_state(
     backend: str,
     tmp_path: Path,
 ) -> None:
-    state = (
-        RuntimeState.in_memory()
-        if backend == "memory"
-        else RuntimeState.sqlite(tmp_path / "runtime.db")
-    )
+    engine = None
+    if backend == "memory":
+        state = RuntimeState.in_memory()
+    else:
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+        await provision_database(engine)
+        state = RuntimeState.sql(engine)
     await state.initialize(namespace=f"task-reconcile-{backend}", tenant_id="tenant")
     try:
         graph = TaskGraph(
@@ -61,3 +65,5 @@ async def test_reconcile_propagates_transitive_blocked_state(
         assert nodes["a"].error_code == ErrorCode.TASK_DEPENDENCY_FAILED.value
     finally:
         await state.close()
+        if engine is not None:
+            await engine.dispose()

@@ -16,6 +16,7 @@ from ..core import (
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
+    validate_resource_id,
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
@@ -30,6 +31,8 @@ from ._agent import AgentHandle
 from .service_api import (
     ApprovalService,
     ArtifactService,
+    CancelExecutionRequest,
+    CancelExecutionResult,
     CreateSessionRequest,
     EvaluationHandle,
     EvaluationService,
@@ -199,6 +202,32 @@ class Runtime:
             memory_scope=memory_scope,
             timeout_seconds=timeout_seconds,
         )
+
+    async def cancel(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        idempotency_key: "str | None" = None,
+        force: bool = False,
+    ) -> CancelExecutionResult:
+        """Explicitly request cancellation of an admitted execution."""
+        self._ensure_open()
+        validate_resource_id(execution_id)
+        result = await self.execution.cancel(
+            execution_id,
+            CancelExecutionRequest(
+                principal,
+                secrets.token_urlsafe(32) if idempotency_key is None else idempotency_key,
+                force,
+            ),
+        )
+        _logger.info(
+            "runtime execution cancellation requested: execution=%s cancelled=%s",
+            execution_id,
+            result.cancelled,
+        )
+        return result
 
     async def _run_for_agent(
         self,

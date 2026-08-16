@@ -1,678 +1,545 @@
--- linktools-ai complete schema reference (MySQL 5.7+/8.0) --
+-- linktools-ai canonical MySQL schema reference.
 --
--- This file is a DBA review artifact, not a production bootstrap or migration
--- command. Production databases must be created and changed only through
--- reviewed, environment-specific DBA migration tooling.
---
--- This reference contains every current SQL table, grouped by its owner:
---   * Schema manifest table owned by storage.database;
---   * Runtime tables owned by runtime.state._sql;
---   * Harness StepStore tables owned by runtime.state._steps;
---   * Asset current entries, change history, content blobs, and revision
---     counter tables owned by asset.sql.
--- The application validates this complete manifest before opening SQL-backed
--- runtime resources.
---
--- Reference DBA rules:
---   * Every table uses the ai_ prefix and every table/column carries a COMMENT.
---   * Every table uses a BIGINT AUTO_INCREMENT surrogate id, puts updated_at
---     immediately before created_at, and has both ix_updated_at and
---     ix_created_at timestamp indexes.
---   * Index and unique-key names are logical, unprefixed identifiers. Identity
---     keys use uk_namespace_key_tenant_id_record_id; timestamp keys use
---     ix_updated_at and ix_created_at. Special keys retain the exact logical
---     names declared by their columns, including uk_namespace, uk_digest,
---     uk_namespace_asset_key_hash,
---     uk_namespace_key_tenant_id_chunk_key,
---     uk_namespace_key_tenant_id_call_key, and
---     uk_namespace_key_tenant_id_identity_key.
---     Runtime execution lookups use
---     ix_namespace_key_tenant_id_parent_execution_id and
---     ix_namespace_key_tenant_id_session_id; Step run identity uses
---     uk_namespace_key_run_key.
---   * No composite index or unique key contains more than three physical
---     columns. Where a logical identity has more fields, its canonical
---     combination is stored in a utf8mb4 CHAR(64) identity column and indexed
---     with namespace/tenant scope.
---   * namespace_key and every digest/hash column use utf8mb4_bin, never ASCII.
---     Sessions session_id, tool run_id/tool_call_id, and Step run
---     conversation_id are NOT NULL wherever their identity requires them.
---     Step event/snapshot run_id indexes use a (128) prefix.
---   * Indexed columns wider than 128 characters use a (128) prefix.
---   * No low-selectivity status index, redundant left-prefix index,
---     floating-point column, or database-level foreign key is introduced.
---   * JSON and LONGBLOB payloads are limited to fields required by each contract.
+-- This file is manually reviewed DBA input, not an application bootstrap.
+-- Provisioning is performed only by the explicit migrate/provision API.
+-- All physical tables use the ai_ prefix; there is no schema manifest table.
+-- Every column is commented, digest columns are utf8mb4_bin CHAR(64),
+-- tenant_id is VARCHAR(128), operational timestamps are adjacent,
+-- composite unique/index keys contain at most three physical columns,
+-- and this schema deliberately contains no foreign keys or FLOAT columns.
 
 SET NAMES utf8mb4;
 
-CREATE TABLE `ai_storage_schema_manifest` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Singleton schema manifest identifier',
-  `generation` INT NOT NULL COMMENT 'Storage format generation',
-  `manifest_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Complete schema manifest digest',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+CREATE TABLE `ai_asset_changes` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_asset_changes.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.namespace_digest',
+  `asset_key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.asset_key_digest',
+  `asset_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.asset_kind',
+  `asset_id` VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.asset_id',
+  `entry_revision` BIGINT NOT NULL COMMENT 'Column ai_asset_changes.entry_revision',
+  `store_revision` BIGINT NOT NULL COMMENT 'Column ai_asset_changes.store_revision',
+  `etag` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.etag',
+  `size` BIGINT NOT NULL COMMENT 'Column ai_asset_changes.size',
+  `status` VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_changes.status',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_asset_changes.object_store_id',
+  `object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_asset_changes.object_key',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_asset_changes.metadata',
+  `modified_at` DATETIME NOT NULL COMMENT 'Column ai_asset_changes.modified_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_changes.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_changes.created_at',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_storage_generation` (`generation`),
+  UNIQUE KEY `uk_ai_asset_changes_revision` (`namespace_digest`, `asset_key_digest`, `entry_revision`),
+  KEY `ix_ai_asset_changes_history` (`namespace_digest`, `asset_key_digest`, `entry_revision`),
+  KEY `ix_ai_asset_changes_revision` (`namespace_digest`, `store_revision`),
   KEY `ix_created_at` (`created_at`),
   KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Linktools AI storage schema manifest';
-
-CREATE TABLE `ai_runtime_approvals` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime approval records';
-
-CREATE TABLE `ai_runtime_artifacts` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime artifact records';
-
-CREATE TABLE `ai_runtime_blob_chunks` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Content digest',
-  `chunk_index` BIGINT DEFAULT 0 NOT NULL COMMENT 'Blob chunk index',
-  `chunk_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Blob chunk identity digest',
-  `content` LONGBLOB NOT NULL COMMENT 'Blob chunk content',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_chunk_key` (`namespace_key`, `tenant_id`, `chunk_key`),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime content blob chunks';
-
-CREATE TABLE `ai_runtime_blobs` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Content digest',
-  `size` BIGINT DEFAULT 0 NOT NULL COMMENT 'Content size in bytes',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime content blob records';
-
-CREATE TABLE `ai_runtime_evaluation_idempotency` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `scope` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency scope',
-  `key_hash` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency key digest',
-  `identity_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Idempotency identity digest',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_identity_key` (`namespace_key`, `tenant_id`, `identity_key`),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime evaluation idempotency records';
-
-CREATE TABLE `ai_runtime_evaluations` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime evaluation records';
-
-CREATE TABLE `ai_runtime_events` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime execution events';
-
-CREATE TABLE `ai_runtime_executions` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `agent_run_sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Agent run sequence',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_namespace_key_tenant_id_base_execution_id` (`namespace_key`, `tenant_id`, `base_execution_id`(128)),
-  KEY `ix_namespace_key_tenant_id_parent_execution_id` (`namespace_key`, `tenant_id`, `parent_execution_id`(128)),
-  KEY `ix_namespace_key_tenant_id_session_id` (`namespace_key`, `tenant_id`, `session_id`(128)),
-  KEY `ix_namespace_key_tenant_id_source_execution_id` (`namespace_key`, `tenant_id`, `source_execution_id`(128))
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime execution records';
-
-CREATE TABLE `ai_runtime_externals` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime external result records';
-
-CREATE TABLE `ai_runtime_idempotency` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `scope` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency scope',
-  `key_hash` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Idempotency key digest',
-  `identity_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Idempotency identity digest',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_identity_key` (`namespace_key`, `tenant_id`, `identity_key`),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime idempotency records';
-
-CREATE TABLE `ai_runtime_memories` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime memory records';
-
-CREATE TABLE `ai_runtime_operation_counters` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `resource_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Operation resource kind',
-  `resource_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Operation resource identifier',
-  `partition_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Operation partition identity digest',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_partition_key` (`namespace_key`, `tenant_id`, `partition_key`),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime operation counters';
-
-CREATE TABLE `ai_runtime_operations` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `resource_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Operation resource kind',
-  `resource_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Operation resource identifier',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime operation ledger';
-
-CREATE TABLE `ai_runtime_recovery_checkpoints` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical recovery checkpoint payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime recovery checkpoints';
-
-CREATE TABLE `ai_runtime_results` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime result records';
-
-CREATE TABLE `ai_runtime_sessions` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `profile` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Session profile',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_session_id` (`namespace_key`, `tenant_id`, `session_id`(128)),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime session records';
-
-CREATE TABLE `ai_runtime_task_nodes` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `owner` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Lease owner',
-  `fence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Lease fence',
-  `lease_expires_at` DATETIME NULL COMMENT 'Lease expiration',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime task node records';
-
-CREATE TABLE `ai_runtime_tasks` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime task graph records';
-
-CREATE TABLE `ai_runtime_tools` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace digest',
-  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
-  `record_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Domain record identifier',
-  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Session identifier',
-  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent execution identifier',
-  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Source execution identifier',
-  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Base execution identifier',
-  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'RUN' NOT NULL COMMENT 'Execution lineage kind',
-  `sequence` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record sequence',
-  `revision` BIGINT DEFAULT 0 NOT NULL COMMENT 'Record revision',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Record status',
-  `payload` JSON NOT NULL COMMENT 'Canonical record payload',
-  `run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tool run identifier',
-  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tool call identifier',
-  `call_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT '' NOT NULL COMMENT 'Tool call identity digest',
-  `owner` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Lease owner',
-  `fence` BIGINT DEFAULT 0 NULL COMMENT 'Lease fence',
-  `lease_expires_at` DATETIME NULL COMMENT 'Lease expiration',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_call_key` (`namespace_key`, `tenant_id`, `call_key`),
-  UNIQUE KEY `uk_namespace_key_tenant_id_record_id` (`namespace_key`, `tenant_id`, `record_id`(128)),
-  KEY `ix_created_at` (`created_at`),
-  KEY `ix_updated_at` (`updated_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime tool operation records';
-
-CREATE TABLE `ai_step_runs` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'StepStore namespace digest',
-  `run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Agent run identifier',
-  `conversation_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Conversation identifier',
-  `parent_run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent run identifier',
-  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Agent name',
-  `metadata_json` JSON NOT NULL COMMENT 'Run metadata',
-  `started_at` DATETIME NOT NULL COMMENT 'Run start timestamp',
-  `run_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Run identity digest',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_run_id` (`namespace_key`, `run_id`(128)),
-  UNIQUE KEY `uk_namespace_key_run_key` (`namespace_key`, `run_key`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Harness StepStore run records';
-
-CREATE TABLE `ai_step_events` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'StepStore namespace digest',
-  `run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Agent run identifier',
-  `kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Event kind',
-  `step_index` INT NOT NULL COMMENT 'Step index',
-  `timestamp` DATETIME NOT NULL COMMENT 'Event timestamp',
-  `conversation_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Conversation identifier',
-  `parent_run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent run identifier',
-  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Agent name',
-  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Tool call identifier',
-  `tool_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Tool name',
-  `error` TEXT NULL COMMENT 'Event error details',
-  `metadata_json` JSON NOT NULL COMMENT 'Event metadata',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  KEY `ix_namespace_key_run_id` (`namespace_key`, `run_id`(128)),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Harness StepStore event records';
-
-CREATE TABLE `ai_step_snapshots` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'StepStore namespace digest',
-  `run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Agent run identifier',
-  `step_index` INT NOT NULL COMMENT 'Step index',
-  `conversation_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Conversation identifier',
-  `parent_run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Parent run identifier',
-  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Agent name',
-  `timestamp` DATETIME NOT NULL COMMENT 'Snapshot timestamp',
-  `state` VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'complete' NOT NULL COMMENT 'Snapshot state',
-  `messages_json` JSON NOT NULL COMMENT 'Serialized model messages',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  KEY `ix_namespace_key_run_id` (`namespace_key`, `run_id`(128)),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Harness StepStore snapshots';
-
-CREATE TABLE `ai_step_effects` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'StepStore namespace digest',
-  `run_id` VARCHAR(200) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Agent run identifier',
-  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tool call identifier',
-  `tool_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tool name',
-  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Effect status',
-  `started_at` DATETIME NOT NULL COMMENT 'Effect start timestamp',
-  `ended_at` DATETIME NULL COMMENT 'Effect end timestamp',
-  `idempotency_key` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Idempotency key',
-  `effect_summary` TEXT NULL COMMENT 'Effect summary',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_run_id_tool_call_id` (`namespace_key`, `run_id`(128), `tool_call_id`(128)),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Harness StepStore tool effects';
-
-CREATE TABLE `ai_step_media` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'StepStore namespace digest',
-  `sha256` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Media content digest',
-  `media_type` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Media MIME type',
-  `bytes` LONGBLOB NOT NULL COMMENT 'Media content',
-  `size_bytes` BIGINT NOT NULL COMMENT 'Media content size',
-  `metadata_json` JSON NOT NULL COMMENT 'Media metadata',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_key_sha256` (`namespace_key`, `sha256`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Harness StepStore media objects';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_asset_changes';
 
 CREATE TABLE `ai_asset_entries` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset namespace',
-  `asset_key_hash` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset key digest',
-  `asset_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset kind',
-  `asset_id` VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset file identifier',
-  `entry_revision` BIGINT NOT NULL COMMENT 'File entry revision',
-  `store_revision` BIGINT NOT NULL COMMENT 'Store revision at file update',
-  `etag` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'File content digest',
-  `size` BIGINT NOT NULL COMMENT 'File content size',
-  `status` VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Current file status',
-  `blob_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Content blob digest',
-  `modified_at` DATETIME NOT NULL COMMENT 'File modification timestamp',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_asset_entries.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.namespace_digest',
+  `asset_key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.asset_key_digest',
+  `asset_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.asset_kind',
+  `asset_id` VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.asset_id',
+  `entry_revision` BIGINT NOT NULL COMMENT 'Column ai_asset_entries.entry_revision',
+  `store_revision` BIGINT NOT NULL COMMENT 'Column ai_asset_entries.store_revision',
+  `etag` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.etag',
+  `size` BIGINT NOT NULL COMMENT 'Column ai_asset_entries.size',
+  `status` VARCHAR(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_entries.status',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_asset_entries.object_store_id',
+  `object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_asset_entries.object_key',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_asset_entries.metadata',
+  `modified_at` DATETIME NOT NULL COMMENT 'Column ai_asset_entries.modified_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_entries.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_entries.created_at',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace_asset_key_hash` (`namespace`, `asset_key_hash`),
-  KEY `ix_namespace_store_revision` (`namespace`, `store_revision`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Current Asset file entries';
+  UNIQUE KEY `uk_ai_asset_entries_identity` (`namespace_digest`, `asset_key_digest`),
+  KEY `ix_ai_asset_entries_revision` (`namespace_digest`, `store_revision`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_asset_entries';
 
-CREATE TABLE `ai_asset_changes` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset namespace',
-  `asset_key_hash` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset key digest',
-  `asset_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset kind',
-  `asset_id` VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset file identifier',
-  `entry_revision` BIGINT NOT NULL COMMENT 'File entry revision',
-  `store_revision` BIGINT NOT NULL COMMENT 'Store revision at file update',
-  `etag` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'File content digest',
-  `size` BIGINT NOT NULL COMMENT 'File content size',
-  `status` VARCHAR(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'File status at this history revision',
-  `blob_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NULL COMMENT 'Content blob digest',
-  `modified_at` DATETIME NOT NULL COMMENT 'File modification timestamp',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+CREATE TABLE `ai_asset_heads` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_asset_heads.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_asset_heads.namespace_digest',
+  `store_revision` BIGINT NOT NULL COMMENT 'Column ai_asset_heads.store_revision',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_heads.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_asset_heads.created_at',
   PRIMARY KEY (`id`),
-  KEY `ix_namespace_asset_key_hash_entry_revision` (`namespace`, `asset_key_hash`, `entry_revision`),
-  KEY `ix_namespace_store_revision` (`namespace`, `store_revision`),
-  KEY `ix_blob_digest` (`blob_digest`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Asset file change history';
+  UNIQUE KEY `uk_ai_asset_heads_namespace_digest` (`namespace_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_asset_heads';
 
-CREATE TABLE `ai_asset_blobs` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Content digest',
-  `content` LONGBLOB NOT NULL COMMENT 'File content',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+CREATE TABLE `ai_runtime_approvals` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_approvals.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.tenant_id',
+  `approval_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.approval_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.execution_id',
+  `operation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.operation_id',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_approvals.status',
+  `idempotency_key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_approvals.idempotency_key_digest',
+  `decision` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_approvals.decision',
+  `decided_by` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_approvals.decided_by',
+  `decision_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_approvals.decision_digest',
+  `decided_at` DATETIME COMMENT 'Column ai_runtime_approvals.decided_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_approvals.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_approvals.created_at',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_digest` (`digest`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Content-addressed Asset file blobs';
+  UNIQUE KEY `uk_ai_runtime_approvals_namespace_digest_tenant_id_approval_id` (`namespace_digest`, `tenant_id`, `approval_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_approvals';
 
-CREATE TABLE `ai_asset_revision` (
-  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Surrogate primary key',
-  `namespace` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Asset namespace',
-  `store_revision` BIGINT NOT NULL COMMENT 'Asset store revision',
-  `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL COMMENT 'Last update timestamp',
-  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL COMMENT 'Creation timestamp',
+CREATE TABLE `ai_runtime_artifacts` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_artifacts.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.tenant_id',
+  `artifact_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.artifact_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.execution_id',
+  `producer` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.producer',
+  `media_type` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.media_type',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.object_store_id',
+  `object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.object_key',
+  `object_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_artifacts.object_digest',
+  `object_size` BIGINT NOT NULL COMMENT 'Column ai_runtime_artifacts.object_size',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_artifacts.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_artifacts.created_at',
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_namespace` (`namespace`),
-  KEY `ix_updated_at` (`updated_at`),
-  KEY `ix_created_at` (`created_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Asset store revision counters';
+  UNIQUE KEY `uk_ai_runtime_artifacts_namespace_digest_tenant_id_artifact_id` (`namespace_digest`, `tenant_id`, `artifact_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_artifacts';
+
+CREATE TABLE `ai_runtime_evaluations` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_evaluations.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.tenant_id',
+  `evaluation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.evaluation_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.execution_id',
+  `dataset_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.dataset_id',
+  `dataset_revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_evaluations.dataset_revision',
+  `evaluator_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.evaluator_id',
+  `evaluator_revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_evaluations.evaluator_revision',
+  `binding_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.binding_digest',
+  `output_schema_fingerprint` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.output_schema_fingerprint',
+  `artifact_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_evaluations.artifact_digest',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_evaluations.status',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_evaluations.revision',
+  `metrics` JSON NOT NULL COMMENT 'Column ai_runtime_evaluations.metrics',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_evaluations.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_evaluations.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_evaluations_namespace_digest_tenant_id_evaluation_id` (`namespace_digest`, `tenant_id`, `evaluation_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_evaluations';
+
+CREATE TABLE `ai_runtime_events` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_events.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_events.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_events.tenant_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_events.execution_id',
+  `sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_events.sequence',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_events.identity_digest',
+  `event_type` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_events.event_type',
+  `payload` JSON NOT NULL COMMENT 'Column ai_runtime_events.payload',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_events.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_events.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_events_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_events';
+
+CREATE TABLE `ai_runtime_executions` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_executions.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.tenant_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.execution_id',
+  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.session_id',
+  `binding_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.binding_digest',
+  `parent_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.parent_execution_id',
+  `root_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.root_execution_id',
+  `source_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.source_execution_id',
+  `base_execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.base_execution_id',
+  `lineage_kind` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.lineage_kind',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_executions.status',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_executions.revision',
+  `event_sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_executions.event_sequence',
+  `agent_run_sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_executions.agent_run_sequence',
+  `error_code` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.error_code',
+  `safe_error_details` JSON NOT NULL COMMENT 'Column ai_runtime_executions.safe_error_details',
+  `memory_scope` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.memory_scope',
+  `conversation_step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.conversation_step_run_id',
+  `output_schema_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.output_schema_id',
+  `output_schema_revision` BIGINT COMMENT 'Column ai_runtime_executions.output_schema_revision',
+  `output_schema_fingerprint` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.output_schema_fingerprint',
+  `result_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.result_store_id',
+  `result_object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.result_object_key',
+  `result_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_executions.result_digest',
+  `result_size` BIGINT COMMENT 'Column ai_runtime_executions.result_size',
+  `stop_reason` TEXT COMMENT 'Column ai_runtime_executions.stop_reason',
+  `model_requests` BIGINT COMMENT 'Column ai_runtime_executions.model_requests',
+  `tool_calls` BIGINT COMMENT 'Column ai_runtime_executions.tool_calls',
+  `input_tokens` BIGINT COMMENT 'Column ai_runtime_executions.input_tokens',
+  `output_tokens` BIGINT COMMENT 'Column ai_runtime_executions.output_tokens',
+  `cache_read_tokens` BIGINT COMMENT 'Column ai_runtime_executions.cache_read_tokens',
+  `cache_write_tokens` BIGINT COMMENT 'Column ai_runtime_executions.cache_write_tokens',
+  `result_created_at` DATETIME COMMENT 'Column ai_runtime_executions.result_created_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_executions.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_executions.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_executions_namespace_digest_tenant_id_execution_id` (`namespace_digest`, `tenant_id`, `execution_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_executions';
+
+CREATE TABLE `ai_runtime_external_calls` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_external_calls.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.tenant_id',
+  `call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.call_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.execution_id',
+  `operation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.operation_id',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_external_calls.status',
+  `idempotency_key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_external_calls.idempotency_key_digest',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_external_calls.object_store_id',
+  `object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_external_calls.object_key',
+  `object_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_external_calls.object_digest',
+  `object_size` BIGINT COMMENT 'Column ai_runtime_external_calls.object_size',
+  `payload_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_external_calls.payload_digest',
+  `supplied_at` DATETIME COMMENT 'Column ai_runtime_external_calls.supplied_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_external_calls.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_external_calls.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_external_calls_namespace_digest_tenant_id_call_id` (`namespace_digest`, `tenant_id`, `call_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_external_calls';
+
+CREATE TABLE `ai_runtime_idempotency` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_idempotency.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.tenant_id',
+  `runtime_domain` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.runtime_domain',
+  `scope` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.scope',
+  `key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.key_digest',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.identity_digest',
+  `request_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.request_digest',
+  `resource_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.resource_id',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_idempotency.status',
+  `result_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_idempotency.result_digest',
+  `error_code` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_idempotency.error_code',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_idempotency.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_idempotency.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_idempotency_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_idempotency';
+
+CREATE TABLE `ai_runtime_memories` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_memories.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.tenant_id',
+  `memory_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.memory_id',
+  `memory_scope_key` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.memory_scope_key',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.object_store_id',
+  `object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.object_key',
+  `object_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_memories.object_digest',
+  `object_size` BIGINT NOT NULL COMMENT 'Column ai_runtime_memories.object_size',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_runtime_memories.metadata',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_memories.revision',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_memories.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_memories.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_memories_namespace_digest_tenant_id_memory_id` (`namespace_digest`, `tenant_id`, `memory_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_memories';
+
+CREATE TABLE `ai_runtime_operation_counters` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_operation_counters.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.tenant_id',
+  `runtime_domain` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.runtime_domain',
+  `resource_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.resource_kind',
+  `resource_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.resource_id',
+  `stream_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operation_counters.stream_digest',
+  `last_sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_operation_counters.last_sequence',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_operation_counters.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_operation_counters.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_operation_counters_namespace_digest_tenant_id_stream_digest` (`namespace_digest`, `tenant_id`, `stream_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_operation_counters';
+
+CREATE TABLE `ai_runtime_operations` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_operations.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.tenant_id',
+  `runtime_domain` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.runtime_domain',
+  `resource_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.resource_kind',
+  `resource_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.resource_id',
+  `stream_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.stream_digest',
+  `operation_kind` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.operation_kind',
+  `operation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.operation_id',
+  `operation_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.operation_digest',
+  `sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_operations.sequence',
+  `stream_sequence_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.stream_sequence_digest',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.status',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_operations.execution_id',
+  `request_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_operations.request_digest',
+  `result_ref` TEXT COMMENT 'Column ai_runtime_operations.result_ref',
+  `result_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_operations.result_digest',
+  `error_code` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_operations.error_code',
+  `compactable` BOOL NOT NULL COMMENT 'Column ai_runtime_operations.compactable',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_operations.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_operations.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_operations_namespace_digest_tenant_id_operation_digest` (`namespace_digest`, `tenant_id`, `operation_digest`),
+  UNIQUE KEY `uk_ai_runtime_operations_stream` (`namespace_digest`, `tenant_id`, `stream_sequence_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_operations';
+
+CREATE TABLE `ai_runtime_recovery_checkpoints` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.tenant_id',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.execution_id',
+  `step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.step_run_id',
+  `agent_run_sequence` BIGINT NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.agent_run_sequence',
+  `state` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.state',
+  `handoff_phase` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.handoff_phase',
+  `input` JSON NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.input',
+  `terminal_handoff` JSON COMMENT 'Column ai_runtime_recovery_checkpoints.terminal_handoff',
+  `handoff_contract_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_recovery_checkpoints.handoff_contract_digest',
+  `pending_operation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_recovery_checkpoints.pending_operation_id',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_recovery_checkpoints.revision',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_recovery_checkpoints.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_recovery_checkpoints.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_recovery_checkpoints_namespace_digest_tenant_id_execution_id` (`namespace_digest`, `tenant_id`, `execution_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_recovery_checkpoints';
+
+CREATE TABLE `ai_runtime_sessions` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_sessions.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.tenant_id',
+  `session_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.session_id',
+  `owner_principal_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.owner_principal_id',
+  `binding_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.binding_digest',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_sessions.status',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_sessions.revision',
+  `resource_generation` BIGINT NOT NULL COMMENT 'Column ai_runtime_sessions.resource_generation',
+  `cwd` TEXT COMMENT 'Column ai_runtime_sessions.cwd',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_runtime_sessions.metadata',
+  `continuation_step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_sessions.continuation_step_run_id',
+  `closed_at` DATETIME COMMENT 'Column ai_runtime_sessions.closed_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_sessions.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_sessions.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_sessions_namespace_digest_tenant_id_session_id` (`namespace_digest`, `tenant_id`, `session_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_sessions';
+
+CREATE TABLE `ai_runtime_task_graphs` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_task_graphs.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_graphs.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_graphs.tenant_id',
+  `graph_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_graphs.graph_id',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_graphs.status',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_task_graphs.revision',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_task_graphs.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_task_graphs.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_task_graphs_namespace_digest_tenant_id_graph_id` (`namespace_digest`, `tenant_id`, `graph_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_task_graphs';
+
+CREATE TABLE `ai_runtime_task_nodes` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_task_nodes.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.tenant_id',
+  `graph_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.graph_id',
+  `node_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.node_id',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.identity_digest',
+  `dependencies` JSON NOT NULL COMMENT 'Column ai_runtime_task_nodes.dependencies',
+  `input` JSON COMMENT 'Column ai_runtime_task_nodes.input',
+  `budget_cost` BIGINT COMMENT 'Column ai_runtime_task_nodes.budget_cost',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_task_nodes.status',
+  `revision` BIGINT NOT NULL COMMENT 'Column ai_runtime_task_nodes.revision',
+  `owner` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_task_nodes.owner',
+  `fence` BIGINT NOT NULL COMMENT 'Column ai_runtime_task_nodes.fence',
+  `lease_expires_at` DATETIME COMMENT 'Column ai_runtime_task_nodes.lease_expires_at',
+  `execution_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_task_nodes.execution_id',
+  `result_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_task_nodes.result_digest',
+  `error_code` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_task_nodes.error_code',
+  `error_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_task_nodes.error_digest',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_task_nodes.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_task_nodes.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_task_nodes_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_task_nodes';
+
+CREATE TABLE `ai_runtime_tool_operations` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_runtime_tool_operations.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.tenant_id',
+  `tool_operation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.tool_operation_id',
+  `step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.step_run_id',
+  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.tool_call_id',
+  `call_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.call_digest',
+  `idempotency_key_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.idempotency_key_digest',
+  `tool_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.tool_name',
+  `arguments_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.arguments_digest',
+  `binding_fingerprint` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.binding_fingerprint',
+  `replay_safe` BOOL NOT NULL COMMENT 'Column ai_runtime_tool_operations.replay_safe',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_runtime_tool_operations.status',
+  `owner` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_tool_operations.owner',
+  `fence` BIGINT NOT NULL COMMENT 'Column ai_runtime_tool_operations.fence',
+  `lease_expires_at` DATETIME COMMENT 'Column ai_runtime_tool_operations.lease_expires_at',
+  `result_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_tool_operations.result_store_id',
+  `result_object_key` VARCHAR(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_tool_operations.result_object_key',
+  `result_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_tool_operations.result_digest',
+  `result_size` BIGINT COMMENT 'Column ai_runtime_tool_operations.result_size',
+  `error_code` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_runtime_tool_operations.error_code',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_tool_operations.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_runtime_tool_operations.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_runtime_tool_operations_step_call` (`namespace_digest`, `tenant_id`, `call_digest`),
+  UNIQUE KEY `uk_ai_runtime_tool_operations_namespace_digest_tenant_id_tool_operation_id` (`namespace_digest`, `tenant_id`, `tool_operation_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_runtime_tool_operations';
+
+CREATE TABLE `ai_step_effects` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_step_effects.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.tenant_id',
+  `run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.run_id',
+  `effect_index` BIGINT NOT NULL COMMENT 'Column ai_step_effects.effect_index',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.identity_digest',
+  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.tool_call_id',
+  `tool_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.tool_name',
+  `status` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_effects.status',
+  `started_at` DATETIME NOT NULL COMMENT 'Column ai_step_effects.started_at',
+  `ended_at` DATETIME COMMENT 'Column ai_step_effects.ended_at',
+  `idempotency_key` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_effects.idempotency_key',
+  `effect_summary` TEXT COMMENT 'Column ai_step_effects.effect_summary',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_effects.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_effects.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_step_effects_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_ai_step_effects_tool` (`namespace_digest`, `tenant_id`, `run_id`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_step_effects';
+
+CREATE TABLE `ai_step_events` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_step_events.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_events.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_events.tenant_id',
+  `run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_events.run_id',
+  `event_index` BIGINT NOT NULL COMMENT 'Column ai_step_events.event_index',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_events.identity_digest',
+  `kind` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_events.kind',
+  `step_index` BIGINT NOT NULL COMMENT 'Column ai_step_events.step_index',
+  `timestamp` DATETIME NOT NULL COMMENT 'Column ai_step_events.timestamp',
+  `conversation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_events.conversation_id',
+  `parent_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_events.parent_run_id',
+  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_events.agent_name',
+  `tool_call_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_events.tool_call_id',
+  `tool_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_events.tool_name',
+  `error` TEXT COMMENT 'Column ai_step_events.error',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_step_events.metadata',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_events.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_events.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_step_events_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_step_events';
+
+CREATE TABLE `ai_step_runs` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_step_runs.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_runs.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_runs.tenant_id',
+  `runtime_domain` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_runs.runtime_domain',
+  `run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_runs.run_id',
+  `run_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_runs.run_digest',
+  `conversation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_runs.conversation_id',
+  `parent_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_runs.parent_run_id',
+  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_runs.agent_name',
+  `metadata` JSON NOT NULL COMMENT 'Column ai_step_runs.metadata',
+  `last_event_index` BIGINT NOT NULL COMMENT 'Column ai_step_runs.last_event_index',
+  `last_snapshot_index` BIGINT NOT NULL COMMENT 'Column ai_step_runs.last_snapshot_index',
+  `last_effect_index` BIGINT NOT NULL COMMENT 'Column ai_step_runs.last_effect_index',
+  `started_at` DATETIME NOT NULL COMMENT 'Column ai_step_runs.started_at',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_runs.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_runs.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_step_runs_namespace_digest_tenant_id_run_digest` (`namespace_digest`, `tenant_id`, `run_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_step_runs';
+
+CREATE TABLE `ai_step_snapshots` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_step_snapshots.id',
+  `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.namespace_digest',
+  `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.tenant_id',
+  `runtime_domain` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.runtime_domain',
+  `run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.run_id',
+  `snapshot_index` BIGINT NOT NULL COMMENT 'Column ai_step_snapshots.snapshot_index',
+  `identity_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.identity_digest',
+  `step_index` BIGINT NOT NULL COMMENT 'Column ai_step_snapshots.step_index',
+  `state` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.state',
+  `conversation_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_snapshots.conversation_id',
+  `parent_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_snapshots.parent_run_id',
+  `agent_name` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Column ai_step_snapshots.agent_name',
+  `timestamp` DATETIME NOT NULL COMMENT 'Column ai_step_snapshots.timestamp',
+  `object_store_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_step_snapshots.object_store_id',
+  `messages` JSON NOT NULL COMMENT 'Column ai_step_snapshots.messages',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_snapshots.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_step_snapshots.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_step_snapshots_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_step_snapshots';
+
+CREATE TABLE `ai_storage_object_chunks` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_storage_object_chunks.id',
+  `object_id` BIGINT NOT NULL COMMENT 'Column ai_storage_object_chunks.object_id',
+  `chunk_index` BIGINT NOT NULL COMMENT 'Column ai_storage_object_chunks.chunk_index',
+  `content` LONGBLOB NOT NULL COMMENT 'Column ai_storage_object_chunks.content',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_storage_object_chunks.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_storage_object_chunks.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_storage_object_chunks_object_index` (`object_id`, `chunk_index`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_storage_object_chunks';
+
+CREATE TABLE `ai_storage_objects` (
+  `id` BIGINT AUTO_INCREMENT NOT NULL COMMENT 'Column ai_storage_objects.id',
+  `object_key` VARCHAR(255) NOT NULL COMMENT 'Column ai_storage_objects.object_key',
+  `digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Column ai_storage_objects.digest',
+  `size` BIGINT NOT NULL COMMENT 'Column ai_storage_objects.size',
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_storage_objects.updated_at',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Column ai_storage_objects.created_at',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_ai_storage_objects_object_key` (`object_key`),
+  KEY `ix_created_at` (`created_at`),
+  KEY `ix_updated_at` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Table ai_storage_objects';

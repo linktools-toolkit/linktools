@@ -351,8 +351,8 @@ class SqlObjectStore:
     ) -> ObjectStat:
         _validate_put(key, expected_size, expected_digest)
         data = await _collect(chunks, expected_size, expected_digest)
-        objects = self._metadata.tables["storage_objects"]
-        chunks_table = self._metadata.tables["storage_object_chunks"]
+        objects = self._metadata.tables["ai_storage_objects"]
+        chunks_table = self._metadata.tables["ai_storage_object_chunks"]
         from sqlalchemy import insert, select
         from sqlalchemy.exc import IntegrityError
 
@@ -360,7 +360,7 @@ class SqlObjectStore:
             try:
                 async with self._begin() as connection:
                     result = await connection.execute(
-                        insert(objects).values(object_key=key, digest=expected_digest, size=expected_size, chunk_count=(expected_size + _SQL_CHUNK_SIZE - 1) // _SQL_CHUNK_SIZE)
+                        insert(objects).values(object_key=key, digest=expected_digest, size=expected_size)
                     )
                     object_id = int(result.inserted_primary_key[0])
                     rows = [
@@ -380,7 +380,7 @@ class SqlObjectStore:
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)
-        objects = self._metadata.tables["storage_objects"]
+        objects = self._metadata.tables["ai_storage_objects"]
         from sqlalchemy import select
 
         async with self._connect() as connection:
@@ -391,12 +391,12 @@ class SqlObjectStore:
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
-        objects = self._metadata.tables["storage_objects"]
-        chunks_table = self._metadata.tables["storage_object_chunks"]
+        objects = self._metadata.tables["ai_storage_objects"]
+        chunks_table = self._metadata.tables["ai_storage_object_chunks"]
         from sqlalchemy import select
 
         async with self._connect() as connection:
-            row = (await connection.execute(select(objects.c.id, objects.c.digest, objects.c.size, objects.c.chunk_count).where(objects.c.object_key == key))).first()
+            row = (await connection.execute(select(objects.c.id, objects.c.digest, objects.c.size).where(objects.c.object_key == key))).first()
             if row is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             items = (await connection.execute(select(chunks_table.c.chunk_index, chunks_table.c.content).where(chunks_table.c.object_id == row.id).order_by(chunks_table.c.chunk_index))).all()
@@ -409,7 +409,8 @@ class SqlObjectStore:
             digest.update(value)
             size += len(value)
             yield value
-        if len(items) != int(row.chunk_count) or size != int(row.size) or digest.hexdigest() != str(row.digest):
+        expected_chunks = 0 if int(row.size) == 0 else (int(row.size) + _SQL_CHUNK_SIZE - 1) // _SQL_CHUNK_SIZE
+        if len(items) != expected_chunks or size != int(row.size) or digest.hexdigest() != str(row.digest):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def open(self, key: str) -> AsyncIterator[bytes]:
@@ -434,11 +435,11 @@ class SqlObjectStore:
                 yield session
 
 
-def build_object_sql_metadata() -> "MetaData":
+def build_object_sql_metadata(metadata: "MetaData | None" = None) -> "MetaData":
     from sqlalchemy import (
         Column,
         DateTime,
-        ForeignKey,
+        Index,
         MetaData,
         String,
         Table,
@@ -446,30 +447,38 @@ def build_object_sql_metadata() -> "MetaData":
         func,
     )
 
-    metadata = MetaData()
+    if metadata is None:
+        metadata = MetaData()
     _objects = Table(
-        "storage_objects",
+        "ai_storage_objects",
         metadata,
         Column("id", sql_integer_id(), primary_key=True, autoincrement=True),
         Column("object_key", String(255), nullable=False),
         Column("digest", sql_digest(), nullable=False),
         Column("size", sql_integer_id(), nullable=False),
-        Column("chunk_count", sql_integer_id(), nullable=False),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-        UniqueConstraint("object_key", name="uk_storage_objects_object_key"),
+        UniqueConstraint("object_key", name="uk_ai_storage_objects_object_key"),
         **sql_table_options(),
     )
-    Table(
-        "storage_object_chunks",
+    chunks = Table(
+        "ai_storage_object_chunks",
         metadata,
         Column("id", sql_integer_id(), primary_key=True, autoincrement=True),
-        Column("object_id", sql_integer_id(), ForeignKey("storage_objects.id", ondelete="CASCADE"), nullable=False),
+        Column("object_id", sql_integer_id(), nullable=False),
         Column("chunk_index", sql_integer_id(), nullable=False),
         Column("content", sql_blob(), nullable=False),
+        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
         Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-        UniqueConstraint("object_id", "chunk_index", name="uk_storage_object_chunks_object_index"),
+        UniqueConstraint("object_id", "chunk_index", name="uk_ai_storage_object_chunks_object_index"),
         **sql_table_options(),
     )
+    from ._database import sql_index
+
+    sql_index(Index("ix_updated_at", _objects.c.updated_at))
+    sql_index(Index("ix_created_at", _objects.c.created_at))
+    sql_index(Index("ix_updated_at", chunks.c.updated_at))
+    sql_index(Index("ix_created_at", chunks.c.created_at))
     return metadata
 
 

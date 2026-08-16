@@ -10,7 +10,7 @@ from typing import Literal, Protocol
 from pydantic_ai.capabilities import AgentCapability as PydanticAgentCapability
 
 from ..asset import AssetRepository
-from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple, validate_capability_provider
+from ..core import Principal, ResourceRef, canonical_sha256, canonical_string_tuple
 from ..errors import AIError, ErrorCode
 from ..spec import AgentCapabilityRef
 

@@ -16,7 +16,7 @@ from ._capabilities import (
 )
 from ._compiler import AgentCompiler
 from ._definition import AgentDefinition
-from ._executor import AgentExecutionResult, AgentExecutor, EventSink
+from ._executor import AgentExecutionResult, AgentExecutor, EventSink, UsageSink
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -36,6 +36,7 @@ __all__ = [
     "AgentExecutor",
     "AssistantTextOutput",
     "EventSink",
+    "UsageSink",
     "OutputSchemaManifest",
     "OutputSchemaManifestEntry",
     "OutputTypeRegistry",

@@ -307,12 +307,12 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         return f"{normalized}/"
 
 
-def _operation_input(operation: "MemoryOperation | None", namespace_key: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> "OperationLedgerInput | None":
+def _operation_input(operation: "MemoryOperation | None", namespace_digest: str, tenant_id: str, mutation: MemoryMutation, kind: OperationKind, resource_id: str) -> "OperationLedgerInput | None":
     if operation is None:
         return None
     now = datetime.now(timezone.utc)
     return OperationLedgerInput(
-        _operation_id(namespace_key, operation.id),
+        _operation_id(namespace_digest, operation.id),
         tenant_id,
         ResourceKind.MEMORY,
         resource_id,
@@ -329,12 +329,12 @@ def _operation_input(operation: "MemoryOperation | None", namespace_key: str, te
     )
 
 
-def _memory_id(namespace_key: str, logical_path: str) -> str:
-    return hashlib.sha256(f"{namespace_key}\0{logical_path}".encode("utf-8")).hexdigest()
+def _memory_id(namespace_digest: str, logical_path: str) -> str:
+    return hashlib.sha256(f"{namespace_digest}\0{logical_path}".encode("utf-8")).hexdigest()
 
 
-def _operation_id(namespace_key: str, operation_id: str) -> str:
-    return hashlib.sha256(f"{namespace_key}\0{operation_id}".encode("utf-8")).hexdigest()
+def _operation_id(namespace_digest: str, operation_id: str) -> str:
+    return hashlib.sha256(f"{namespace_digest}\0{operation_id}".encode("utf-8")).hexdigest()
 
 
 def _version(revision: int) -> str:

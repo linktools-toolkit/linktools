@@ -16,6 +16,7 @@ from ..core import (
     Page,
     Principal,
     SessionStatus,
+    UsageMetrics,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
@@ -106,6 +107,7 @@ class ExecutionResult:
     output_schema_id: str
     output_schema_revision: int
     output_schema_fingerprint: str
+    usage: UsageMetrics
 
 
 @dataclass(frozen=True, slots=True)

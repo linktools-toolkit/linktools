@@ -14,6 +14,7 @@ from ._codec import (
 from ._contract import (
     AgentCapabilityRef,
     AgentSpec,
+    AgentUsageLimits,
     MCPServerSpec,
     SkillSpec,
 )
@@ -21,5 +22,5 @@ from ._contract import (
 __all__ = [
     "AgentCapabilityRef", "AgentSpec", "AgentSpecCodec", "MCPServerSpec", "MCPServerSpecCodec",
     "SkillMarkdownSpecAdapter", "SkillMarkdownSpecCodec",
-    "SkillSpec", "SkillSpecCodec", "SpecCodec", "builtin_asset_bindings",
+    "SkillSpec", "SkillSpecCodec", "SpecCodec", "AgentUsageLimits", "builtin_asset_bindings",
 ]

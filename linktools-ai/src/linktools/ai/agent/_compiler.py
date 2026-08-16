@@ -167,7 +167,7 @@ def _definition_digest(
     execution_profile_fingerprint: str,
 ) -> str:
     return canonical_sha256({
-        "version": 2,
+        "version": 3,
         "agent": {
             "id": spec.id,
             "revision": spec.revision,
@@ -180,6 +180,15 @@ def _definition_digest(
             "allow_tools": spec.allow_tools,
             "allow_skills": spec.allow_skills,
             "metadata": dict(spec.metadata),
+            "usage_limits": None
+            if spec.usage_limits is None
+            else {
+                "model_requests": spec.usage_limits.model_requests,
+                "tool_calls": spec.usage_limits.tool_calls,
+                "input_tokens": spec.usage_limits.input_tokens,
+                "output_tokens": spec.usage_limits.output_tokens,
+                "total_tokens": spec.usage_limits.total_tokens,
+            },
         },
         "model_fingerprint": model.fingerprint,
         "output_schema_fingerprint": output_fingerprint,

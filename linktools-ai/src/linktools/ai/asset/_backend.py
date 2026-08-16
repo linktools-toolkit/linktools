@@ -6,7 +6,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from linktools.core import environ
@@ -26,7 +26,9 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
+    normalize_storage_metadata,
 )
+from ..core import JsonValue
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
 _logger = environ.get_logger("ai.asset.backend")
@@ -106,6 +108,7 @@ class InMemoryAssetBackend:
         value: bytes,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StoragePutResult[AssetInfo]":
         async with self._lock:
             self._require_writable()
@@ -114,7 +117,13 @@ class InMemoryAssetBackend:
             if previous is not None and previous[0].status is StorageEntryStatus.NORMAL and previous[0].etag == _etag(value):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
-            info = self._next_info(key, value, previous, status=StorageEntryStatus.NORMAL)
+            info = self._next_info(
+                key,
+                value,
+                previous,
+                status=StorageEntryStatus.NORMAL,
+                metadata=metadata,
+            )
             self._record(info, value)
             _logger.debug("asset file stored: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StoragePutResult(info, info.revision, info.store_revision, True)
@@ -124,6 +133,7 @@ class InMemoryAssetBackend:
         key: AssetKey,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageDeleteResult[AssetKey]":
         async with self._lock:
             self._require_writable()
@@ -132,7 +142,13 @@ class InMemoryAssetBackend:
             if previous is None or previous[0].status is StorageEntryStatus.DELETED:
                 return StorageDeleteResult(key, False, None, self._store_revision())
             self._revision += 1
-            info = self._next_info(key, b"", previous, status=StorageEntryStatus.DELETED)
+            info = self._next_info(
+                key,
+                b"",
+                previous,
+                status=StorageEntryStatus.DELETED,
+                metadata=metadata,
+            )
             self._record(info, b"")
             _logger.debug("asset file deleted: kind=%s id=%s revision=%s", key.kind, key.id, info.revision)
             return StorageDeleteResult(key, True, info.revision, info.store_revision)
@@ -142,6 +158,7 @@ class InMemoryAssetBackend:
         key: AssetKey,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[AssetKey]":
         async with self._lock:
             self._require_writable()
@@ -150,7 +167,13 @@ class InMemoryAssetBackend:
             if previous is None or previous[0].status is StorageEntryStatus.RESET:
                 return StorageResetResult(key, False, self._store_revision())
             self._revision += 1
-            info = self._next_info(key, b"", previous, status=StorageEntryStatus.RESET)
+            info = self._next_info(
+                key,
+                b"",
+                previous,
+                status=StorageEntryStatus.RESET,
+                metadata=metadata,
+            )
             self._record(info, b"")
             _logger.debug("asset file reset: kind=%s id=%s revision=%s", key.kind, key.id, self._revision)
             return StorageResetResult(key, True, self._store_revision())
@@ -182,7 +205,13 @@ class InMemoryAssetBackend:
                     if not _change_mutates(change, current) and current is not None:
                         results.append(StoragePutResult(current[0], current[0].revision, store_revision, False))
                         continue
-                    info = self._next_info(change.key, value, current, status=StorageEntryStatus.NORMAL)
+                    info = self._next_info(
+                        change.key,
+                        value,
+                        current,
+                        status=StorageEntryStatus.NORMAL,
+                        metadata=change.metadata,
+                    )
                     self._record(info, value)
                     results.append(StoragePutResult(info, info.revision, store_revision, True))
                 elif change.operation is StorageOperation.DELETE and (
@@ -190,13 +219,25 @@ class InMemoryAssetBackend:
                 ):
                     results.append(StorageDeleteResult(change.key, False, None, store_revision))
                 elif change.operation is StorageOperation.DELETE:
-                    info = self._next_info(change.key, b"", current, status=StorageEntryStatus.DELETED)
+                    info = self._next_info(
+                        change.key,
+                        b"",
+                        current,
+                        status=StorageEntryStatus.DELETED,
+                        metadata=change.metadata,
+                    )
                     self._record(info, b"")
                     results.append(StorageDeleteResult(change.key, True, info.revision, store_revision))
                 elif current is None or current[0].status is StorageEntryStatus.RESET:
                     results.append(StorageResetResult(change.key, False, store_revision))
                 else:
-                    info = self._next_info(change.key, b"", current, status=StorageEntryStatus.RESET)
+                    info = self._next_info(
+                        change.key,
+                        b"",
+                        current,
+                        status=StorageEntryStatus.RESET,
+                        metadata=change.metadata,
+                    )
                     self._record(info, b"")
                     results.append(StorageResetResult(change.key, True, store_revision))
             if mutates:
@@ -206,7 +247,7 @@ class InMemoryAssetBackend:
     async def list_versions(self, key: AssetKey) -> "tuple[VersionSummary, ...]":
         async with self._lock:
             return tuple(
-                VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status)
+                VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status, info.metadata)
                 for info, _ in self._versions.get(key, ())
             )
 
@@ -274,6 +315,7 @@ class InMemoryAssetBackend:
         previous: "tuple[AssetInfo, bytes] | None",
         *,
         status: StorageEntryStatus,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AssetInfo:
         history = self._versions.get(key, ())
         if previous is not None:
@@ -293,6 +335,7 @@ class InMemoryAssetBackend:
             self._root.root_id,
             self._root.digest,
             datetime.now(timezone.utc),
+            normalize_storage_metadata(metadata),
         )
 
     def _record(self, info: AssetInfo, value: bytes) -> None:
@@ -337,6 +380,7 @@ def _encode_entry(info: AssetInfo, value: bytes) -> "dict[str, object]":
         "size": info.size,
         "status": info.status.value,
         "modified_at": info.modified_at.isoformat(),
+        "metadata": dict(info.metadata),
         "content": base64.b64encode(value).decode("ascii"),
     }
 
@@ -356,6 +400,7 @@ def _decode_entry(raw: object, root: AssetRoot) -> "tuple[AssetInfo, bytes]":
             root.root_id,
             root.digest,
             datetime.fromisoformat(str(raw["modified_at"])),
+            normalize_storage_metadata(raw.get("metadata")),
         )
     except (KeyError, TypeError, ValueError, binascii.Error) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error

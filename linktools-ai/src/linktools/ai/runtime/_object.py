@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from ..core import validate_tenant_id
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectRef, ObjectStore, namespace_key, read_object
+from ..storage import ObjectRef, ObjectStore, namespace_digest, read_object
 from .state._plan import RuntimeDomain
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
@@ -34,8 +34,8 @@ class RuntimeObjectKeyFactory:
             raise ValueError("namespace must be a non-empty string")
 
     @property
-    def namespace_key(self) -> str:
-        return namespace_key(self.namespace)
+    def namespace_digest(self) -> str:
+        return namespace_digest(self.namespace)
 
     def key(self, runtime_domain: RuntimeDomain, tenant_id: str, digest: str) -> str:
         if runtime_domain not in _OBJECT_DOMAINS:
@@ -44,7 +44,7 @@ class RuntimeObjectKeyFactory:
         if _DIGEST.fullmatch(digest) is None:
             raise ValueError("Runtime object digest is invalid")
         tenant_scope_key = hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
-        return f"v1/runtime/{self.namespace_key}/{runtime_domain.value}/{tenant_scope_key}/{digest}"
+        return f"v1/runtime/{self.namespace_digest}/{runtime_domain.value}/{tenant_scope_key}/{digest}"
 
 
 async def put_runtime_object(

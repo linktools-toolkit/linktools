@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """Domain-independent storage DTOs and protocols."""
 
+import math
 from collections.abc import Hashable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
 
 from ..errors import AIError, ErrorCode
+from ..core import JsonValue
 
 KeyT = TypeVar("KeyT", bound=Hashable)
 ValueT = TypeVar("ValueT")
@@ -51,18 +53,47 @@ class StorageOperation(StrEnum):
     RESET = "RESET"
 
 
+def normalize_storage_metadata(value: Mapping[str, JsonValue] | None) -> dict[str, JsonValue]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("storage metadata must be a JSON object")
+    normalized: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError("storage metadata keys must be non-empty strings")
+        normalized[key] = _normalize_json_value(item)
+    return normalized
+
+
+def _normalize_json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("storage metadata numbers must be finite")
+        return value
+    if isinstance(value, Mapping):
+        return normalize_storage_metadata(value)
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(item) for item in value]
+    raise TypeError("storage metadata contains an unsupported JSON value")
+
+
 @dataclass(frozen=True, slots=True)
 class StorageChange(Generic[KeyT, ValueT]):
     operation: StorageOperation
     key: KeyT
     value: "ValueT | None"
     expected_revision: "StorageEntryRevision | None"
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.operation is StorageOperation.PUT and self.value is None:
             raise ValueError("PUT changes require a value")
         if self.operation in {StorageOperation.DELETE, StorageOperation.RESET} and self.value is not None:
             raise ValueError(f"{self.operation.value} changes cannot contain a value")
+        object.__setattr__(self, "metadata", normalize_storage_metadata(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +171,10 @@ class VersionSummary:
     size: int
     created_at: datetime
     status: StorageEntryStatus = StorageEntryStatus.NORMAL
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", normalize_storage_metadata(self.metadata))
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +211,7 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         value: ValueT,
         *,
         expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StoragePutResult[InfoT]': ...
 
     async def delete(
@@ -183,6 +219,7 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         key: KeyT,
         *,
         expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StorageDeleteResult[KeyT]': ...
 
     async def reset(
@@ -190,6 +227,7 @@ class StorageWriter(Protocol[KeyT, ValueT, InfoT]):
         key: KeyT,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[KeyT]":
         """Mark one writer entry RESET so a lower read layer can become effective."""
         ...
@@ -203,6 +241,12 @@ class BatchStorageWriter(Protocol[KeyT, ValueT, InfoT]):
         *,
         expected_revision: 'StorageRevision | None' = None,
     ) -> 'StorageBatchResult[InfoT, KeyT]': ...
+
+
+@runtime_checkable
+class AtomicBatchStorageWriter(BatchStorageWriter[KeyT, ValueT, InfoT], Protocol):
+    @property
+    def atomic_batch(self) -> bool: ...
 
 
 @runtime_checkable
@@ -258,6 +302,7 @@ class StorageEntryStatusInfo(Protocol):
 
 
 __all__ = [
+    "AtomicBatchStorageWriter",
     "BatchStorageReader",
     "BatchStorageWriter",
     "InitializableStorage",
@@ -283,6 +328,7 @@ __all__ = [
     "StorageRevision",
     "StorageStatReader",
     "StorageWriter",
+    "normalize_storage_metadata",
     "VersionSummary",
     "VersionedStorage",
 ]

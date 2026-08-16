@@ -9,10 +9,11 @@ from typing import Generic, Protocol, TypeVar, cast
 
 from linktools.core import environ
 
-from ..core import canonical_sha256
+from ..core import JsonValue, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ._cache import ContentCache, contains_many, read_cache, write_cache
 from ._contracts import (
+    AtomicBatchStorageWriter,
     BatchStorageReader,
     BatchStorageWriter,
     InitializableStorage,
@@ -137,6 +138,11 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
     def writable(self) -> bool:
         """Return whether generic storage mutations have a configured writer."""
         return self.writer is not None
+
+    @property
+    def atomic_batch(self) -> bool:
+        """Return whether the configured writer commits batches atomically."""
+        return isinstance(self.writer, AtomicBatchStorageWriter) and self.writer.atomic_batch
 
     def is_writable_backend(self, backend: "ReadableStorageBackend[KeyT, ValueT, InfoT]") -> bool:
         """Return whether a backend is the overlay's writable backend."""
@@ -577,9 +583,15 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         value: ValueT,
         *,
         expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StoragePutResult[InfoT]':
         writer = self._require_writer()
-        result = await writer.put(key, value, expected_revision=expected_revision)
+        result = await writer.put(
+            key,
+            value,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         self._validate_value(key, value, result.info)
         self._after_put(key, result.info, result.store_revision)
         if result.changed:
@@ -591,9 +603,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         key: KeyT,
         *,
         expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StorageDeleteResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.delete(key, expected_revision=expected_revision)
+        result = await writer.delete(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         self._preloaded.pop(key, None)
         if result.deleted:
             self._invalidate_writer_view()
@@ -605,9 +622,14 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         key: KeyT,
         *,
         expected_revision: 'StorageEntryRevision | None' = None,
+        metadata: 'Mapping[str, JsonValue] | None' = None,
     ) -> 'StorageResetResult[KeyT]':
         writer = self._require_writer()
-        result = await writer.reset(key, expected_revision=expected_revision)
+        result = await writer.reset(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         self._preloaded.pop(key, None)
         if result.reset:
             self._invalidate_writer_view()
@@ -662,16 +684,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                         change.key,
                         value,
                         expected_revision=change.expected_revision,
+                        metadata=change.metadata,
                     )
                 elif change.operation is StorageOperation.DELETE:
                     item = await self.delete(
                         change.key,
                         expected_revision=change.expected_revision,
+                        metadata=change.metadata,
                     )
                 else:
                     item = await self.reset(
                         change.key,
                         expected_revision=change.expected_revision,
+                        metadata=change.metadata,
                     )
             except Exception as exc:
                 failure_revision = revision if revision is not None else await self.current_revision()

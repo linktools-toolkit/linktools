@@ -22,7 +22,7 @@ from ..core import (
     ResourceRef,
     TaskStatus,
     canonical_sha256,
-    idempotency_key_hash,
+    idempotency_key_digest,
     principal_identity_payload,
 )
 from ..errors import AIError, ErrorCode
@@ -114,7 +114,7 @@ class DefaultTaskService(TaskApi):
                 ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id),
             )
             digest = _graph_digest(request)
-            operation_id = idempotency_key_hash(request.idempotency_key)
+            operation_id = idempotency_key_digest(request.idempotency_key)
             claimed, operation = await self._claim_operation(
                 operation_id=operation_id,
                 tenant_id=tenant_id,
@@ -221,7 +221,7 @@ class DefaultTaskService(TaskApi):
                 self._cancel_finalizer(
                     graph_id,
                     request,
-                    idempotency_key_hash(request.idempotency_key),
+                    idempotency_key_digest(request.idempotency_key),
                     request_digest,
                 )
             )

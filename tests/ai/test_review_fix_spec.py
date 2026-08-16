@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """Focused RuntimeState and transaction invariant evidence."""
 
-import asyncio
 
 import pytest
 

@@ -3,9 +3,10 @@
 """Pure core values and errors."""
 
 from ._ids import (
+    canonical_identity_digest,
     canonical_sha256,
     deterministic_id,
-    idempotency_key_hash,
+    idempotency_key_digest,
     principal_identity_payload,
     step_conversation_id,
     step_run_id,
@@ -68,9 +69,11 @@ from ._value import (
     ToolOperationStatus,
     canonical_string_tuple,
 )
+from ._usage import UsageMetrics
 
 __all__ = [
     "JsonValue",
+    "UsageMetrics",
     "Page",
     "CursorPayload",
     "CursorSigner",
@@ -85,7 +88,7 @@ __all__ = [
     "Principal",
     "PrincipalKind",
     "PrincipalProvider",
-    "canonical_sha256", "idempotency_key_hash", "principal_identity_payload", "step_conversation_id", "step_run_id",
+    "canonical_sha256", "canonical_identity_digest", "idempotency_key_digest", "principal_identity_payload", "step_conversation_id", "step_run_id",
     "canonical_json_bytes",
     "OperationLedgerInput", "OperationLedgerRecord",
     "canonical_string_tuple",

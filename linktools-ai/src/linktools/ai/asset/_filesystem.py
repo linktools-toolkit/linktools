@@ -11,6 +11,7 @@ from pathlib import Path
 
 from linktools.core import environ
 
+from ..core import JsonValue
 from ..errors import AIError, ErrorCode
 from ..storage import (
     FilesystemMutationLock,
@@ -29,6 +30,7 @@ from ..storage import (
     StorageResetResult,
     StorageRevision,
     VersionSummary,
+    normalize_storage_metadata,
     read_object,
     write_json_atomic,
 )
@@ -145,24 +147,45 @@ class FilesystemAssetBackend:
         value: bytes,
         *,
         expected_revision: StorageEntryRevision | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
     ) -> StoragePutResult[AssetInfo]:
-        return await self._mutate(StorageOperation.PUT, key, bytes(value), expected_revision=expected_revision)
+        return await self._mutate(
+            StorageOperation.PUT,
+            key,
+            bytes(value),
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
 
     async def delete(
         self,
         key: AssetKey,
         *,
         expected_revision: StorageEntryRevision | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
     ) -> StorageDeleteResult[AssetKey]:
-        return await self._mutate(StorageOperation.DELETE, key, None, expected_revision=expected_revision)
+        return await self._mutate(
+            StorageOperation.DELETE,
+            key,
+            None,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
 
     async def reset(
         self,
         key: AssetKey,
         *,
         expected_revision: StorageEntryRevision | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
     ) -> StorageResetResult[AssetKey]:
-        return await self._mutate(StorageOperation.RESET, key, None, expected_revision=expected_revision)
+        return await self._mutate(
+            StorageOperation.RESET,
+            key,
+            None,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
 
     async def apply_batch(
         self,
@@ -196,7 +219,15 @@ class FilesystemAssetBackend:
                 if not mutates_change:
                     results.append(_result(change.operation, change.key, current, StorageRevision(str(next_revision)), changed=False))
                     continue
-                info = _next_info(self._root, change.key, prepared.get(change.key, b""), current, change.operation, next_revision)
+                info = _next_info(
+                    self._root,
+                    change.key,
+                    prepared.get(change.key, b""),
+                    current,
+                    change.operation,
+                    next_revision,
+                    change.metadata,
+                )
                 self._record(info)
                 results.append(_result(change.operation, change.key, info, StorageRevision(str(next_revision)), changed=True))
             self._revision = next_revision
@@ -212,7 +243,7 @@ class FilesystemAssetBackend:
         await self._ensure_ready()
         await self._reload()
         return tuple(
-            VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status)
+            VersionSummary(info.revision, info.etag, info.size, info.modified_at, info.status, info.metadata)
             for info in self._versions.get(key, ())
         )
 
@@ -234,6 +265,7 @@ class FilesystemAssetBackend:
         value: bytes | None,
         *,
         expected_revision: StorageEntryRevision | None,
+        metadata: Mapping[str, JsonValue] | None,
     ) -> object:
         await self._ensure_ready()
         async with self._process_lock, FilesystemMutationLock(self._lock_path):
@@ -248,7 +280,15 @@ class FilesystemAssetBackend:
                 await self._put_content(content)
             before = self._snapshot()
             next_revision = self._revision + 1
-            info = _next_info(self._root, key, content, current, operation, next_revision)
+            info = _next_info(
+                self._root,
+                key,
+                content,
+                current,
+                operation,
+                next_revision,
+                metadata,
+            )
             self._record(info)
             self._revision = next_revision
             try:
@@ -349,6 +389,7 @@ class FilesystemAssetBackend:
             "modified_at": info.modified_at.astimezone(timezone.utc).isoformat(),
             "object_store_id": self._object_store.store_id if normal else None,
             "object_key": self._object_keys.key(info.etag) if normal else None,
+            "metadata": dict(info.metadata),
         }
 
     def _validate_or_write_manifest(self) -> None:
@@ -412,11 +453,30 @@ def _mutates(operation: StorageOperation, current: AssetInfo | None, value: byte
     return current is None or current.status is not StorageEntryStatus.NORMAL or current.etag != _etag(value)
 
 
-def _next_info(root: AssetRoot, key: AssetKey, value: bytes, previous: AssetInfo | None, operation: StorageOperation, store_revision: int) -> AssetInfo:
+def _next_info(
+    root: AssetRoot,
+    key: AssetKey,
+    value: bytes,
+    previous: AssetInfo | None,
+    operation: StorageOperation,
+    store_revision: int,
+    metadata: Mapping[str, JsonValue] | None = None,
+) -> AssetInfo:
     status = StorageEntryStatus.NORMAL if operation is StorageOperation.PUT else StorageEntryStatus.DELETED if operation is StorageOperation.DELETE else StorageEntryStatus.RESET
     content = value if status is StorageEntryStatus.NORMAL else b""
     entry_revision = 1 if previous is None else previous.revision.value + 1
-    return AssetInfo(key, StorageEntryRevision(entry_revision), StorageRevision(str(store_revision)), _etag(content), len(content), status, root.root_id, root.digest, datetime.now(timezone.utc))
+    return AssetInfo(
+        key,
+        StorageEntryRevision(entry_revision),
+        StorageRevision(str(store_revision)),
+        _etag(content),
+        len(content),
+        status,
+        root.root_id,
+        root.digest,
+        datetime.now(timezone.utc),
+        normalize_storage_metadata(metadata),
+    )
 
 
 def _result(operation: StorageOperation, key: AssetKey, info: AssetInfo | None, revision: StorageRevision, *, changed: bool) -> object:
@@ -457,6 +517,7 @@ def _info_from_json(raw: object, root: AssetRoot, store_id: str) -> AssetInfo:
             root.root_id,
             root.digest,
             _utc(raw["modified_at"]),
+            normalize_storage_metadata(raw.get("metadata")),
         )
     except AIError:
         raise

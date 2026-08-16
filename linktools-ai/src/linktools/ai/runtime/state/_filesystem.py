@@ -33,6 +33,7 @@ from ...core import (
     StopReason,
     TaskStatus,
     ToolOperationStatus,
+    UsageMetrics,
     validate_tenant_id,
 )
 from ...errors import AIError, ErrorCode
@@ -41,7 +42,7 @@ from ...storage import (
     FilesystemWriterLock,
     ObjectRef,
     ObjectStore,
-    namespace_key,
+    namespace_digest,
     read_json,
     write_json_atomic,
 )
@@ -106,7 +107,7 @@ def _filesystem_scope_root(
 ) -> Path:
     return (
         route_root.expanduser().resolve(strict=False)
-        / namespace_key(namespace)
+        / namespace_digest(namespace)
         / _tenant_scope_key(validate_tenant_id(tenant_id))
     )
 
@@ -292,8 +293,8 @@ class _FilesystemDomainBackend:
                 if isinstance(raw, dict):
                     record = _idempotency_from_json(raw)
                     if _operation_storage_domain(record.resource_kind.value) is self._domain:
-                        key_hash = str(raw["key_hash"])
-                        idempotency._records[(record.tenant_id, record.scope, key_hash)] = record
+                        key_digest = str(raw["key_digest"])
+                        idempotency._records[(record.tenant_id, record.scope, key_digest)] = record
         if isinstance(terminal, _TerminalCommitRepository):
             for raw in payload["results"]:
                 if isinstance(raw, dict):
@@ -446,7 +447,7 @@ class _FilesystemDomainBackend:
             if isinstance(events, _EventRepository):
                 values["events"] = [_json_record(item) for items in events._items.values() for item in items]
             if isinstance(idempotency, _IdempotencyRepository):
-                values["idempotency"] = [_idempotency_json(item, key_hash) for (tenant, scope, key_hash), item in idempotency._records.items() if scope != "evaluation.run"]
+                values["idempotency"] = [_idempotency_json(item, key_digest) for (tenant, scope, key_digest), item in idempotency._records.items() if scope != "evaluation.run"]
         elif self._domain is RuntimeDomain.MEMORY and isinstance(memories, _MemoryRepository):
             values["memories"] = [_json_record(item) for item in memories._records.values()]
         elif self._domain is RuntimeDomain.ARTIFACT and isinstance(artifacts, _ArtifactRepository):
@@ -463,7 +464,7 @@ class _FilesystemDomainBackend:
             if isinstance(evaluations, _EvaluationRepository):
                 values["evaluations"] = [_json_record(item) for item in evaluations._records.values()]
             if isinstance(idempotency, _IdempotencyRepository):
-                values["idempotency"] = [_idempotency_json(item, key_hash) for (tenant, scope, key_hash), item in idempotency._records.items() if scope == "evaluation.run"]
+                values["idempotency"] = [_idempotency_json(item, key_digest) for (tenant, scope, key_digest), item in idempotency._records.items() if scope == "evaluation.run"]
         elif self._domain is RuntimeDomain.RECOVERY:
             if isinstance(approvals, _ApprovalRepository):
                 values["approvals"] = [_json_record(item) for item in approvals._records.values()]
@@ -533,7 +534,7 @@ def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
         "sessions": ("tenant_id", "session_id"),
         "executions": ("tenant_id", "execution_id"),
         "results": ("tenant_id", "execution_id"),
-        "idempotency": ("tenant_id", "scope", "key_hash"),
+        "idempotency": ("tenant_id", "scope", "key_digest"),
         "events": ("tenant_id", "execution_id", "sequence"),
         "evaluations": ("tenant_id", "evaluation_id"),
         "memories": ("tenant_id", "memory_id"),
@@ -556,7 +557,7 @@ def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
                 raise ValueError(f"runtime {name} identity is duplicated")
             seen.add(identity)
     for item in records["idempotency"]:
-        if re.fullmatch(r"[0-9a-f]{64}", str(item["key_hash"])) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", str(item["key_digest"])) is None:
             raise ValueError("runtime idempotency key hash is invalid")
     task_keys: set[tuple[str, str, str]] = set()
     for item in records["tasks"]:
@@ -716,14 +717,14 @@ def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
-    key_hash = str(value["key_hash"])
-    if re.fullmatch(r"[0-9a-f]{64}", key_hash) is None:
+    key_digest = str(value["key_digest"])
+    if re.fullmatch(r"[0-9a-f]{64}", key_digest) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return IdempotencyRecord(
         tenant_id=str(value["tenant_id"]),
         runtime_domain=RuntimeDomain(str(value["runtime_domain"])),
         scope=str(value["scope"]),
-        key_hash=key_hash,
+        key_digest=key_digest,
         request_digest=str(value["request_digest"]),
         resource_kind=ResourceKind(str(value["resource_kind"])),
         resource_id=str(value["resource_id"]),
@@ -754,7 +755,7 @@ def recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckp
         parent_execution_id=None if raw_input.get("parent_execution_id") is None else str(raw_input["parent_execution_id"]),
         root_execution_id=str(raw_input["root_execution_id"]),
         source_execution_id=None if raw_input.get("source_execution_id") is None else str(raw_input["source_execution_id"]),
-        idempotency=None if raw_input.get("idempotency") is None else RecoveryIdempotencyInput(str(raw_input["idempotency"]["scope"]), str(raw_input["idempotency"]["key_hash"]), str(raw_input["idempotency"]["request_digest"])),
+        idempotency=None if raw_input.get("idempotency") is None else RecoveryIdempotencyInput(str(raw_input["idempotency"]["scope"]), str(raw_input["idempotency"]["key_digest"]), str(raw_input["idempotency"]["request_digest"])),
     )
     return RecoveryCheckpoint(
         execution_id=str(value["execution_id"]),
@@ -790,9 +791,7 @@ def _recovery_handoff_from_json(value: object) -> RecoveryTerminalHandoff:
         output_schema_revision=None if raw_outcome.get("output_schema_revision") is None else int(raw_outcome["output_schema_revision"]),
         output_schema_fingerprint=None if raw_outcome.get("output_schema_fingerprint") is None else str(raw_outcome["output_schema_fingerprint"]),
         recovery_object_ref=object_ref,
-        input_tokens=int(raw_outcome["input_tokens"]),
-        output_tokens=int(raw_outcome["output_tokens"]),
-        total_cost_micros=int(raw_outcome["total_cost_micros"]),
+        usage=_usage_from_json(raw_outcome["usage"]),
         terminal_event_type=ExecutionEventType(str(raw_outcome["terminal_event_type"])),
         terminal_event_payload=raw_outcome["terminal_event_payload"],
         result_created_at=_time(str(raw_outcome["result_created_at"])),
@@ -818,9 +817,9 @@ def _json_record(record: object) -> dict[str, JsonValue]:
     return _json_value(asdict(record))
 
 
-def _idempotency_json(record: IdempotencyRecord, key_hash: str) -> dict[str, JsonValue]:
+def _idempotency_json(record: IdempotencyRecord, key_digest: str) -> dict[str, JsonValue]:
     value = _record_json(record)
-    value["key_hash"] = key_hash
+    value["key_digest"] = key_digest
     return value
 
 
@@ -831,7 +830,33 @@ def _result_from_json(value: dict[str, JsonValue]) -> ResultRecord:
         if not isinstance(raw_ref, dict):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         object_ref = ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"]))
-    return ResultRecord(str(value["execution_id"]), str(value["tenant_id"]), None if value.get("output_schema_id") is None else str(value["output_schema_id"]), None if value.get("output_schema_revision") is None else int(value["output_schema_revision"]), None if value.get("output_schema_fingerprint") is None else str(value["output_schema_fingerprint"]), object_ref, StopReason(str(value["stop_reason"])), int(value["input_tokens"]), int(value["output_tokens"]), int(value["total_cost_micros"]), _time(str(value["created_at"])))
+    return ResultRecord(
+        str(value["execution_id"]),
+        str(value["tenant_id"]),
+        None if value.get("output_schema_id") is None else str(value["output_schema_id"]),
+        None if value.get("output_schema_revision") is None else int(value["output_schema_revision"]),
+        None if value.get("output_schema_fingerprint") is None else str(value["output_schema_fingerprint"]),
+        object_ref,
+        StopReason(str(value["stop_reason"])),
+        _usage_from_json(value["usage"]),
+        _time(str(value["created_at"])),
+    )
+
+
+def _usage_from_json(value: object) -> UsageMetrics:
+    if not isinstance(value, dict):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return UsageMetrics(
+            model_requests=int(value["model_requests"]),
+            tool_calls=int(value["tool_calls"]),
+            input_tokens=int(value["input_tokens"]),
+            output_tokens=int(value["output_tokens"]),
+            cache_read_tokens=int(value["cache_read_tokens"]),
+            cache_write_tokens=int(value["cache_write_tokens"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _event_from_json(value: dict[str, JsonValue]) -> ExecutionEventRecord:
@@ -890,11 +915,11 @@ def _artifact_from_json(value: dict[str, JsonValue]) -> ArtifactRecord:
 
 
 def _approval_from_json(value: dict[str, JsonValue]) -> ApprovalRecord:
-    return ApprovalRecord(str(value["approval_id"]), str(value["execution_id"]), str(value["tenant_id"]), str(value["operation_id"]), ApprovalStatus(str(value["status"])), None if value.get("idempotency_key_hash") is None else str(value["idempotency_key_hash"]), None if value.get("decision") is None else ApprovalDecision(str(value["decision"])), None if value.get("decided_by") is None else str(value["decided_by"]), None if value.get("decision_digest") is None else str(value["decision_digest"]), _time(str(value["created_at"])), None if value.get("decided_at") is None else _time(str(value["decided_at"])))
+    return ApprovalRecord(str(value["approval_id"]), str(value["execution_id"]), str(value["tenant_id"]), str(value["operation_id"]), ApprovalStatus(str(value["status"])), None if value.get("idempotency_key_digest") is None else str(value["idempotency_key_digest"]), None if value.get("decision") is None else ApprovalDecision(str(value["decision"])), None if value.get("decided_by") is None else str(value["decided_by"]), None if value.get("decision_digest") is None else str(value["decision_digest"]), _time(str(value["created_at"])), None if value.get("decided_at") is None else _time(str(value["decided_at"])))
 
 
 def _external_from_json(value: dict[str, JsonValue]) -> ExternalCallRecord:
-    return ExternalCallRecord(str(value["call_id"]), str(value["execution_id"]), str(value["tenant_id"]), str(value["operation_id"]), ExternalCallStatus(str(value["status"])), None if value.get("idempotency_key_hash") is None else str(value["idempotency_key_hash"]), None, None if value.get("payload_digest") is None else str(value["payload_digest"]), _time(str(value["created_at"])), None if value.get("supplied_at") is None else _time(str(value["supplied_at"])))
+    return ExternalCallRecord(str(value["call_id"]), str(value["execution_id"]), str(value["tenant_id"]), str(value["operation_id"]), ExternalCallStatus(str(value["status"])), None if value.get("idempotency_key_digest") is None else str(value["idempotency_key_digest"]), None, None if value.get("payload_digest") is None else str(value["payload_digest"]), _time(str(value["created_at"])), None if value.get("supplied_at") is None else _time(str(value["supplied_at"])))
 
 
 def _operation_from_json(value: dict[str, JsonValue]) -> OperationLedgerRecord:
@@ -910,8 +935,8 @@ def _tool_from_json(value: dict[str, JsonValue]) -> ToolOperationRecord:
         object_ref = ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"]))
     return ToolOperationRecord(
         tool_operation_id=str(value["tool_operation_id"]), tenant_id=str(value["tenant_id"]), step_run_id=str(value["step_run_id"]),
-        tool_call_id=str(value["tool_call_id"]), idempotency_key_hash=str(value["idempotency_key_hash"]), tool_name=str(value["tool_name"]),
-        arguments_hash=str(value["arguments_hash"]), binding_fingerprint=str(value["binding_fingerprint"]), replay_safe=bool(value["replay_safe"]),
+        tool_call_id=str(value["tool_call_id"]), idempotency_key_digest=str(value["idempotency_key_digest"]), tool_name=str(value["tool_name"]),
+        arguments_digest=str(value["arguments_digest"]), binding_fingerprint=str(value["binding_fingerprint"]), replay_safe=bool(value["replay_safe"]),
         status=ToolOperationStatus(str(value["status"])), owner=None if value.get("owner") is None else str(value["owner"]), fence=int(value["fence"]),
         lease_expires_at=None if value.get("lease_expires_at") is None else _time(value["lease_expires_at"]), result_object_ref=object_ref,
         error_code=None if value.get("error_code") is None else str(value["error_code"]), created_at=_time(str(value["created_at"])), updated_at=_time(str(value["updated_at"])),

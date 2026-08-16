@@ -4,15 +4,15 @@
 """Generic Storage composition and cache conformance tests."""
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from linktools.ai.asset import build_asset_sql_metadata
+from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import RuntimeDomain
-from linktools.ai.runtime.state import RuntimeStatePlan, RuntimeStateRoute
 from linktools.ai.runtime.state._schema import build_runtime_sql_metadata
 from linktools.ai.storage import (
     FilesystemContentCache,
@@ -73,8 +73,9 @@ class WritableBackend(Backend):
         value: Value,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StoragePutResult[Info]":
-        del expected_revision
+        del expected_revision, metadata
         self.values[key] = value
         self.revision = StorageRevision(str(int(self.revision.value) + 1))
         return StoragePutResult(
@@ -89,8 +90,9 @@ class WritableBackend(Backend):
         key: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageDeleteResult[str]":
-        del expected_revision
+        del expected_revision, metadata
         value = self.values.pop(key, None)
         self.revision = StorageRevision(str(int(self.revision.value) + 1))
         return StorageDeleteResult(
@@ -105,7 +107,9 @@ class WritableBackend(Backend):
         key: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[str]":
+        del metadata
         value = self.values.get(key)
         if expected_revision is not None and (
             value is None or value.revision != expected_revision.value
@@ -223,16 +227,16 @@ def test_sql_metadata_builders_are_owner_scoped() -> None:
     runtime_metadata = build_runtime_sql_metadata(frozenset(RuntimeDomain))
     asset_metadata = build_asset_sql_metadata()
 
-    assert {"runtime_sessions", "runtime_executions", "step_runs", "step_events", "step_effects"} <= set(runtime_metadata.tables)
-    assert {"asset_entries", "asset_changes", "asset_revision", "storage_objects", "storage_object_chunks"} <= set(asset_metadata.tables)
-    assert "asset_entries" not in runtime_metadata.tables
-    assert "runtime_sessions" not in asset_metadata.tables
+    assert {"ai_runtime_sessions", "ai_runtime_executions", "ai_step_runs", "ai_step_events", "ai_step_effects"} <= set(runtime_metadata.tables)
+    assert set(asset_metadata.tables) == {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"}
+    assert "ai_asset_entries" not in runtime_metadata.tables
+    assert "ai_runtime_sessions" not in asset_metadata.tables
 
     recovery_metadata = build_runtime_sql_metadata(
         frozenset({RuntimeDomain.RECOVERY})
     )
-    assert "step_effects" in recovery_metadata.tables
-    assert "runtime_sessions" not in recovery_metadata.tables
+    assert "ai_step_effects" in recovery_metadata.tables
+    assert "ai_runtime_sessions" not in recovery_metadata.tables
 
 @pytest.mark.asyncio
 async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() -> None:

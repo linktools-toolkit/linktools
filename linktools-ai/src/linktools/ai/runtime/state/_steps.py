@@ -24,7 +24,7 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ...core import validate_persistence_namespace, validate_tenant_id
+from ...core import canonical_identity_digest, validate_persistence_namespace, validate_tenant_id
 from ...errors import AIError, ErrorCode
 from ...storage import (
     FilesystemMutationLock,
@@ -35,9 +35,7 @@ from ...storage import (
     SqlStorageContext,
     create_sql_storage_context,
     dialect_for_name,
-    provision_sql,
     read_object,
-    validate_sql,
     write_json_atomic,
 )
 from ._filesystem import _filesystem_scope_root
@@ -319,7 +317,7 @@ class FilesystemStepArchive(StagingStepStore):
             raise ValueError("Step archive owner is invalid")
         physical_root = scope_root.expanduser().resolve(strict=False)
         self._root = physical_root / "steps"
-        self._namespace_key = physical_root.parent.name
+        self._namespace_digest = physical_root.parent.name
         self._tenant_scope_key = physical_root.name
         self._runtime_domain = runtime_domain
         self._object_store = (
@@ -508,7 +506,7 @@ class FilesystemStepArchive(StagingStepStore):
         return self._root / "runs" / _digest(run_id)
 
     def _media_prefix(self) -> str:
-        return f"v1/step/{self._runtime_domain.value}/{self._namespace_key}/{self._tenant_scope_key}"
+        return f"v1/step/{self._runtime_domain.value}/{self._namespace_digest}/{self._tenant_scope_key}"
 
     async def _ensure_ready(self) -> None:
         if not self._ready:
@@ -579,11 +577,7 @@ class SqlStepArchive(StepStore):
 
     async def initialize(self) -> None:
         try:
-            if self._provision:
-                await provision_sql(self.engine, self._metadata)
-                await self._context.initialize()
-            else:
-                await validate_sql(self.engine, self._metadata)
+            await self._context.initialize(metadata=self._metadata)
             await self._validate_current_state()
             self._ready = True
             _logger.debug("SQL step archive initialized: domain=%s", self._runtime_domain.value)
@@ -599,10 +593,10 @@ class SqlStepArchive(StepStore):
         await self._ensure_ready()
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_runs"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_runs"]
+        key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
-            row = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.step_run_id == run_id).with_for_update())).mappings().first()
+            row = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == run_id).with_for_update())).mappings().first()
             result = None if row is None else _run_from_sql(row)
             if row is not None:
                 await self._validate_run_indexes(connection, run_id, row)
@@ -612,37 +606,37 @@ class SqlStepArchive(StepStore):
         await self._ensure_ready()
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_runs"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_runs"]
+        key = _namespace_digest(self.namespace)
         query = select(table).where(
-            table.c.namespace_key == key,
+            table.c.namespace_digest == key,
             table.c.tenant_id == self.tenant_id,
             table.c.runtime_domain == self._runtime_domain.value,
         )
         if parent_run_id is not None:
-            query = query.where(table.c.parent_step_run_id == parent_run_id)
+            query = query.where(table.c.parent_run_id == parent_run_id)
         if conversation_id is not None:
-            query = query.where(table.c.harness_conversation_id == conversation_id)
-        query = query.order_by(table.c.started_at, table.c.step_run_id)
+            query = query.where(table.c.conversation_id == conversation_id)
+        query = query.order_by(table.c.started_at, table.c.run_id)
         async with self._begin() as connection:
             rows = (await connection.execute(query.with_for_update())).mappings().all()
             for row in rows:
-                await self._validate_run_indexes(connection, str(row["step_run_id"]), row)
+                await self._validate_run_indexes(connection, str(row["run_id"] ), row)
             result = [_run_from_sql(row) for row in rows]
         return result
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         await self._ensure_ready()
-        if "step_events" not in self._metadata.tables:
+        if "ai_step_events" not in self._metadata.tables:
             return []
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_events"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_events"]
+        key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
-            runs = self._metadata.tables["step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == run_id).with_for_update())).mappings().first()
-            rows = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.step_run_id == run_id).order_by(table.c.event_index))).mappings().all()
+            runs = self._metadata.tables["ai_step_runs"]
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
+            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id).order_by(table.c.event_index))).mappings().all()
             if run_row is None:
                 if rows:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -657,18 +651,18 @@ class SqlStepArchive(StepStore):
         await self._ensure_ready()
         from sqlalchemy import select
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
-        events = self._metadata.tables["step_events"]
-        snapshots = self._metadata.tables["step_snapshots"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
+        events = self._metadata.tables["ai_step_events"]
+        snapshots = self._metadata.tables["ai_step_snapshots"]
         async with self._begin() as connection:
             run_row = (
                 await connection.execute(
                     select(runs).where(
-                        runs.c.namespace_key == key,
+                        runs.c.namespace_digest == key,
                         runs.c.tenant_id == self.tenant_id,
                         runs.c.runtime_domain == self._runtime_domain.value,
-                        runs.c.step_run_id == run_id,
+                        runs.c.run_id == run_id,
                     ).with_for_update()
                 )
             ).mappings().first()
@@ -677,7 +671,7 @@ class SqlStepArchive(StepStore):
             event_rows = (
                 await connection.execute(
                     select(events)
-                    .where(events.c.namespace_key == key, events.c.tenant_id == self.tenant_id, events.c.step_run_id == run_id)
+                    .where(events.c.namespace_digest == key, events.c.tenant_id == self.tenant_id, events.c.run_id == run_id)
                     .order_by(events.c.event_index)
                 )
             ).mappings().all()
@@ -685,10 +679,10 @@ class SqlStepArchive(StepStore):
                 await connection.execute(
                     select(snapshots)
                     .where(
-                        snapshots.c.namespace_key == key,
+                        snapshots.c.namespace_digest == key,
                         snapshots.c.tenant_id == self.tenant_id,
                         snapshots.c.runtime_domain == self._runtime_domain.value,
-                        snapshots.c.step_run_id == run_id,
+                        snapshots.c.run_id == run_id,
                     )
                     .order_by(snapshots.c.snapshot_index)
                 )
@@ -710,17 +704,17 @@ class SqlStepArchive(StepStore):
         await self._ensure_ready()
         from sqlalchemy import select
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
-        effects = self._metadata.tables["step_effects"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
+        effects = self._metadata.tables["ai_step_effects"]
         async with self._begin() as connection:
             run_row = (
                 await connection.execute(
                     select(runs).where(
-                        runs.c.namespace_key == key,
+                        runs.c.namespace_digest == key,
                         runs.c.tenant_id == self.tenant_id,
                         runs.c.runtime_domain == self._runtime_domain.value,
-                        runs.c.step_run_id == run_id,
+                        runs.c.run_id == run_id,
                     ).with_for_update()
                 )
             ).mappings().first()
@@ -729,7 +723,7 @@ class SqlStepArchive(StepStore):
             effect_rows = (
                 await connection.execute(
                     select(effects)
-                    .where(effects.c.namespace_key == key, effects.c.tenant_id == self.tenant_id, effects.c.step_run_id == run_id)
+                    .where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == run_id)
                     .order_by(effects.c.effect_index)
                 )
             ).mappings().all()
@@ -741,14 +735,14 @@ class SqlStepArchive(StepStore):
         await self._ensure_ready()
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_snapshots"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_snapshots"]
+        key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
-            runs = self._metadata.tables["step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == run_id).with_for_update())).mappings().first()
+            runs = self._metadata.tables["ai_step_runs"]
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
             if run_row is None:
                 return None
-            rows = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.step_run_id == run_id).order_by(table.c.snapshot_index))).mappings().all()
+            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == run_id).order_by(table.c.snapshot_index))).mappings().all()
             _validate_step_indexes(int(run_row["last_snapshot_index"]), rows, "snapshot_index")
             row = dict(rows[-1]) if rows else None
         if row is None or (not include_interrupted and str(row["state"]) != "complete"):
@@ -757,16 +751,16 @@ class SqlStepArchive(StepStore):
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
         await self._ensure_ready()
-        if "step_effects" not in self._metadata.tables:
+        if "ai_step_effects" not in self._metadata.tables:
             return None
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_effects"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_effects"]
+        key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
-            runs = self._metadata.tables["step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == run_id).with_for_update())).mappings().first()
-            query = select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.step_run_id == run_id, table.c.tool_call_id == tool_call_id).order_by(table.c.effect_index.desc()).limit(1)
+            runs = self._metadata.tables["ai_step_runs"]
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
+            query = select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id, table.c.tool_call_id == tool_call_id).order_by(table.c.effect_index.desc()).limit(1)
             row = (await connection.execute(query)).mappings().first()
             if run_row is None:
                 if row is not None:
@@ -777,16 +771,16 @@ class SqlStepArchive(StepStore):
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         await self._ensure_ready()
-        if "step_effects" not in self._metadata.tables:
+        if "ai_step_effects" not in self._metadata.tables:
             return []
         from sqlalchemy import select
 
-        table = self._metadata.tables["step_effects"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_effects"]
+        key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
-            runs = self._metadata.tables["step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == run_id).with_for_update())).mappings().first()
-            rows = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.step_run_id == run_id).order_by(table.c.effect_index))).mappings().all()
+            runs = self._metadata.tables["ai_step_runs"]
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
+            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id).order_by(table.c.effect_index))).mappings().all()
             if run_row is None:
                 if rows:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -803,21 +797,21 @@ class SqlStepArchive(StepStore):
         from sqlalchemy import insert, select
         from sqlalchemy.exc import IntegrityError
 
-        table = self._metadata.tables["step_runs"]
-        key = _namespace_key(self.namespace)
+        table = self._metadata.tables["ai_step_runs"]
+        key = _namespace_digest(self.namespace)
         try:
             async with self._begin() as connection:
-                current = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.step_run_id == record.run_id).with_for_update())).mappings().first()
+                current = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == record.run_id).with_for_update())).mappings().first()
                 if current is not None:
                     await self._validate_run_indexes(connection, record.run_id, current)
                     if _run_from_sql(current) != record:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                 else:
-                    await connection.execute(insert(table).values(namespace_key=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, step_run_id=record.run_id, harness_conversation_id=record.conversation_id, parent_step_run_id=record.parent_run_id, agent_name=record.agent_name, metadata_json=dict(record.metadata), last_event_index=0, last_snapshot_index=0, last_effect_index=0, started_at=record.started_at))
+                    await connection.execute(insert(table).values(namespace_digest=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, run_id=record.run_id, run_digest=_step_identity_digest(self._runtime_domain.value, record.run_id), conversation_id=record.conversation_id, parent_run_id=record.parent_run_id, agent_name=record.agent_name, metadata=dict(record.metadata), last_event_index=0, last_snapshot_index=0, last_effect_index=0, started_at=record.started_at))
             return
         except IntegrityError:
             async with self._begin() as connection:
-                current = (await connection.execute(select(table).where(table.c.namespace_key == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.step_run_id == record.run_id).with_for_update())).mappings().first()
+                current = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == record.run_id).with_for_update())).mappings().first()
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await self._validate_run_indexes(connection, record.run_id, current)
@@ -830,11 +824,11 @@ class SqlStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from sqlalchemy import insert, select, update
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
-        events = self._metadata.tables["step_events"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
+        events = self._metadata.tables["ai_step_events"]
         async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == event.run_id).with_for_update())).mappings().first()
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == event.run_id).with_for_update())).mappings().first()
             if run_row is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             await self._validate_run_indexes(connection, event.run_id, run_row)
@@ -842,9 +836,9 @@ class SqlStepArchive(StepStore):
                 await connection.execute(
                     select(events)
                     .where(
-                        events.c.namespace_key == key,
+                        events.c.namespace_digest == key,
                         events.c.tenant_id == self.tenant_id,
-                        events.c.step_run_id == event.run_id,
+                        events.c.run_id == event.run_id,
                     )
                     .order_by(events.c.event_index)
                 )
@@ -852,8 +846,8 @@ class SqlStepArchive(StepStore):
             if any(_event_from_sql(previous) == event for previous in previous_rows):
                 return
             index = int(run_row["last_event_index"]) + 1
-            await connection.execute(insert(events).values(namespace_key=key, tenant_id=self.tenant_id, step_run_id=event.run_id, event_index=index, event_kind=event.kind, step_index=event.step_index, timestamp=event.timestamp, harness_conversation_id=event.conversation_id, parent_step_run_id=event.parent_run_id, agent_name=event.agent_name, tool_call_id=event.tool_call_id, tool_name=event.tool_name, error=event.error, metadata_json=dict(event.metadata)))
-            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == event.run_id).values(last_event_index=index))
+            await connection.execute(insert(events).values(namespace_digest=key, tenant_id=self.tenant_id, run_id=event.run_id, event_index=index, identity_digest=_step_identity_digest("event", event.run_id, index), kind=event.kind, step_index=event.step_index, timestamp=event.timestamp, conversation_id=event.conversation_id, parent_run_id=event.parent_run_id, agent_name=event.agent_name, tool_call_id=event.tool_call_id, tool_name=event.tool_name, error=event.error, metadata=dict(event.metadata)))
+            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == event.run_id).values(last_event_index=index))
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self._ensure_ready()
@@ -861,17 +855,17 @@ class SqlStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from sqlalchemy import insert, select, update
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
-        snapshots = self._metadata.tables["step_snapshots"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
+        snapshots = self._metadata.tables["ai_step_snapshots"]
         async with self._begin() as preflight_connection:
             preflight_row = (
                 await preflight_connection.execute(
                 select(runs).where(
-                    runs.c.namespace_key == key,
+                    runs.c.namespace_digest == key,
                     runs.c.tenant_id == self.tenant_id,
                     runs.c.runtime_domain == self._runtime_domain.value,
-                    runs.c.step_run_id == snapshot.run_id,
+                    runs.c.run_id == snapshot.run_id,
                 )
                 )
             ).mappings().first()
@@ -880,16 +874,16 @@ class SqlStepArchive(StepStore):
             await self._validate_run_indexes(preflight_connection, snapshot.run_id, preflight_row)
         payload = await _snapshot_json(snapshot, self.object_store, self._media_prefix())
         async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == snapshot.run_id).with_for_update())).mappings().first()
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == snapshot.run_id).with_for_update())).mappings().first()
             if run_row is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             await self._validate_run_indexes(connection, snapshot.run_id, run_row)
-            previous_rows = (await connection.execute(select(snapshots).where(snapshots.c.namespace_key == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.step_run_id == snapshot.run_id).order_by(snapshots.c.snapshot_index))).mappings().all()
+            previous_rows = (await connection.execute(select(snapshots).where(snapshots.c.namespace_digest == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.run_id == snapshot.run_id).order_by(snapshots.c.snapshot_index))).mappings().all()
             if any(_snapshot_row_matches(previous_row, payload, snapshot) for previous_row in previous_rows):
                 return
             index = int(run_row["last_snapshot_index"]) + 1
-            await connection.execute(insert(snapshots).values(namespace_key=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, step_run_id=snapshot.run_id, snapshot_index=index, step_index=snapshot.step_index, state=snapshot.state, harness_conversation_id=snapshot.conversation_id, parent_step_run_id=snapshot.parent_run_id, agent_name=snapshot.agent_name, timestamp=snapshot.timestamp, object_store_id=self.object_store.store_id, messages_json=payload["messages"]))
-            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == snapshot.run_id).values(last_snapshot_index=index))
+            await connection.execute(insert(snapshots).values(namespace_digest=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, run_id=snapshot.run_id, snapshot_index=index, identity_digest=_step_identity_digest("snapshot", self._runtime_domain.value, snapshot.run_id, index), step_index=snapshot.step_index, state=snapshot.state, conversation_id=snapshot.conversation_id, parent_run_id=snapshot.parent_run_id, agent_name=snapshot.agent_name, timestamp=snapshot.timestamp, object_store_id=self.object_store.store_id, messages=payload["messages"]))
+            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == snapshot.run_id).values(last_snapshot_index=index))
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         await self._ensure_ready()
@@ -897,20 +891,20 @@ class SqlStepArchive(StepStore):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from sqlalchemy import insert, select, update
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
-        effects = self._metadata.tables["step_effects"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
+        effects = self._metadata.tables["ai_step_effects"]
         async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == record.run_id).with_for_update())).mappings().first()
+            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == record.run_id).with_for_update())).mappings().first()
             if run_row is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             await self._validate_run_indexes(connection, record.run_id, run_row)
-            previous_rows = (await connection.execute(select(effects).where(effects.c.namespace_key == key, effects.c.tenant_id == self.tenant_id, effects.c.step_run_id == record.run_id).order_by(effects.c.effect_index))).mappings().all()
+            previous_rows = (await connection.execute(select(effects).where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == record.run_id).order_by(effects.c.effect_index))).mappings().all()
             if any(_effect_from_sql(previous_row) == record for previous_row in previous_rows):
                 return
             index = int(run_row["last_effect_index"]) + 1
-            await connection.execute(insert(effects).values(namespace_key=key, tenant_id=self.tenant_id, step_run_id=record.run_id, effect_index=index, tool_call_id=record.tool_call_id, tool_name=record.tool_name, status=record.status, started_at=record.started_at, ended_at=record.ended_at, idempotency_key=record.idempotency_key, effect_summary=json.dumps(record.effect_summary, sort_keys=True, separators=(",", ":"))))
-            await connection.execute(update(runs).where(runs.c.namespace_key == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.step_run_id == record.run_id).values(last_effect_index=index))
+            await connection.execute(insert(effects).values(namespace_digest=key, tenant_id=self.tenant_id, run_id=record.run_id, effect_index=index, identity_digest=_step_identity_digest("effect", record.run_id, index), tool_call_id=record.tool_call_id, tool_name=record.tool_name, status=record.status, started_at=record.started_at, ended_at=record.ended_at, idempotency_key=record.idempotency_key, effect_summary=json.dumps(record.effect_summary, sort_keys=True, separators=(",", ":"))))
+            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == record.run_id).values(last_effect_index=index))
 
     async def close(self) -> None:
         self._ready = False
@@ -924,61 +918,61 @@ class SqlStepArchive(StepStore):
     async def _validate_current_state(self) -> None:
         from sqlalchemy import select
 
-        key = _namespace_key(self.namespace)
-        runs = self._metadata.tables["step_runs"]
+        key = _namespace_digest(self.namespace)
+        runs = self._metadata.tables["ai_step_runs"]
         async with self._begin() as connection:
             run_rows = (
                 await connection.execute(
                     select(runs).where(
-                        runs.c.namespace_key == key,
+                        runs.c.namespace_digest == key,
                         runs.c.tenant_id == self.tenant_id,
                         runs.c.runtime_domain == self._runtime_domain.value,
                     )
                 )
             ).mappings().all()
-            run_ids = {str(row["step_run_id"]) for row in run_rows}
+            run_ids = {str(row["run_id"] ) for row in run_rows}
             event_rows: Sequence[Mapping[str, object]] = ()
-            if "step_events" in self._metadata.tables:
-                events = self._metadata.tables["step_events"]
+            if "ai_step_events" in self._metadata.tables:
+                events = self._metadata.tables["ai_step_events"]
                 event_rows = (
                     await connection.execute(
                         select(events).where(
-                            events.c.namespace_key == key,
+                            events.c.namespace_digest == key,
                             events.c.tenant_id == self.tenant_id,
-                        ).order_by(events.c.step_run_id, events.c.event_index)
+                        ).order_by(events.c.run_id, events.c.event_index)
                     )
                 ).mappings().all()
             snapshot_rows: Sequence[Mapping[str, object]] = ()
-            if "step_snapshots" in self._metadata.tables:
-                snapshots = self._metadata.tables["step_snapshots"]
+            if "ai_step_snapshots" in self._metadata.tables:
+                snapshots = self._metadata.tables["ai_step_snapshots"]
                 snapshot_rows = (
                     await connection.execute(
                         select(snapshots).where(
-                            snapshots.c.namespace_key == key,
+                            snapshots.c.namespace_digest == key,
                             snapshots.c.tenant_id == self.tenant_id,
                             snapshots.c.runtime_domain == self._runtime_domain.value,
-                        ).order_by(snapshots.c.step_run_id, snapshots.c.snapshot_index)
+                        ).order_by(snapshots.c.run_id, snapshots.c.snapshot_index)
                     )
                 ).mappings().all()
             effect_rows: Sequence[Mapping[str, object]] = ()
-            if "step_effects" in self._metadata.tables:
-                effects = self._metadata.tables["step_effects"]
+            if "ai_step_effects" in self._metadata.tables:
+                effects = self._metadata.tables["ai_step_effects"]
                 effect_rows = (
                     await connection.execute(
                         select(effects).where(
-                            effects.c.namespace_key == key,
+                            effects.c.namespace_digest == key,
                             effects.c.tenant_id == self.tenant_id,
-                        ).order_by(effects.c.step_run_id, effects.c.effect_index)
+                        ).order_by(effects.c.run_id, effects.c.effect_index)
                     )
                 ).mappings().all()
             for child_rows, index_name in ((event_rows, "event_index"), (snapshot_rows, "snapshot_index"), (effect_rows, "effect_index")):
-                if any(str(row["step_run_id"]) not in run_ids for row in child_rows):
+                if any(str(row["run_id"] ) not in run_ids for row in child_rows):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             grouped_events = _group_step_rows(event_rows)
             grouped_snapshots = _group_step_rows(snapshot_rows)
             grouped_effects = _group_step_rows(effect_rows)
             for run_row in run_rows:
-                run_id = str(run_row["step_run_id"])
+                run_id = str(run_row["run_id"] )
                 _validate_step_indexes(int(run_row["last_event_index"]), grouped_events.get(run_id, ()), "event_index")
                 _validate_step_indexes(int(run_row["last_snapshot_index"]), grouped_snapshots.get(run_id, ()), "snapshot_index")
                 _validate_step_indexes(int(run_row["last_effect_index"]), grouped_effects.get(run_id, ()), "effect_index")
@@ -993,40 +987,40 @@ class SqlStepArchive(StepStore):
     async def _validate_run_indexes(self, connection: object, run_id: str, run_row: Mapping[str, object]) -> None:
         from sqlalchemy import select
 
-        key = _namespace_key(self.namespace)
-        if "step_events" in self._metadata.tables:
-            events = self._metadata.tables["step_events"]
+        key = _namespace_digest(self.namespace)
+        if "ai_step_events" in self._metadata.tables:
+            events = self._metadata.tables["ai_step_events"]
             event_rows = (
                 await connection.execute(
                     select(events)
-                    .where(events.c.namespace_key == key, events.c.tenant_id == self.tenant_id, events.c.step_run_id == run_id)
+                    .where(events.c.namespace_digest == key, events.c.tenant_id == self.tenant_id, events.c.run_id == run_id)
                     .order_by(events.c.event_index)
                 )
             ).mappings().all()
             _validate_step_indexes(int(run_row["last_event_index"]), event_rows, "event_index")
-        if "step_snapshots" in self._metadata.tables:
-            snapshots = self._metadata.tables["step_snapshots"]
+        if "ai_step_snapshots" in self._metadata.tables:
+            snapshots = self._metadata.tables["ai_step_snapshots"]
             snapshot_rows = (
                 await connection.execute(
                     select(snapshots)
-                    .where(snapshots.c.namespace_key == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.step_run_id == run_id)
+                    .where(snapshots.c.namespace_digest == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.run_id == run_id)
                     .order_by(snapshots.c.snapshot_index)
                 )
             ).mappings().all()
             _validate_step_indexes(int(run_row["last_snapshot_index"]), snapshot_rows, "snapshot_index")
-        if "step_effects" in self._metadata.tables:
-            effects = self._metadata.tables["step_effects"]
+        if "ai_step_effects" in self._metadata.tables:
+            effects = self._metadata.tables["ai_step_effects"]
             effect_rows = (
                 await connection.execute(
                     select(effects)
-                    .where(effects.c.namespace_key == key, effects.c.tenant_id == self.tenant_id, effects.c.step_run_id == run_id)
+                    .where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == run_id)
                     .order_by(effects.c.effect_index)
                 )
             ).mappings().all()
             _validate_step_indexes(int(run_row["last_effect_index"]), effect_rows, "effect_index")
 
     def _media_prefix(self) -> str:
-        return f"v1/step/{self._runtime_domain.value}/{_namespace_key(self.namespace)}/{_scope_key(self.tenant_id)}"
+        return f"v1/step/{self._runtime_domain.value}/{_namespace_digest(self.namespace)}/{_scope_key(self.tenant_id)}"
 
     @asynccontextmanager
     async def _begin(self) -> AsyncIterator[object]:
@@ -1291,7 +1285,7 @@ class RuntimeStepStore(StepStore):
         first: BaseException | None = None
         for run_id in tuple(dict.fromkeys(candidate_step_run_ids)):
             try:
-                await self.verify_terminal_attempts(candidate_step_run_ids=(run_id,), required_step_run_id=None)
+                await self.verify_terminal_attempts(candidate_step_run_ids=(run_id,), required_run_id=None)
                 await self._staging.release_run(run_id)
             except asyncio.CancelledError:
                 raise
@@ -1511,12 +1505,19 @@ def _raise_filesystem_storage_error(error: BaseException) -> None:
     raise error
 
 
-def _namespace_key(namespace: str) -> str:
+def _namespace_digest(namespace: str) -> str:
     return _digest(namespace)
 
 
 def _scope_key(tenant_id: str) -> str:
     return _digest(tenant_id)
+
+
+def _step_identity_digest(*parts: str | int) -> str:
+    return canonical_identity_digest(
+        "step-fact",
+        {"parts": [str(part) for part in parts]},
+    )
 
 
 def _digest(value: str) -> str:
@@ -1533,7 +1534,7 @@ def _run_json(record: RunRecord, counters: Mapping[str, int] | None = None) -> d
 def _group_step_rows(rows: Sequence[Mapping[str, object]]) -> dict[str, tuple[Mapping[str, object], ...]]:
     grouped: dict[str, list[Mapping[str, object]]] = {}
     for row in rows:
-        grouped.setdefault(str(row["step_run_id"]), []).append(row)
+        grouped.setdefault(str(row["run_id"] ), []).append(row)
     return {run_id: tuple(values) for run_id, values in grouped.items()}
 
 
@@ -1555,7 +1556,7 @@ def _run_from_json(value: dict[str, object]) -> RunRecord:
 
 
 def _run_from_sql(value: Mapping[str, object]) -> RunRecord:
-    return RunRecord(run_id=str(value["step_run_id"]), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), metadata=dict(value.get("metadata_json") or {}), started_at=_datetime(value["started_at"]))
+    return RunRecord(run_id=str(value["run_id"]), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), metadata=dict(value.get("metadata") or {}), started_at=_datetime(value["started_at"]))
 
 
 def _event_json(event: StepEvent) -> dict[str, object]:
@@ -1567,7 +1568,7 @@ def _event_from_json(value: dict[str, object]) -> StepEvent:
 
 
 def _event_from_sql(value: Mapping[str, object]) -> StepEvent:
-    return StepEvent(run_id=str(value["step_run_id"]), kind=str(value["event_kind"]), step_index=int(value["step_index"]), timestamp=_datetime(value["timestamp"]), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), tool_call_id=value.get("tool_call_id"), tool_name=value.get("tool_name"), error=value.get("error"), metadata=dict(value.get("metadata_json") or {}))
+    return StepEvent(run_id=str(value["run_id"]), kind=str(value["kind"]), step_index=int(value["step_index"]), timestamp=_datetime(value["timestamp"]), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), tool_call_id=value.get("tool_call_id"), tool_name=value.get("tool_name"), error=value.get("error"), metadata=dict(value.get("metadata") or {}))
 
 
 async def _snapshot_json(snapshot: ContinuableSnapshot, object_store: ObjectStore, media_prefix: str) -> dict[str, object]:
@@ -1595,9 +1596,9 @@ async def _snapshot_from_sql(value: Mapping[str, object], object_store: ObjectSt
     if object_store_id != object_store.store_id:
         raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
     state = _snapshot_state(value.get("state", "complete"))
-    messages = value.get("messages_json") or []
+    messages = value.get("messages") or []
     await _materialize_media(messages, object_store)
-    return ContinuableSnapshot(run_id=str(value["step_run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("harness_conversation_id"), parent_run_id=value.get("parent_step_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=state)
+    return ContinuableSnapshot(run_id=str(value["run_id"]), step_index=int(value["step_index"]), messages=ModelMessagesTypeAdapter.validate_python(messages), conversation_id=value.get("conversation_id"), parent_run_id=value.get("parent_run_id"), agent_name=value.get("agent_name"), timestamp=_datetime(value["timestamp"]), state=state)
 
 
 def _snapshot_state(value: object) -> str:
@@ -1608,11 +1609,11 @@ def _snapshot_state(value: object) -> str:
 
 def _snapshot_row_matches(row: Mapping[str, object], payload: Mapping[str, object], snapshot: ContinuableSnapshot) -> bool:
     return (
-        str(row["step_run_id"]) == snapshot.run_id
+        str(row["run_id"] ) == snapshot.run_id
         and int(row["step_index"]) == snapshot.step_index
-        and row.get("messages_json") == payload.get("messages")
-        and row.get("harness_conversation_id") == snapshot.conversation_id
-        and row.get("parent_step_run_id") == snapshot.parent_run_id
+        and row.get("messages") == payload.get("messages")
+        and row.get("conversation_id") == snapshot.conversation_id
+        and row.get("parent_run_id") == snapshot.parent_run_id
         and row.get("agent_name") == snapshot.agent_name
         and _datetime(row["timestamp"]) == snapshot.timestamp.astimezone(timezone.utc)
         and str(row["state"]) == snapshot.state
@@ -1697,7 +1698,7 @@ def _effect_from_sql(value: Mapping[str, object]) -> ToolEffectRecord:
             summary = json.loads(summary)
         except json.JSONDecodeError as error:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED) from error
-    return ToolEffectRecord(tool_call_id=str(value["tool_call_id"]), tool_name=str(value["tool_name"]), run_id=str(value["step_run_id"]), status=str(value["status"]), started_at=_datetime(value["started_at"]), ended_at=None if value.get("ended_at") is None else _datetime(value["ended_at"]), idempotency_key=value.get("idempotency_key"), effect_summary=summary)
+    return ToolEffectRecord(tool_call_id=str(value["tool_call_id"]), tool_name=str(value["tool_name"]), run_id=str(value["run_id"]), status=str(value["status"]), started_at=_datetime(value["started_at"]), ended_at=None if value.get("ended_at") is None else _datetime(value["ended_at"]), idempotency_key=value.get("idempotency_key"), effect_summary=summary)
 
 
 def _datetime(value: object) -> datetime:

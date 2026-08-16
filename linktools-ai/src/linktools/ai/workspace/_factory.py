@@ -29,7 +29,12 @@ from ..asset import (
     PrefixAssetPathAdapter,
 )
 from ..capability import CapabilityGrant, CapabilityProvider, SkillCapabilityProvider
-from ..core import HmacCursorSigner, TenantAuthorizationPolicy, canonical_sha256
+from ..core import (
+    HmacCursorSigner,
+    TenantAuthorizationPolicy,
+    canonical_sha256,
+    validate_tenant_id,
+)
 from ..errors import AIError, ErrorCode
 from ..model import ModelRegistry
 from ..runtime import Runtime, RuntimeState, build_local_runtime
@@ -56,7 +61,6 @@ async def _build_default_assets(
     )
     source = DirectoryAssetBackend(
         str(workspace.storage_root / "assets"),
-        writable=False,
         path_adapter=adapter,
     )
     writable = InMemoryAssetBackend()
@@ -170,6 +174,7 @@ def _build_output_types(
 async def open_workspace_runtime(
     workspace: Workspace,
     *,
+    tenant_id: str | None = None,
     assets: "AssetRepository | None" = None,
     asset_bindings: "Sequence[AssetTypeBinding[object]]" = (),
     asset_path_adapter: "AssetPathAdapter | None" = None,
@@ -181,6 +186,7 @@ async def open_workspace_runtime(
 ) -> AsyncIterator[Runtime]:
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace is required")
+    effective_tenant_id = workspace.workspace_id if tenant_id is None else validate_tenant_id(tenant_id)
     if assets is not None and (asset_bindings or asset_path_adapter is not None):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     workspace_owned_assets = assets is None
@@ -218,11 +224,12 @@ async def open_workspace_runtime(
     try:
         await selected_runtime.initialize(
             namespace=workspace.workspace_id,
-            tenant_id=workspace.workspace_id,
+            tenant_id=effective_tenant_id,
         )
         runtime_value = await _compose_runtime(
             workspace,
             selected_assets,
+            tenant_id=effective_tenant_id,
             providers=providers,
             capabilities=capabilities,
             models=models,
@@ -232,7 +239,11 @@ async def open_workspace_runtime(
     except BaseException:
         await selected_runtime.close()
         raise
-    _logger.info("workspace Runtime opened: workspace=%s", workspace.workspace_id)
+    _logger.info(
+        "workspace Runtime opened: workspace=%s tenant=%s",
+        workspace.workspace_id,
+        effective_tenant_id,
+    )
     try:
         yield runtime_value
     except BaseException as body_error:
@@ -249,6 +260,7 @@ async def _compose_runtime(
     workspace: Workspace,
     assets: AssetRepository,
     *,
+    tenant_id: str,
     providers: Sequence[CapabilityProvider],
     capabilities: Sequence[CapabilityGrant],
     models: ModelRegistry | None,
@@ -315,8 +327,8 @@ async def _compose_runtime(
     return await build_local_runtime(
         state=state,
         compiler=compiler,
-        authorization=TenantAuthorizationPolicy(workspace.workspace_id),
-        tenant_id=workspace.workspace_id,
+        authorization=TenantAuthorizationPolicy(tenant_id),
+        tenant_id=tenant_id,
         namespace=workspace.workspace_id,
         execution_root=workspace.root,
         history_reader=history,

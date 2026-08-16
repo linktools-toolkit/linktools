@@ -14,10 +14,10 @@ def storage_name(name: str) -> str:
     return f"{TABLE_PREFIX}{name}"
 
 
-def namespace_key(namespace: str) -> str:
+def namespace_digest(namespace: str) -> str:
     if not isinstance(namespace, str) or not namespace:
         raise ValueError("namespace must be a non-empty string")
     return hashlib.sha256(namespace.encode("utf-8")).hexdigest()
 
 
-__all__ = ["TABLE_PREFIX", "namespace_key", "storage_name"]
+__all__ = ["TABLE_PREFIX", "namespace_digest", "storage_name"]

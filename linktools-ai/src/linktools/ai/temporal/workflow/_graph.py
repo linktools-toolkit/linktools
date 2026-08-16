@@ -49,22 +49,22 @@ from ._execution import (
 class TaskWorkflowNode:
     node_id: str
     dependencies: tuple[str, ...]
-    input_json: str
+    input: str
     budget_cost: int = 1
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.input_json, str)
-            or not self.input_json
+            not isinstance(self.input, str)
+            or not self.input
             or isinstance(self.dependencies, (str, bytes))
         ):
             raise ValueError("task workflow node input is required")
         try:
             dependencies = tuple(self.dependencies)
-            value = json.loads(self.input_json)
+            value = json.loads(self.input)
             if (
                 not isinstance(value, dict)
-                or canonical_json_bytes(value).decode("utf-8") != self.input_json
+                or canonical_json_bytes(value).decode("utf-8") != self.input
             ):
                 raise ValueError("task workflow node input is not canonical JSON")
             TaskNode(
@@ -525,7 +525,7 @@ def _task_node(node: TaskWorkflowNode) -> TaskNode:
     return TaskNode(
         node.node_id,
         node.dependencies,
-        input=cast(Mapping[str, JsonValue], json.loads(node.input_json)),
+        input=cast(Mapping[str, JsonValue], json.loads(node.input)),
         budget_cost=node.budget_cost,
     )
 

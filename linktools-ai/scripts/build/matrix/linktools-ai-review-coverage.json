@@ -1,5 +1,5 @@
 {
-  "validated_source_commit": "589523800ca3881b9614d2931da44661836e7b85",
+  "validated_source_commit": "ed02e1331484691a03d46bf1f20d59e28393ea5f",
   "status": "CLEAN",
   "open_findings": [],
   "uncovered": [],
@@ -8,7 +8,7 @@
     "Unrelated Asset and Storage migration or compatibility work is excluded; Runtime memory and Harness Step adapters required by this spec are in scope."
   ],
   "verification": {
-    "memory_file_sqlite": "passed: exact S 111 AI tests and persistence checks",
+    "memory_file_sqlite": "passed: 203 AI tests, including persistence and schema ownership checks",
     "mysql": "not_run_no_environment_accepted",
     "postgresql": "not_run_no_environment_accepted",
     "source_commit": "passed: exact source validation at 589523800ca3881b9614d2931da44661836e7b85",
@@ -16,7 +16,7 @@
       "Critical": 0,
       "Important": 0,
       "Minor": 0,
-      "Notes": 1,
+      "Notes": 0,
       "verdict": "Critical: 0\nImportant: 0\nMinor: 0\nNotes: 0\nVerdict: CLEAN"
     }
   },

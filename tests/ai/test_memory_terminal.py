@@ -13,6 +13,7 @@ from linktools.ai.core import (
     IdempotencyStatus,
     ResourceKind,
     StopReason,
+    UsageMetrics,
 )
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state._contracts import (
@@ -83,9 +84,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
             "fingerprint",
             result_ref,
             StopReason.END_TURN,
-            0,
-            0,
-            0,
+            UsageMetrics(),
             now,
         )
         committed = await state.execution.executions.commit_terminal(
@@ -98,7 +97,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
                 {},
                 IdempotencyTerminalUpdate(
                     identity.scope,
-                    identity.key_hash,
+                    identity.key_digest,
                     identity.status,
                     IdempotencyStatus.COMPLETED,
                     identity.request_digest,

@@ -14,6 +14,7 @@ from ..errors import AIError, ErrorCode
 from ._contract import (
     AgentCapabilityRef,
     AgentSpec,
+    AgentUsageLimits,
     MCPServerSpec,
     SkillSpec,
 )
@@ -50,6 +51,15 @@ class AgentSpecCodec:
                 "allow_tools": value.allow_tools,
                 "allow_skills": value.allow_skills,
                 "metadata": dict(value.metadata),
+                "usage_limits": None
+                if value.usage_limits is None
+                else {
+                    "model_requests": value.usage_limits.model_requests,
+                    "tool_calls": value.usage_limits.tool_calls,
+                    "input_tokens": value.usage_limits.input_tokens,
+                    "output_tokens": value.usage_limits.output_tokens,
+                    "total_tokens": value.usage_limits.total_tokens,
+                },
             }
         )
 
@@ -73,6 +83,7 @@ class AgentSpecCodec:
             )
             for item in cast("list[dict[str, object]]", raw["capabilities"])
         )
+        usage_limits = _decode_usage_limits(raw.get("usage_limits"))
         return AgentSpec(
             str(raw["id"]),
             int(raw["revision"]),
@@ -85,6 +96,7 @@ class AgentSpecCodec:
             _strict_allowlist(raw, "allow_tools", ("*",)),
             _strict_allowlist(raw, "allow_skills", ("*",)),
             cast("dict[str, object]", raw.get("metadata", {})),
+            usage_limits,
         )
 
 
@@ -147,6 +159,26 @@ class SkillMarkdownSpecAdapter:
         return SkillSpec(logical_id.rsplit("/", 1)[-1], value.revision, value.content)
 
 
+def retarget_skill_markdown(content: str, local_name: str) -> str:
+    """Rewrite the canonical frontmatter name during a logical rename."""
+    lines = content.splitlines(keepends=True)
+    closing = next(
+        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
+        None,
+    )
+    if closing is None:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID)
+    frontmatter, _ = _parse_skill_markdown(content)
+    frontmatter["name"] = local_name
+    encoded = yaml.safe_dump(
+        frontmatter,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=True,
+    )
+    return f"---\n{encoded}---\n{''.join(lines[closing + 1:])}"
+
+
 class MCPServerSpecCodec:
     def encode(self, value: MCPServerSpec) -> bytes:
         return _encode({"id": value.id, "revision": value.revision, "command": value.command, "args": list(value.args)})
@@ -184,6 +216,26 @@ def _strict_allowlist(raw: Mapping[str, object], name: str, default: "tuple[str,
     if not isinstance(value, list):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID, f"{name} must be a JSON array")
     return canonical_string_tuple(value, field=name)
+
+
+def _decode_usage_limits(value: object) -> "AgentUsageLimits | None":
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits must be an object or null")
+    names = {
+        "model_requests",
+        "tool_calls",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+    }
+    if set(value) != names:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits fields are invalid")
+    try:
+        return AgentUsageLimits(**{name: value[name] for name in names})
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.OUTPUT_CONTRACT_INVALID, "usage_limits values are invalid") from error
 
 
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -262,4 +314,5 @@ __all__ = [
     "SkillMarkdownSpecCodec",
     "SkillSpecCodec",
     "SpecCodec",
+    "retarget_skill_markdown",
 ]

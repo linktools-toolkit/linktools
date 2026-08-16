@@ -16,6 +16,7 @@ from ._composition import (
     StorageValueValidator,
 )
 from ._contracts import (
+    AtomicBatchStorageWriter,
     BatchStorageReader,
     BatchStorageWriter,
     MetadataChange,
@@ -41,6 +42,7 @@ from ._contracts import (
     StorageWriter,
     VersionedStorage,
     VersionSummary,
+    normalize_storage_metadata,
 )
 from ._database import (
     SqlStorageContext,
@@ -92,7 +94,7 @@ from ._lock import (
     ProcessLeaseCoordinator,
 )
 from ._metrics import StorageMetrics
-from ._names import TABLE_PREFIX, namespace_key, storage_name
+from ._names import TABLE_PREFIX, namespace_digest, storage_name
 from ._object import (
     FilesystemObjectStore,
     InMemoryObjectStore,
@@ -108,6 +110,7 @@ from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 __all__ = [
     "TABLE_PREFIX",
+    "AtomicBatchStorageWriter",
     "BatchStorageReader",
     "BatchStorageWriter",
     "CacheAdapter",
@@ -129,7 +132,7 @@ __all__ = [
     "MetadataLoad",
     "MetadataLoadMode",
     "MySQLDialect",
-    "namespace_key",
+    "namespace_digest",
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
@@ -174,6 +177,7 @@ __all__ = [
     "TieredContentCache",
     "TransientObjectStore",
     "VersionSummary",
+    "normalize_storage_metadata",
     "VersionedStorage",
     "atomic_write_bytes",
     "atomic_write_json",

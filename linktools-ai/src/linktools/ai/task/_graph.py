@@ -62,7 +62,7 @@ class TaskNode:
     node_id: str
     dependencies: tuple[str, ...]
     budget_cost: int
-    _input_json: bytes = field(repr=False)
+    _input: bytes = field(repr=False)
 
     def __init__(
         self,
@@ -95,11 +95,11 @@ class TaskNode:
         object.__setattr__(self, "node_id", node_id)
         object.__setattr__(self, "dependencies", normalized_dependencies)
         object.__setattr__(self, "budget_cost", budget_cost)
-        object.__setattr__(self, "_input_json", canonical_json_bytes(normalized))
+        object.__setattr__(self, "_input", canonical_json_bytes(normalized))
 
     @property
     def input(self) -> "dict[str, JsonValue]":
-        return json.loads(self._input_json.decode("utf-8"))
+        return json.loads(self._input.decode("utf-8"))
 
 
 @dataclass(frozen=True, slots=True)

@@ -33,6 +33,7 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     StopReason,
+    UsageMetrics,
     canonical_json_bytes,
     step_conversation_id,
     step_run_id,
@@ -135,6 +136,7 @@ class LocalExecutionBackend:
             raise ValueError("step_reads must contain exactly the three Step owner domains")
         self._step_lifecycle = step_lifecycle
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._captured_usage: dict[str, UsageMetrics] = {}
         self._accepting = True
 
     async def start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
@@ -278,9 +280,7 @@ class LocalExecutionBackend:
                     outcome.output_schema_fingerprint,
                     execution_ref,
                     outcome.stop_reason,
-                    outcome.input_tokens,
-                    outcome.output_tokens,
-                    outcome.total_cost_micros,
+                    outcome.usage,
                     outcome.result_created_at,
                 )
                 commit_current = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
@@ -302,9 +302,7 @@ class LocalExecutionBackend:
                     outcome.output_schema_fingerprint if outcome.terminal_status is ExecutionStatus.SUCCEEDED else None,
                     execution_ref,
                     outcome.stop_reason,
-                    outcome.input_tokens,
-                    outcome.output_tokens,
-                    outcome.total_cost_micros,
+                    outcome.usage,
                     outcome.result_created_at,
                 )
                 await self._execution.executions.commit_terminal(
@@ -379,7 +377,7 @@ class LocalExecutionBackend:
                         tenant_id=execution.tenant_id,
                         runtime_domain=RuntimeDomain.EXECUTION,
                         scope=recovery_idempotency.scope,
-                        key_hash=recovery_idempotency.key_hash,
+                        key_digest=recovery_idempotency.key_digest,
                         request_digest=recovery_idempotency.request_digest,
                         resource_kind=ResourceKind.EXECUTION,
                         resource_id=execution.execution_id,
@@ -396,7 +394,7 @@ class LocalExecutionBackend:
             return None
         next_status = IdempotencyStatus.COMPLETED if checkpoint.terminal_handoff is not None and checkpoint.terminal_handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED else IdempotencyStatus.CANCELLED if checkpoint.terminal_handoff is not None and checkpoint.terminal_handoff.outcome.terminal_status is ExecutionStatus.CANCELLED else IdempotencyStatus.FAILED
         outcome = checkpoint.terminal_handoff.outcome if checkpoint.terminal_handoff is not None else None
-        return IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, next_status, identity.request_digest, None if outcome is None or outcome.recovery_object_ref is None else outcome.recovery_object_ref.digest, None if outcome is None else outcome.error_code)
+        return IdempotencyTerminalUpdate(identity.scope, identity.key_digest, identity.status, next_status, identity.request_digest, None if outcome is None or outcome.recovery_object_ref is None else outcome.recovery_object_ref.digest, None if outcome is None else outcome.error_code)
 
     async def _resolve_handoff_conversation(self, checkpoint: RecoveryCheckpoint, handoff: RecoveryTerminalHandoff) -> None:
         intent = handoff.conversation
@@ -504,7 +502,7 @@ class LocalExecutionBackend:
             recovery_idempotency = None
             if idempotency_records:
                 identity = idempotency_records[0]
-                recovery_idempotency = RecoveryIdempotencyInput(identity.scope, identity.key_hash, identity.request_digest)
+                recovery_idempotency = RecoveryIdempotencyInput(identity.scope, identity.key_digest, identity.request_digest)
             existing_checkpoint = None
             if self._recovery_enabled:
                 existing_checkpoint = await self._recovery.checkpoints.get(execution_id, tenant_id=current.tenant_id)
@@ -599,8 +597,9 @@ class LocalExecutionBackend:
                     )
                 ),
                 event_sink=sink,
+                usage_sink=lambda usage: self._capture_usage(execution_id, usage),
             )
-            await self._commit_success(current, definition, result.output, run_id)
+            await self._commit_success(current, definition, result.output, result.usage, run_id)
             if checkpoint is not None:
                 await self._finish_checkpoint(checkpoint)
             operation_result = "success"
@@ -735,7 +734,14 @@ class LocalExecutionBackend:
     def _step_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         return self._step_reads[runtime_domain]
 
-    async def _commit_success(self, execution: ExecutionRecord, definition: AgentDefinition, output: JsonValue, run_id: str) -> None:
+    async def _commit_success(
+        self,
+        execution: ExecutionRecord,
+        definition: AgentDefinition,
+        output: JsonValue,
+        usage: UsageMetrics,
+        run_id: str,
+    ) -> None:
         payload = canonical_json_bytes(output)
         object_ref = await put_runtime_object(
             self._execution_objects,
@@ -756,6 +762,7 @@ class LocalExecutionBackend:
             definition=definition,
             output_digest=object_ref.digest,
             run_id=run_id,
+            usage=usage,
         )
 
     async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
@@ -773,11 +780,13 @@ class LocalExecutionBackend:
         definition: AgentDefinition | None = None,
         output_digest: str | None = None,
         run_id: str | None = None,
+        usage: UsageMetrics | None = None,
     ) -> None:
         current = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
         if current is None or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             return
         now = datetime.now(timezone.utc)
+        captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
         terminal = _terminal_record(current, status, now, error_code=error_code)
         identity = await _terminal_idempotency(self._execution, current, status, output_digest, error_code)
         if definition is None:
@@ -821,9 +830,7 @@ class LocalExecutionBackend:
                         output_schema_revision=schema_revision if status is ExecutionStatus.SUCCEEDED else None,
                         output_schema_fingerprint=schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
                         recovery_object_ref=recovery_ref,
-                        input_tokens=0,
-                        output_tokens=0,
-                        total_cost_micros=0,
+                        usage=captured_usage,
                         terminal_event_type=terminal_event_type,
                         terminal_event_payload={"run_id": run_id} if run_id is not None else {"error_code": error_code},
                         result_created_at=now,
@@ -862,7 +869,17 @@ class LocalExecutionBackend:
                 current.revision,
                 current.event_sequence,
                 terminal,
-                ResultRecord(current.execution_id, current.tenant_id, schema_id if status is ExecutionStatus.SUCCEEDED else None, schema_revision if status is ExecutionStatus.SUCCEEDED else None, schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None, object_ref if status is ExecutionStatus.SUCCEEDED else None, stop_reason, 0, 0, 0, now),
+                ResultRecord(
+                    current.execution_id,
+                    current.tenant_id,
+                    schema_id if status is ExecutionStatus.SUCCEEDED else None,
+                    schema_revision if status is ExecutionStatus.SUCCEEDED else None,
+                    schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
+                    object_ref if status is ExecutionStatus.SUCCEEDED else None,
+                    stop_reason,
+                    captured_usage,
+                    now,
+                ),
                 ExecutionEventType.EXECUTION_SUCCEEDED if status is ExecutionStatus.SUCCEEDED else ExecutionEventType.EXECUTION_CANCELLED if status is ExecutionStatus.CANCELLED else ExecutionEventType.EXECUTION_FAILED,
                 {"run_id": run_id} if run_id is not None else {"error_code": error_code},
                 identity,
@@ -875,6 +892,16 @@ class LocalExecutionBackend:
         if recovery_checkpoint is not None:
             recovery_checkpoint = await self._advance_handoff(recovery_checkpoint, RecoveryHandoffPhase.CONVERSATION_RESOLVED)
             await self._complete_handoff(recovery_checkpoint)
+
+    async def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:
+        self._captured_usage[execution_id] = usage
+        _logger.debug(
+            "execution usage captured: execution=%s requests=%s tool_calls=%s total_tokens=%s",
+            execution_id,
+            usage.model_requests,
+            usage.tool_calls,
+            usage.total_tokens,
+        )
 
     async def verify_terminal_projection(self, execution: ExecutionRecord, status: ExecutionStatus, run_id: "str | None") -> None:
         candidates = tuple(
@@ -971,7 +998,7 @@ async def _terminal_idempotency(state: ExecutionState, execution: ExecutionRecor
         return None
     identity = records[0]
     next_status = IdempotencyStatus.COMPLETED if status is ExecutionStatus.SUCCEEDED else IdempotencyStatus.CANCELLED if status is ExecutionStatus.CANCELLED else IdempotencyStatus.FAILED
-    return IdempotencyTerminalUpdate(identity.scope, identity.key_hash, identity.status, next_status, identity.request_digest, result_digest, error_code)
+    return IdempotencyTerminalUpdate(identity.scope, identity.key_digest, identity.status, next_status, identity.request_digest, result_digest, error_code)
 
 
 __all__ = ["LocalExecutionBackend"]

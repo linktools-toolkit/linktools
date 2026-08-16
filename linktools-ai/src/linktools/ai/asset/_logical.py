@@ -51,6 +51,7 @@ class AssetScope(Protocol):
         value: bytes,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AssetInfo: ...
 
     async def delete(
@@ -58,6 +59,7 @@ class AssetScope(Protocol):
         path: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageDeleteResult[AssetKey]": ...
 
     async def reset(
@@ -65,6 +67,7 @@ class AssetScope(Protocol):
         path: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[AssetKey]": ...
 
 
@@ -182,6 +185,17 @@ class AssetValueAdapter(Protocol[LogicalT]):
     def to_storage(self, logical_id: str, value: LogicalT) -> LogicalT: ...
 
 
+@runtime_checkable
+class AssetRetargeter(Protocol[LogicalT]):
+    def __call__(
+        self,
+        source: AssetRef,
+        target: AssetRef,
+        variant: str,
+        value: LogicalT,
+    ) -> LogicalT: ...
+
+
 @dataclass(frozen=True, slots=True)
 class AssetVariantBinding(Generic[LogicalT]):
     """Bind one physical layout to a codec and optional representation adapter."""
@@ -226,6 +240,8 @@ class AssetTypeBinding(Generic[LogicalT]):
     identity_validator: Callable[[AssetRef, LogicalT], bool] | None = None
     identity_fingerprint: str | None = None
     allow_nested_id: bool = True
+    retargeter: AssetRetargeter[LogicalT] | None = None
+    retarget_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -251,6 +267,12 @@ class AssetTypeBinding(Generic[LogicalT]):
             not isinstance(self.identity_fingerprint, str) or not self.identity_fingerprint
         ):
             raise ValueError("asset identity fingerprint is invalid")
+        if (self.retargeter is None) != (self.retarget_fingerprint is None):
+            raise ValueError("asset retarget fingerprint is incomplete")
+        if self.retarget_fingerprint is not None and (
+            not isinstance(self.retarget_fingerprint, str) or not self.retarget_fingerprint
+        ):
+            raise ValueError("asset retarget fingerprint is invalid")
 
     def variant(self, name: str) -> AssetVariantBinding[LogicalT]:
         for variant in self.variants:
@@ -447,6 +469,7 @@ def _manifest_entries(bindings: tuple[AssetTypeBinding[object], ...]) -> tuple[d
                 "value_type": qualified,
                 "allow_nested_id": binding.allow_nested_id,
                 "identity_fingerprint": binding.identity_fingerprint,
+                "retarget_fingerprint": binding.retarget_fingerprint,
                 "default_write_variant": binding.default_write_variant,
                 "variants": variants,
             }
@@ -460,6 +483,7 @@ __all__ = [
     "AssetEntry",
     "AssetRef",
     "AssetResource",
+    "AssetRetargeter",
     "AssetTypeBinding",
     "AssetTypeRegistry",
     "AssetTypeRegistrySnapshot",

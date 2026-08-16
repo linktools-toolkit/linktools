@@ -71,7 +71,7 @@ class DefaultApprovalService:
             request.approval_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ApprovalStatus.PENDING,
-            idempotency_key_hash=hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest(),
+            idempotency_key_digest=hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest(),
             decision=request.decision,
             principal_id=request.principal.principal_id,
             decision_digest=decision_digest,

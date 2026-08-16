@@ -3,11 +3,12 @@
 """Asset file identities and metadata."""
 
 import hashlib
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
-from ..core import validate_asset_kind
+from ..core import JsonValue, validate_asset_kind
 from ..errors import AIError
 from ..storage import (
     ReadableStorageBackend,
@@ -15,6 +16,7 @@ from ..storage import (
     StorageEntryStatus,
     StorageRevision,
     StorageWriter,
+    normalize_storage_metadata,
 )
 
 
@@ -65,6 +67,7 @@ class AssetInfo:
     root_id: str
     root_digest: str
     modified_at: datetime
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if (
@@ -78,6 +81,7 @@ class AssetInfo:
             raise ValueError("asset metadata is invalid")
         if self.modified_at.tzinfo is None:
             raise ValueError("asset metadata requires a timezone-aware timestamp")
+        object.__setattr__(self, "metadata", normalize_storage_metadata(self.metadata))
         if self.status is not StorageEntryStatus.NORMAL and (
             self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()
         ):
@@ -85,13 +89,15 @@ class AssetInfo:
 
 
 @runtime_checkable
-class AssetBackend(
-    ReadableStorageBackend[AssetKey, bytes, AssetInfo],
-    StorageWriter[AssetKey, bytes, AssetInfo],
-    Protocol,
-):
+class AssetBackend(ReadableStorageBackend[AssetKey, bytes, AssetInfo], Protocol):
     @property
     def root(self) -> AssetRoot: ...
 
 
-__all__ = ["AssetBackend", "AssetInfo", "AssetKey", "AssetRoot"]
+@runtime_checkable
+class WritableAssetBackend(AssetBackend, StorageWriter[AssetKey, bytes, AssetInfo], Protocol):
+    @property
+    def writable(self) -> bool: ...
+
+
+__all__ = ["AssetBackend", "AssetInfo", "AssetKey", "AssetRoot", "WritableAssetBackend"]

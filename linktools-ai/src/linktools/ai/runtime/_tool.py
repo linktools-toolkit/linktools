@@ -25,9 +25,9 @@ class ToolOperationRecord:
     tenant_id: str
     step_run_id: str
     tool_call_id: str
-    idempotency_key_hash: str
+    idempotency_key_digest: str
     tool_name: str
-    arguments_hash: str
+    arguments_digest: str
     binding_fingerprint: str
     replay_safe: bool
     status: ToolOperationStatus

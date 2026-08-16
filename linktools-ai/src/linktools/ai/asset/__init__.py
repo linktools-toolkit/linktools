@@ -17,7 +17,13 @@ from ._directory import (
     PrefixAssetPathAdapter,
     directory_root,
 )
-from ._domain import AssetBackend, AssetInfo, AssetKey, AssetRoot
+from ._domain import (
+    AssetBackend,
+    AssetInfo,
+    AssetKey,
+    AssetRoot,
+    WritableAssetBackend,
+)
 from ._filesystem import FilesystemAssetBackend, filesystem_root
 from ._logical import (
     AssetCodec,
@@ -25,6 +31,7 @@ from ._logical import (
     AssetEntry,
     AssetRef,
     AssetResource,
+    AssetRetargeter,
     AssetTypeBinding,
     AssetTypeRegistry,
     AssetTypeRegistrySnapshot,
@@ -59,6 +66,7 @@ __all__ = [
     "AssetRef",
     "AssetRepository",
     "AssetResource",
+    "AssetRetargeter",
     "AssetScope",
     "AssetRoot",
     "AssetStore",
@@ -76,6 +84,7 @@ __all__ = [
     "ResolvedAsset",
     "SingleFileLayout",
     "SqlAssetBackend",
+    "WritableAssetBackend",
     "build_asset_sql_metadata",
     "StrictConfigReader",
     "filesystem_root",

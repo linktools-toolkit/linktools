@@ -1,0 +1,47 @@
+{
+  "source": [
+    "linktools-ai/src/linktools/ai/migrate/_database.py",
+    "linktools-ai/migrations/init_schema.sql"
+  ],
+  "table_count": 24,
+  "runtime_tables": [
+    "ai_runtime_sessions",
+    "ai_runtime_executions",
+    "ai_runtime_idempotency",
+    "ai_runtime_events",
+    "ai_runtime_task_graphs",
+    "ai_runtime_task_nodes",
+    "ai_runtime_evaluations",
+    "ai_runtime_memories",
+    "ai_runtime_artifacts",
+    "ai_runtime_approvals",
+    "ai_runtime_external_calls",
+    "ai_runtime_recovery_checkpoints",
+    "ai_runtime_tool_operations",
+    "ai_runtime_operation_counters",
+    "ai_runtime_operations"
+  ],
+  "step_tables": [
+    "ai_step_runs",
+    "ai_step_events",
+    "ai_step_snapshots",
+    "ai_step_effects"
+  ],
+  "object_tables": [
+    "ai_storage_objects",
+    "ai_storage_object_chunks"
+  ],
+  "asset_tables": [
+    "ai_asset_heads",
+    "ai_asset_entries",
+    "ai_asset_changes"
+  ],
+  "invariants": [
+    "no schema manifest table",
+    "no foreign keys",
+    "no composite unique or index wider than three columns",
+    "backend initialization validates and never provisions"
+  ],
+  "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",
+  "review_scope": "linktools-ai-spec-capability-agent-runtime-refactor"
+}

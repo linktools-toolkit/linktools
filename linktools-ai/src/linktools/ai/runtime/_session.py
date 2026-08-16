@@ -27,7 +27,7 @@ from ..core import (
     ResourceRef,
     SessionStatus,
     canonical_sha256,
-    idempotency_key_hash,
+    idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
 from .service_api import (
@@ -422,7 +422,7 @@ class DefaultSessionService:
         return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active, record.metadata)
 
     async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, operation_kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
-        operation_id = idempotency_key_hash(operation_id)
+        operation_id = idempotency_key_digest(operation_id)
         for _ in range(4):
             existing = await self._conversation.operations.get(operation_id, tenant_id=tenant_id)
             if existing is not None:

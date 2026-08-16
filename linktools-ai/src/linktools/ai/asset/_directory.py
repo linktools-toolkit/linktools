@@ -17,17 +17,10 @@ from ..storage import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
-    StorageBatchResult,
-    StorageChange,
-    StorageDeleteResult,
     StorageEntryRevision,
     StorageEntryStatus,
-    StorageOperation,
-    StoragePutResult,
-    StorageResetResult,
     StorageRevision,
     read_bytes,
-    write_bytes_atomic,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
@@ -133,7 +126,6 @@ class DirectoryAssetBackend:
         self,
         root: "AssetRoot | str" = "assets",
         *,
-        writable: bool = False,
         path_adapter: "AssetPathAdapter | None" = None,
     ) -> None:
         resolved = directory_root(root) if isinstance(root, str) else root
@@ -141,7 +133,6 @@ class DirectoryAssetBackend:
             raise ValueError("DirectoryAssetBackend requires a filesystem root")
         self._root = resolved
         self._directory = Path(resolved.locator)
-        self._writable = writable
         self._path_adapter = path_adapter or PrefixAssetPathAdapter()
         self._lock = asyncio.Lock()
 
@@ -151,19 +142,17 @@ class DirectoryAssetBackend:
 
     @property
     def writable(self) -> bool:
-        return self._writable
+        return False
 
     @property
     def atomic_batch(self) -> bool:
         return False
 
     async def initialize(self) -> None:
-        if self._writable:
-            await asyncio.to_thread(self._directory.mkdir, parents=True, exist_ok=True)
         _logger.debug(
             "local directory asset backend initialized: root=%s writable=%s",
             self._directory,
-            self._writable,
+            False,
         )
 
     async def head_revision(self) -> StorageRevision:
@@ -214,115 +203,6 @@ class DirectoryAssetBackend:
             modified = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
             revision = _store_revision(await asyncio.to_thread(self._scan))
             return self._info(key, content, modified, revision)
-
-    async def put(
-        self,
-        key: AssetKey,
-        value: bytes,
-        *,
-        expected_revision: "StorageEntryRevision | None" = None,
-    ) -> "StoragePutResult[AssetInfo]":
-        async with self._lock:
-            self._require_writable()
-            path = self._file_path(key)
-            exists = path.is_file()
-            current = await asyncio.to_thread(read_bytes, path) if exists else None
-            current_revision = None if current is None else _entry_revision(current)
-            self._check_revision(current_revision, expected_revision)
-            if current is not None and _etag(current) == _etag(value):
-                entries = await asyncio.to_thread(self._scan)
-                revision = _store_revision(entries)
-                current = next(item for item in entries if item[0] == key)
-                info = self._info(key, current[1], current[2], revision)
-                return StoragePutResult(info, info.revision, revision, False)
-            await asyncio.to_thread(write_bytes_atomic, path, bytes(value))
-            entries = await asyncio.to_thread(self._scan)
-            revision = _store_revision(entries)
-            info = self._info(
-                key,
-                bytes(value),
-                datetime.fromtimestamp(path.stat().st_mtime, timezone.utc),
-                revision,
-            )
-            _logger.debug("local asset file stored: kind=%s id=%s", key.kind, key.id)
-            return StoragePutResult(info, info.revision, revision, True)
-
-    async def delete(
-        self,
-        key: AssetKey,
-        *,
-        expected_revision: "StorageEntryRevision | None" = None,
-    ) -> "StorageDeleteResult[AssetKey]":
-        async with self._lock:
-            self._require_writable()
-            path = self._file_path(key)
-            exists = path.is_file()
-            current = await asyncio.to_thread(read_bytes, path) if exists else None
-            current_revision = None if current is None else _entry_revision(current)
-            self._check_revision(current_revision, expected_revision)
-            if not exists:
-                return StorageDeleteResult(key, False, None, _store_revision(await asyncio.to_thread(self._scan)))
-            await asyncio.to_thread(path.unlink)
-            self._remove_empty_parents(path.parent)
-            revision = _store_revision(await asyncio.to_thread(self._scan))
-            _logger.debug("local asset file deleted: kind=%s id=%s", key.kind, key.id)
-            return StorageDeleteResult(key, True, current_revision, revision)
-
-    async def reset(
-        self,
-        key: AssetKey,
-        *,
-        expected_revision: "StorageEntryRevision | None" = None,
-    ) -> "StorageResetResult[AssetKey]":
-        async with self._lock:
-            self._require_writable()
-            path = self._file_path(key)
-            content = await asyncio.to_thread(read_bytes, path) if path.is_file() else None
-            current_revision = None if content is None else _entry_revision(content)
-            self._check_revision(current_revision, expected_revision)
-            if content is None:
-                return StorageResetResult(key, False, _store_revision(await asyncio.to_thread(self._scan)))
-            await asyncio.to_thread(path.unlink)
-            self._remove_empty_parents(path.parent)
-            _logger.debug("local asset file reset: kind=%s id=%s", key.kind, key.id)
-            return StorageResetResult(key, True, _store_revision(await asyncio.to_thread(self._scan)))
-
-    async def apply_batch(
-        self,
-        changes: "Sequence[StorageChange[AssetKey, bytes]]",
-        *,
-        expected_revision: "StorageRevision | None" = None,
-    ) -> "StorageBatchResult[AssetInfo, AssetKey]":
-        if len({change.key for change in changes}) != len(changes):
-            raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
-        current = await self.head_revision()
-        if expected_revision is not None and expected_revision != current:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-        results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]] = []
-        for change in changes:
-            if change.operation is StorageOperation.PUT:
-                results.append(
-                    await self.put(
-                        change.key,
-                        bytes(change.value or b""),
-                        expected_revision=change.expected_revision,
-                    )
-                )
-            elif change.operation is StorageOperation.DELETE:
-                results.append(
-                    await self.delete(
-                        change.key,
-                        expected_revision=change.expected_revision,
-                    )
-                )
-            else:
-                results.append(
-                    await self.reset(
-                        change.key,
-                        expected_revision=change.expected_revision,
-                    )
-                )
-        return StorageBatchResult(await self.head_revision(), False, tuple(results))
 
     def _scan(self) -> "tuple[tuple[AssetKey, bytes, datetime], ...]":
         if not self._directory.is_dir():
@@ -385,24 +265,6 @@ class DirectoryAssetBackend:
             self._root.digest,
             modified_at,
         )
-
-    @staticmethod
-    def _check_revision(current: "StorageEntryRevision | None", expected: "StorageEntryRevision | None") -> None:
-        if expected is not None and current != expected:
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
-
-    def _require_writable(self) -> None:
-        if not self._writable:
-            raise AIError(ErrorCode.STORAGE_READ_ONLY)
-
-    def _remove_empty_parents(self, path: Path) -> None:
-        root = self._directory.resolve()
-        while path.resolve() != root:
-            try:
-                path.rmdir()
-            except OSError:
-                return
-            path = path.parent
 
 
 def directory_root(locator: str) -> AssetRoot:

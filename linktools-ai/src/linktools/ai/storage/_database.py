@@ -217,6 +217,7 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
             tuple(column.name for column in index.columns)
             for index in expected_table.indexes
             if not index.unique
+            and index.info.get("ddl_dialect") in (None, dialect_name)
         }
         if not expected_indexes.issubset(actual_non_unique):
             _schema_mismatch(table=expected_table.name, category="index")

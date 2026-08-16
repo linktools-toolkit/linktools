@@ -7,19 +7,21 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import Sequence
-from contextlib import asynccontextmanager
+from collections.abc import Mapping, Sequence
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from linktools.core import environ
 
-from ..core import Page, canonical_json_bytes, canonical_sha256
+from ..core import JsonValue, Page, canonical_json_bytes, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..storage import (
     StorageDeleteResult,
+    StorageChange,
     StorageEntryRevision,
     StorageEntryStatus,
+    StorageOperation,
     StorageResetResult,
 )
 from ._domain import AssetInfo, AssetKey
@@ -70,6 +72,19 @@ class _RepositoryKeyedLock:
 
     @asynccontextmanager
     async def hold(self, key: str):
+        async with self.hold_many((key,)):
+            yield
+
+    @asynccontextmanager
+    async def hold_many(self, keys: Sequence[str]):
+        ordered = tuple(sorted(set(keys)))
+        async with AsyncExitStack() as stack:
+            for key in ordered:
+                await stack.enter_async_context(self._hold_one(key))
+            yield
+
+    @asynccontextmanager
+    async def _hold_one(self, key: str):
         async with self._guard:
             state = self._states.get(key)
             if state is None:
@@ -162,10 +177,16 @@ class AssetScope:
         value: bytes,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> AssetInfo:
         """Write one non-entry raw resource through the underlying store."""
         key = self._mutation_key_for(path)
-        result = await self._store.put(key, value, expected_revision=expected_revision)
+        result = await self._store.put(
+            key,
+            value,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
         return result
 
     async def delete(
@@ -173,20 +194,30 @@ class AssetScope:
         path: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageDeleteResult[AssetKey]":
         """Delete one non-entry raw resource through the underlying store."""
         key = self._mutation_key_for(path)
-        return await self._store.delete(key, expected_revision=expected_revision)
+        return await self._store.delete(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
 
     async def reset(
         self,
         path: str,
         *,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "StorageResetResult[AssetKey]":
         """Reset one non-entry raw resource so lower layers can reappear."""
         key = self._mutation_key_for(path)
-        return await self._store.reset(key, expected_revision=expected_revision)
+        return await self._store.reset(
+            key,
+            expected_revision=expected_revision,
+            metadata=metadata,
+        )
 
     def _relative_path(self, key: AssetKey) -> str | None:
         if self._directory:
@@ -337,6 +368,7 @@ class AssetRepository:
         *,
         variant: "str | None" = None,
         expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> "ResolvedAsset[object]":
         """Encode and write one logical asset while preserving its layout."""
         binding = self._binding_for(ref)
@@ -357,7 +389,12 @@ class AssetRepository:
             _validate_value_type(binding, value)
             _validate_identity(binding, ref, value)
             encoded = _encode_value(selected, ref, value, binding.value_type)
-            new_info = await self._store.put(key, encoded, expected_revision=expected_revision)
+            new_info = await self._store.put(
+                key,
+                encoded,
+                expected_revision=expected_revision,
+                metadata=metadata,
+            )
             post = await self._probe(ref, binding)
             takeover = is_new_directory and await self._has_descendant_candidates(ref, binding, exclude_key=key)
             if (
@@ -385,6 +422,153 @@ class AssetRepository:
                 old_info is not None,
             )
             return ResolvedAsset(ref, selected.name, value, new_info, scope)
+
+    async def rename(
+        self,
+        source: AssetRef,
+        target: AssetRef,
+        *,
+        expected_revision: "StorageEntryRevision | None" = None,
+        metadata: "Mapping[str, JsonValue] | None" = None,
+    ) -> "ResolvedAsset[object]":
+        """Atomically move one logical asset and its owned raw resources."""
+        if source.kind != target.kind:
+            raise AIError(
+                ErrorCode.REQUEST_FIELD_INVALID,
+                safe_details={"reason": "rename_kind_mismatch"},
+            )
+        if source == target:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if not self._store.atomic_batch:
+            raise AIError(
+                ErrorCode.STORAGE_CAPABILITY_MISSING,
+                safe_details={"capability": "atomic_batch"},
+            )
+        binding = self._binding_for(source)
+        async with self._locks.hold_many(
+            (f"{source.kind}:{source.id}", f"{target.kind}:{target.id}")
+        ):
+            batch_revision = await self._store.current_revision()
+            source_probe = await self._probe(source, binding)
+            self._raise_for_owner(source_probe, source)
+            if len(source_probe.candidates) == 0:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            if len(source_probe.candidates) > 1:
+                self._raise_layout_conflict(source, source_probe.candidates)
+            source_candidate = source_probe.candidates[0]
+            if expected_revision is not None and source_candidate.info.revision != expected_revision:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+            target_probe = await self._probe(target, binding)
+            if target_probe.candidates:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if target_probe.owner_id is not None or await self._has_descendant_candidates(target, binding):
+                raise AIError(ErrorCode.ASSET_LAYOUT_CONFLICT)
+
+            infos = await self._rename_source_infos(source, source_candidate.variant)
+            changes = await self._rename_changes(
+                source,
+                target,
+                source_candidate.variant,
+                binding,
+                infos,
+                metadata,
+            )
+            result = await self._store.apply_batch(changes, expected_revision=batch_revision)
+            if not result.atomic:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            _logger.info(
+                "asset logical rename committed: kind=%s source_id_digest=%s "
+                "target_id_digest=%s changes=%s revision=%s",
+                source.kind,
+                canonical_sha256(source.id),
+                canonical_sha256(target.id),
+                len(changes),
+                result.store_revision,
+            )
+        return await self.resolve(target)
+
+    async def _rename_source_infos(
+        self,
+        source: AssetRef,
+        variant: AssetVariantBinding[object],
+    ) -> tuple[AssetInfo, ...]:
+        if isinstance(variant.layout, SingleFileLayout):
+            info = await self._store.stat(variant.layout.entry_key(source))
+            if info is None or info.status is not StorageEntryStatus.NORMAL:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return (info,)
+        infos = await _load_all(self._store, kind=source.kind)
+        prefix = source.id + "/"
+        selected = tuple(
+            info for info in infos if info.key.id == variant.layout.entry_key(source).id
+            or info.key.id.startswith(prefix)
+        )
+        if not selected:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return tuple(sorted(selected, key=lambda info: info.key.id))
+
+    async def _rename_changes(
+        self,
+        source: AssetRef,
+        target: AssetRef,
+        variant: AssetVariantBinding[object],
+        binding: AssetTypeBinding[object],
+        infos: Sequence[AssetInfo],
+        metadata: "Mapping[str, JsonValue] | None",
+    ) -> tuple[StorageChange[AssetKey, bytes], ...]:
+        entry_key = variant.layout.entry_key(source)
+        source_entry = next(info for info in infos if info.key == entry_key)
+        source_bytes = await self._store.get(source_entry.key)
+        if source_bytes is None or hashlib.sha256(source_bytes).hexdigest() != source_entry.etag:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        value = _decode_value(variant, source, source_bytes, binding.value_type)
+        if not _identity_matches(binding, target, value):
+            if binding.retargeter is None:
+                raise AIError(
+                    ErrorCode.STORAGE_CAPABILITY_MISSING,
+                    safe_details={"capability": "asset_retarget"},
+                )
+            try:
+                value = binding.retargeter(source, target, variant.name, value)
+            except AIError:
+                raise
+            except Exception as error:
+                raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+            _validate_value_type(binding, value)
+            _validate_identity(binding, target, value)
+        target_entry_key = variant.layout.entry_key(target)
+        target_existing = await self._store.stat(target_entry_key)
+        changes: list[StorageChange[AssetKey, bytes]] = []
+        for info in infos:
+            data = await self._store.get(info.key)
+            if data is None or hashlib.sha256(data).hexdigest() != info.etag:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            suffix = _rename_suffix(source, variant, info.key)
+            target_key = AssetKey(target.kind, target.id + suffix)
+            if info.key == source_entry.key:
+                data = _encode_value(variant, target, value, binding.value_type)
+            existing = target_existing if target_key == target_entry_key else await self._store.stat(target_key)
+            changes.append(
+                StorageChange(
+                    StorageOperation.PUT,
+                    target_key,
+                    data,
+                    None if existing is None else existing.revision,
+                    metadata or {},
+                )
+            )
+        changes.extend(
+            StorageChange(
+                StorageOperation.DELETE,
+                info.key,
+                None,
+                info.revision,
+                metadata or {},
+            )
+            for info in infos
+        )
+        return tuple(changes)
 
     def _binding_for_kind(self, kind: str) -> AssetTypeBinding[object]:
         return self._registry.binding(kind)
@@ -724,6 +908,24 @@ def _validate_identity(binding: AssetTypeBinding[object], ref: AssetRef, value: 
         raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
     if not valid:
         raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH)
+
+
+def _identity_matches(binding: AssetTypeBinding[object], ref: AssetRef, value: object) -> bool:
+    if binding.identity_validator is None:
+        return True
+    try:
+        return binding.identity_validator(ref, value)
+    except AIError:
+        raise
+    except Exception as error:
+        raise AIError(ErrorCode.ASSET_CONTENT_MISMATCH) from error
+
+
+def _rename_suffix(source: AssetRef, variant: AssetVariantBinding[object], key: AssetKey) -> str:
+    del variant
+    if not key.id.startswith(source.id):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return key.id[len(source.id) :]
 
 
 def _validate_limit(limit: int) -> None:

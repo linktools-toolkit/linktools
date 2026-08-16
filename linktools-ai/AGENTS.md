@@ -7,7 +7,7 @@ Each package owns one concern:
 | Package | Responsibility |
 |---|---|
 | `core` | Pure values, IDs, JSON, paging, principals, and canonical hashing |
-| `storage` | Generic overlays, caches, revisions, files, locks, SQL dialects, schema manifests, and database initialization |
+| `storage` | Generic overlays, caches, revisions, files, locks, SQL dialects, ObjectStore, and SQL validation primitives |
 | `asset` | Raw Asset keys, metadata, logical bindings, `AssetStore`, `AssetRepository`, and Asset backends |
 | `spec` | Agent, Skill, and MCP declaration DTOs and codecs |
 | `model` | Model routes, connections, credentials, registries, and materializers |
@@ -42,34 +42,33 @@ Normal library modules live directly under `linktools/ai/<package>/`. Only Tempo
 
 Keep common construction paths short. Callers should pass `RuntimeState` and domain inputs; they should not assemble registries, table collections, manifests, or internal storage bundles.
 
-The current SQL entry points follow this rule:
+The SQL lifecycle follows this rule:
 
 ```python
-context = create_sql_storage_context(engine, namespace)
-metadata, digest = build_sql_schema_metadata()
-await context.initialize(metadata=metadata, schema_manifest_digest=digest)
+await provision_database(engine)
+context = create_sql_storage_context(engine)
+await context.initialize(metadata=owned_metadata)
 domain = await open_sql_runtime(context, persist=frozenset({StorageDomain.CONVERSATION}))
-steps = build_sql_step_store(context)
 assets = build_sql_asset_backend(context)
 ```
 
-Schema owners expose public schema contributors for migration and evidence generation. Runtime constructors register and freeze their own schema; normal callers do not pass tables around.
+Schema owners expose public builders for migration and evidence generation. Runtime constructors validate their own metadata; normal callers do not assemble schema registries.
 
 Keep classification identities distinct:
 
 - Persistence `namespace` partitions Runtime records inside a backend.
 - `tenant_id` is the authorization and resource ownership boundary within a persistence namespace.
-- `memory_namespace` selects a memory collection within a tenant; persistence stores only its derived `memory_namespace_key`.
+- `memory_namespace` selects a memory collection within a tenant; persistence stores only its derived `memory_namespace_digest`.
 - Asset `namespace` partitions raw Asset storage independently from Runtime persistence; Asset `kind` selects the logical representation.
 - Task and tool lease records use `owner`; schema registries and storage overlays also use `owner` because each declaring type makes the role explicit.
 - `StorageDomain` selects durable business domains; Blob, Media, StepStore, Idempotency, OperationLedger, Approval, ExternalResult, ToolState, and Repository remain implementation details of those domains.
-- Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_key`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
+- Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_digest`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
 - Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
 - Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
 
-Workspace composition is single-tenant: bind authorization, local execution admission, and recovery to `workspace.workspace_id`. Do not infer a tenant from the persistence namespace. Lower-level Runtime persistence remains multi-tenant.
+Workspace composition defaults the Runtime tenant to `workspace.workspace_id`, but accepts an explicitly validated independent `tenant_id`. Namespace remains the workspace identity; lower-level Runtime persistence remains multi-tenant.
 
-All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. `StorageDatabase.initialize()` validates a frozen schema manifest. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
+All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. SQL initialization validates owned metadata only. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
 
 Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `initialize()` may perform documented I/O. Keep cleanup paired with opening through async context managers where ownership spans a scope.
 
@@ -85,9 +84,8 @@ Layer precedence is primary first, followed by declared fallback layers. Tombsto
 
 ## 5. SQL rules
 
-- Schema contributors register only tables they own in `SqlSchemaRegistry`.
-- Freeze the registry before deriving a manifest digest.
-- Use `prepare_storage_database()` for dialect preparation and `StorageDatabase.initialize()` for schema validation.
+- Runtime, Step, ObjectStore, and Asset builders register only tables they own into an optional shared `MetaData`.
+- `migrations/init_schema.sql` is the manually maintained 24-table DBA reference; there is no schema registry or manifest table.
 - SQLite requires WAL and process-scoped coordination. MySQL and PostgreSQL use shared-database coordination.
 - Filesystem coordination uses `filelock`; do not add `fcntl`, `msvcrt`, or platform-specific advisory-lock code.
 - Keep schema creation out of runtime startup. Tests and deployment tooling call `provision_database()` explicitly.
@@ -121,4 +119,4 @@ PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m pytest -q test
 PYTHONPATH=linktools-ai:linktools-ai/src:linktools/src python3 -m ruff check linktools-ai/scripts/build linktools-ai/src/linktools/ai linktools-ai/src/linktools/commands/ai tests/ai
 ```
 
-The specification, package policy, contract map, traceability files, schema manifests, and evidence matrices under `scripts/build/matrix` are release inputs. Update them only from deterministic current-source evidence. Run architecture checks after changing imports, package ownership, public exports, or module paths.
+The specification, package policy, contract map, traceability files, schema reference, and evidence matrices under `scripts/build/matrix` are release inputs. Update them only from deterministic current-source evidence. Run architecture checks after changing imports, package ownership, public exports, or module paths.

@@ -20,7 +20,7 @@ from ..core import (
     ResourceKind,
     ResourceRef,
     canonical_sha256,
-    idempotency_key_hash,
+    idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
 from ..observe import RunSnapshot
@@ -128,10 +128,10 @@ class DefaultEvaluationService:
 
     async def run(self, binding_digest: str, output_schema_fingerprint: str, request: RunEvaluationRequest) -> EvaluationHandle:
         evaluation_id = uuid.uuid4().hex
-        key_hash = idempotency_key_hash(request.idempotency_key)
+        key_digest = idempotency_key_digest(request.idempotency_key)
         await self._authorization.authorize(request.principal, AuthorizationAction.EVALUATION_RUN, ResourceRef(ResourceKind.EVALUATION, evaluation_id, request.principal.tenant_id))
         request_digest = canonical_sha256({"action": "evaluation.run", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "dataset_digest": request.dataset_digest, "binding": binding_digest, "output_schema_fingerprint": output_schema_fingerprint})
-        existing = await self._state.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+        existing = await self._state.idempotency.get("evaluation.run", key_digest, tenant_id=request.principal.tenant_id)
         if existing is not None:
             if existing.request_digest != request_digest:
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
@@ -147,7 +147,7 @@ class DefaultEvaluationService:
                 tenant_id=request.principal.tenant_id,
                 runtime_domain=RuntimeDomain.EVALUATION,
                 scope="evaluation.run",
-                key_hash=key_hash,
+                key_digest=key_digest,
                 request_digest=request_digest,
                 resource_kind=ResourceKind.EVALUATION,
                 resource_id=evaluation_id,
@@ -186,11 +186,11 @@ class DefaultEvaluationService:
             _logger.warning("evaluation reservation remains recoverable: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id, exc_info=environ.debug)
             raise
         try:
-            await self._state.idempotency.compare_and_swap("evaluation.run", key_hash, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(
+            await self._state.idempotency.compare_and_swap("evaluation.run", key_digest, tenant_id=request.principal.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=IdempotencyRecord(
                 tenant_id=request.principal.tenant_id,
                 runtime_domain=RuntimeDomain.EVALUATION,
                 scope="evaluation.run",
-                key_hash=key_hash,
+                key_digest=key_digest,
                 request_digest=request_digest,
                 resource_kind=ResourceKind.EVALUATION,
                 resource_id=evaluation_id,
@@ -203,7 +203,7 @@ class DefaultEvaluationService:
         except AIError as error:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
-            current = await self._state.idempotency.get("evaluation.run", key_hash, tenant_id=request.principal.tenant_id)
+            current = await self._state.idempotency.get("evaluation.run", key_digest, tenant_id=request.principal.tenant_id)
             if current is None or current.status is not IdempotencyStatus.COMPLETED:
                 raise
         _logger.info("evaluation submitted: evaluation=%s tenant=%s", evaluation_id, request.principal.tenant_id)

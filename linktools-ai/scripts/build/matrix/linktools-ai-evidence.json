@@ -1,6 +1,6 @@
 {
   "baseline_commit": "e9fe29cffd674efd8d817d77d4f7de52050102a8",
-  "validated_source_commit": "589523800ca3881b9614d2931da44661836e7b85",
+  "validated_source_commit": "ed02e1331484691a03d46bf1f20d59e28393ea5f",
   "status": "COMPLETE",
   "open_findings": [],
   "environment": {
@@ -8,7 +8,7 @@
     "debug": "false",
     "pydantic_ai_harness": "0.13.0",
     "pydantic_ai_slim": "2.27.0",
-    "ruff": "passed for changed files: F/E9/I; repository-wide F/E9/I retains the pre-existing frozen asset/_sql.py import-order violation and broader baseline violations",
+    "ruff": "passed: configured linktools-ai source, build scripts, commands, and AI tests",
     "mysql_server": "not_run_no_environment_accepted",
     "postgresql_server": "not_run_no_environment_accepted"
   },
@@ -20,13 +20,13 @@
     "postgresql": "not_run_no_environment_accepted"
   },
   "mandatory": {
-    "conformance": "passed: 111 AI tests, 2 optional live tests skipped without MySQL/PostgreSQL environment",
+    "conformance": "passed: 203 AI tests; optional live MySQL/PostgreSQL tests not run without server environments",
     "cancellation": "passed: exact S Runtime/Task cancellation and terminal convergence regression suite",
     "concurrency": "passed: exact S Runtime/Task CAS, resume, shutdown and effect-ownership regression suite",
     "fault_injection": "passed: exact S FILE/SQL fault-injection and rollback regression suite",
     "public_api": "passed: exact S package exports, profile-free contract, command imports and optional dependency isolation",
-    "architecture": "passed: compileall, changed-file Ruff F/E9/I, architecture, SCC, dynamic import, dependency, naming, cohesion, visibility and private-import gates; repository-wide Ruff retains pre-existing baseline violations",
-    "schema": "passed: exact S separate runtime/step metadata registries and SQL profile tombstone checks",
+    "architecture": "passed: compileall, Ruff, architecture, SCC, dynamic import, dependency, naming, cohesion, visibility, and private-import gates",
+    "schema": "passed: canonical 24-table metadata and init_schema.sql agree; all tables use ai_ names, with no FK or schema manifest",
     "provenance": "passed: exact S validated; E is evidence-only and directly based on S"
   },
   "spec_revision": "linktools-ai-spec-capability-agent-runtime-refactor",

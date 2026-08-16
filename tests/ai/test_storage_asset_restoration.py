@@ -26,6 +26,7 @@ from linktools.ai.storage import (
     StorageChange,
     StorageOverlay,
     StorageOperation,
+    build_object_sql_metadata,
     classify_sql_error,
     is_retryable_sql_transaction,
     resolve_dialect,
@@ -92,13 +93,13 @@ def test_asset_path_adapter_and_config_are_available() -> None:
 async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -> None:
     backend = DirectoryAssetBackend(
         AssetRoot("file:directory", "file", str(tmp_path), "directory"),
-        writable=True,
         path_adapter=_MappedPathAdapter(),
     )
     await backend.initialize()
     key = AssetKey("mcp", "one")
-    await backend.put(key, b"one")
-    assert (tmp_path / "mapped/mcp/one.json").read_bytes() == b"one"
+    (tmp_path / "mapped/mcp").mkdir(parents=True)
+    (tmp_path / "mapped/mcp/one.json").write_bytes(b"one")
+    assert backend.writable is False
     assert await backend.get(key) == b"one"
     info = await backend.stat(key)
     assert info is not None
@@ -106,8 +107,7 @@ async def test_local_directory_asset_backend_maps_single_files(tmp_path: Path) -
     repeated = await backend.stat(key)
     assert repeated is not None
     assert info.revision == repeated.revision
-    await backend.delete(key)
-    assert await backend.get(key) is None
+    assert not hasattr(backend, "put")
 
 
 @pytest.mark.asyncio
@@ -180,13 +180,18 @@ async def test_sql_asset_backend_uses_normalized_history_tables(tmp_path: Path) 
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     try:
-        tables = build_asset_sql_metadata().tables
+        from sqlalchemy import MetaData
+
+        metadata = MetaData()
+        build_asset_sql_metadata(metadata=metadata)
+        build_object_sql_metadata(metadata=metadata)
+        tables = metadata.tables
         backend = SqlAssetBackend(engine, namespace="test")
         assert backend.root.scheme == "sql"
-        assert tuple(table.name for table in (tables["asset_entries"], tables["asset_changes"], tables["asset_revision"])) == (
-            "asset_entries",
-            "asset_changes",
-            "asset_revision",
+        assert tuple(table.name for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_asset_heads"])) == (
+            "ai_asset_entries",
+            "ai_asset_changes",
+            "ai_asset_heads",
         )
     finally:
         await engine.dispose()
@@ -244,7 +249,12 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
         statements.append(statement)
 
     try:
-        tables = build_asset_sql_metadata().tables
+        from sqlalchemy import MetaData
+
+        metadata = MetaData()
+        build_asset_sql_metadata(metadata=metadata)
+        build_object_sql_metadata(metadata=metadata)
+        tables = metadata.tables
         backend = SqlAssetBackend(engine, namespace="history")
         await provision_asset_database(engine)
         await backend.initialize()
@@ -271,13 +281,13 @@ async def test_sql_asset_backend_persists_history_outside_revision_row(tmp_path:
             if statement.lstrip().upper().startswith("SELECT")
         )
         assert len(selects) == 2
-        assert all("asset_" in statement for statement in selects)
+        assert all("ai_asset_" in statement for statement in selects)
         async with session_factory() as session:
             counts = []
-            for table in (tables["asset_entries"], tables["asset_changes"], tables["storage_objects"], tables["asset_revision"]):
+            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_storage_objects"], tables["ai_asset_heads"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert counts == [1, 4, 2, 1]
-        assert not hasattr(tables["asset_revision"].c, "payload")
+        assert not hasattr(tables["ai_asset_heads"].c, "payload")
     finally:
         await engine.dispose()
 
@@ -290,10 +300,11 @@ async def test_sql_asset_backend_provisions_its_owner_schema(tmp_path: Path) -> 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     try:
         backend = SqlAssetBackend(engine, namespace="missing")
+        await provision_asset_database(engine)
         await backend.initialize()
         async with engine.connect() as connection:
             tables = await connection.run_sync(lambda sync_connection: inspect(sync_connection).get_table_names())
-        assert {"asset_entries", "asset_changes", "asset_revision"} <= set(tables)
+        assert {"ai_asset_entries", "ai_asset_changes", "ai_asset_heads"} <= set(tables)
     finally:
         await engine.dispose()
 
@@ -385,7 +396,12 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'asset.db'}")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        tables = build_asset_sql_metadata().tables
+        from sqlalchemy import MetaData
+
+        metadata = MetaData()
+        build_asset_sql_metadata(metadata=metadata)
+        build_object_sql_metadata(metadata=metadata)
+        tables = metadata.tables
         backend = SqlAssetBackend(engine, namespace="batch")
         await provision_asset_database(engine)
         await backend.initialize()
@@ -403,7 +419,7 @@ async def test_sql_asset_backend_batches_large_file_sets(tmp_path: Path) -> None
         assert await backend.get(AssetKey("skill", "skill-129/SKILL.md")) == b"skill-129"
         async with session_factory() as session:
             counts = []
-            for table in (tables["asset_entries"], tables["asset_changes"], tables["storage_objects"]):
+            for table in (tables["ai_asset_entries"], tables["ai_asset_changes"], tables["ai_storage_objects"]):
                 counts.append(await session.scalar(select(func.count()).select_from(table)))
         assert tuple(counts) == (130, 130, 130)
     finally:

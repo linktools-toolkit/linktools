@@ -29,7 +29,7 @@ class DefaultExternalService:
             request.call_id,
             tenant_id=request.principal.tenant_id,
             expected_status=ExternalCallStatus.PENDING,
-            idempotency_key_hash=hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest(),
+            idempotency_key_digest=hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest(),
             object_ref=request.object_ref,
             payload_digest=request.payload_digest,
             supplied_at=datetime.now(timezone.utc),

@@ -868,7 +868,7 @@
   ],
   "verification": {
     "status": "COMPLETE",
-    "validated_source_commit": "589523800ca3881b9614d2931da44661836e7b85",
+    "validated_source_commit": "ed02e1331484691a03d46bf1f20d59e28393ea5f",
     "tests_ai": "passed: 111 passed, 2 skipped (MySQL/PostgreSQL live not available)",
     "compileall": "passed",
     "ruff": "passed for changed files: F/E9/I; repository-wide F/E9/I retains the frozen asset/_sql.py baseline violation and broader Ruff baseline violations",

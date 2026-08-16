@@ -2,6 +2,16 @@
 # -*- coding: utf-8 -*-
 """Explicit database schema provisioning for deployment tooling."""
 
-from ._database import provision_asset_database, provision_runtime_database
+from ._database import (
+    build_sql_schema_metadata,
+    provision_asset_database,
+    provision_database,
+    provision_runtime_database,
+)
 
-__all__ = ["provision_asset_database", "provision_runtime_database"]
+__all__ = [
+    "build_sql_schema_metadata",
+    "provision_asset_database",
+    "provision_database",
+    "provision_runtime_database",
+]

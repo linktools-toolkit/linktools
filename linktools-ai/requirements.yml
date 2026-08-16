@@ -1,7 +1,7 @@
 dependencies:
   - filelock>=3.4.0
   - pydantic-ai-slim[mcp,openai]>=2.27.0,<3.0.0
-  - pydantic-ai-harness[dynamic-workflow]>=0.13.0
+  - pydantic-ai-harness[skills,dynamic-workflow]>=0.13.0
   - jsonschema>=4.23.0
   - PyYAML>=6.0,<7.0
 
@@ -24,4 +24,4 @@ optional-dependencies:
   evaluation:
     - pydantic-evals>=0.1.0
   temporal:
-    - pydantic-ai-slim[temporal,mcp,openai]>=2.27.0,<3.0.0
+    - pydantic-ai-slim[temporal]>=2.27.0,<3.0.0

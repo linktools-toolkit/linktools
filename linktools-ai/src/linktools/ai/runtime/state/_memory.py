@@ -2,34 +2,28 @@
 # -*- coding: utf-8 -*-
 """Reference runtime persistence for in-memory and filesystem backends."""
 
-import asyncio
 import copy
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
-from enum import Enum
 
 from linktools.core import environ
 
 from ...core import (
     ApprovalDecision,
     ApprovalStatus,
-    EvaluationStatus,
     ExecutionEventType,
-    ExecutionLineageKind,
     ExecutionStatus,
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
-    OperationKind,
     OperationStatus,
     Page,
     ResourceKind,
     ResourceRef,
     SessionStatus,
-    StopReason,
     TaskStatus,
     ToolOperationStatus,
     canonical_sha256,
@@ -42,7 +36,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import (
     ObjectRef,
 )
-from ...task import TaskGraph, TaskGraphView, TaskNode, TaskTerminalRecord
+from ...task import TaskGraph, TaskGraphView, TaskTerminalRecord
 from .._tool import ToolOperationRecord, ToolStateRepository
 from ._contracts import (
     ApprovalRecord,
@@ -64,23 +58,14 @@ from ._contracts import (
     ExecutionTerminalCommitResult,
     ExternalCallRecord,
     IdempotencyRecord,
-    IdempotencyRepository,
     IdempotencyTerminalUpdate,
     MemoryRecord,
     MemoryState,
     OperationLedgerInput,
     OperationLedgerRecord,
-    OperationLedgerRepository,
     OperationTerminalUpdate,
     RecoveryCheckpoint,
-    RecoveryCheckpointState,
-    RecoveryConversationIntent,
-    RecoveryExecutionInput,
-    RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
     RecoveryState,
-    RecoveryTerminalHandoff,
-    RecoveryTerminalOutcome,
     ResultRecord,
     RuntimeRepository,
     SessionRecord,
@@ -296,7 +281,7 @@ class _ExecutionRepository(_Base):
         async with self._lock:
             key = (claim.tenant_id, claim.execution_id)
             current = self._records.get(key)
-            identity = await self._idempotency.get(claim.scope, claim.key_hash, tenant_id=claim.tenant_id)
+            identity = await self._idempotency.get(claim.scope, claim.key_digest, tenant_id=claim.tenant_id)
             if current is None or identity is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if current.status is not ExecutionStatus.PENDING_START or current.revision != claim.expected_revision or current.event_sequence != claim.expected_event_sequence or current.agent_run_sequence != 0:
@@ -308,7 +293,7 @@ class _ExecutionRepository(_Base):
             started_identity = replace(identity, status=IdempotencyStatus.STARTED, updated_at=now)
             event = ExecutionEventRecord(claim.execution_id, claim.tenant_id, claim.expected_event_sequence + 1, ExecutionEventType.EXECUTION_STARTED, {})
             self._records[key] = started
-            self._idempotency._records[(claim.tenant_id, claim.scope, claim.key_hash)] = started_identity
+            self._idempotency._records[(claim.tenant_id, claim.scope, claim.key_digest)] = started_identity
             self._events._items.setdefault((claim.tenant_id, claim.execution_id), []).append(event)
             self._mark_changed()
             return started
@@ -321,7 +306,7 @@ class _ExecutionRepository(_Base):
         if reservation.execution.tenant_id != reservation.idempotency.tenant_id or reservation.execution.execution_id != reservation.idempotency.resource_id or reservation.idempotency.runtime_domain is not RuntimeDomain.EXECUTION or reservation.idempotency.resource_kind is not ResourceKind.EXECUTION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         async with self._lock:
-            idempotency_key = (reservation.idempotency.tenant_id, reservation.idempotency.scope, reservation.idempotency.key_hash)
+            idempotency_key = (reservation.idempotency.tenant_id, reservation.idempotency.scope, reservation.idempotency.key_digest)
             existing_idempotency = self._idempotency._records.get(idempotency_key)
             if existing_idempotency is not None:
                 if existing_idempotency.request_digest != reservation.idempotency.request_digest:
@@ -358,12 +343,12 @@ class _ExecutionRepository(_Base):
         async with self._lock:
             key = (commit.tenant_id, commit.execution_id)
             current = self._records.get(key)
-            identity = await self._idempotency.get(commit.scope, commit.key_hash, tenant_id=commit.tenant_id)
+            identity = await self._idempotency.get(commit.scope, commit.key_digest, tenant_id=commit.tenant_id)
             if current is None or identity is None or current.status is not ExecutionStatus.STARTED or current.revision != commit.expected_revision or identity.status is not IdempotencyStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             unknown = replace(current, status=ExecutionStatus.START_UNKNOWN, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.occurred_at)
             self._records[key] = unknown
-            self._idempotency._records[(commit.tenant_id, commit.scope, commit.key_hash)] = replace(identity, status=IdempotencyStatus.START_UNKNOWN, updated_at=commit.occurred_at)
+            self._idempotency._records[(commit.tenant_id, commit.scope, commit.key_digest)] = replace(identity, status=IdempotencyStatus.START_UNKNOWN, updated_at=commit.occurred_at)
             self._events._items.setdefault((commit.tenant_id, commit.execution_id), []).append(ExecutionEventRecord(commit.execution_id, commit.tenant_id, current.event_sequence + 1, ExecutionEventType.EXECUTION_START_UNKNOWN, {}))
             self._mark_changed()
             return unknown
@@ -449,10 +434,10 @@ class _IdempotencyRepository(_Base):
         self._check_tenant(record.tenant_id)
         if record.runtime_domain is not self._runtime_domain:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if re.fullmatch(r"[0-9a-f]{64}", record.key_hash) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", record.key_digest) is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         async with self._lock:
-            key = (record.tenant_id, record.scope, record.key_hash)
+            key = (record.tenant_id, record.scope, record.key_digest)
             current = self._records.get(key)
             if current is None:
                 self._records[key] = record
@@ -462,25 +447,25 @@ class _IdempotencyRepository(_Base):
                 raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             return current
 
-    async def get(self, scope: str, key_hash: str, *, tenant_id: str) -> IdempotencyRecord | None:
+    async def get(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        return self._records.get((tenant_id, scope, key_hash))
+        return self._records.get((tenant_id, scope, key_digest))
 
     async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
         self._ensure_open()
         self._check_tenant(tenant_id)
-        return tuple(sorted((record for record in self._records.values() if record.tenant_id == tenant_id and record.resource_kind is resource_kind and record.resource_id == resource_id), key=lambda record: (record.scope, record.key_hash)))
+        return tuple(sorted((record for record in self._records.values() if record.tenant_id == tenant_id and record.resource_kind is resource_kind and record.resource_id == resource_id), key=lambda record: (record.scope, record.key_digest)))
 
-    async def compare_and_swap(self, scope: str, key_hash: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
+    async def compare_and_swap(self, scope: str, key_digest: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         async with self._lock:
-            store_key = (tenant_id, scope, key_hash)
+            store_key = (tenant_id, scope, key_digest)
             current = self._records.get(store_key)
             if current is None or current.status is not expected_status:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if next_record.tenant_id != tenant_id or next_record.key_hash != key_hash or next_record.runtime_domain is not self._runtime_domain:
+            if next_record.tenant_id != tenant_id or next_record.key_digest != key_digest or next_record.runtime_domain is not self._runtime_domain:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._records[store_key] = next_record
             self._mark_changed()
@@ -574,7 +559,7 @@ class _TerminalCommitRepository(_Base):
             self._results[key] = result
             self._events._items.setdefault(key, []).append(ExecutionEventRecord(execution.execution_id, execution.tenant_id, commit.expected_event_sequence + 1, commit.terminal_event_type, commit.terminal_event_payload))
             if commit.idempotency is not None:
-                identity_key = (execution.tenant_id, commit.idempotency.scope, commit.idempotency.key_hash)
+                identity_key = (execution.tenant_id, commit.idempotency.scope, commit.idempotency.key_digest)
                 self._idempotency._records[identity_key] = replace(identity, status=commit.idempotency.next_status, result_digest=commit.idempotency.result_digest, error_code=commit.idempotency.error_code, updated_at=execution.updated_at)
             if commit.operation is not None:
                 current_operation = self._operations._records[(execution.tenant_id, commit.operation.operation_id)]
@@ -593,7 +578,7 @@ class _TerminalCommitRepository(_Base):
             if current is not None and current.status in {IdempotencyStatus.RESERVED, IdempotencyStatus.STARTED}:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return
-        if current is None or current.tenant_id != execution.tenant_id or current.runtime_domain is not RuntimeDomain.EXECUTION or current.resource_kind is not ResourceKind.EXECUTION or current.resource_id != execution.execution_id or current.scope != update.scope or current.key_hash != update.key_hash or current.request_digest != update.request_digest or current.status is not update.expected_status:
+        if current is None or current.tenant_id != execution.tenant_id or current.runtime_domain is not RuntimeDomain.EXECUTION or current.resource_kind is not ResourceKind.EXECUTION or current.resource_id != execution.execution_id or current.scope != update.scope or current.key_digest != update.key_digest or current.request_digest != update.request_digest or current.status is not update.expected_status:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     def _idempotency_matches(self, current: IdempotencyRecord | None, update: IdempotencyTerminalUpdate | None) -> bool:
@@ -784,16 +769,16 @@ class _ApprovalRepository(_Base):
         self._check_tenant(tenant_id)
         return self._records.get((tenant_id, approval_id))
 
-    async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, idempotency_key_hash: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord:
+    async def decide(self, approval_id: str, *, tenant_id: str, expected_status: ApprovalStatus, idempotency_key_digest: str, decision: ApprovalDecision, principal_id: str, decision_digest: str, decided_at: datetime) -> ApprovalRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         async with self._lock:
             current = self._records.get((tenant_id, approval_id))
             if current is None or current.status is not expected_status:
-                if current is not None and current.idempotency_key_hash == idempotency_key_hash and current.decision is decision and current.decision_digest == decision_digest:
+                if current is not None and current.idempotency_key_digest == idempotency_key_digest and current.decision is decision and current.decision_digest == decision_digest:
                     return current
                 raise AIError(ErrorCode.APPROVAL_CONFLICT)
-            updated = replace(current, status=ApprovalStatus.APPROVED if decision is ApprovalDecision.APPROVE else ApprovalStatus.DENIED, idempotency_key_hash=idempotency_key_hash, decision=decision, decided_by=principal_id, decision_digest=decision_digest, decided_at=decided_at)
+            updated = replace(current, status=ApprovalStatus.APPROVED if decision is ApprovalDecision.APPROVE else ApprovalStatus.DENIED, idempotency_key_digest=idempotency_key_digest, decision=decision, decided_by=principal_id, decision_digest=decision_digest, decided_at=decided_at)
             self._records[(tenant_id, approval_id)] = updated
             self._mark_changed()
             return updated
@@ -833,16 +818,16 @@ class _ExternalRepository(_Base):
         self._check_tenant(tenant_id)
         return self._records.get((tenant_id, call_id))
 
-    async def supply(self, call_id: str, *, tenant_id: str, expected_status: ExternalCallStatus, idempotency_key_hash: str, object_ref: object, payload_digest: str, supplied_at: datetime) -> ExternalCallRecord:
+    async def supply(self, call_id: str, *, tenant_id: str, expected_status: ExternalCallStatus, idempotency_key_digest: str, object_ref: object, payload_digest: str, supplied_at: datetime) -> ExternalCallRecord:
         self._ensure_open()
         self._check_tenant(tenant_id)
         async with self._lock:
             current = self._records.get((tenant_id, call_id))
             if current is None or current.status is not expected_status:
-                if current is not None and current.idempotency_key_hash == idempotency_key_hash and current.object_ref == object_ref and current.payload_digest == payload_digest:
+                if current is not None and current.idempotency_key_digest == idempotency_key_digest and current.object_ref == object_ref and current.payload_digest == payload_digest:
                     return current
                 raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
-            updated = replace(current, status=ExternalCallStatus.SUPPLIED, idempotency_key_hash=idempotency_key_hash, object_ref=object_ref, payload_digest=payload_digest, supplied_at=supplied_at)
+            updated = replace(current, status=ExternalCallStatus.SUPPLIED, idempotency_key_digest=idempotency_key_digest, object_ref=object_ref, payload_digest=payload_digest, supplied_at=supplied_at)
             self._records[(tenant_id, call_id)] = updated
             self._mark_changed()
             return updated
@@ -1247,7 +1232,7 @@ class _ToolRepository(_Base, ToolStateRepository):
     async def reserve(self, record: ToolOperationRecord) -> ToolOperationRecord:
         self._ensure_open()
         self._check_tenant(record.tenant_id)
-        if re.fullmatch(r"[0-9a-f]{64}", record.idempotency_key_hash) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", record.idempotency_key_digest) is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
         async with self._lock:
             key = (record.tenant_id, record.tool_operation_id)
@@ -1256,9 +1241,9 @@ class _ToolRepository(_Base, ToolStateRepository):
                 if (
                     current.step_run_id != record.step_run_id
                     or current.tool_call_id != record.tool_call_id
-                    or current.idempotency_key_hash != record.idempotency_key_hash
+                    or current.idempotency_key_digest != record.idempotency_key_digest
                     or current.tool_name != record.tool_name
-                    or current.arguments_hash != record.arguments_hash
+                    or current.arguments_digest != record.arguments_digest
                     or current.binding_fingerprint != record.binding_fingerprint
                     or current.replay_safe != record.replay_safe
                 ):
@@ -1809,6 +1794,40 @@ def _validate_terminal_result(execution: ExecutionRecord, result: ResultRecord) 
         has_schema or result.object_ref is not None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _operation_immutable(record: OperationLedgerRecord) -> tuple[object, ...]:
+    return (
+        record.operation_id,
+        record.tenant_id,
+        record.resource_kind,
+        record.resource_id,
+        record.execution_id,
+        record.operation_kind,
+        record.status,
+        record.request_digest,
+        record.result_ref,
+        record.result_digest,
+        record.error_code,
+        record.compactable,
+    )
+
+
+def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ...]:
+    return (
+        record.operation_id,
+        record.tenant_id,
+        record.resource_kind,
+        record.resource_id,
+        record.execution_id,
+        record.operation_kind,
+        record.status,
+        record.request_digest,
+        record.result_ref,
+        record.result_digest,
+        record.error_code,
+        record.compactable,
+    )
 
 
 __all__ = []

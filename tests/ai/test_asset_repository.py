@@ -3,6 +3,7 @@
 """Logical AssetRepository behavior and Skill Markdown contract checks."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,6 +23,7 @@ from linktools.ai.asset import (
     DirectoryAssetBackend,
     SingleFileLayout,
 )
+from linktools.ai.core import JsonValue
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.spec import (
     builtin_asset_bindings,
@@ -126,8 +128,9 @@ class _RaceStore(AssetStore):
         value: bytes,
         *,
         expected_revision: StorageEntryRevision | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
     ) -> AssetInfo:
-        info = await super().put(key, value, expected_revision=expected_revision)
+        info = await super().put(key, value, expected_revision=expected_revision, metadata=metadata)
         if not self._raced:
             self._raced = True
             await self._backend.put(AssetKey(key.kind, "foo.md"), b"foo")
@@ -140,8 +143,9 @@ class _RecoveryRaceStore(_RaceStore):
         key: AssetKey,
         *,
         expected_revision: StorageEntryRevision | None = None,
+        metadata: Mapping[str, JsonValue] | None = None,
     ) -> StorageResetResult[AssetKey]:
-        del key, expected_revision
+        del key, expected_revision, metadata
         raise AIError(ErrorCode.STORAGE_READ_ONLY)
 
 
