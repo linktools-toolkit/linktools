@@ -1660,41 +1660,6 @@ class SqlStepArchive(StepStore):
         for row in snapshot_values:
             await _snapshot_from_sql(row, self.object_store)
 
-    async def _validate_run_indexes(self, connection: object, run_id: str, run_row: Mapping[str, object]) -> None:
-        from sqlalchemy import select
-
-        key = _namespace_digest(self.namespace)
-        if "ai_step_events" in self._metadata.tables:
-            events = self._metadata.tables["ai_step_events"]
-            event_rows = (
-                await connection.execute(
-                    select(events)
-                    .where(events.c.namespace_digest == key, events.c.tenant_id == self.tenant_id, events.c.run_id == run_id)
-                    .order_by(events.c.event_index)
-                )
-            ).mappings().all()
-            _validate_step_indexes(int(run_row["last_event_index"]), event_rows, "event_index")
-        if "ai_step_snapshots" in self._metadata.tables:
-            snapshots = self._metadata.tables["ai_step_snapshots"]
-            snapshot_rows = (
-                await connection.execute(
-                    select(snapshots)
-                    .where(snapshots.c.namespace_digest == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.run_id == run_id)
-                    .order_by(snapshots.c.snapshot_index)
-                )
-            ).mappings().all()
-            _validate_step_indexes(int(run_row["last_snapshot_index"]), snapshot_rows, "snapshot_index")
-        if "ai_step_effects" in self._metadata.tables:
-            effects = self._metadata.tables["ai_step_effects"]
-            effect_rows = (
-                await connection.execute(
-                    select(effects)
-                    .where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == run_id)
-                    .order_by(effects.c.effect_index)
-                )
-            ).mappings().all()
-            _validate_step_indexes(int(run_row["last_effect_index"]), effect_rows, "effect_index")
-
     def _media_prefix(self) -> str:
         return f"v1/step/{self._runtime_domain.value}/{_namespace_digest(self.namespace)}/{_scope_key(self.tenant_id)}"
 

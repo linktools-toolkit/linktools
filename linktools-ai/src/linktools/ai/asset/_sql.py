@@ -224,6 +224,11 @@ class SqlAssetBackend:
 
     async def load_metadata(self, after_revision: StorageRevision | None) -> MetadataLoad[AssetKey, AssetInfo]:
         await self._ensure_ready()
+        after_value = (
+            None
+            if after_revision is None
+            else int(after_revision.value)
+        )
         from sqlalchemy import and_, select
         revision_table = self._metadata.tables["ai_asset_heads"]
         entries_table = self._metadata.tables["ai_asset_entries"]
@@ -236,9 +241,9 @@ class SqlAssetBackend:
             condition = [
                 entries_table.c.namespace_digest == self._namespace_digest,
             ]
-            if after_revision is not None:
+            if after_value is not None:
                 condition.append(
-                    revision_table.c.store_revision != int(after_revision.value)
+                    revision_table.c.store_revision != after_value
                 )
             statement = (
                 select(
@@ -260,7 +265,7 @@ class SqlAssetBackend:
             if not rows:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             current = int(rows[0]["head_store_revision"])
-            if after_revision is not None and int(after_revision) == current:
+            if after_value is not None and after_value == current:
                 return MetadataLoad(MetadataLoadMode.PATCH, StorageRevision(str(current)), ())
             changes = []
             for row in rows:
@@ -308,17 +313,19 @@ class SqlAssetBackend:
                 )
         if isinstance(self._object_store, SqlObjectStore):
             values = await self._object_store.read_many(tuple(refs.values()))
-        else:
-            values = {
-                key: await read_object(
-                    self._object_store,
-                    ref.key,
-                    expected_digest=ref.digest,
-                    expected_size=ref.size,
-                )
+            return {
+                key: values[ref.key]
                 for key, ref in refs.items()
             }
-        return {key: values[ref.key] for key, ref in refs.items()}
+        return {
+            key: await read_object(
+                self._object_store,
+                ref.key,
+                expected_digest=ref.digest,
+                expected_size=ref.size,
+            )
+            for key, ref in refs.items()
+        }
 
     async def stat(self, key: AssetKey) -> AssetInfo | None:
         await self._ensure_ready()
@@ -336,6 +343,8 @@ class SqlAssetBackend:
 
     async def apply_batch(self, changes: Sequence[StorageChange[AssetKey, bytes]], *, expected_revision: StorageRevision | None = None) -> StorageBatchResult[AssetInfo, AssetKey]:
         await self._ensure_ready()
+        if len({change.key for change in changes}) != len(changes):
+            raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
         if isinstance(self._object_store, SqlObjectStore):
             prepared = await self._prepare_batch_objects(changes)
             async with self._lock:
@@ -505,7 +514,7 @@ class SqlAssetBackend:
                             )
                         )
                         if deleted.rowcount != (1 if current_row is not None else 0):
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
                         await connection.execute(insert(entry_table).values(**row))
                 if no_op is not None:
                     current, store_revision = no_op
@@ -540,6 +549,7 @@ class SqlAssetBackend:
     async def _head_matches(self, revision: StorageRevision) -> bool:
         from sqlalchemy import select
 
+        expected_value = int(revision.value)
         table = self._metadata.tables["ai_asset_heads"]
         async with self._connect() as connection:
             value = await connection.scalar(
@@ -549,7 +559,7 @@ class SqlAssetBackend:
             )
         if value is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return int(value) == int(revision)
+        return int(value) == expected_value
 
     async def _prepare_batch_objects(
         self,
@@ -579,8 +589,6 @@ class SqlAssetBackend:
     ) -> StorageBatchResult[AssetInfo, AssetKey]:
         from sqlalchemy import delete, insert, select, update
 
-        if len({change.key for change in changes}) != len(changes):
-            raise AIError(ErrorCode.STORAGE_BATCH_DUPLICATE_KEY)
         revision_table = self._metadata.tables["ai_asset_heads"]
         entry_table = self._metadata.tables["ai_asset_entries"]
         change_table = self._metadata.tables["ai_asset_changes"]
@@ -737,7 +745,7 @@ class SqlAssetBackend:
                             if is_mutating and change.key in current
                         )
                         if deleted_count != expected_deleted:
-                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
                         await connection.execute(insert(entry_table), rows_to_insert)
                 if no_op is not None:
                     revision, results = no_op
@@ -762,21 +770,28 @@ class SqlAssetBackend:
 
         entry_table = self._metadata.tables["ai_asset_entries"]
         change_table = self._metadata.tables["ai_asset_changes"]
-        columns = tuple(
-            entry_table.c[column]
-            for column in entry_table.c.keys()
-            if column != "id"
+        persisted_columns = (
+            "asset_kind",
+            "asset_id",
+            "asset_key_digest",
+            "entry_revision",
+            "store_revision",
+            "etag",
+            "size",
+            "status",
+            "content_store_id",
+            "content_key",
+            "metadata",
+            "modified_at",
         )
         statement = union_all(
-            select(*columns).where(
+            select(
+                *(entry_table.c[name] for name in persisted_columns)
+            ).where(
                 entry_table.c.namespace_digest == self._namespace_digest
             ),
             select(
-                *tuple(
-                    change_table.c[column]
-                    for column in change_table.c.keys()
-                    if column != "id"
-                )
+                *(change_table.c[name] for name in persisted_columns)
             ).where(
                 change_table.c.namespace_digest == self._namespace_digest
             ),
@@ -974,7 +989,7 @@ def _row_for_info(info: AssetInfo, store_id: str, object_key: str | None) -> dic
         "asset_kind": info.key.kind,
         "asset_id": info.key.id,
         "entry_revision": info.revision.value,
-        "store_revision": info.store_revision.value,
+        "store_revision": int(info.store_revision.value),
         "etag": info.etag,
         "size": info.size,
         "status": info.status.value,
