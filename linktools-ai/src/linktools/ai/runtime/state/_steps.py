@@ -1926,7 +1926,10 @@ class RuntimeStepStore(StepStore):
         first: BaseException | None = None
         for run_id in tuple(dict.fromkeys(candidate_step_run_ids)):
             try:
-                await self.verify_terminal_attempts(candidate_step_run_ids=(run_id,), required_run_id=None)
+                await self.verify_terminal_attempts(
+                    candidate_step_run_ids=(run_id,),
+                    required_step_run_id=None,
+                )
                 await self._staging.release_run(run_id)
             except asyncio.CancelledError:
                 raise

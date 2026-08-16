@@ -10,10 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from linktools.ai.adapter import StepExecutionHistoryReader
+from linktools.ai.core import (
+    ExecutionLineageKind,
+    ExecutionStatus,
+    HmacCursorSigner,
+    step_conversation_id,
+    step_run_id,
+)
 from linktools.ai.runtime.state._steps import FilesystemStepArchive
 from linktools.ai.errors import AIError, ErrorCode
-from linktools.ai.runtime.state import RuntimeDomain
-from pydantic_ai.messages import BinaryContent, ModelRequest, UserPromptPart
+from linktools.ai.runtime.state import ExecutionRecord, RuntimeDomain, RuntimeState
+from pydantic_ai.messages import BinaryContent, ModelRequest, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import (
     ContinuableSnapshot,
     RunRecord,
@@ -120,6 +128,124 @@ async def test_filesystem_step_store_hides_interrupted_snapshots_and_rejects_unk
     with pytest.raises(AIError) as error:
         await reopened.initialize()
     assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED
+
+
+@pytest.mark.asyncio
+async def test_terminal_multisegment_history_survives_staging_release() -> None:
+    namespace = "history-release"
+    tenant_id = "tenant"
+    execution_id = "execution"
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace=namespace, tenant_id=tenant_id)
+    try:
+        now = datetime.now(timezone.utc)
+        execution = ExecutionRecord(
+            execution_id,
+            tenant_id,
+            None,
+            "binding",
+            None,
+            execution_id,
+            None,
+            None,
+            ExecutionLineageKind.RUN,
+            ExecutionStatus.SUCCEEDED,
+            0,
+            0,
+            2,
+            None,
+            {},
+            now,
+            now,
+        )
+        await state.execution.executions.create(execution)
+        conversation_id = step_conversation_id(
+            namespace=namespace,
+            tenant_id=tenant_id,
+            execution_id=execution_id,
+        )
+        run_ids: list[str] = []
+        for sequence in (1, 2):
+            run_id = step_run_id(
+                namespace=namespace,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+                segment_sequence=sequence,
+            )
+            run_ids.append(run_id)
+            run = RunRecord(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                agent_name="default",
+                metadata={
+                    "segment_sequence": str(sequence),
+                    "agent_name": "default",
+                },
+                started_at=now,
+            )
+            await state.steps.register_run(run)
+            await state.steps.append_event(
+                StepEvent(
+                    run_id=run_id,
+                    kind="model_request_started",
+                    step_index=sequence,
+                    timestamp=now,
+                    conversation_id=conversation_id,
+                    agent_name="default",
+                )
+            )
+            await state.steps.append_event(
+                StepEvent(
+                    run_id=run_id,
+                    kind="model_request_completed",
+                    step_index=sequence,
+                    timestamp=now,
+                    conversation_id=conversation_id,
+                    agent_name="default",
+                )
+            )
+            await state.steps.save_snapshot(
+                ContinuableSnapshot(
+                    run_id=run_id,
+                    step_index=sequence,
+                    messages=[
+                        ModelRequest(
+                            parts=[UserPromptPart(content=f"prompt-{sequence}")],
+                            conversation_id=conversation_id,
+                        ),
+                        ModelResponse(
+                            parts=[TextPart(content=f"response-{sequence}")],
+                            conversation_id=conversation_id,
+                        ),
+                    ],
+                    conversation_id=conversation_id,
+                    agent_name="default",
+                    timestamp=now,
+                )
+            )
+
+        await state.retention.release_execution_handoff(execution_id, tenant_id=tenant_id)
+        reader = StepExecutionHistoryReader(
+            namespace=namespace,
+            executions=state.execution.executions,
+            store=state.steps.read_store(RuntimeDomain.EXECUTION),
+            cursor_signer=HmacCursorSigner("test", b"test-key"),
+        )
+        trace = await reader.trace(execution_id, tenant_id=tenant_id, cursor=None, limit=200)
+        history = await reader.history(execution_id, tenant_id=tenant_id, cursor=None, limit=200)
+
+        assert [item.payload["segment_sequence"] for item in trace.items] == [1, 1, 2, 2]
+        assert [item.item_kind for item in history.items] == ["user", "assistant", "user", "assistant"]
+        assert [item.content for item in history.items] == [
+            "prompt-1",
+            "response-1",
+            "prompt-2",
+            "response-2",
+        ]
+        for run_id in run_ids:
+            assert await state.steps.get_run(run_id=run_id) is None
+    finally:
+        await state.close()
 
 
 def test_filesystem_step_store_writes_hashed_run_directory(tmp_path: Path) -> None:

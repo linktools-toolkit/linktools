@@ -66,7 +66,7 @@ Keep classification identities distinct:
 - Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
 - Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
 
-Workspace composition defaults the Runtime tenant to `workspace.workspace_id`, but accepts an explicitly validated independent `tenant_id`. Namespace remains the workspace identity; lower-level Runtime persistence remains multi-tenant.
+Workspace composition defaults the Runtime tenant to `default`, but accepts an explicitly validated independent `tenant_id`. Namespace remains the workspace identity; lower-level Runtime persistence remains multi-tenant.
 
 All lifecycle objects use `initialize()`; do not add parallel lifecycle aliases. `StorageOverlay.initialize()` initializes each distinct backend once. SQL initialization validates owned metadata only. Runtime initialization never creates or alters SQL tables; only `migrate.provision_database()` performs explicit provisioning.
 

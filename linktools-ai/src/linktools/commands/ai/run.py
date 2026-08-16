@@ -66,7 +66,13 @@ class Command(BaseCommand):
                     api_key=args.api_key,
                 ),
             ) as runtime:
-                return await _emit_result(runtime, workspace, args.prompt, session_id, memory_scope, args.json)
+                return await _emit_result(
+                    runtime,
+                    args.prompt,
+                    session_id,
+                    memory_scope,
+                    args.json,
+                )
 
         try:
             return asyncio.run(execute())
@@ -74,10 +80,15 @@ class Command(BaseCommand):
             raise CommandError(str(error)) from error
 
 
-async def _emit_result(runtime: Runtime, workspace: Workspace, prompt: str, session_id: str, memory_scope: str, as_json: bool) -> int:
-    principal = _trusted_principal(workspace.workspace_id)
+async def _emit_result(
+    runtime: Runtime,
+    prompt: str,
+    session_id: str,
+    memory_scope: str,
+    as_json: bool,
+) -> int:
     if as_json:
-        result = await runtime.run(prompt, principal=principal, session_id=session_id, memory_scope=memory_scope)
+        result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
         payload = _result_payload(result)
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
@@ -85,7 +96,7 @@ async def _emit_result(runtime: Runtime, workspace: Workspace, prompt: str, sess
         return 0
 
     succeeded = False
-    async for event in runtime.stream(prompt, principal=principal, session_id=session_id, memory_scope=memory_scope):
+    async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
         if event.event_type is ExecutionEventType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
             if isinstance(text, str):
@@ -130,12 +141,6 @@ def _payload_text(payload: object) -> str:
 def _write_stderr(value: str) -> None:
     sys.stderr.write(value + "\n")
     sys.stderr.flush()
-
-
-def _trusted_principal(workspace_id: str):
-    from ...ai.workspace import trusted_workspace_principal
-
-    return trusted_workspace_principal(workspace_id)
 
 
 command = Command()

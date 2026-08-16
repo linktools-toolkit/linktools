@@ -186,7 +186,7 @@ async def open_workspace_runtime(
 ) -> AsyncIterator[Runtime]:
     if not isinstance(workspace, Workspace):
         raise TypeError("workspace is required")
-    effective_tenant_id = workspace.workspace_id if tenant_id is None else validate_tenant_id(tenant_id)
+    effective_tenant_id = "default" if tenant_id is None else validate_tenant_id(tenant_id)
     if assets is not None and (asset_bindings or asset_path_adapter is not None):
         raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
     workspace_owned_assets = assets is None

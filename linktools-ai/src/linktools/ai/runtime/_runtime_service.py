@@ -12,11 +12,13 @@ from ..agent import AgentCompiler, AgentDefinition
 from ..core import (
     JsonValue,
     Principal,
+    PrincipalKind,
     SessionStatus,
     validate_agent_id,
     validate_idempotency_key,
     validate_memory_scope,
     validate_resource_id,
+    validate_tenant_id,
     validate_user_prompt,
 )
 from ..errors import AIError, ErrorCode
@@ -67,6 +69,7 @@ class Runtime:
         event: EventService,
         artifact: ArtifactService,
         *,
+        tenant_id: str = "default",
         definitions: "dict[str, AgentDefinition] | None" = None,
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
     ) -> None:
@@ -80,11 +83,25 @@ class Runtime:
         self.approval = approval
         self.event = event
         self.artifact = artifact
+        self._tenant_id = validate_tenant_id(tenant_id)
+        self._default_principal = Principal(
+            principal_id="runtime",
+            tenant_id=self._tenant_id,
+            kind=PrincipalKind.LOCAL_TRUSTED.value,
+        )
         self._definitions = {} if definitions is None else definitions
         self._close_callback = close_callback
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: "asyncio.Task[None] | None" = None
+
+    @property
+    def tenant_id(self) -> str:
+        return self._tenant_id
+
+    @property
+    def default_principal(self) -> Principal:
+        return self._default_principal
 
     def agent(self, agent_id: str) -> AgentHandle:
         self._ensure_open()
@@ -114,7 +131,7 @@ class Runtime:
         self,
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
@@ -133,12 +150,13 @@ class Runtime:
         agent_id: "str | None",
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None",
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
     ) -> ExecutionHandle:
         self._ensure_open()
+        principal = self._resolve_principal(principal)
         validate_user_prompt(user_prompt)
         request = ExecutionRequest(
             user_prompt,
@@ -187,7 +205,7 @@ class Runtime:
         self,
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
@@ -207,12 +225,13 @@ class Runtime:
         self,
         execution_id: str,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         idempotency_key: "str | None" = None,
         force: bool = False,
     ) -> CancelExecutionResult:
         """Explicitly request cancellation of an admitted execution."""
         self._ensure_open()
+        principal = self._resolve_principal(principal)
         validate_resource_id(execution_id)
         result = await self.execution.cancel(
             execution_id,
@@ -234,12 +253,13 @@ class Runtime:
         agent_id: "str | None",
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None",
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
         timeout_seconds: "float | None",
     ) -> ExecutionResult:
+        principal = self._resolve_principal(principal)
         handle = await self._start_for_agent(
             agent_id,
             user_prompt,
@@ -258,7 +278,7 @@ class Runtime:
         self,
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
@@ -277,11 +297,12 @@ class Runtime:
         agent_id: "str | None",
         user_prompt: str,
         *,
-        principal: Principal,
+        principal: "Principal | None",
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
     ) -> AsyncIterator[ExecutionEvent]:
+        principal = self._resolve_principal(principal)
         return self._stream(
             agent_id,
             user_prompt,
@@ -316,7 +337,7 @@ class Runtime:
         self,
         session_id: str,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         cwd: "str | None" = None,
         metadata: "Mapping[str, JsonValue] | None" = None,
     ) -> SessionView:
@@ -333,10 +354,11 @@ class Runtime:
         agent_id: str,
         session_id: str,
         *,
-        principal: Principal,
+        principal: "Principal | None",
         cwd: "str | None",
         metadata: "Mapping[str, JsonValue] | None",
     ) -> SessionView:
+        principal = self._resolve_principal(principal)
         definition = await self._compile_and_register(agent_id)
         values = dict(metadata or {})
         if any(key.startswith("linktools.ai.") for key in values):
@@ -388,7 +410,7 @@ class Runtime:
         self,
         graph: TaskGraph,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
     ) -> TaskGraphResult:
@@ -404,7 +426,7 @@ class Runtime:
         self,
         graph: TaskGraph,
         *,
-        principal: Principal,
+        principal: "Principal | None" = None,
         idempotency_key: str,
         limits: "TaskGraphLimits | None" = None,
         timeout_seconds: "float | None" = None,
@@ -421,11 +443,12 @@ class Runtime:
         self,
         graph: TaskGraph,
         *,
-        principal: Principal,
+        principal: "Principal | None",
         idempotency_key: str,
         limits: "TaskGraphLimits | None",
     ) -> TaskGraphRequest:
         self._ensure_open()
+        principal = self._resolve_principal(principal)
         selected_limits = limits or TaskGraphLimits()
         validate_idempotency_key(idempotency_key)
         graph.validate_limits(selected_limits)
@@ -531,6 +554,16 @@ class Runtime:
     def _ensure_open(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    def _resolve_principal(self, principal: "Principal | None") -> Principal:
+        if principal is not None:
+            return principal
+        _logger.debug(
+            "runtime default principal selected: tenant=%s principal=%s",
+            self._default_principal.tenant_id,
+            self._default_principal.principal_id,
+        )
+        return self._default_principal
 
     async def close(self) -> None:
         async with self._close_lock:

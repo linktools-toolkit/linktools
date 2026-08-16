@@ -20,7 +20,7 @@ except ModuleNotFoundError:
 from .core import ExecutionEventType, JsonValue, Principal, validate_memory_scope
 from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
-from .workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
+from .workspace import Workspace, open_workspace_runtime
 
 _logger = environ.get_logger("ai.acp")
 
@@ -142,9 +142,14 @@ class ACPApplication:
         return cls(workspace)
 
     async def serve(self, *, memory_scope: str) -> None:
-        principal = trusted_workspace_principal(self.workspace.workspace_id)
         async with open_workspace_runtime(self.workspace) as runtime:
-            await serve_stdio(ACPAgent(runtime, principal=principal, memory_scope=memory_scope))
+            await serve_stdio(
+                ACPAgent(
+                    runtime,
+                    principal=runtime.default_principal,
+                    memory_scope=memory_scope,
+                )
+            )
 
 
 async def serve_stdio(agent: ACPAgent) -> None:

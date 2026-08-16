@@ -143,7 +143,7 @@ The identity fields are intentionally independent:
 
 Fields stay short when their declaring type supplies the domain, such as `Principal.kind` and `TaskLease.owner`. Explicit qualifiers distinguish meanings that can coexist in the same record or flattened storage boundary, such as `operation_kind`, `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_digest`, or preserve an authorization identity domain, such as `owner_principal_id`.
 
-`open_workspace_runtime()` uses `workspace.workspace_id` as the Runtime namespace. Its optional `tenant_id` defaults to that workspace identity and can be set independently after validation. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
+`open_workspace_runtime()` uses `workspace.workspace_id` as the Runtime namespace. Its optional `tenant_id` defaults to `default` and can be set independently after validation. Runtime facade methods use a local trusted principal for that tenant when callers omit `principal`; lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
 
 External SQL deployments borrow an application-owned async SQLAlchemy `AsyncEngine` and require the explicit 24-table schema to be provisioned first. Runtime startup validates owned tables and never alters them:
 

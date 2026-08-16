@@ -171,6 +171,7 @@ async def build_local_runtime(
             approval,
             event,
             artifact,
+            tenant_id=tenant_id,
             definitions=definitions,
             close_callback=coordinator.close,
         )

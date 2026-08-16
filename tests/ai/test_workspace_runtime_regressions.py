@@ -7,7 +7,7 @@ import pytest
 from linktools.ai.adapter import RuntimeMemoryStore
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.workspace import Workspace, open_workspace_runtime, trusted_workspace_principal
+from linktools.ai.workspace import Workspace, open_workspace_runtime
 
 
 @pytest.mark.asyncio
@@ -41,13 +41,29 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
 @pytest.mark.asyncio
 async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
     workspace = Workspace.load(tmp_path)
-    principal = trusted_workspace_principal(workspace.workspace_id)
     models = ModelRegistry.openai(model="gpt-test")
     async with open_workspace_runtime(workspace, models=models) as runtime:
-        created = await runtime.create_session("remember", principal=principal)
+        assert runtime.tenant_id == "default"
+        assert runtime.default_principal.tenant_id == "default"
+        created = await runtime.create_session("remember")
+        agent_created = await runtime.agent("default").create_session("remember-agent")
+
+    async with open_workspace_runtime(workspace, tenant_id="tenant-a", models=models) as runtime:
+        assert runtime.tenant_id == "tenant-a"
+        assert runtime.default_principal.tenant_id == "tenant-a"
+        await runtime.create_session("custom-tenant")
 
     async with open_workspace_runtime(workspace, models=models) as runtime:
-        loaded = await runtime.session.get(created.session_id, principal=principal)
+        loaded = await runtime.session.get(
+            created.session_id,
+            principal=runtime.default_principal,
+        )
+        agent_loaded = await runtime.session.get(
+            agent_created.session_id,
+            principal=runtime.default_principal,
+        )
 
     assert loaded is not None
     assert loaded.session_id == created.session_id
+    assert agent_loaded is not None
+    assert agent_loaded.session_id == agent_created.session_id
