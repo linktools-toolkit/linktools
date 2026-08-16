@@ -809,7 +809,26 @@ class SqlStepArchive(StepStore):
                     if _run_from_sql(current) != record:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                 else:
-                    await connection.execute(insert(table).values(namespace_digest=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, run_id=record.run_id, run_digest=_step_identity_digest(self._runtime_domain.value, record.run_id), conversation_id=record.conversation_id, parent_run_id=record.parent_run_id, agent_name=record.agent_name, metadata=dict(record.metadata), last_event_index=0, last_snapshot_index=0, last_effect_index=0, started_at=record.started_at))
+                    await connection.execute(
+                        insert(table).values(
+                            namespace_digest=key,
+                            tenant_id=self.tenant_id,
+                            runtime_domain=self._runtime_domain.value,
+                            run_id=record.run_id,
+                            identity_digest=_step_identity_digest(
+                                self._runtime_domain.value,
+                                record.run_id,
+                            ),
+                            conversation_id=record.conversation_id,
+                            parent_run_id=record.parent_run_id,
+                            agent_name=record.agent_name,
+                            metadata=dict(record.metadata),
+                            last_event_index=0,
+                            last_snapshot_index=0,
+                            last_effect_index=0,
+                            started_at=record.started_at,
+                        )
+                    )
             return
         except IntegrityError:
             async with self._begin() as connection:
@@ -884,7 +903,29 @@ class SqlStepArchive(StepStore):
             if any(_snapshot_row_matches(previous_row, payload, snapshot) for previous_row in previous_rows):
                 return
             index = int(run_row["last_snapshot_index"]) + 1
-            await connection.execute(insert(snapshots).values(namespace_digest=key, tenant_id=self.tenant_id, runtime_domain=self._runtime_domain.value, run_id=snapshot.run_id, snapshot_index=index, identity_digest=_step_identity_digest("snapshot", self._runtime_domain.value, snapshot.run_id, index), step_index=snapshot.step_index, state=snapshot.state, conversation_id=snapshot.conversation_id, parent_run_id=snapshot.parent_run_id, agent_name=snapshot.agent_name, timestamp=snapshot.timestamp, object_store_id=self.object_store.store_id, messages=payload["messages"]))
+            await connection.execute(
+                insert(snapshots).values(
+                    namespace_digest=key,
+                    tenant_id=self.tenant_id,
+                    runtime_domain=self._runtime_domain.value,
+                    run_id=snapshot.run_id,
+                    snapshot_index=index,
+                    identity_digest=_step_identity_digest(
+                        "snapshot",
+                        self._runtime_domain.value,
+                        snapshot.run_id,
+                        index,
+                    ),
+                    step_index=snapshot.step_index,
+                    state=snapshot.state,
+                    conversation_id=snapshot.conversation_id,
+                    parent_run_id=snapshot.parent_run_id,
+                    agent_name=snapshot.agent_name,
+                    timestamp=snapshot.timestamp,
+                    media_store_id=self.object_store.store_id,
+                    messages=payload["messages"],
+                )
+            )
             await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == snapshot.run_id).values(last_snapshot_index=index))
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:

@@ -86,13 +86,13 @@ class RuntimeRetentionController:
             if domain is RuntimeDomain.EXECUTION:
                 await self._pruner.prune_execution_terminal(execution_id, tenant_id)
             elif domain in {RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY}:
-                memory_scope_key = None
+                memory_scope_digest = None
                 if execution is not None and execution.memory_scope is not None:
-                    memory_scope_key = _memory_working_scope_key(execution_id, execution.memory_scope)
+                    memory_scope_digest = _memory_working_scope_digest(execution_id, execution.memory_scope)
                 await self._pruner.prune_execution_working(
                     execution_id,
                     tenant_id,
-                    memory_scope_key,
+                    memory_scope_digest,
                     frozenset(candidates),
                     domains=frozenset({domain}),
                 )
@@ -137,8 +137,8 @@ class RuntimeRetentionController:
         _logger.debug("runtime transient retention closed: domains=%s", sorted(domain.value for domain in self._transient_domains))
 
 
-def _memory_working_scope_key(execution_id: str, memory_scope: str) -> str:
-    return canonical_sha256({"execution_id": execution_id, "memory_scope_key": canonical_sha256(memory_scope)})
+def _memory_working_scope_digest(execution_id: str, memory_scope: str) -> str:
+    return canonical_sha256({"execution_id": execution_id, "memory_scope_digest": canonical_sha256(memory_scope)})
 
 
 __all__ = []

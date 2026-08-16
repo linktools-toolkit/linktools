@@ -293,8 +293,8 @@ class _FilesystemDomainBackend:
                 if isinstance(raw, dict):
                     record = _idempotency_from_json(raw)
                     if _operation_storage_domain(record.resource_kind.value) is self._domain:
-                        key_digest = str(raw["key_digest"])
-                        idempotency._records[(record.tenant_id, record.scope, key_digest)] = record
+                        idempotency_key_digest = str(raw["idempotency_key_digest"])
+                        idempotency._records[(record.tenant_id, record.scope, idempotency_key_digest)] = record
         if isinstance(terminal, _TerminalCommitRepository):
             for raw in payload["results"]:
                 if isinstance(raw, dict):
@@ -447,7 +447,11 @@ class _FilesystemDomainBackend:
             if isinstance(events, _EventRepository):
                 values["events"] = [_json_record(item) for items in events._items.values() for item in items]
             if isinstance(idempotency, _IdempotencyRepository):
-                values["idempotency"] = [_idempotency_json(item, key_digest) for (tenant, scope, key_digest), item in idempotency._records.items() if scope != "evaluation.run"]
+                values["idempotency"] = [
+                    _idempotency_json(item, idempotency_key_digest)
+                    for (tenant, scope, idempotency_key_digest), item in idempotency._records.items()
+                    if scope != "evaluation.run"
+                ]
         elif self._domain is RuntimeDomain.MEMORY and isinstance(memories, _MemoryRepository):
             values["memories"] = [_json_record(item) for item in memories._records.values()]
         elif self._domain is RuntimeDomain.ARTIFACT and isinstance(artifacts, _ArtifactRepository):
@@ -464,7 +468,11 @@ class _FilesystemDomainBackend:
             if isinstance(evaluations, _EvaluationRepository):
                 values["evaluations"] = [_json_record(item) for item in evaluations._records.values()]
             if isinstance(idempotency, _IdempotencyRepository):
-                values["idempotency"] = [_idempotency_json(item, key_digest) for (tenant, scope, key_digest), item in idempotency._records.items() if scope == "evaluation.run"]
+                values["idempotency"] = [
+                    _idempotency_json(item, idempotency_key_digest)
+                    for (tenant, scope, idempotency_key_digest), item in idempotency._records.items()
+                    if scope == "evaluation.run"
+                ]
         elif self._domain is RuntimeDomain.RECOVERY:
             if isinstance(approvals, _ApprovalRepository):
                 values["approvals"] = [_json_record(item) for item in approvals._records.values()]
@@ -534,7 +542,7 @@ def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
         "sessions": ("tenant_id", "session_id"),
         "executions": ("tenant_id", "execution_id"),
         "results": ("tenant_id", "execution_id"),
-        "idempotency": ("tenant_id", "scope", "key_digest"),
+        "idempotency": ("tenant_id", "scope", "idempotency_key_digest"),
         "events": ("tenant_id", "execution_id", "sequence"),
         "evaluations": ("tenant_id", "evaluation_id"),
         "memories": ("tenant_id", "memory_id"),
@@ -557,7 +565,7 @@ def _validate_state_record_uniqueness(records: "dict[str, JsonValue]") -> None:
                 raise ValueError(f"runtime {name} identity is duplicated")
             seen.add(identity)
     for item in records["idempotency"]:
-        if re.fullmatch(r"[0-9a-f]{64}", str(item["key_digest"])) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", str(item["idempotency_key_digest"])) is None:
             raise ValueError("runtime idempotency key hash is invalid")
     task_keys: set[tuple[str, str, str]] = set()
     for item in records["tasks"]:
@@ -717,14 +725,14 @@ def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
-    key_digest = str(value["key_digest"])
-    if re.fullmatch(r"[0-9a-f]{64}", key_digest) is None:
+    idempotency_key_digest = str(value["idempotency_key_digest"])
+    if re.fullmatch(r"[0-9a-f]{64}", idempotency_key_digest) is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return IdempotencyRecord(
         tenant_id=str(value["tenant_id"]),
         runtime_domain=RuntimeDomain(str(value["runtime_domain"])),
         scope=str(value["scope"]),
-        key_digest=key_digest,
+        idempotency_key_digest=idempotency_key_digest,
         request_digest=str(value["request_digest"]),
         resource_kind=ResourceKind(str(value["resource_kind"])),
         resource_id=str(value["resource_id"]),
@@ -755,7 +763,15 @@ def recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckp
         parent_execution_id=None if raw_input.get("parent_execution_id") is None else str(raw_input["parent_execution_id"]),
         root_execution_id=str(raw_input["root_execution_id"]),
         source_execution_id=None if raw_input.get("source_execution_id") is None else str(raw_input["source_execution_id"]),
-        idempotency=None if raw_input.get("idempotency") is None else RecoveryIdempotencyInput(str(raw_input["idempotency"]["scope"]), str(raw_input["idempotency"]["key_digest"]), str(raw_input["idempotency"]["request_digest"])),
+        idempotency=(
+            None
+            if raw_input.get("idempotency") is None
+            else RecoveryIdempotencyInput(
+                str(raw_input["idempotency"]["scope"]),
+                str(raw_input["idempotency"]["idempotency_key_digest"]),
+                str(raw_input["idempotency"]["request_digest"]),
+            )
+        ),
     )
     return RecoveryCheckpoint(
         execution_id=str(value["execution_id"]),
@@ -817,9 +833,9 @@ def _json_record(record: object) -> dict[str, JsonValue]:
     return _json_value(asdict(record))
 
 
-def _idempotency_json(record: IdempotencyRecord, key_digest: str) -> dict[str, JsonValue]:
+def _idempotency_json(record: IdempotencyRecord, idempotency_key_digest: str) -> dict[str, JsonValue]:
     value = _record_json(record)
-    value["key_digest"] = key_digest
+    value["idempotency_key_digest"] = idempotency_key_digest
     return value
 
 
@@ -904,7 +920,22 @@ def _memory_from_json(value: dict[str, JsonValue]) -> MemoryRecord:
     raw_ref = value["content_ref"]
     if not isinstance(raw_ref, dict):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return MemoryRecord(str(value["memory_id"]), str(value["tenant_id"]), str(value["memory_scope_key"]), ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"])), str(value["content_digest"]), value.get("metadata", {}), int(value["revision"]), _time(str(value["created_at"])), _time(str(value["updated_at"])))
+    return MemoryRecord(
+        str(value["memory_id"]),
+        str(value["tenant_id"]),
+        str(value["memory_scope_digest"]),
+        ObjectRef(
+            str(raw_ref["store_id"]),
+            str(raw_ref["key"]),
+            str(raw_ref["digest"]),
+            int(raw_ref["size"]),
+        ),
+        str(value["content_digest"]),
+        value.get("metadata", {}),
+        int(value["revision"]),
+        _time(str(value["created_at"])),
+        _time(str(value["updated_at"])),
+    )
 
 
 def _artifact_from_json(value: dict[str, JsonValue]) -> ArtifactRecord:

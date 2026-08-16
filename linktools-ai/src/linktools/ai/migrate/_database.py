@@ -10,8 +10,6 @@ from linktools.core import environ
 from ..asset import build_asset_sql_metadata
 from ..runtime.state import (
     RuntimeDomain,
-    RuntimeStatePlan,
-    RuntimeStateRoute,
     build_runtime_sql_metadata,
     build_step_sql_metadata,
 )
@@ -31,11 +29,7 @@ def build_sql_schema_metadata() -> "MetaData":
     from sqlalchemy import MetaData
 
     metadata = MetaData()
-    routes = {
-        domain.value: RuntimeStateRoute.filesystem(f"runtime-{domain.value}")
-        for domain in RuntimeDomain
-    }
-    build_runtime_sql_metadata(RuntimeStatePlan(**routes), metadata=metadata)
+    build_runtime_sql_metadata(frozenset(RuntimeDomain), metadata=metadata)
     for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
         build_step_sql_metadata(domain, metadata=metadata)
     build_object_sql_metadata(metadata=metadata)

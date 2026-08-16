@@ -377,7 +377,7 @@ class LocalExecutionBackend:
                         tenant_id=execution.tenant_id,
                         runtime_domain=RuntimeDomain.EXECUTION,
                         scope=recovery_idempotency.scope,
-                        key_digest=recovery_idempotency.key_digest,
+                        idempotency_key_digest=recovery_idempotency.idempotency_key_digest,
                         request_digest=recovery_idempotency.request_digest,
                         resource_kind=ResourceKind.EXECUTION,
                         resource_id=execution.execution_id,
@@ -394,7 +394,15 @@ class LocalExecutionBackend:
             return None
         next_status = IdempotencyStatus.COMPLETED if checkpoint.terminal_handoff is not None and checkpoint.terminal_handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED else IdempotencyStatus.CANCELLED if checkpoint.terminal_handoff is not None and checkpoint.terminal_handoff.outcome.terminal_status is ExecutionStatus.CANCELLED else IdempotencyStatus.FAILED
         outcome = checkpoint.terminal_handoff.outcome if checkpoint.terminal_handoff is not None else None
-        return IdempotencyTerminalUpdate(identity.scope, identity.key_digest, identity.status, next_status, identity.request_digest, None if outcome is None or outcome.recovery_object_ref is None else outcome.recovery_object_ref.digest, None if outcome is None else outcome.error_code)
+        return IdempotencyTerminalUpdate(
+            identity.scope,
+            identity.idempotency_key_digest,
+            identity.status,
+            next_status,
+            identity.request_digest,
+            None if outcome is None or outcome.recovery_object_ref is None else outcome.recovery_object_ref.digest,
+            None if outcome is None else outcome.error_code,
+        )
 
     async def _resolve_handoff_conversation(self, checkpoint: RecoveryCheckpoint, handoff: RecoveryTerminalHandoff) -> None:
         intent = handoff.conversation
@@ -503,7 +511,11 @@ class LocalExecutionBackend:
             recovery_idempotency = None
             if idempotency_records:
                 identity = idempotency_records[0]
-                recovery_idempotency = RecoveryIdempotencyInput(identity.scope, identity.key_digest, identity.request_digest)
+                recovery_idempotency = RecoveryIdempotencyInput(
+                    identity.scope,
+                    identity.idempotency_key_digest,
+                    identity.request_digest,
+                )
             existing_checkpoint = None
             if self._recovery_enabled:
                 existing_checkpoint = await self._recovery.checkpoints.get(execution_id, tenant_id=current.tenant_id)
@@ -1000,7 +1012,15 @@ async def _terminal_idempotency(state: ExecutionState, execution: ExecutionRecor
         return None
     identity = records[0]
     next_status = IdempotencyStatus.COMPLETED if status is ExecutionStatus.SUCCEEDED else IdempotencyStatus.CANCELLED if status is ExecutionStatus.CANCELLED else IdempotencyStatus.FAILED
-    return IdempotencyTerminalUpdate(identity.scope, identity.key_digest, identity.status, next_status, identity.request_digest, result_digest, error_code)
+    return IdempotencyTerminalUpdate(
+        identity.scope,
+        identity.idempotency_key_digest,
+        identity.status,
+        next_status,
+        identity.request_digest,
+        result_digest,
+        error_code,
+    )
 
 
 __all__ = ["LocalExecutionBackend"]

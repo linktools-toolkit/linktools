@@ -4,6 +4,7 @@
 """Generic Storage composition and cache conformance tests."""
 
 import asyncio
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,6 +244,30 @@ def test_sql_metadata_builders_are_owner_scoped() -> None:
     )
     assert "ai_step_effects" not in recovery_metadata.tables
     assert "ai_runtime_sessions" not in recovery_metadata.tables
+
+
+def test_sql_database_kernel_has_no_domain_schema_catalog() -> None:
+    source = Path("linktools-ai/src/linktools/ai/storage/_database.py").read_text(encoding="utf-8")
+    forbidden_terms = (
+        "ai_runtime_",
+        "ai_step_",
+        "ai_storage_objects",
+        "ai_storage_object_chunks",
+        "ai_asset_",
+        "ObjectStore",
+    )
+    assert not any(term in source for term in forbidden_terms)
+
+    import linktools.ai.storage as storage
+
+    assert not hasattr(storage, "sql_table_comment")
+    assert not hasattr(storage, "sql_column_comment")
+
+    ddl = Path("linktools-ai/migrations/init_schema.sql").read_text(encoding="utf-8")
+    comments = re.findall(r"COMMENT(?:=| )'([^']*)'", ddl)
+    assert comments
+    assert all(all(ord(char) < 128 for char in comment) for comment in comments)
+
 
 @pytest.mark.asyncio
 async def test_composition_uses_metadata_owner_and_does_not_probe_absent_keys() -> None:

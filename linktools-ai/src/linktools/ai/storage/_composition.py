@@ -257,13 +257,19 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata points to a missing origin",
-                    safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
+                    safe_details={
+                        "storage_key_digest": canonical_sha256(str(key)),
+                        "layer": self._owner_id(state.owners[key]),
+                    },
                 )
             if origin != info:
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata and origin disagree",
-                    safe_details={"key_digest": canonical_sha256(str(key)), "layer": self._owner_id(state.owners[key])},
+                    safe_details={
+                        "storage_key_digest": canonical_sha256(str(key)),
+                        "layer": self._owner_id(state.owners[key]),
+                    },
                 )
         return info
 
@@ -324,7 +330,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata points to a missing origin",
-                    safe_details={"key_digest": canonical_sha256(str(key))},
+                    safe_details={
+                        "storage_key_digest": canonical_sha256(str(key)),
+                    },
                 )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
@@ -341,7 +349,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                 raise AIError(
                     ErrorCode.STORAGE_INTEGRITY_ERROR,
                     "storage metadata and origin disagree",
-                    safe_details={"key_digest": canonical_sha256(str(key))},
+                    safe_details={
+                        "storage_key_digest": canonical_sha256(str(key)),
+                    },
                 )
             refreshed = await self._state()
             return await self._get_from_state(key, refreshed, retried=True)
@@ -414,7 +424,9 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
                     raise AIError(
                         ErrorCode.STORAGE_INTEGRITY_ERROR,
                         "storage metadata and origin disagree",
-                        safe_details={"key_digest": canonical_sha256(str(key))},
+                        safe_details={
+                            "storage_key_digest": canonical_sha256(str(key)),
+                        },
                     )
         return values
 

@@ -97,7 +97,7 @@ async def test_in_memory_terminal_commit_validates_success_result() -> None:
                 {},
                 IdempotencyTerminalUpdate(
                     identity.scope,
-                    identity.key_digest,
+                    identity.idempotency_key_digest,
                     identity.status,
                     IdempotencyStatus.COMPLETED,
                     identity.request_digest,

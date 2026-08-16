@@ -58,11 +58,11 @@ Keep classification identities distinct:
 
 - Persistence `namespace` partitions Runtime records inside a backend.
 - `tenant_id` is the authorization and resource ownership boundary within a persistence namespace.
-- `memory_namespace` selects a memory collection within a tenant; persistence stores only its derived `memory_namespace_digest`.
+- `memory_scope` selects a memory collection within a tenant; persistence stores only its derived `memory_scope_digest`.
 - Asset `namespace` partitions raw Asset storage independently from Runtime persistence; Asset `kind` selects the logical representation.
 - Task and tool lease records use `owner`; schema registries and storage overlays also use `owner` because each declaring type makes the role explicit.
 - `StorageDomain` selects durable business domains; Blob, Media, StepStore, Idempotency, OperationLedger, Approval, ExternalResult, ToolState, and Repository remain implementation details of those domains.
-- Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_namespace_digest`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
+- Prefer short object-local fields when the declaring type supplies the domain, including `Principal.kind`, `AssetKey.kind`, `OperationLedgerRecord.kind`, and `TaskLease.owner`. Add a qualifier when the same type or flattened boundary contains another plausible meaning, as with `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_digest`, or when it preserves an authorization identity domain, as with `owner_principal_id`.
 - Free functions have no declaring-object context, so their names retain the domain they validate, such as `validate_persistence_namespace()` and `validate_lease_owner()`.
 - Observation and Runtime trace records are distinct contracts: use `RecordedTraceItem` for recorder facts and `ExecutionTraceItem` for Runtime query projections.
 

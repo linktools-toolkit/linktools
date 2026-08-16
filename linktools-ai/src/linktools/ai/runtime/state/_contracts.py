@@ -98,7 +98,7 @@ class ExecutionStartClaim:
     expected_revision: int
     expected_event_sequence: int
     scope: str
-    key_digest: str
+    idempotency_key_digest: str
     request_digest: str
     started_at: datetime
 
@@ -110,7 +110,7 @@ class ExecutionStartUnknownCommit:
     expected_revision: int
     expected_event_sequence: int
     scope: str
-    key_digest: str
+    idempotency_key_digest: str
     request_digest: str
     occurred_at: datetime
 
@@ -143,7 +143,7 @@ class IdempotencyRecord:
     tenant_id: str
     runtime_domain: RuntimeDomain
     scope: str
-    key_digest: str
+    idempotency_key_digest: str
     request_digest: str
     resource_kind: ResourceKind
     resource_id: str
@@ -190,7 +190,7 @@ class ResultRecord:
 class MemoryRecord:
     memory_id: str
     tenant_id: str
-    memory_scope_key: str
+    memory_scope_digest: str
     content_ref: ObjectRef
     content_digest: str
     metadata: Mapping[str, JsonValue]
@@ -260,7 +260,7 @@ class ExecutionTerminalCommit:
 @dataclass(frozen=True, slots=True)
 class IdempotencyTerminalUpdate:
     scope: str
-    key_digest: str
+    idempotency_key_digest: str
     expected_status: IdempotencyStatus
     next_status: IdempotencyStatus
     request_digest: str
@@ -379,7 +379,7 @@ class RecoveryExecutionInput:
 @dataclass(frozen=True, slots=True)
 class RecoveryIdempotencyInput:
     scope: str
-    key_digest: str
+    idempotency_key_digest: str
     request_digest: str
 
 
@@ -457,9 +457,17 @@ class ExecutionRepository(RuntimeRepository, Protocol):
 
 class IdempotencyRepository(RuntimeRepository, Protocol):
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord: ...
-    async def get(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
+    async def get(self, scope: str, idempotency_key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None: ...
     async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]: ...
-    async def compare_and_swap(self, scope: str, key_digest: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord: ...
+    async def compare_and_swap(
+        self,
+        scope: str,
+        idempotency_key_digest: str,
+        *,
+        tenant_id: str,
+        expected_status: IdempotencyStatus,
+        next_record: IdempotencyRecord,
+    ) -> IdempotencyRecord: ...
 
 
 class EventRepository(RuntimeRepository, Protocol):
@@ -533,7 +541,14 @@ class MemoryRepository(RuntimeRepository, Protocol):
     async def put(self, record: MemoryRecord, *, expected_revision: int | None) -> MemoryRecord: ...
     async def put_with_operation(self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[MemoryRecord | None, bool]": ...
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None: ...
-    async def list(self, *, tenant_id: str, memory_scope_key: str, cursor: "str | None", limit: int) -> "Page[MemoryRecord]": ...
+    async def list(
+        self,
+        *,
+        tenant_id: str,
+        memory_scope_digest: str,
+        cursor: "str | None",
+        limit: int,
+    ) -> "Page[MemoryRecord]": ...
     async def delete(self, memory_id: str, *, tenant_id: str, expected_revision: int) -> None: ...
     async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None) -> "tuple[bool, bool]": ...
 

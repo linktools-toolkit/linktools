@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from linktools.core import environ
-
 from ..errors import AIError, ErrorCode
 from ._dialects import (
     dialect_for_name,
@@ -16,7 +15,7 @@ from ._dialects import (
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy import CHAR, BigInteger, Index, LargeBinary, MetaData, String
+    from sqlalchemy import CHAR, BigInteger, Column, Index, LargeBinary, MetaData, String, Table
     from sqlalchemy.engine import Connection
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -107,6 +106,18 @@ def sql_integer_id() -> "BigInteger":
     return BigInteger().with_variant(Integer, "sqlite")
 
 
+def sql_id_column(comment: str = "Auto-increment primary key") -> "Column":
+    from sqlalchemy import Column
+
+    return Column(
+        "id",
+        sql_integer_id(),
+        primary_key=True,
+        autoincrement=True,
+        comment=comment,
+    )
+
+
 def sql_text_key(length: int = 256) -> "String":
     from sqlalchemy import String
     from sqlalchemy.dialects import mysql
@@ -135,9 +146,90 @@ def sql_table_options() -> "Mapping[str, str]":
     return {"mysql_engine": "InnoDB", "mysql_charset": "utf8mb4", "mysql_collate": "utf8mb4_bin"}
 
 
-def sql_index(index: "Index") -> "Index":
+def sql_audit_columns(
+    updated_comment: str = "Update timestamp",
+    created_comment: str = "Creation timestamp",
+) -> "tuple[Column, Column]":
+    from sqlalchemy import Column, DateTime, DefaultClause, text
+    from sqlalchemy.ext.compiler import compiles
+    from sqlalchemy.sql.elements import ClauseElement
+
+    class AuditCurrentTimestamp(ClauseElement):
+        inherit_cache = True
+
+        def __str__(self) -> str:
+            return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditCurrentTimestamp)
+    def compile_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditCurrentTimestamp, "mysql")
+    def compile_mysql_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+
+    return (
+        Column(
+            "updated_at",
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=DefaultClause(AuditCurrentTimestamp()),
+            comment=updated_comment,
+        ),
+        Column(
+            "created_at",
+            DateTime(timezone=True),
+            nullable=False,
+            server_default=text("CURRENT_TIMESTAMP"),
+            comment=created_comment,
+        ),
+    )
+
+
+def sql_unique(table: "Table", *columns: str) -> None:
+    from sqlalchemy import Index, UniqueConstraint
+
+    _validate_index_columns(columns)
+    constraint = UniqueConstraint(*(table.c[column] for column in columns))
+    constraint.info["ddl_dialect"] = "portable"
+    constraint.ddl_if(dialect=("sqlite", "postgresql"))
+    table.append_constraint(constraint)
+    index = Index(
+        f"uk_{'_'.join(columns)}",
+        *(table.c[column] for column in columns),
+        unique=True,
+    )
     index.info["ddl_dialect"] = "mysql"
-    return index.ddl_if(dialect="mysql")
+    index.ddl_if(dialect="mysql")
+
+
+def sql_query_index(table: "Table", *columns: str, mysql_length: int | None = None) -> "Index":
+    from sqlalchemy import Index
+
+    _validate_index_columns(columns)
+    column_objects = tuple(table.c[column] for column in columns)
+    portable = Index(
+        f"ix_{table.name}_{'_'.join(columns)}",
+        *column_objects,
+    )
+    portable.info["ddl_dialect"] = "portable"
+    portable.ddl_if(dialect=("sqlite", "postgresql"))
+    mysql_options: dict[str, object] = {}
+    if mysql_length is not None:
+        mysql_options["mysql_length"] = {columns[-1]: mysql_length}
+    mysql = Index(
+        f"ix_{'_'.join(columns)}",
+        *column_objects,
+        **mysql_options,
+    )
+    mysql.info["ddl_dialect"] = "mysql"
+    mysql.ddl_if(dialect="mysql")
+    return portable
+
+
+def _validate_index_columns(columns: tuple[str, ...]) -> None:
+    if not columns or len(columns) > 3:
+        raise ValueError("SQL composite indexes must contain one to three columns")
 
 
 def _validate_connection_schema(connection: "Connection", metadata: "MetaData") -> None:
@@ -151,6 +243,7 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
             _schema_mismatch(table=expected_table.name, category="table")
         if dialect_name == "mysql":
             _validate_mysql_options(inspector, expected_table.name, expected_table.schema)
+        _validate_comments(inspector, dialect_name, expected_table)
 
         actual_columns = {
             str(column["name"]): column
@@ -197,7 +290,13 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
             tuple(column.name for column in constraint.columns)
             for constraint in expected_table.constraints
             if isinstance(constraint, UniqueConstraint)
+            and _ddl_matches(constraint, dialect_name)
         }
+        expected_unique.update(
+            tuple(column.name for column in index.columns)
+            for index in expected_table.indexes
+            if index.unique and _ddl_matches(index, dialect_name)
+        )
         actual_unique: set[tuple[str, ...]] = set()
         for item in inspector.get_unique_constraints(expected_table.name, schema=expected_table.schema):
             actual_unique.add(_reflected_columns(expected_table.name, item, "unique"))
@@ -217,7 +316,7 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
             tuple(column.name for column in index.columns)
             for index in expected_table.indexes
             if not index.unique
-            and index.info.get("ddl_dialect") in (None, dialect_name)
+            and _ddl_matches(index, dialect_name)
         }
         if not expected_indexes.issubset(actual_non_unique):
             _schema_mismatch(table=expected_table.name, category="index")
@@ -261,6 +360,26 @@ def _schema_mismatch(*, table: str, category: str, column: str | None = None) ->
     if column is not None:
         details["column"] = column
     raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING, safe_details=details)
+
+
+def _ddl_matches(item: Any, dialect_name: str) -> bool:
+    dialect = item.info.get("ddl_dialect")
+    return dialect is None or dialect == dialect_name or dialect == "portable" and dialect_name != "mysql"
+
+
+def _validate_comments(inspector: Any, dialect_name: str, table: Any) -> None:
+    if dialect_name not in {"mysql", "postgresql"}:
+        return
+    table_comment = inspector.get_table_comment(table.name, schema=table.schema).get("text")
+    if table_comment != table.comment:
+        _schema_mismatch(table=table.name, category="table_comment")
+    actual_columns = {
+        str(column["name"]): column
+        for column in inspector.get_columns(table.name, schema=table.schema)
+    }
+    for column in table.columns:
+        if actual_columns[column.name].get("comment") != column.comment:
+            _schema_mismatch(table=table.name, category="column_comment", column=column.name)
 
 
 def _reflected_columns(table_name: str, item: Mapping[str, Any], category: str) -> tuple[str, ...]:
@@ -335,6 +454,10 @@ def _validate_server_default(
     actual_value = _normalize_current_timestamp_default(dialect_name, actual.get("default"))
     if expected_value != "current_timestamp":
         _schema_mismatch(table=table_name, category="server_default", column=expected.name)
+    if dialect_name == "mysql" and expected.name == "updated_at":
+        if actual_value != "current_timestamponupdatecurrent_timestamp":
+            _schema_mismatch(table=table_name, category="server_default", column=expected.name)
+        return
     allowed = {"current_timestamp", "current_timestamp()"}
     if dialect_name == "postgresql":
         allowed.add("now()")
@@ -356,6 +479,8 @@ def _foreign_key_signature(
 def _normalize_current_timestamp_default(dialect_name: str, value: object) -> str | None:
     if value is None:
         return None
+    if type(value).__name__ == "AuditCurrentTimestamp":
+        return "current_timestamp"
     text = "".join(str(value).split()).lower()
     while text.startswith("(") and text.endswith(")"):
         text = text[1:-1]
@@ -521,8 +646,11 @@ __all__ = [
     "validate_sql",
     "sql_blob",
     "sql_digest",
-    "sql_index",
+    "sql_audit_columns",
     "sql_integer_id",
+    "sql_id_column",
+    "sql_query_index",
     "sql_table_options",
     "sql_text_key",
+    "sql_unique",
 ]

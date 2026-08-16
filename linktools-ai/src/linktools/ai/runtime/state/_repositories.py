@@ -288,7 +288,7 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
 
     def _from_row(self, row: Mapping[str, object]) -> IdempotencyRecord:
         return IdempotencyRecord(
-            self._tenant_id, self._runtime_domain, str(row["scope"]), str(row["key_digest"]),
+            self._tenant_id, self._runtime_domain, str(row["scope"]), str(row["idempotency_key_digest"]),
             str(row["request_digest"]), _resource_kind_for_domain(self._runtime_domain), str(row["resource_id"]),
             IdempotencyStatus(str(row["status"])), None if row["result_digest"] is None else str(row["result_digest"]),
             None if row["error_code"] is None else str(row["error_code"]), _utc(row["created_at"]), _utc(row["updated_at"]),
@@ -300,10 +300,17 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             {
                 "runtime_domain": self._runtime_domain.value,
                 "scope": record.scope,
-                "key_digest": record.key_digest,
+                "idempotency_key_digest": record.idempotency_key_digest,
             },
         )
-        return self._values({"runtime_domain": self._runtime_domain.value, "scope": record.scope, "key_digest": record.key_digest, "identity_digest": identity_digest}) | {
+        return self._values(
+            {
+                "runtime_domain": self._runtime_domain.value,
+                "scope": record.scope,
+                "idempotency_key_digest": record.idempotency_key_digest,
+                "identity_digest": identity_digest,
+            }
+        ) | {
             "request_digest": record.request_digest,
             "resource_id": record.resource_id,
             "status": record.status.value,
@@ -325,7 +332,16 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             table = self._table("ai_runtime_idempotency")
             if await self._insert(session, table, self._record_values(record)):
                 return record
-            row = await self._one(session, table, *self._where(table, runtime_domain=self._runtime_domain.value, scope=record.scope, key_digest=record.key_digest))
+            row = await self._one(
+                session,
+                table,
+                *self._where(
+                    table,
+                    runtime_domain=self._runtime_domain.value,
+                    scope=record.scope,
+                    idempotency_key_digest=record.idempotency_key_digest,
+                ),
+            )
         if row is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = self._from_row(row)
@@ -333,11 +349,20 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         return current
 
-    async def get(self, scope: str, key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
+    async def get(self, scope: str, idempotency_key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:
         self._check_tenant(tenant_id)
         async with self._read_session() as session:
             table = self._table("ai_runtime_idempotency")
-            row = await self._one(session, table, *self._where(table, runtime_domain=self._runtime_domain.value, scope=scope, key_digest=key_digest))
+            row = await self._one(
+                session,
+                table,
+                *self._where(
+                    table,
+                    runtime_domain=self._runtime_domain.value,
+                    scope=scope,
+                    idempotency_key_digest=idempotency_key_digest,
+                ),
+            )
         return None if row is None else self._from_row(row)
 
     async def list_by_resource(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str) -> tuple[IdempotencyRecord, ...]:
@@ -349,25 +374,71 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             expected_kind = _resource_kind_for_domain(self._runtime_domain)
             if resource_kind is not expected_kind:
                 return ()
-            rows = (await session.execute(select(table).where(*self._where(table, runtime_domain=self._runtime_domain.value, resource_id=resource_id)).order_by(table.c.scope, table.c.key_digest))).mappings().all()
+            rows = (
+                await session.execute(
+                    select(table)
+                    .where(
+                        *self._where(
+                            table,
+                            runtime_domain=self._runtime_domain.value,
+                            resource_id=resource_id,
+                        )
+                    )
+                    .order_by(table.c.scope, table.c.idempotency_key_digest)
+                )
+            ).mappings().all()
         return tuple(self._from_row(row) for row in rows)
 
-    async def compare_and_swap(self, scope: str, key_digest: str, *, tenant_id: str, expected_status: IdempotencyStatus, next_record: IdempotencyRecord) -> IdempotencyRecord:
+    async def compare_and_swap(
+        self,
+        scope: str,
+        idempotency_key_digest: str,
+        *,
+        tenant_id: str,
+        expected_status: IdempotencyStatus,
+        next_record: IdempotencyRecord,
+    ) -> IdempotencyRecord:
         from sqlalchemy import update
 
         self._check_tenant(tenant_id)
-        if next_record.tenant_id != self._tenant_id or next_record.runtime_domain is not self._runtime_domain or next_record.scope != scope or next_record.key_digest != key_digest:
+        if (
+            next_record.tenant_id != self._tenant_id
+            or next_record.runtime_domain is not self._runtime_domain
+            or next_record.scope != scope
+            or next_record.idempotency_key_digest != idempotency_key_digest
+        ):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         async with self._mutation() as session:
             table = self._table("ai_runtime_idempotency")
             values = self._record_values(next_record)
-            for name in ("namespace_digest", "tenant_id", "runtime_domain", "scope", "key_digest"):
+            for name in ("namespace_digest", "tenant_id", "runtime_domain", "scope", "idempotency_key_digest"):
                 values.pop(name, None)
-            result = await session.execute(update(table).where(*self._where(table, runtime_domain=self._runtime_domain.value, scope=scope, key_digest=key_digest, status=expected_status.value)).values(**values))
+            result = await session.execute(
+                update(table)
+                .where(
+                    *self._where(
+                        table,
+                        runtime_domain=self._runtime_domain.value,
+                        scope=scope,
+                        idempotency_key_digest=idempotency_key_digest,
+                        status=expected_status.value,
+                    )
+                )
+                .values(**values)
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-            row = await self._one(session, table, *self._where(table, runtime_domain=self._runtime_domain.value, scope=scope, key_digest=key_digest))
+            row = await self._one(
+                session,
+                table,
+                *self._where(
+                    table,
+                    runtime_domain=self._runtime_domain.value,
+                    scope=scope,
+                    idempotency_key_digest=idempotency_key_digest,
+                ),
+            )
         if row is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return self._from_row(row)
@@ -490,7 +561,7 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                     idempotency_table,
                     runtime_domain=RuntimeDomain.EXECUTION.value,
                     scope=reservation.idempotency.scope,
-                    key_digest=reservation.idempotency.key_digest,
+                    idempotency_key_digest=reservation.idempotency.idempotency_key_digest,
                 ),
             )
             if identity_row is not None:
@@ -525,7 +596,16 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             execution_table = self._table("ai_runtime_executions")
             identity_table = self._table("ai_runtime_idempotency")
             execution_row = await self._one(session, execution_table, *self._where(execution_table, execution_id=claim.execution_id))
-            identity_row = await self._one(session, identity_table, *self._where(identity_table, runtime_domain=RuntimeDomain.EXECUTION.value, scope=claim.scope, key_digest=claim.key_digest))
+            identity_row = await self._one(
+                session,
+                identity_table,
+                *self._where(
+                    identity_table,
+                    runtime_domain=RuntimeDomain.EXECUTION.value,
+                    scope=claim.scope,
+                    idempotency_key_digest=claim.idempotency_key_digest,
+                ),
+            )
             if execution_row is None or identity_row is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = self._from_row(execution_row)
@@ -540,7 +620,17 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-            await self._idempotency.compare_and_swap(claim.scope, claim.key_digest, tenant_id=claim.tenant_id, expected_status=IdempotencyStatus.RESERVED, next_record=replace(identity, status=IdempotencyStatus.STARTED, updated_at=claim.started_at))
+            await self._idempotency.compare_and_swap(
+                claim.scope,
+                claim.idempotency_key_digest,
+                tenant_id=claim.tenant_id,
+                expected_status=IdempotencyStatus.RESERVED,
+                next_record=replace(
+                    identity,
+                    status=IdempotencyStatus.STARTED,
+                    updated_at=claim.started_at,
+                ),
+            )
             await self._events.append(claim.execution_id, tenant_id=claim.tenant_id, expected_sequence=claim.expected_event_sequence, event_type=ExecutionEventType.EXECUTION_STARTED, payload={})
             return started
 
@@ -558,7 +648,11 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
         async with self._mutation() as session:
             table = self._table("ai_runtime_executions")
             row = await self._one(session, table, *self._where(table, execution_id=commit.execution_id))
-            identity = await self._idempotency.get(commit.scope, commit.key_digest, tenant_id=commit.tenant_id)
+            identity = await self._idempotency.get(
+                commit.scope,
+                commit.idempotency_key_digest,
+                tenant_id=commit.tenant_id,
+            )
             if row is None or identity is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             current = self._from_row(row)
@@ -572,7 +666,17 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-            await self._idempotency.compare_and_swap(commit.scope, commit.key_digest, tenant_id=commit.tenant_id, expected_status=IdempotencyStatus.STARTED, next_record=replace(identity, status=IdempotencyStatus.START_UNKNOWN, updated_at=commit.occurred_at))
+            await self._idempotency.compare_and_swap(
+                commit.scope,
+                commit.idempotency_key_digest,
+                tenant_id=commit.tenant_id,
+                expected_status=IdempotencyStatus.STARTED,
+                next_record=replace(
+                    identity,
+                    status=IdempotencyStatus.START_UNKNOWN,
+                    updated_at=commit.occurred_at,
+                ),
+            )
             await self._events.append(commit.execution_id, tenant_id=commit.tenant_id, expected_sequence=commit.expected_event_sequence, event_type=ExecutionEventType.EXECUTION_START_UNKNOWN, payload={})
             return unknown
 
@@ -598,7 +702,7 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                         event_table,
                         execution_id=commit.execution_id,
                         sequence=current.event_sequence,
-                        event_type=ExecutionEventType.CANCEL_REQUESTED.value,
+                        kind=ExecutionEventType.CANCEL_REQUESTED.value,
                     ),
                 )
                 if event is None or event["payload"] not in ({}, None):
@@ -666,7 +770,7 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                 "output_schema_revision": commit.result.output_schema_revision,
                 "output_schema_fingerprint": commit.result.output_schema_fingerprint,
                 "result_store_id": None if commit.result.object_ref is None else commit.result.object_ref.store_id,
-                "result_object_key": None if commit.result.object_ref is None else commit.result.object_ref.key,
+                "result_key": None if commit.result.object_ref is None else commit.result.object_ref.key,
                 "result_digest": None if commit.result.object_ref is None else commit.result.object_ref.digest,
                 "result_size": None if commit.result.object_ref is None else commit.result.object_ref.size,
                 "stop_reason": commit.result.stop_reason.value,
@@ -686,10 +790,26 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             self._transaction.mark_changed()
             await self._events.append(commit.execution.execution_id, tenant_id=commit.execution.tenant_id, expected_sequence=commit.expected_event_sequence, event_type=commit.terminal_event_type, payload=commit.terminal_event_payload)
             if commit.idempotency is not None:
-                identity = await self._idempotency.get(commit.idempotency.scope, commit.idempotency.key_digest, tenant_id=commit.execution.tenant_id)
+                identity = await self._idempotency.get(
+                    commit.idempotency.scope,
+                    commit.idempotency.idempotency_key_digest,
+                    tenant_id=commit.execution.tenant_id,
+                )
                 if identity is None or identity.resource_kind is not ResourceKind.EXECUTION or identity.resource_id != commit.execution.execution_id or identity.request_digest != commit.idempotency.request_digest:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._idempotency.compare_and_swap(commit.idempotency.scope, commit.idempotency.key_digest, tenant_id=commit.execution.tenant_id, expected_status=commit.idempotency.expected_status, next_record=replace(identity, status=commit.idempotency.next_status, result_digest=commit.idempotency.result_digest, error_code=commit.idempotency.error_code, updated_at=commit.execution.updated_at))
+                await self._idempotency.compare_and_swap(
+                    commit.idempotency.scope,
+                    commit.idempotency.idempotency_key_digest,
+                    tenant_id=commit.execution.tenant_id,
+                    expected_status=commit.idempotency.expected_status,
+                    next_record=replace(
+                        identity,
+                        status=commit.idempotency.next_status,
+                        result_digest=commit.idempotency.result_digest,
+                        error_code=commit.idempotency.error_code,
+                        updated_at=commit.execution.updated_at,
+                    ),
+                )
             if commit.operation is not None:
                 operation = await self._operations.get(commit.operation.operation_id, tenant_id=commit.execution.tenant_id)
                 if operation is None or operation.execution_id not in {None, commit.execution.execution_id}:
@@ -719,7 +839,17 @@ class _SqlEventRepository(_SqlRepositoryBase):
             if execution_row is None or int(execution_row["event_sequence"]) not in {expected_sequence, expected_sequence + 1}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = expected_sequence + 1
-            values = self._values({"execution_id": execution_id, "sequence": sequence, "identity_digest": canonical_identity_digest("runtime-event", {"execution_id": execution_id, "sequence": sequence})}) | {"event_type": event_type.value, "payload": payload}
+            event_identity = canonical_identity_digest(
+                "runtime-event",
+                {"execution_id": execution_id, "sequence": sequence},
+            )
+            values = self._values(
+                {
+                    "execution_id": execution_id,
+                    "sequence": sequence,
+                    "identity_digest": event_identity,
+                }
+            ) | {"kind": event_type.value, "payload": payload}
             if not await self._insert(session, table, values):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if int(execution_row["event_sequence"]) == expected_sequence:
@@ -742,7 +872,16 @@ class _SqlEventRepository(_SqlRepositoryBase):
         async with self._read_session() as session:
             table = self._table("ai_runtime_events")
             rows = (await session.execute(select(table).where(*self._where(table, execution_id=execution_id), table.c.sequence > after_sequence).order_by(table.c.sequence).limit(limit + 1))).mappings().all()
-        items = tuple(ExecutionEventRecord(execution_id, self._tenant_id, int(row["sequence"]), ExecutionEventType(str(row["event_type"])), row["payload"] or {}) for row in rows[:limit])
+        items = tuple(
+            ExecutionEventRecord(
+                execution_id,
+                self._tenant_id,
+                int(row["sequence"]),
+                ExecutionEventType(str(row["kind"])),
+                row["payload"] or {},
+            )
+            for row in rows[:limit]
+        )
         return Page(items, str(items[-1].sequence) if len(rows) > limit and items else None)
 
 
@@ -776,30 +915,54 @@ class _SqlOperationRepository(_SqlRepositoryBase):
                     "runtime_domain": self._owner_domain.value,
                     "resource_kind": record.resource_kind.value,
                     "resource_id": record.resource_id,
-                    "stream_digest": canonical_identity_digest(
-                        "runtime-operation-stream",
-                        {
-                            "runtime_domain": self._owner_domain.value,
-                            "resource_kind": record.resource_kind.value,
-                            "resource_id": record.resource_id,
-                        },
+                    "stream_digest": _operation_stream_digest(
+                        record.tenant_id,
+                        self._owner_domain,
+                        record.resource_kind,
+                        record.resource_id,
                     ),
                     "created_at": record.created_at,
                     "updated_at": record.updated_at,
                 }),
                 column="last_sequence",
-                index_elements=("namespace_digest", "tenant_id", "stream_digest"),
+                index_elements=("namespace_digest", "stream_digest"),
             )
             self._transaction.mark_changed()
-            stream_digest = canonical_identity_digest(
-                "runtime-operation-stream",
+            stream_digest = _operation_stream_digest(
+                record.tenant_id,
+                self._owner_domain,
+                record.resource_kind,
+                record.resource_id,
+            )
+            operation_digest = canonical_identity_digest(
+                "runtime-operation",
                 {
                     "runtime_domain": self._owner_domain.value,
-                    "resource_kind": record.resource_kind.value,
-                    "resource_id": record.resource_id,
+                    "operation_id": record.operation_id,
                 },
             )
-            values = self._values({"runtime_domain": self._owner_domain.value, "operation_id": record.operation_id, "operation_digest": canonical_identity_digest("runtime-operation", {"runtime_domain": self._owner_domain.value, "operation_id": record.operation_id}), "stream_digest": stream_digest, "stream_sequence_digest": canonical_identity_digest("runtime-operation-stream-sequence", {"stream_digest": stream_digest, "sequence": sequence})}) | {"resource_kind": record.resource_kind.value, "resource_id": record.resource_id, "operation_kind": record.operation_kind.value, "sequence": sequence, "status": record.status.value, "execution_id": record.execution_id, "request_digest": record.request_digest, "result_ref": record.result_ref, "result_digest": record.result_digest, "error_code": record.error_code, "compactable": record.compactable, "created_at": record.created_at, "updated_at": record.updated_at}
+            values = self._values(
+                {
+                    "runtime_domain": self._owner_domain.value,
+                    "operation_id": record.operation_id,
+                    "operation_digest": operation_digest,
+                    "stream_digest": stream_digest,
+                }
+            ) | {
+                "resource_kind": record.resource_kind.value,
+                "resource_id": record.resource_id,
+                "operation_kind": record.operation_kind.value,
+                "sequence": sequence,
+                "status": record.status.value,
+                "execution_id": record.execution_id,
+                "request_digest": record.request_digest,
+                "result_ref": record.result_ref,
+                "result_digest": record.result_digest,
+                "error_code": record.error_code,
+                "compactable": record.compactable,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            }
             if not await self._insert(session, table, values):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
         return OperationLedgerRecord(record.operation_id, record.tenant_id, record.resource_kind, record.resource_id, record.execution_id, record.operation_kind, record.status, record.request_digest, record.result_ref, record.result_digest, record.error_code, record.compactable, sequence, record.created_at, record.updated_at)
@@ -923,11 +1086,11 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             revision = 0 if current is None else int(current["revision"]) + 1
             values = self._values({"memory_id": record.memory_id}) | {
-                "memory_scope_key": record.memory_scope_key,
-                "object_store_id": record.content_ref.store_id,
-                "object_key": record.content_ref.key,
-                "object_digest": record.content_digest,
-                "object_size": record.content_ref.size,
+                "memory_scope_digest": record.memory_scope_digest,
+                "content_store_id": record.content_ref.store_id,
+                "content_key": record.content_ref.key,
+                "content_digest": record.content_digest,
+                "content_size": record.content_ref.size,
                 "metadata": dict(record.metadata),
                 "revision": revision,
                 "created_at": record.created_at,
@@ -945,7 +1108,14 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
                 await self._operations.append(operation)
         return replace(record, revision=revision), False
 
-    async def list(self, *, tenant_id: str, memory_scope_key: str, cursor: str | None, limit: int) -> Page[MemoryRecord]:
+    async def list(
+        self,
+        *,
+        tenant_id: str,
+        memory_scope_digest: str,
+        cursor: str | None,
+        limit: int,
+    ) -> Page[MemoryRecord]:
         self._check_tenant(tenant_id)
         from sqlalchemy import select
 
@@ -953,7 +1123,7 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
             raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
         async with self._read_session() as session:
             table = self._table("ai_runtime_memories")
-            clauses = list(self._where(table, memory_scope_key=memory_scope_key))
+            clauses = list(self._where(table, memory_scope_digest=memory_scope_digest))
             if cursor is not None:
                 clauses.append(table.c.memory_id > cursor)
             rows = (await session.execute(select(table).where(*clauses).order_by(table.c.memory_id).limit(limit + 1))).mappings().all()
@@ -998,8 +1168,8 @@ class _SqlArtifactRepository(_SqlRepositoryBase):
             table = self._table("ai_runtime_artifacts")
             values = self._values({"artifact_id": record.artifact_id}) | {
                 "execution_id": record.execution_id, "producer": record.producer, "media_type": record.media_type,
-                "object_store_id": record.object_ref.store_id, "object_key": record.object_ref.key,
-                "object_digest": record.digest, "object_size": record.size, "created_at": record.created_at,
+                "content_store_id": record.object_ref.store_id, "content_key": record.object_ref.key,
+                "content_digest": record.digest, "content_size": record.size, "created_at": record.created_at,
             }
             if await self._insert(session, table, values):
                 return record
@@ -1553,7 +1723,19 @@ class _SqlExternalCallRepository(_SqlRepositoryBase):
         self._check_tenant(record.tenant_id)
         async with self._mutation() as session:
             table = self._table("ai_runtime_external_calls")
-            values = self._values({"call_id": record.call_id}) | {"execution_id": record.execution_id, "operation_id": record.operation_id, "status": record.status.value, "idempotency_key_digest": record.idempotency_key_digest, "object_store_id": None if record.object_ref is None else record.object_ref.store_id, "object_key": None if record.object_ref is None else record.object_ref.key, "object_digest": None if record.object_ref is None else record.object_ref.digest, "object_size": None if record.object_ref is None else record.object_ref.size, "payload_digest": record.payload_digest, "supplied_at": record.supplied_at, "created_at": record.created_at}
+            values = self._values({"call_id": record.call_id}) | {
+                "execution_id": record.execution_id,
+                "operation_id": record.operation_id,
+                "status": record.status.value,
+                "idempotency_key_digest": record.idempotency_key_digest,
+                "result_store_id": None if record.object_ref is None else record.object_ref.store_id,
+                "result_key": None if record.object_ref is None else record.object_ref.key,
+                "result_digest": None if record.object_ref is None else record.object_ref.digest,
+                "result_size": None if record.object_ref is None else record.object_ref.size,
+                "payload_digest": record.payload_digest,
+                "supplied_at": record.supplied_at,
+                "created_at": record.created_at,
+            }
             if await self._insert(session, table, values):
                 return record
         current = await self.get(record.call_id, tenant_id=record.tenant_id)
@@ -1577,7 +1759,20 @@ class _SqlExternalCallRepository(_SqlRepositoryBase):
 
         async with self._mutation() as session:
             table = self._table("ai_runtime_external_calls")
-            result = await session.execute(update(table).where(*self._where(table, call_id=call_id, status=expected_status.value)).values(status=ExternalCallStatus.SUPPLIED.value, idempotency_key_digest=idempotency_key_digest, object_store_id=object_ref.store_id, object_key=object_ref.key, object_digest=object_ref.digest, object_size=object_ref.size, payload_digest=payload_digest, supplied_at=supplied_at))
+            result = await session.execute(
+                update(table)
+                .where(*self._where(table, call_id=call_id, status=expected_status.value))
+                .values(
+                    status=ExternalCallStatus.SUPPLIED.value,
+                    idempotency_key_digest=idempotency_key_digest,
+                    result_store_id=object_ref.store_id,
+                    result_key=object_ref.key,
+                    result_digest=object_ref.digest,
+                    result_size=object_ref.size,
+                    payload_digest=payload_digest,
+                    supplied_at=supplied_at,
+                )
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.EXTERNAL_RESULT_CONFLICT)
             self._transaction.mark_changed()
@@ -1641,7 +1836,34 @@ class _SqlToolRepository(_SqlRepositoryBase):
         self._check_tenant(record.tenant_id)
         async with self._mutation() as session:
             table = self._table("ai_runtime_tool_operations")
-            values = self._values({"tool_operation_id": record.tool_operation_id}) | {"step_run_id": record.step_run_id, "tool_call_id": record.tool_call_id, "call_digest": canonical_identity_digest("runtime-tool-call", {"step_run_id": record.step_run_id, "tool_call_id": record.tool_call_id}), "idempotency_key_digest": record.idempotency_key_digest, "tool_name": record.tool_name, "arguments_digest": record.arguments_digest, "binding_fingerprint": record.binding_fingerprint, "replay_safe": record.replay_safe, "status": record.status.value, "owner": record.owner, "fence": record.fence, "lease_expires_at": record.lease_expires_at, "result_store_id": None if record.result_object_ref is None else record.result_object_ref.store_id, "result_object_key": None if record.result_object_ref is None else record.result_object_ref.key, "result_digest": None if record.result_object_ref is None else record.result_object_ref.digest, "result_size": None if record.result_object_ref is None else record.result_object_ref.size, "error_code": record.error_code, "created_at": record.created_at, "updated_at": record.updated_at}
+            call_digest = canonical_identity_digest(
+                "runtime-tool-call",
+                {
+                    "step_run_id": record.step_run_id,
+                    "tool_call_id": record.tool_call_id,
+                },
+            )
+            values = self._values({"tool_operation_id": record.tool_operation_id}) | {
+                "step_run_id": record.step_run_id,
+                "tool_call_id": record.tool_call_id,
+                "call_digest": call_digest,
+                "idempotency_key_digest": record.idempotency_key_digest,
+                "tool_name": record.tool_name,
+                "arguments_digest": record.arguments_digest,
+                "binding_fingerprint": record.binding_fingerprint,
+                "replay_safe": record.replay_safe,
+                "status": record.status.value,
+                "owner": record.owner,
+                "fence": record.fence,
+                "lease_expires_at": record.lease_expires_at,
+                "result_store_id": None if record.result_object_ref is None else record.result_object_ref.store_id,
+                "result_key": None if record.result_object_ref is None else record.result_object_ref.key,
+                "result_digest": None if record.result_object_ref is None else record.result_object_ref.digest,
+                "result_size": None if record.result_object_ref is None else record.result_object_ref.size,
+                "error_code": record.error_code,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            }
             if await self._insert(session, table, values):
                 return record
         current = await self.get_operation(record.tool_operation_id, tenant_id=record.tenant_id)
@@ -1738,7 +1960,27 @@ class _SqlToolRepository(_SqlRepositoryBase):
             if current.owner != owner or current.fence != fence or current.status is not ToolOperationStatus.CLAIMED or current.lease_expires_at is None or current.lease_expires_at <= now:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             updated = replace(current, status=ToolOperationStatus.COMPLETED, lease_expires_at=None, result_object_ref=result_object_ref, updated_at=now)
-            result = await session.execute(update(table).where(*self._where(table, tool_operation_id=tool_operation_id, owner=owner, fence=fence, status=ToolOperationStatus.CLAIMED.value)).values(status=updated.status.value, lease_expires_at=None, result_store_id=None if result_object_ref is None else result_object_ref.store_id, result_object_key=None if result_object_ref is None else result_object_ref.key, result_digest=None if result_object_ref is None else result_object_ref.digest, result_size=None if result_object_ref is None else result_object_ref.size, updated_at=updated.updated_at))
+            result = await session.execute(
+                update(table)
+                .where(
+                    *self._where(
+                        table,
+                        tool_operation_id=tool_operation_id,
+                        owner=owner,
+                        fence=fence,
+                        status=ToolOperationStatus.CLAIMED.value,
+                    )
+                )
+                .values(
+                    status=updated.status.value,
+                    lease_expires_at=None,
+                    result_store_id=None if result_object_ref is None else result_object_ref.store_id,
+                    result_key=None if result_object_ref is None else result_object_ref.key,
+                    result_digest=None if result_object_ref is None else result_object_ref.digest,
+                    result_size=None if result_object_ref is None else result_object_ref.size,
+                    updated_at=updated.updated_at,
+                )
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             self._transaction.mark_changed()
@@ -1790,6 +2032,23 @@ def _object_ref(row: Mapping[str, object], prefix: str = "object_") -> ObjectRef
     return ObjectRef(str(values[0]), str(values[1]), str(values[2]), int(values[3]))
 
 
+def _operation_stream_digest(
+    tenant_id: str,
+    runtime_domain: RuntimeDomain,
+    resource_kind: ResourceKind,
+    resource_id: str,
+) -> str:
+    return canonical_identity_digest(
+        "runtime-operation-stream",
+        {
+            "tenant_id": tenant_id,
+            "runtime_domain": runtime_domain.value,
+            "resource_kind": resource_kind.value,
+            "resource_id": resource_id,
+        },
+    )
+
+
 def _lease_matches(row: Mapping[str, object], lease: "TaskLease") -> bool:
     expiry = _optional_utc(row["lease_expires_at"])
     return (
@@ -1821,17 +2080,37 @@ def _task_graph_status(statuses: tuple[TaskStatus, ...]) -> TaskStatus:
 
 
 def _memory(row: Mapping[str, object], tenant_id: str) -> MemoryRecord:
-    reference = _object_ref(row)
+    reference = _object_ref(row, "content_")
     if reference is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return MemoryRecord(str(row["memory_id"]), tenant_id, str(row["memory_scope_key"]), reference, str(row["object_digest"]), row["metadata"] or {}, int(row["revision"]), _utc(row["created_at"]), _utc(row["updated_at"]))
+    return MemoryRecord(
+        str(row["memory_id"]),
+        tenant_id,
+        str(row["memory_scope_digest"]),
+        reference,
+        str(row["content_digest"]),
+        row["metadata"] or {},
+        int(row["revision"]),
+        _utc(row["created_at"]),
+        _utc(row["updated_at"]),
+    )
 
 
 def _artifact(row: Mapping[str, object], tenant_id: str) -> ArtifactRecord:
-    reference = _object_ref(row)
+    reference = _object_ref(row, "content_")
     if reference is None:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    return ArtifactRecord(str(row["artifact_id"]), str(row["execution_id"]), tenant_id, str(row["producer"]), str(row["media_type"]), int(row["object_size"]), str(row["object_digest"]), reference, _utc(row["created_at"]))
+    return ArtifactRecord(
+        str(row["artifact_id"]),
+        str(row["execution_id"]),
+        tenant_id,
+        str(row["producer"]),
+        str(row["media_type"]),
+        int(row["content_size"]),
+        str(row["content_digest"]),
+        reference,
+        _utc(row["created_at"]),
+    )
 
 
 def _operation_matches(current: OperationLedgerRecord, candidate: OperationLedgerInput) -> bool:
@@ -1846,7 +2125,18 @@ def _operation_matches(current: OperationLedgerRecord, candidate: OperationLedge
 
 
 def _result(row: Mapping[str, object], tenant_id: str) -> ResultRecord | None:
-    output_values = tuple(row.get(name) for name in ("output_schema_id", "output_schema_revision", "output_schema_fingerprint", "result_store_id", "result_object_key", "result_digest", "result_size"))
+    output_values = tuple(
+        row.get(name)
+        for name in (
+            "output_schema_id",
+            "output_schema_revision",
+            "output_schema_fingerprint",
+            "result_store_id",
+            "result_key",
+            "result_digest",
+            "result_size",
+        )
+    )
     accounting_values = tuple(row.get(name) for name in ("stop_reason", "model_requests", "tool_calls", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "result_created_at"))
     if all(value is None for value in output_values + accounting_values):
         return None
@@ -1860,7 +2150,12 @@ def _result(row: Mapping[str, object], tenant_id: str) -> ResultRecord | None:
         output_schema_id = str(row["output_schema_id"])
         output_schema_revision = int(row["output_schema_revision"])
         output_schema_fingerprint = str(row["output_schema_fingerprint"])
-        object_ref = ObjectRef(str(row["result_store_id"]), str(row["result_object_key"]), str(row["result_digest"]), int(row["result_size"]))
+        object_ref = ObjectRef(
+            str(row["result_store_id"]),
+            str(row["result_key"]),
+            str(row["result_digest"]),
+            int(row["result_size"]),
+        )
     return ResultRecord(
         str(row["execution_id"]),
         tenant_id,
@@ -1890,7 +2185,18 @@ def _approval(row: Mapping[str, object], tenant_id: str) -> ApprovalRecord:
 
 
 def _external(row: Mapping[str, object], tenant_id: str) -> ExternalCallRecord:
-    return ExternalCallRecord(str(row["call_id"]), str(row["execution_id"]), tenant_id, str(row["operation_id"]), ExternalCallStatus(str(row["status"])), None if row["idempotency_key_digest"] is None else str(row["idempotency_key_digest"]), _object_ref(row), None if row["payload_digest"] is None else str(row["payload_digest"]), _utc(row["created_at"]), _optional_utc(row["supplied_at"]))
+    return ExternalCallRecord(
+        str(row["call_id"]),
+        str(row["execution_id"]),
+        tenant_id,
+        str(row["operation_id"]),
+        ExternalCallStatus(str(row["status"])),
+        None if row["idempotency_key_digest"] is None else str(row["idempotency_key_digest"]),
+        _object_ref(row, "result_"),
+        None if row["payload_digest"] is None else str(row["payload_digest"]),
+        _utc(row["created_at"]),
+        _optional_utc(row["supplied_at"]),
+    )
 
 
 def _tool(row: Mapping[str, object], tenant_id: str) -> ToolOperationRecord:
@@ -1917,7 +2223,7 @@ def _input(value: RecoveryExecutionInput) -> dict[str, object]:
             if value.idempotency is None
             else {
                 "scope": value.idempotency.scope,
-                "key_digest": value.idempotency.key_digest,
+                "idempotency_key_digest": value.idempotency.idempotency_key_digest,
                 "request_digest": value.idempotency.request_digest,
             }
         ),
@@ -1934,7 +2240,15 @@ def _checkpoint(row: Mapping[str, object], tenant_id: str) -> RecoveryCheckpoint
         if not isinstance(raw_input, dict):
             raise ValueError("input")
         raw_identity = raw_input.get("idempotency")
-        identity = None if raw_identity is None else RecoveryIdempotencyInput(str(raw_identity["scope"]), str(raw_identity["key_digest"]), str(raw_identity["request_digest"]))
+        identity = (
+            None
+            if raw_identity is None
+            else RecoveryIdempotencyInput(
+                str(raw_identity["scope"]),
+                str(raw_identity["idempotency_key_digest"]),
+                str(raw_identity["request_digest"]),
+            )
+        )
         user_prompt = raw_input.get("user_prompt", raw_input.get("prompt"))
         if not isinstance(user_prompt, str):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

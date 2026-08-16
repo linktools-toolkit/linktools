@@ -141,7 +141,7 @@ The identity fields are intentionally independent:
 | Asset `kind` | Selects a logical Asset type such as `agent`, `skill`, or `mcp` |
 | Task/Tool `owner` | Identifies the current lease holder |
 
-Fields stay short when their declaring type supplies the domain, such as `Principal.kind` and `TaskLease.owner`. Explicit qualifiers distinguish meanings that can coexist in the same record or flattened storage boundary, such as `operation_kind`, `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_key`, or preserve an authorization identity domain, such as `owner_principal_id`.
+Fields stay short when their declaring type supplies the domain, such as `Principal.kind` and `TaskLease.owner`. Explicit qualifiers distinguish meanings that can coexist in the same record or flattened storage boundary, such as `operation_kind`, `resource_kind`, `lineage_kind`, `asset_kind`, and `memory_scope_digest`, or preserve an authorization identity domain, such as `owner_principal_id`.
 
 `open_workspace_runtime()` uses `workspace.workspace_id` as the Runtime namespace. Its optional `tenant_id` defaults to that workspace identity and can be set independently after validation. Lower-level domain stores remain multi-tenant through their explicit `tenant_id` fields.
 

@@ -47,7 +47,7 @@ def validate_principal_id(value: str) -> str:
 
 
 def validate_resource_id(value: str) -> str:
-    return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
+    return _text(value, 128, ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def validate_idempotency_key(value: str) -> str:

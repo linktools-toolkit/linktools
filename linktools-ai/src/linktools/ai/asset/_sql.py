@@ -33,11 +33,14 @@ from ..storage import (
     normalize_storage_metadata,
     build_object_sql_metadata,
     read_object,
+    sql_audit_columns,
     sql_digest,
-    sql_index,
+    sql_id_column,
     sql_integer_id,
+    sql_query_index,
     sql_table_options,
     sql_text_key,
+    sql_unique,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
 from ._object import AssetObjectKeyFactory
@@ -50,67 +53,54 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.asset.sql")
 _EMPTY_DIGEST = hashlib.sha256(b"").hexdigest()
 
-
 def build_asset_sql_metadata(
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
     """Build the Asset-owned tables in the supplied metadata collection."""
 
-    from sqlalchemy import (
-        Column,
-        DateTime,
-        Index,
-        JSON,
-        MetaData,
-        Table,
-        UniqueConstraint,
-        func,
-    )
+    from sqlalchemy import Column, DateTime, JSON, MetaData, Table
 
     if metadata is None:
         metadata = MetaData()
     digest = sql_digest()
     integer_id = sql_integer_id()
-    _revision = Table(
+    revision = Table(
         "ai_asset_heads",
         metadata,
-        Column("id", integer_id, primary_key=True, autoincrement=True),
-        Column("namespace_digest", digest, nullable=False),
-        Column("store_revision", integer_id, nullable=False),
-        Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-        Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.current_timestamp()),
-        UniqueConstraint("namespace_digest", name="uk_ai_asset_heads_namespace_digest"),
+        sql_id_column(),
+        Column("namespace_digest", digest, nullable=False, comment="Namespace SHA-256 digest"),
+        Column("store_revision", integer_id, nullable=False, comment="Global storage revision"),
+        *sql_audit_columns(),
+        comment="Asset namespace heads",
         **sql_table_options(),
     )
+    sql_unique(revision, "namespace_digest")
+    sql_query_index(revision, "updated_at")
+    sql_query_index(revision, "created_at")
+
     def asset_columns() -> tuple[Column, ...]:
         return (
-            Column("id", integer_id, primary_key=True, autoincrement=True),
-            Column("namespace_digest", digest, nullable=False),
-            Column("asset_key_digest", digest, nullable=False),
-            Column("asset_kind", sql_text_key(128), nullable=False),
-            Column("asset_id", sql_text_key(512), nullable=False),
-            Column("entry_revision", integer_id, nullable=False),
-            Column("store_revision", integer_id, nullable=False),
-            Column("etag", digest, nullable=False),
-            Column("size", integer_id, nullable=False),
-            Column("status", sql_text_key(32), nullable=False),
-            Column("object_store_id", sql_text_key(128), nullable=True),
-            Column("object_key", sql_text_key(1024), nullable=True),
-            Column("metadata", JSON(), nullable=False),
-            Column("modified_at", DateTime(timezone=True), nullable=False),
+            sql_id_column(),
+            Column("namespace_digest", digest, nullable=False, comment="Namespace SHA-256 digest"),
+            Column("asset_key_digest", digest, nullable=False, comment="Asset logical key SHA-256 digest"),
+            Column("asset_kind", sql_text_key(128), nullable=False, comment="Asset kind"),
+            Column("asset_id", sql_text_key(512), nullable=False, comment="Asset identifier"),
+            Column("entry_revision", integer_id, nullable=False, comment="File revision"),
+            Column("store_revision", integer_id, nullable=False, comment="Global storage revision"),
+            Column("etag", digest, nullable=False, comment="File content SHA-256 ETag"),
+            Column("size", integer_id, nullable=False, comment="Size in bytes"),
+            Column("status", sql_text_key(32), nullable=False, comment="Status"),
             Column(
-                "updated_at",
-                DateTime(timezone=True),
-                nullable=False,
-                server_default=func.current_timestamp(),
+                "content_store_id",
+                sql_text_key(128),
+                nullable=True,
+                comment="Content ObjectStore identifier",
             ),
-            Column(
-                "created_at",
-                DateTime(timezone=True),
-                nullable=False,
-                server_default=func.current_timestamp(),
-            ),
+            Column("content_key", sql_text_key(255), nullable=True, comment="Content object key"),
+            Column("metadata", JSON(), nullable=False, comment="Extended metadata"),
+            Column("modified_at", DateTime(timezone=True), nullable=False, comment="File modification time"),
+            *sql_audit_columns(),
         )
 
     columns = asset_columns()
@@ -118,22 +108,25 @@ def build_asset_sql_metadata(
         "ai_asset_entries",
         metadata,
         *columns,
-        UniqueConstraint("namespace_digest", "asset_key_digest", name="uk_ai_asset_entries_identity"),
-        Index("ix_ai_asset_entries_revision", "namespace_digest", "store_revision"),
+        comment="Asset entries",
         **sql_table_options(),
     )
+    sql_unique(_entry, "namespace_digest", "asset_key_digest")
+    sql_query_index(_entry, "namespace_digest", "store_revision")
+    sql_query_index(_entry, "updated_at")
+    sql_query_index(_entry, "created_at")
     history_columns = asset_columns()
     _change = Table(
         "ai_asset_changes",
         metadata,
         *history_columns,
-        UniqueConstraint("namespace_digest", "asset_key_digest", "entry_revision", name="uk_ai_asset_changes_revision"),
-        Index("ix_ai_asset_changes_revision", "namespace_digest", "store_revision"),
+        comment="Asset change history",
         **sql_table_options(),
     )
-    for table in (_revision, _entry, _change):
-        sql_index(Index("ix_updated_at", table.c.updated_at))
-        sql_index(Index("ix_created_at", table.c.created_at))
+    sql_unique(_change, "namespace_digest", "asset_key_digest", "entry_revision")
+    sql_query_index(_change, "namespace_digest", "store_revision")
+    sql_query_index(_change, "updated_at")
+    sql_query_index(_change, "created_at")
     return metadata
 
 
@@ -470,20 +463,20 @@ class SqlAssetBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _validate_object_columns(self, row: Mapping[str, object], status: StorageEntryStatus) -> None:
-        fields = (row.get("object_store_id"), row.get("object_key"))
+        fields = (row.get("content_store_id"), row.get("content_key"))
         if status is StorageEntryStatus.NORMAL:
             if any(value is None for value in fields):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if str(row["object_store_id"]) != self._object_store.store_id:
+            if str(row["content_store_id"]) != self._object_store.store_id:
                 raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-            if str(row["object_key"]) != self._object_keys.key(str(row["etag"])):
+            if str(row["content_key"]) != self._object_keys.key(str(row["etag"])):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         elif any(value is not None for value in fields):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def _object_key_from_row(self, row: Mapping[str, object]) -> str:
         self._validate_object_columns(row, StorageEntryStatus(str(row["status"])))
-        return str(row["object_key"])
+        return str(row["content_key"])
 
     async def _ensure_ready(self) -> None:
         if not self._ready:
@@ -554,8 +547,8 @@ def _row_for_info(info: AssetInfo, store_id: str, object_key: str | None) -> dic
         "etag": info.etag,
         "size": info.size,
         "status": info.status.value,
-        "object_store_id": store_id if normal else None,
-        "object_key": object_key if normal else None,
+        "content_store_id": store_id if normal else None,
+        "content_key": object_key if normal else None,
         "metadata": dict(info.metadata),
         "modified_at": info.modified_at,
     }
