@@ -12,7 +12,7 @@ from linktools.core import environ
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 
-from ..capability import CapabilityGrant
+from ..capability import RuntimeCapability
 from ..core import JsonValue, canonical_sha256
 from ..errors import ErrorCode
 from ..storage import write_bytes_atomic
@@ -134,17 +134,17 @@ def build_workspace_tools(root: 'str | Path') -> 'tuple[WorkspaceTool, ...]':
     return cast(tuple[WorkspaceTool, ...], (list_dir, read_file, write_file, bash))
 
 
-def build_workspace_capability_grants(root: 'str | Path') -> 'tuple[CapabilityGrant, ...]':
+def build_workspace_capabilities(root: 'str | Path') -> 'tuple[RuntimeCapability, ...]':
     project_root = Path(root).expanduser().resolve()
     _logger.debug("local workspace tools configured root=%s", project_root)
     filesystem = FileSystem(root_dir=project_root)
     shell = Shell(cwd=project_root, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
     return (
-        CapabilityGrant(
+        RuntimeCapability(
             "workspace-filesystem",
             filesystem,
         ),
-        CapabilityGrant(
+        RuntimeCapability(
             "workspace-shell",
             shell,
         ),
@@ -214,4 +214,4 @@ def _kill_process_group(pid: int) -> None:
         return
 
 
-__all__ = ["WorkspaceTool", "build_workspace_capability_grants", "build_workspace_tool_map", "build_workspace_tools"]
+__all__ = ["WorkspaceTool", "build_workspace_capabilities", "build_workspace_tool_map", "build_workspace_tools"]

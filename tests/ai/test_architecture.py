@@ -318,6 +318,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "validate_fingerprint",
     } <= set(capability.__all__)
     assert workspace.__all__ == [
+        "CapabilitySource",
         "DisabledSandbox",
         "Sandbox",
         "Workspace",

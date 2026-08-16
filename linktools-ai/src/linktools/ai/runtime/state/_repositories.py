@@ -57,16 +57,17 @@ from ._contracts import (
     MemoryRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryConversationIntent,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
-    RecoveryTerminalHandoff,
-    RecoveryTerminalOutcome,
     ResultRecord,
     SessionRecord,
 )
 from ._plan import RuntimeDomain
+from ._recovery_codec import (
+    recovery_handoff_from_json,
+    recovery_handoff_to_json,
+    recovery_input_from_json,
+    recovery_input_to_json,
+)
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -494,15 +495,41 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
 
     def _from_row(self, row: Mapping[str, object]) -> ExecutionRecord:
         return ExecutionRecord(
-            str(row["execution_id"]), self._tenant_id, None if row["session_id"] is None else str(row["session_id"]),
-            str(row["binding_digest"]), None if row["parent_execution_id"] is None else str(row["parent_execution_id"]),
-            str(row["root_execution_id"]), None if row["source_execution_id"] is None else str(row["source_execution_id"]),
-            None if row["base_execution_id"] is None else str(row["base_execution_id"]),
-            ExecutionLineageKind(str(row["lineage_kind"])), ExecutionStatus(str(row["status"])), int(row["revision"]),
-            int(row["event_sequence"]), int(row["agent_run_sequence"]), None if row["error_code"] is None else str(row["error_code"]),
-            row["safe_error_details"] or {}, _utc(row["created_at"]), _utc(row["updated_at"]),
-            None if row["memory_scope"] is None else str(row["memory_scope"]),
-            None if row["conversation_step_run_id"] is None else str(row["conversation_step_run_id"]),
+            execution_id=str(row["execution_id"]),
+            tenant_id=self._tenant_id,
+            session_id=None if row["session_id"] is None else str(row["session_id"]),
+            binding_digest=str(row["binding_digest"]),
+            parent_execution_id=(
+                None
+                if row["parent_execution_id"] is None
+                else str(row["parent_execution_id"])
+            ),
+            root_execution_id=str(row["root_execution_id"]),
+            source_execution_id=(
+                None
+                if row["source_execution_id"] is None
+                else str(row["source_execution_id"])
+            ),
+            base_execution_id=(
+                None
+                if row["base_execution_id"] is None
+                else str(row["base_execution_id"])
+            ),
+            lineage_kind=ExecutionLineageKind(str(row["lineage_kind"])),
+            status=ExecutionStatus(str(row["status"])),
+            revision=int(row["revision"]),
+            event_sequence=int(row["event_sequence"]),
+            agent_run_sequence=int(row["agent_run_sequence"]),
+            error_code=None if row["error_code"] is None else str(row["error_code"]),
+            safe_error_details=row["safe_error_details"] or {},
+            created_at=_utc(row["created_at"]),
+            updated_at=_utc(row["updated_at"]),
+            memory_scope=None if row["memory_scope"] is None else str(row["memory_scope"]),
+            conversation_step_run_id=(
+                None
+                if row["conversation_step_run_id"] is None
+                else str(row["conversation_step_run_id"])
+            ),
         )
 
     def _record_values(self, record: ExecutionRecord) -> dict[str, object]:
@@ -2182,7 +2209,19 @@ class _SqlRecoveryCheckpointRepository(_SqlRepositoryBase):
         self._check_tenant(record.tenant_id)
         async with self._mutation() as session:
             table = self._table("ai_runtime_recovery_checkpoints")
-            values = self._values({"execution_id": record.execution_id}) | {"step_run_id": record.step_run_id, "agent_run_sequence": record.agent_run_sequence, "state": record.state.value, "handoff_phase": record.handoff_phase.value, "input": _input(record.input), "terminal_handoff": _handoff_json(record.terminal_handoff), "handoff_contract_digest": record.handoff_contract_digest, "pending_operation_id": record.pending_operation_id, "revision": record.revision, "created_at": record.created_at, "updated_at": record.updated_at}
+            values = self._values({"execution_id": record.execution_id}) | {
+                "step_run_id": record.step_run_id,
+                "agent_run_sequence": record.agent_run_sequence,
+                "state": record.state.value,
+                "handoff_phase": record.handoff_phase.value,
+                "input": recovery_input_to_json(record.input),
+                "terminal_handoff": recovery_handoff_to_json(record.terminal_handoff),
+                "handoff_contract_digest": record.handoff_contract_digest,
+                "pending_operation_id": record.pending_operation_id,
+                "revision": record.revision,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+            }
             if await self._insert(session, table, values):
                 return record
         current = await self.get(record.execution_id, tenant_id=record.tenant_id)
@@ -2213,7 +2252,22 @@ class _SqlRecoveryCheckpointRepository(_SqlRepositoryBase):
 
         async with self._mutation() as session:
             table = self._table("ai_runtime_recovery_checkpoints")
-            result = await session.execute(update(table).where(*self._where(table, execution_id=execution_id, revision=expected_revision)).values(step_run_id=next_record.step_run_id, agent_run_sequence=next_record.agent_run_sequence, state=next_record.state.value, handoff_phase=next_record.handoff_phase.value, input=_input(next_record.input), terminal_handoff=_handoff_json(next_record.terminal_handoff), handoff_contract_digest=next_record.handoff_contract_digest, pending_operation_id=next_record.pending_operation_id, revision=next_record.revision, updated_at=next_record.updated_at))
+            result = await session.execute(
+                update(table)
+                .where(*self._where(table, execution_id=execution_id, revision=expected_revision))
+                .values(
+                    step_run_id=next_record.step_run_id,
+                    agent_run_sequence=next_record.agent_run_sequence,
+                    state=next_record.state.value,
+                    handoff_phase=next_record.handoff_phase.value,
+                    input=recovery_input_to_json(next_record.input),
+                    terminal_handoff=recovery_handoff_to_json(next_record.terminal_handoff),
+                    handoff_contract_digest=next_record.handoff_contract_digest,
+                    pending_operation_id=next_record.pending_operation_id,
+                    revision=next_record.revision,
+                    updated_at=next_record.updated_at,
+                )
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
@@ -2620,90 +2674,31 @@ def _tool(row: Mapping[str, object], tenant_id: str) -> ToolOperationRecord:
     return ToolOperationRecord(str(row["tool_operation_id"]), tenant_id, str(row["step_run_id"]), str(row["tool_call_id"]), str(row["idempotency_key_digest"]), str(row["tool_name"]), str(row["arguments_digest"]), str(row["binding_fingerprint"]), bool(row["replay_safe"]), ToolOperationStatus(str(row["status"])), None if row["owner"] is None else str(row["owner"]), int(row["fence"]), _optional_utc(row["lease_expires_at"]), _object_ref(row, "result_"), None if row["error_code"] is None else str(row["error_code"]), _utc(row["created_at"]), _utc(row["updated_at"]))
 
 
-def _input(value: RecoveryExecutionInput) -> dict[str, object]:
-    return {
-        "version": 2,
-        "user_prompt": value.user_prompt,
-        "principal_id": value.principal_id,
-        "principal_kind": value.principal_kind,
-        "session_id": value.session_id,
-        "memory_scope": value.memory_scope,
-        "agent_id": value.agent_id,
-        "binding_digest": value.binding_digest,
-        "lineage_kind": value.lineage_kind,
-        "parent_execution_id": value.parent_execution_id,
-        "root_execution_id": value.root_execution_id,
-        "source_execution_id": value.source_execution_id,
-        "base_execution_id": value.base_execution_id,
-        "idempotency": (
-            None
-            if value.idempotency is None
-            else {
-                "scope": value.idempotency.scope,
-                "idempotency_key_digest": value.idempotency.idempotency_key_digest,
-                "request_digest": value.idempotency.request_digest,
-            }
-        ),
-    }
-
-
-def _handoff_json(value: RecoveryTerminalHandoff | None) -> object:
-    return None if value is None else {"source_step_run_id": value.source_step_run_id, "outcome": {"terminal_status": value.outcome.terminal_status.value, "error_code": value.outcome.error_code, "safe_error_details": value.outcome.safe_error_details, "stop_reason": value.outcome.stop_reason.value, "output_schema_id": value.outcome.output_schema_id, "output_schema_revision": value.outcome.output_schema_revision, "output_schema_fingerprint": value.outcome.output_schema_fingerprint, "recovery_object_ref": None if value.outcome.recovery_object_ref is None else {"store_id": value.outcome.recovery_object_ref.store_id, "key": value.outcome.recovery_object_ref.key, "digest": value.outcome.recovery_object_ref.digest, "size": value.outcome.recovery_object_ref.size}, "usage": asdict(value.outcome.usage), "terminal_event_type": value.outcome.terminal_event_type.value, "terminal_event_payload": value.outcome.terminal_event_payload, "result_created_at": value.outcome.result_created_at.isoformat()}, "conversation": None if value.conversation is None else {"session_id": value.conversation.session_id, "expected_cursor": None if value.conversation.expected_cursor is None else value.conversation.expected_cursor.step_run_id, "next_cursor": value.conversation.next_cursor.step_run_id}}
-
-
 def _checkpoint(row: Mapping[str, object], tenant_id: str) -> RecoveryCheckpoint:
     try:
-        raw_input = row["input"]
-        if not isinstance(raw_input, dict):
-            raise ValueError("input")
-        raw_identity = raw_input.get("idempotency")
-        identity = (
-            None
-            if raw_identity is None
-            else RecoveryIdempotencyInput(
-                str(raw_identity["scope"]),
-                str(raw_identity["idempotency_key_digest"]),
-                str(raw_identity["request_digest"]),
-            )
+        return RecoveryCheckpoint(
+            execution_id=str(row["execution_id"]),
+            tenant_id=tenant_id,
+            input=recovery_input_from_json(row["input"]),
+            step_run_id=None if row["step_run_id"] is None else str(row["step_run_id"]),
+            agent_run_sequence=int(row["agent_run_sequence"]),
+            state=RecoveryCheckpointState(str(row["state"])),
+            handoff_phase=RecoveryHandoffPhase(str(row["handoff_phase"])),
+            terminal_handoff=recovery_handoff_from_json(row["terminal_handoff"]),
+            handoff_contract_digest=(
+                None
+                if row["handoff_contract_digest"] is None
+                else str(row["handoff_contract_digest"])
+            ),
+            pending_operation_id=None if row["pending_operation_id"] is None else str(row["pending_operation_id"]),
+            revision=int(row["revision"]),
+            created_at=_utc(row["created_at"]),
+            updated_at=_utc(row["updated_at"]),
         )
-        user_prompt = raw_input.get("user_prompt", raw_input.get("prompt"))
-        if not isinstance(user_prompt, str):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        checkpoint_input = RecoveryExecutionInput(
-            user_prompt,
-            str(raw_input["principal_id"]),
-            str(raw_input["principal_kind"]),
-            raw_input.get("session_id"),
-            raw_input.get("memory_scope"),
-            str(raw_input["agent_id"]),
-            str(raw_input["binding_digest"]),
-            str(raw_input["lineage_kind"]),
-            raw_input.get("parent_execution_id"),
-            str(raw_input["root_execution_id"]),
-            raw_input.get("source_execution_id"),
-            raw_input.get("base_execution_id"),
-            identity,
-        )
-        handoff = _handoff_from_json(row["terminal_handoff"])
-        return RecoveryCheckpoint(str(row["execution_id"]), tenant_id, checkpoint_input, str(row["step_run_id"]), int(row["agent_run_sequence"]), RecoveryCheckpointState(str(row["state"])), RecoveryHandoffPhase(str(row["handoff_phase"])), handoff, None if row["handoff_contract_digest"] is None else str(row["handoff_contract_digest"]), None if row["pending_operation_id"] is None else str(row["pending_operation_id"]), int(row["revision"]), _utc(row["created_at"]), _utc(row["updated_at"]))
+    except AIError:
+        raise
     except (KeyError, TypeError, ValueError) as error:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-
-
-def _handoff_from_json(value: object) -> RecoveryTerminalHandoff | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise ValueError("handoff")
-    outcome = value["outcome"]
-    if not isinstance(outcome, dict):
-        raise ValueError("outcome")
-    raw_ref = outcome.get("recovery_object_ref")
-    reference = None if raw_ref is None else ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"]))
-    raw_conversation = value.get("conversation")
-    conversation = None if raw_conversation is None else RecoveryConversationIntent(str(raw_conversation["session_id"]), None if raw_conversation.get("expected_cursor") is None else ConversationCursor(str(raw_conversation["expected_cursor"])), ConversationCursor(str(raw_conversation["next_cursor"])))
-    terminal = RecoveryTerminalOutcome(ExecutionStatus(str(outcome["terminal_status"])), outcome.get("error_code"), outcome.get("safe_error_details") or {}, StopReason(str(outcome["stop_reason"])), outcome.get("output_schema_id"), outcome.get("output_schema_revision"), outcome.get("output_schema_fingerprint"), reference, _usage_from_row(outcome["usage"]), ExecutionEventType(str(outcome["terminal_event_type"])), outcome.get("terminal_event_payload") or {}, _utc(datetime.fromisoformat(str(outcome["result_created_at"]))))
-    return RecoveryTerminalHandoff(terminal, str(value["source_step_run_id"]), conversation)
 
 
 def _usage_from_row(value: object) -> UsageMetrics:

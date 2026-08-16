@@ -5,9 +5,21 @@
 import pytest
 
 from linktools.ai.adapter import RuntimeMemoryStore
+from linktools.ai.capability import SkillCapabilityProvider
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.workspace import Workspace, open_workspace_runtime
+from linktools.ai.spec import AgentSpec, AgentSpecCodec, builtin_asset_bindings
+from linktools.ai.workspace import CapabilitySource, Workspace, open_workspace_runtime
+from linktools.ai.workspace._factory import _build_asset_repository
+
+
+class _MCPSourceProvider:
+    provider = "mcp"
+
+
+def _mcp_source() -> CapabilitySource:
+    bindings = {binding.kind: binding for binding in builtin_asset_bindings()}
+    return CapabilitySource(bindings["mcp"], _MCPSourceProvider())
 
 
 @pytest.mark.asyncio
@@ -36,6 +48,49 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
         assert [match.path for match in result.matches] == ["workspace/memory/MEMORY.md"]
     finally:
         await state.close()
+
+
+@pytest.mark.asyncio
+async def test_workspace_assets_use_kind_scoped_paths(tmp_path) -> None:
+    assets_root = tmp_path / ".linktools" / "assets"
+    agent_path = assets_root / "agents" / "default"
+    skill_path = assets_root / "skills" / "review" / "SKILL.md"
+    mcp_path = assets_root / "mcp" / "local"
+    agent_path.parent.mkdir(parents=True)
+    skill_path.parent.mkdir(parents=True)
+    mcp_path.parent.mkdir(parents=True)
+    agent_path.write_bytes(
+        AgentSpecCodec().encode(
+            AgentSpec("default", 1, "gpt-test", (), "assistant_text", 1)
+        )
+    )
+    skill_path.write_text(
+        "---\nname: review\ndescription: Review changes.\n---\n\nReview changes.\n",
+        encoding="utf-8",
+    )
+    mcp_path.write_text(
+        '{"id":"local","revision":1,"command":"echo"}',
+        encoding="utf-8",
+    )
+
+    assets = await _build_asset_repository(
+        Workspace.load(tmp_path),
+        asset=None,
+        sources=(
+            CapabilitySource(
+                {binding.kind: binding for binding in builtin_asset_bindings()}["skill"],
+                SkillCapabilityProvider(),
+            ),
+            _mcp_source(),
+        ),
+    )
+
+    agents = await assets.list(kind="agent")
+    skills = await assets.list(kind="skill")
+    mcp_servers = await assets.list(kind="mcp")
+    assert [item.ref.id for item in agents.items] == ["default"]
+    assert [item.ref.id for item in skills.items] == ["review"]
+    assert [item.ref.id for item in mcp_servers.items] == ["local"]
 
 
 @pytest.mark.asyncio

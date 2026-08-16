@@ -69,23 +69,26 @@ result = await runtime.agent("coding").run("review this change", principal=princ
 ```text
 .linktools/assets/
 ├── agents/<id>
-├── integrations/mcp/<id>
-└── capabilities/skills/<id>/SKILL.md
+├── mcp/<id>
+└── skills/<id>/SKILL.md
 ```
 
 Agent and MCP declarations use their JSON codecs even though the canonical filenames have no suffix. Skills default to the directory layout shown above and may also use the single-file JSON representation.
 
-Workspace startup resolves capabilities twice. The first pass discovers built-in and application providers; the second builds the final default Agent from the resulting capability references. Startup fails if the two passes disagree.
+Workspace startup discovers declarations, resolves each configured capability source, and freezes the resulting Agent definitions before Runtime construction.
 
 ### 2.2 Custom logical Asset types
 
-Pass `AssetTypeBinding` values and capability providers directly to the workspace composition:
+Pass each custom Asset binding and provider as a `CapabilitySource`:
 
 ```python
+from linktools.ai import CapabilitySource
+
 async with open_workspace_runtime(
     workspace,
-    asset_bindings=(my_binding,),
-    capability_providers=(my_provider,),
+    capability_sources=(
+        CapabilitySource(asset_binding=my_binding, provider=my_provider),
+    ),
 ) as runtime:
     result = await runtime.run("use the custom capability", principal=principal)
 ```
@@ -162,7 +165,7 @@ runtime_state = RuntimeState.from_plan(
         memory=RuntimeStateRoute.sql(engine),
     )
 )
-async with open_workspace_runtime(workspace, runtime=runtime_state, models=models) as runtime:
+async with open_workspace_runtime(workspace, state=runtime_state, models=models) as runtime:
     result = await runtime.run("inspect the patch", principal=principal)
 
 await engine.dispose()
@@ -200,7 +203,7 @@ compiler = AgentCompiler(
     model_resolver=model_resolver,
     output_types=output_types,
     capability_providers=(my_provider,),
-    capability_grants=workspace_grants,
+    capabilities=workspace_capabilities,
     execution_profile_fingerprint=profile_digest,
 )
 ```

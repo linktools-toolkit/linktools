@@ -8,7 +8,7 @@ from collections.abc import Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentCompiler, AgentDefinition
+from ..agent import AgentDefinitionCatalog
 from ..core import (
     ExecutionStatus,
     Principal,
@@ -46,12 +46,10 @@ class RuntimeTaskNodeRunner:
     def __init__(
         self,
         execution: ExecutionService,
-        definitions: dict[str, AgentDefinition],
-        compiler: AgentCompiler,
+        catalog: AgentDefinitionCatalog,
     ) -> None:
         self._execution = execution
-        self._definitions = definitions
-        self._compiler = compiler
+        self._catalog = catalog
 
     async def prepare(
         self,
@@ -77,27 +75,9 @@ class RuntimeTaskNodeRunner:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         validate_agent_id(agent_id)
         validate_user_prompt(base_user_prompt)
-        definition = self._definitions.get(binding_digest)
-        if definition is not None:
-            if definition.digest != binding_digest or definition.spec.id != agent_id:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        else:
-            try:
-                definition = await self._compiler.compile(agent_id=agent_id)
-            except AIError as error:
-                if error.code is ErrorCode.AGENT_NOT_FOUND:
-                    raise AIError(
-                        ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                        safe_details={
-                            "agent_id": agent_id,
-                            "binding_digest": binding_digest,
-                        },
-                    ) from error
-                raise
-            if definition.digest != binding_digest:
-                raise AIError(ErrorCode.AGENT_DEFINITION_UNAVAILABLE)
-            self._definitions[binding_digest] = definition
-            _logger.info("task Agent definition rehydrated: agent=%s digest=%s", agent_id, binding_digest)
+        definition = self._catalog.definition(binding_digest)
+        if definition.spec.id != agent_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if set(dependency_results) != set(node.dependencies):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         dependency_payload: dict[str, object] = {}

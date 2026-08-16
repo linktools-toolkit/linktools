@@ -6,14 +6,14 @@
 from pathlib import Path
 
 import pytest
-from linktools.ai.workspace._tools import build_workspace_capability_grants, build_workspace_tool_map
+from linktools.ai.workspace._tools import build_workspace_capabilities, build_workspace_tool_map
 
 
-def test_workspace_grants_are_stable_and_root_scoped(tmp_path: Path) -> None:
-    grants = build_workspace_capability_grants(tmp_path)
-    assert tuple(grant.provider for grant in grants) == ("application", "application")
-    assert tuple(grant.id for grant in grants) == ("workspace-filesystem", "workspace-shell")
-    assert grants == build_workspace_capability_grants(tmp_path)
+def test_workspace_capabilities_are_stable_and_root_scoped(tmp_path: Path) -> None:
+    capabilities = build_workspace_capabilities(tmp_path)
+    assert tuple(capability.provider for capability in capabilities) == ("runtime", "runtime")
+    assert tuple(capability.id for capability in capabilities) == ("workspace-filesystem", "workspace-shell")
+    assert capabilities == build_workspace_capabilities(tmp_path)
 
 
 @pytest.mark.asyncio

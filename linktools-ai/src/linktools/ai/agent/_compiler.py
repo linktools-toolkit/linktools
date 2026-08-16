@@ -7,12 +7,12 @@ from types import MappingProxyType
 
 from linktools.core import environ
 
-from ..asset import AssetRef, AssetRepository, ResolvedAsset
+from ..asset import AssetRepository
 from ..capability import (
     CapabilityBinding,
-    CapabilityGrant,
     CapabilityProvider,
     CapabilityRefResolution,
+    RuntimeCapability,
     group_capability_refs,
     unresolved_binding,
     validate_fingerprint,
@@ -35,7 +35,7 @@ class AgentCompiler:
         model_resolver: ModelResolver,
         output_types: OutputTypeRegistry,
         capability_providers: "Sequence[CapabilityProvider]" = (),
-        capability_grants: "Sequence[CapabilityGrant]" = (),
+        capabilities: "Sequence[RuntimeCapability]" = (),
         execution_profile_fingerprint: str,
     ) -> None:
         if assets is None or not assets.ready or model_resolver is None or output_types is None or not output_types.frozen:
@@ -47,40 +47,56 @@ class AgentCompiler:
             if not isinstance(name, str) or not name.strip() or name in providers:
                 raise AIError(ErrorCode.CAPABILITY_CONFLICT)
             providers[name] = provider
-        grants = tuple(capability_grants)
-        _validate_bindings(grants)
-        if any(grant.provider in providers for grant in grants):
+        direct_capabilities = tuple(capabilities)
+        _validate_bindings(direct_capabilities)
+        if any(capability.provider in providers for capability in direct_capabilities):
+            raise AIError(ErrorCode.CAPABILITY_CONFLICT)
+        if any(provider_name == "runtime" for provider_name in providers):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         self._assets = assets
         self._model_resolver = model_resolver
         self._output_types = output_types
         self._providers = MappingProxyType(providers)
-        self._grants = grants
+        self._capabilities = direct_capabilities
         self._execution_profile_fingerprint = execution_profile_fingerprint
 
-    async def compile(self, *, agent_id: str) -> AgentDefinition:
-        return await self._compile(agent_id=agent_id, direct_grants=self._grants)
+    async def compile(self, spec: AgentSpec) -> AgentDefinition:
+        return await self._compile(spec=spec, direct_capabilities=self._capabilities)
 
-    async def compile_subagent(self, *, agent_id: str) -> AgentDefinition:
-        return await self._compile(
-            agent_id=agent_id,
-            direct_grants=tuple(grant for grant in self._grants if grant.inherit_to_subagents),
+    def derive_subagent(self, definition: AgentDefinition) -> AgentDefinition:
+        effective = tuple(
+            capability
+            for capability in definition.effective_capabilities
+            if not isinstance(capability, RuntimeCapability)
+            or capability.inherit_to_subagents
+        )
+        if effective == definition.effective_capabilities:
+            return definition
+        digest = _definition_digest(
+            definition.spec,
+            definition.model,
+            definition.output_schema_fingerprint,
+            effective,
+            self._execution_profile_fingerprint,
+        )
+        return AgentDefinition(
+            digest,
+            definition.spec,
+            definition.model,
+            definition.output_type,
+            definition.output_schema_fingerprint,
+            effective,
         )
 
     async def _compile(
         self,
         *,
-        agent_id: str,
-        direct_grants: "Sequence[CapabilityGrant]",
+        spec: AgentSpec,
+        direct_capabilities: "Sequence[RuntimeCapability]",
     ) -> AgentDefinition:
-        validate_agent_id(agent_id)
-        agent = await self._resolve_definition_asset(AssetRef("agent", agent_id))
-        if type(agent.spec) is not AgentSpec:
-            raise AIError(ErrorCode.CAPABILITY_RESOLUTION_INVALID)
-        spec = agent.spec
-        grants = tuple(direct_grants)
-        grant_providers = {grant.provider for grant in grants}
-        if any(ref.provider in grant_providers for ref in spec.capabilities):
+        validate_agent_id(spec.id)
+        direct_providers = {capability.provider for capability in direct_capabilities}
+        if any(ref.provider in direct_providers for ref in spec.capabilities):
             raise AIError(ErrorCode.CAPABILITY_CONFLICT)
         declarative: "list[CapabilityBinding]" = []
         for provider_name, refs in group_capability_refs(spec.capabilities):
@@ -93,7 +109,7 @@ class AgentCompiler:
                 binding = await provider.bind(refs, assets=self._assets)
                 _validate_binding(provider_name, refs, binding)
             declarative.append(binding)
-        effective = tuple(declarative) + grants
+        effective = tuple(declarative) + tuple(direct_capabilities)
         _validate_bindings(effective)
         model = self._model_resolver.resolve(spec.model)
         output_type = self._output_types.resolve(spec.output_schema, spec.output_schema_revision)
@@ -102,24 +118,11 @@ class AgentCompiler:
         definition = AgentDefinition(digest, spec, model, output_type, output_fingerprint, effective)
         _logger.debug(
             "agent definition compiled: agent=%s digest=%s capabilities=%s",
-            agent_id,
+            spec.id,
             digest,
             tuple(capability.id for capability in effective),
         )
         return definition
-
-    async def _resolve_definition_asset(self, ref: AssetRef) -> ResolvedAsset:
-        try:
-            return await self._assets.resolve(ref)
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_NOT_FOUND:
-                raise AIError(
-                    ErrorCode.AGENT_NOT_FOUND,
-                    "agent definition is unavailable",
-                    safe_details={"kind": ref.kind, "id": ref.id},
-                ) from error
-            raise
-
 
 def _validate_binding(provider: str, refs: "tuple[AgentCapabilityRef, ...]", binding: CapabilityBinding) -> None:
     _validate_binding_shape(binding)

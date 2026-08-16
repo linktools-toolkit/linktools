@@ -4,10 +4,10 @@
 
 from ._contract import (
     CapabilityBinding,
-    CapabilityGrant,
     CapabilityMaterializationContext,
     CapabilityProvider,
     CapabilityRefResolution,
+    RuntimeCapability,
     group_capability_refs,
     unresolved_binding,
     validate_fingerprint,
@@ -19,10 +19,10 @@ from ._skill import SkillCapabilityProvider
 __all__ = [
     "SKILL_TOOL_NAMES",
     "CapabilityBinding",
-    "CapabilityGrant",
     "CapabilityMaterializationContext",
     "CapabilityProvider",
     "CapabilityRefResolution",
+    "RuntimeCapability",
     "MCPCapabilityProvider",
     "MCPRuntime",
     "SkillCapabilityProvider",

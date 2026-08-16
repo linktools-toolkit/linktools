@@ -15,6 +15,7 @@ from ..core import (
     AuthorizationAction,
     AuthorizationPolicy,
     EvaluationStatus,
+    ExecutionStatus,
     IdempotencyStatus,
     Principal,
     ResourceKind,
@@ -288,21 +289,20 @@ class DefaultEvaluationService:
             return handle
 
     async def _synchronize(self, record: EvaluationRecord, *, principal: Principal) -> EvaluationRecord:
-        del principal
         hold_id = f"evaluation:{record.evaluation_id}"
         current = record
         terminal_statuses = {EvaluationStatus.SUCCEEDED, EvaluationStatus.FAILED, EvaluationStatus.CANCELLED}
         status_rank = {EvaluationStatus.PENDING: 0, EvaluationStatus.RUNNING: 1, EvaluationStatus.SUCCEEDED: 2, EvaluationStatus.FAILED: 2, EvaluationStatus.CANCELLED: 2}
         execution_status_map = {
-            "PENDING_START": EvaluationStatus.PENDING,
-            "START_UNKNOWN": EvaluationStatus.RUNNING,
-            "STARTED": EvaluationStatus.RUNNING,
-            "WAITING_APPROVAL": EvaluationStatus.RUNNING,
-            "WAITING_EXTERNAL": EvaluationStatus.RUNNING,
-            "CANCELLING": EvaluationStatus.RUNNING,
-            "SUCCEEDED": EvaluationStatus.SUCCEEDED,
-            "FAILED": EvaluationStatus.FAILED,
-            "CANCELLED": EvaluationStatus.CANCELLED,
+            ExecutionStatus.PENDING_START: EvaluationStatus.PENDING,
+            ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
+            ExecutionStatus.STARTED: EvaluationStatus.RUNNING,
+            ExecutionStatus.WAITING_APPROVAL: EvaluationStatus.RUNNING,
+            ExecutionStatus.WAITING_EXTERNAL: EvaluationStatus.RUNNING,
+            ExecutionStatus.CANCELLING: EvaluationStatus.RUNNING,
+            ExecutionStatus.SUCCEEDED: EvaluationStatus.SUCCEEDED,
+            ExecutionStatus.FAILED: EvaluationStatus.FAILED,
+            ExecutionStatus.CANCELLED: EvaluationStatus.CANCELLED,
         }
         while True:
             if current.status in terminal_statuses:
@@ -314,8 +314,17 @@ class DefaultEvaluationService:
                 await self._release_execution_hold(current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id)
                 _logger.warning("evaluation dependency missing: evaluation=%s execution=%s dependency_missing=True", current.evaluation_id, current.execution_id)
                 return current
+            if execution.status not in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
+                await self._execution.inspect(
+                    execution.execution_id,
+                    principal=principal,
+                )
             await self._acquire_execution_hold(current.execution_id, tenant_id=current.tenant_id, hold_id=hold_id)
-            target_status = execution_status_map.get(execution.status.value)
+            target_status = execution_status_map.get(execution.status)
             if target_status is None or status_rank[target_status] <= status_rank[current.status]:
                 return current
             updated = replace(current, status=target_status, revision=current.revision + 1, updated_at=datetime.now(timezone.utc))

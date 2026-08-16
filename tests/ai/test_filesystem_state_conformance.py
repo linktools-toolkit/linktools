@@ -267,8 +267,8 @@ async def test_filesystem_prepare_preserves_primary_when_release_fails(
     assert error.value is primary
 
 
-class _Compiler:
-    async def compile_subagent(self, *, agent_id: str) -> SimpleNamespace:
+class _Catalog:
+    def subagent_definition(self, agent_id: str) -> SimpleNamespace:
         return SimpleNamespace(digest=agent_id)
 
 
@@ -306,7 +306,7 @@ async def test_subagent_cleanup_cancellation_does_not_replace_primary() -> None:
             started.set()
             await release.wait()
 
-    dispatcher = Dispatcher(_Compiler(), {}, _Execution(primary))
+    dispatcher = Dispatcher(_Catalog(), _Execution(primary))
     task = asyncio.create_task(_dispatch(dispatcher))
     await started.wait()
     task.cancel()
@@ -324,7 +324,7 @@ async def test_subagent_cleanup_failure_is_recovery_error_from_primary() -> None
         async def cancel_child(self, *args: object, **kwargs: object) -> None:
             raise RuntimeError("cleanup failed")
 
-    dispatcher = Dispatcher(_Compiler(), {}, _Execution(primary))
+    dispatcher = Dispatcher(_Catalog(), _Execution(primary))
     with pytest.raises(AIError) as error:
         await _dispatch(dispatcher)
     assert error.value.code is ErrorCode.STORAGE_RECOVERY_REQUIRED

@@ -318,7 +318,7 @@ class RecoveryCheckpoint:
     execution_id: str
     tenant_id: str
     input: "RecoveryExecutionInput"
-    step_run_id: str
+    step_run_id: "str | None"
     agent_run_sequence: int
     state: "RecoveryCheckpointState"
     handoff_phase: "RecoveryHandoffPhase"
@@ -330,6 +330,12 @@ class RecoveryCheckpoint:
     updated_at: datetime
 
     def __post_init__(self) -> None:
+        if self.state is RecoveryCheckpointState.ADMITTED and (
+            self.step_run_id is not None or self.pending_operation_id is not None
+        ):
+            raise ValueError("admitted recovery checkpoint cannot have an attempt")
+        if self.state in {RecoveryCheckpointState.ACTIVE, RecoveryCheckpointState.WAITING} and self.step_run_id is None:
+            raise ValueError("active recovery checkpoint requires an attempt")
         if self.handoff_phase is RecoveryHandoffPhase.NONE:
             if self.terminal_handoff is not None or self.handoff_contract_digest is not None:
                 raise ValueError("unprepared recovery checkpoint cannot contain a handoff")
@@ -345,6 +351,7 @@ class RecoveryCheckpoint:
 
 
 class RecoveryCheckpointState(StrEnum):
+    ADMITTED = "admitted"
     ACTIVE = "active"
     WAITING = "waiting"
     HANDOFF = "handoff"
@@ -373,7 +380,7 @@ class RecoveryExecutionInput:
     root_execution_id: str
     source_execution_id: "str | None"
     base_execution_id: "str | None"
-    idempotency: "RecoveryIdempotencyInput | None"
+    idempotency: "RecoveryIdempotencyInput"
 
 
 @dataclass(frozen=True, slots=True)
@@ -420,8 +427,14 @@ class RecoveryConversationIntent:
 @dataclass(frozen=True, slots=True)
 class RecoveryTerminalHandoff:
     outcome: RecoveryTerminalOutcome
-    source_step_run_id: str
+    source_step_run_id: "str | None"
     conversation: RecoveryConversationIntent | None
+
+    def __post_init__(self) -> None:
+        if self.outcome.terminal_status is ExecutionStatus.SUCCEEDED and self.source_step_run_id is None:
+            raise ValueError("successful recovery handoff requires a source attempt")
+        if self.conversation is not None and self.source_step_run_id is None:
+            raise ValueError("conversation recovery intent requires a source attempt")
 
 
 class RuntimeRepository(Protocol):

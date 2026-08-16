@@ -23,6 +23,7 @@ from ..storage import (
     StorageEntryStatus,
     StorageOperation,
     StorageResetResult,
+    StorageRevision,
     StorageWriteState,
 )
 from ._domain import AssetInfo, AssetKey
@@ -280,6 +281,10 @@ class AssetRepository:
         """Return whether the underlying raw asset store is initialized."""
         return self._store.ready
 
+    async def current_revision(self) -> StorageRevision:
+        """Return the raw storage revision used for composition stability checks."""
+        return await self._store.current_revision()
+
     async def resolve(self, ref: AssetRef) -> "ResolvedAsset[object]":
         """Discover, stabilize, decode, and return one logical asset."""
         binding = self._binding_for(ref)
@@ -310,6 +315,32 @@ class AssetRepository:
         )
         return ResolvedAsset(ref, candidate.variant.name, value, candidate.info, scope)
 
+    async def discover(
+        self,
+        *,
+        kind: str,
+        prefix: "str | None" = None,
+    ) -> "tuple[AssetEntry, ...]":
+        """Discover all logical assets of one kind without decoding content."""
+        binding = self._binding_for_kind(kind)
+        normalized_prefix = _normalize_logical_prefix(kind, prefix, binding)
+        infos = await _load_all(self._store, kind=kind)
+        entries = _discover(binding, infos)
+        visible = tuple(
+            entry
+            for entry in sorted(entries.values(), key=lambda item: item.ref.id)
+            if normalized_prefix is None
+            or entry.ref.id == normalized_prefix
+            or entry.ref.id.startswith(normalized_prefix + "/")
+        )
+        _logger.debug(
+            "asset logical discovery: kind=%s prefix=%s count=%s",
+            kind,
+            normalized_prefix,
+            len(visible),
+        )
+        return visible
+
     async def list(
         self,
         *,
@@ -322,15 +353,7 @@ class AssetRepository:
         _validate_limit(limit)
         binding = self._binding_for_kind(kind)
         normalized_prefix = _normalize_logical_prefix(kind, prefix, binding)
-        infos = await _load_all(self._store, kind=kind)
-        entries = _discover(binding, infos)
-        visible = tuple(
-            entry
-            for entry in sorted(entries.values(), key=lambda item: item.ref.id)
-            if normalized_prefix is None
-            or entry.ref.id == normalized_prefix
-            or entry.ref.id.startswith(normalized_prefix + "/")
-        )
+        visible = await self.discover(kind=kind, prefix=normalized_prefix)
         discovery_digest = canonical_sha256(
             [
                 {

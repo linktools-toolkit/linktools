@@ -60,12 +60,7 @@ from ._contracts import (
     MemoryRecord,
     RecoveryCheckpoint,
     RecoveryCheckpointState,
-    RecoveryConversationIntent,
-    RecoveryExecutionInput,
     RecoveryHandoffPhase,
-    RecoveryIdempotencyInput,
-    RecoveryTerminalHandoff,
-    RecoveryTerminalOutcome,
     ResultRecord,
     RuntimeRepository,
     SessionRecord,
@@ -90,6 +85,12 @@ from ._memory import (
     _ToolRepository,
 )
 from ._plan import RuntimeDomain
+from ._recovery_codec import (
+    recovery_handoff_from_json,
+    recovery_handoff_to_json,
+    recovery_input_from_json,
+    recovery_input_to_json,
+)
 from ._transaction import TransactionHub
 
 _logger = environ.get_logger("ai.runtime.state.filesystem")
@@ -342,7 +343,7 @@ class _FilesystemDomainBackend:
         if isinstance(checkpoints, _RecoveryCheckpointRepository):
             for raw in payload["recovery_checkpoints"]:
                 if isinstance(raw, dict):
-                    record = recovery_checkpoint_from_json(raw)
+                    record = _recovery_checkpoint_from_json(raw)
                     checkpoints._records[(record.tenant_id, record.execution_id)] = record
         if isinstance(operations, _OperationRepository):
             for raw in payload["operations"]:
@@ -721,7 +722,51 @@ def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:
-    return ExecutionRecord(execution_id=str(value["execution_id"]), tenant_id=str(value["tenant_id"]), session_id=None if value.get("session_id") is None else str(value["session_id"]), binding_digest=str(value["binding_digest"]), parent_execution_id=None if value.get("parent_execution_id") is None else str(value["parent_execution_id"]), root_execution_id=str(value["root_execution_id"]), source_execution_id=None if value.get("source_execution_id") is None else str(value["source_execution_id"]), base_execution_id=None if value.get("base_execution_id") is None else str(value["base_execution_id"]), lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))), status=ExecutionStatus(str(value["status"])), revision=int(value["revision"]), event_sequence=int(value["event_sequence"]), agent_run_sequence=int(value.get("agent_run_sequence", 0)), error_code=None if value.get("error_code") is None else str(value["error_code"]), safe_error_details=value.get("safe_error_details", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), memory_scope=None if value.get("memory_scope") is None else str(value["memory_scope"]), conversation_step_run_id=None if value.get("conversation_step_run_id") is None else str(value["conversation_step_run_id"]))
+    return ExecutionRecord(
+        execution_id=str(value["execution_id"]),
+        tenant_id=str(value["tenant_id"]),
+        session_id=(
+            None
+            if value.get("session_id") is None
+            else str(value["session_id"])
+        ),
+        binding_digest=str(value["binding_digest"]),
+        parent_execution_id=(
+            None
+            if value.get("parent_execution_id") is None
+            else str(value["parent_execution_id"])
+        ),
+        root_execution_id=str(value["root_execution_id"]),
+        source_execution_id=(
+            None
+            if value.get("source_execution_id") is None
+            else str(value["source_execution_id"])
+        ),
+        base_execution_id=(
+            None
+            if value.get("base_execution_id") is None
+            else str(value["base_execution_id"])
+        ),
+        lineage_kind=ExecutionLineageKind(str(value.get("lineage_kind", "RUN"))),
+        status=ExecutionStatus(str(value["status"])),
+        revision=int(value["revision"]),
+        event_sequence=int(value["event_sequence"]),
+        agent_run_sequence=int(value.get("agent_run_sequence", 0)),
+        error_code=None if value.get("error_code") is None else str(value["error_code"]),
+        safe_error_details=value.get("safe_error_details", {}),
+        created_at=_time(value["created_at"]),
+        updated_at=_time(value["updated_at"]),
+        memory_scope=(
+            None
+            if value.get("memory_scope") is None
+            else str(value["memory_scope"])
+        ),
+        conversation_step_run_id=(
+            None
+            if value.get("conversation_step_run_id") is None
+            else str(value["conversation_step_run_id"])
+        ),
+    )
 
 
 def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
@@ -744,92 +789,43 @@ def _idempotency_from_json(value: dict[str, JsonValue]) -> IdempotencyRecord:
     )
 
 
-def recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckpoint:
-    raw_input = value["input"]
-    if not isinstance(raw_input, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    user_prompt = raw_input.get("user_prompt", raw_input.get("prompt"))
-    if not isinstance(user_prompt, str):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    recovery_input = RecoveryExecutionInput(
-        user_prompt=user_prompt,
-        principal_id=str(raw_input["principal_id"]),
-        principal_kind=str(raw_input["principal_kind"]),
-        session_id=None if raw_input.get("session_id") is None else str(raw_input["session_id"]),
-        memory_scope=None if raw_input.get("memory_scope") is None else str(raw_input["memory_scope"]),
-        agent_id=str(raw_input["agent_id"]),
-        binding_digest=str(raw_input["binding_digest"]),
-        lineage_kind=str(raw_input["lineage_kind"]),
-        parent_execution_id=None if raw_input.get("parent_execution_id") is None else str(raw_input["parent_execution_id"]),
-        root_execution_id=str(raw_input["root_execution_id"]),
-        source_execution_id=None if raw_input.get("source_execution_id") is None else str(raw_input["source_execution_id"]),
-        idempotency=(
-            None
-            if raw_input.get("idempotency") is None
-            else RecoveryIdempotencyInput(
-                str(raw_input["idempotency"]["scope"]),
-                str(raw_input["idempotency"]["idempotency_key_digest"]),
-                str(raw_input["idempotency"]["request_digest"]),
-            )
-        ),
-    )
-    return RecoveryCheckpoint(
-        execution_id=str(value["execution_id"]),
-        tenant_id=str(value["tenant_id"]),
-        input=recovery_input,
-        step_run_id=str(value["step_run_id"]),
-        agent_run_sequence=int(value["agent_run_sequence"]),
-        state=RecoveryCheckpointState(str(value["state"])),
-        handoff_phase=RecoveryHandoffPhase(str(value["handoff_phase"])),
-        terminal_handoff=None if value.get("terminal_handoff") is None else _recovery_handoff_from_json(value["terminal_handoff"]),
-        handoff_contract_digest=None if value.get("handoff_contract_digest") is None else str(value["handoff_contract_digest"]),
-        pending_operation_id=None if value.get("pending_operation_id") is None else str(value["pending_operation_id"]),
-        revision=int(value["revision"]),
-        created_at=_time(value["created_at"]),
-        updated_at=_time(value["updated_at"]),
-    )
-
-
-def _recovery_handoff_from_json(value: object) -> RecoveryTerminalHandoff:
-    if not isinstance(value, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raw_outcome = value.get("outcome")
-    if not isinstance(raw_outcome, dict):
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    raw_ref = raw_outcome.get("recovery_object_ref")
-    object_ref = None if raw_ref is None else ObjectRef(str(raw_ref["store_id"]), str(raw_ref["key"]), str(raw_ref["digest"]), int(raw_ref["size"]))
-    outcome = RecoveryTerminalOutcome(
-        terminal_status=ExecutionStatus(str(raw_outcome["terminal_status"])),
-        error_code=None if raw_outcome.get("error_code") is None else str(raw_outcome["error_code"]),
-        safe_error_details=raw_outcome.get("safe_error_details", {}),
-        stop_reason=StopReason(str(raw_outcome["stop_reason"])),
-        output_schema_id=None if raw_outcome.get("output_schema_id") is None else str(raw_outcome["output_schema_id"]),
-        output_schema_revision=None if raw_outcome.get("output_schema_revision") is None else int(raw_outcome["output_schema_revision"]),
-        output_schema_fingerprint=None if raw_outcome.get("output_schema_fingerprint") is None else str(raw_outcome["output_schema_fingerprint"]),
-        recovery_object_ref=object_ref,
-        usage=_usage_from_json(raw_outcome["usage"]),
-        terminal_event_type=ExecutionEventType(str(raw_outcome["terminal_event_type"])),
-        terminal_event_payload=raw_outcome["terminal_event_payload"],
-        result_created_at=_time(str(raw_outcome["result_created_at"])),
-    )
-    raw_conversation = value.get("conversation")
-    conversation = None
-    if raw_conversation is not None:
-        if not isinstance(raw_conversation, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        raw_expected = raw_conversation.get("expected_cursor")
-        raw_next = raw_conversation.get("next_cursor")
-        if not isinstance(raw_next, dict):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        conversation = RecoveryConversationIntent(
-            str(raw_conversation["session_id"]),
-            None if raw_expected is None else ConversationCursor(str(raw_expected["step_run_id"])),
-            ConversationCursor(str(raw_next["step_run_id"])),
+def _recovery_checkpoint_from_json(value: dict[str, JsonValue]) -> RecoveryCheckpoint:
+    try:
+        return RecoveryCheckpoint(
+            execution_id=str(value["execution_id"]),
+            tenant_id=str(value["tenant_id"]),
+            input=recovery_input_from_json(value["input"]),
+            step_run_id=None if value.get("step_run_id") is None else str(value["step_run_id"]),
+            agent_run_sequence=int(value["agent_run_sequence"]),
+            state=RecoveryCheckpointState(str(value["state"])),
+            handoff_phase=RecoveryHandoffPhase(str(value["handoff_phase"])),
+            terminal_handoff=recovery_handoff_from_json(value.get("terminal_handoff")),
+            handoff_contract_digest=(
+                None
+                if value.get("handoff_contract_digest") is None
+                else str(value["handoff_contract_digest"])
+            ),
+            pending_operation_id=(
+                None
+                if value.get("pending_operation_id") is None
+                else str(value["pending_operation_id"])
+            ),
+            revision=int(value["revision"]),
+            created_at=_time(value["created_at"]),
+            updated_at=_time(value["updated_at"]),
         )
-    return RecoveryTerminalHandoff(outcome, str(value["source_step_run_id"]), conversation)
+    except AIError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _json_record(record: object) -> dict[str, JsonValue]:
+    if isinstance(record, RecoveryCheckpoint):
+        value = _json_value(asdict(record))
+        value["input"] = recovery_input_to_json(record.input)
+        value["terminal_handoff"] = recovery_handoff_to_json(record.terminal_handoff)
+        return value
     return _json_value(asdict(record))
 
 

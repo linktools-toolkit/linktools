@@ -23,6 +23,10 @@ from .state._contracts import EventRepository, ExecutionRepository
 _logger = environ.get_logger("ai.runtime.event")
 
 
+class _ExecutionWorkerFailureProbe(Protocol):
+    def __call__(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
+
+
 class EventApi(Protocol):
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
     def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionEvent]': ...
@@ -36,10 +40,12 @@ class DefaultEventService:
         executions: ExecutionRepository,
         events: EventRepository,
         authorization: AuthorizationPolicy,
+        worker_failure: _ExecutionWorkerFailureProbe,
     ) -> None:
         self._executions = executions
         self._events = events
         self._authorization = authorization
+        self._worker_failure = worker_failure
 
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
@@ -63,6 +69,12 @@ class DefaultEventService:
                 execution = await self._executions.get(execution_id, tenant_id=principal.tenant_id)
                 if execution is None or execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     return
+                failure = self._worker_failure(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                )
+                if failure is not None:
+                    raise failure
                 await asyncio.sleep(0.1)
                 continue
             for event in page.items:

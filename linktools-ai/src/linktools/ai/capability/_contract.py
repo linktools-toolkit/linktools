@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Capability binding, grant, and provider contracts."""
+"""Capability binding, runtime capability, and provider contracts."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -85,15 +85,15 @@ class CapabilityProvider(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class CapabilityGrant:
+class RuntimeCapability:
     id: str
     capability: "PydanticAgentCapability[None]"
-    revision: int = 1
+    revision: "int | None" = None
     inherit_to_subagents: bool = True
 
     @property
     def provider(self) -> str:
-        return "application"
+        return "runtime"
 
     @property
     def resolutions(self) -> "tuple[CapabilityRefResolution, ...]":
@@ -101,11 +101,26 @@ class CapabilityGrant:
 
     @property
     def fingerprint(self) -> str:
-        return canonical_sha256({"provider": self.provider, "id": self.id, "revision": self.revision})
+        payload: dict[str, object] = {"provider": self.provider, "id": self.id}
+        if self.revision is not None:
+            payload["revision"] = self.revision
+        return canonical_sha256(payload)
 
     def __post_init__(self) -> None:
-        if not self.id.strip() or self.capability is None or not isinstance(self.revision, int) or isinstance(self.revision, bool) or self.revision < 1 or not isinstance(self.inherit_to_subagents, bool):
-            raise ValueError("capability grant is incomplete")
+        if (
+            not self.id.strip()
+            or self.capability is None
+            or (
+                self.revision is not None
+                and (
+                    not isinstance(self.revision, int)
+                    or isinstance(self.revision, bool)
+                    or self.revision < 1
+                )
+            )
+            or not isinstance(self.inherit_to_subagents, bool)
+        ):
+            raise ValueError("runtime capability is incomplete")
 
     async def materialize(self, context: CapabilityMaterializationContext) -> "tuple[PydanticAgentCapability[None], ...]":
         del context
@@ -158,7 +173,7 @@ def _ref_payload(ref: AgentCapabilityRef) -> dict[str, object]:
 
 __all__ = [
     "CapabilityBinding",
-    "CapabilityGrant",
+    "RuntimeCapability",
     "CapabilityMaterializationContext",
     "CapabilityProvider",
     "CapabilityRefResolution",

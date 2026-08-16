@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
 from linktools.core import environ
 
-from ..agent import AgentCompiler, AgentDefinition
+from ..agent import AgentDefinition, AgentDefinitionCatalog
 from ..core import (
     JsonValue,
     Principal,
@@ -45,6 +45,7 @@ from .service_api import (
     ExecutionResult,
     ExecutionService,
     ReplayEvaluationRequest,
+    ResumeSessionRequest,
     RunEvaluationRequest,
     SessionService,
     SessionView,
@@ -60,7 +61,7 @@ class Runtime:
 
     def __init__(
         self,
-        compiler: AgentCompiler,
+        catalog: AgentDefinitionCatalog,
         execution: ExecutionService,
         session: SessionService,
         task: TaskService,
@@ -70,12 +71,11 @@ class Runtime:
         artifact: ArtifactService,
         *,
         tenant_id: str = "default",
-        definitions: "dict[str, AgentDefinition] | None" = None,
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
     ) -> None:
-        if any(value is None for value in (compiler, execution, session, task, evaluation, approval, event, artifact)):
+        if any(value is None for value in (catalog, execution, session, task, evaluation, approval, event, artifact)):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-        self._compiler = compiler
+        self._catalog = catalog
         self.execution = execution
         self.session = session
         self.task = task
@@ -89,7 +89,6 @@ class Runtime:
             tenant_id=self._tenant_id,
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
-        self._definitions = {} if definitions is None else definitions
         self._close_callback = close_callback
         self._closed = False
         self._close_lock = asyncio.Lock()
@@ -110,22 +109,12 @@ class Runtime:
 
     async def _compile_agent(self, agent_id: str) -> AgentDefinition:
         self._ensure_open()
-        definition = await self._compiler.compile(agent_id=agent_id)
-        _logger.debug("agent definition compiled for handle: agent=%s digest=%s", agent_id, definition.digest)
+        definition = self._catalog.root_definition(agent_id)
+        _logger.debug("agent definition selected: agent=%s digest=%s", agent_id, definition.digest)
         return definition
-
-    def _register_definition(self, definition: AgentDefinition) -> None:
-        self._definitions[definition.digest] = definition
-        _logger.debug(
-            "agent definition registered: agent=%s digest=%s",
-            definition.spec.id,
-            definition.digest,
-        )
 
     async def _compile_and_register(self, agent_id: str) -> AgentDefinition:
-        definition = await self._compile_agent(agent_id)
-        self._register_definition(definition)
-        return definition
+        return await self._compile_agent(agent_id)
 
     async def start(
         self,
@@ -179,10 +168,7 @@ class Runtime:
             )
             if agent_id is not None and definition.spec.id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            self._register_definition(definition)
             await self._ensure_session(definition, session_id, principal)
-            from .service_api import ResumeSessionRequest
-
             handle = await self.session.resume(
                 definition.digest,
                 session_id,
@@ -472,8 +458,6 @@ class Runtime:
             agent_id: await self._compile_agent(agent_id)
             for agent_id in sorted(agent_ids)
         }
-        for definition in compiled.values():
-            self._register_definition(definition)
         admitted_nodes = tuple(
             TaskNode(
                 node.node_id,

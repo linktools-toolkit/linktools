@@ -9,7 +9,8 @@ import pytest
 from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
-from linktools.ai.runtime._execution import DefaultExecutionService
+from linktools.ai.runtime.state import ExecutionRecord
+from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
 
 
 class _History:
@@ -23,12 +24,25 @@ class _History:
 class _Launcher:
     def __init__(self) -> None:
         self.calls = 0
+        self._started: set[str] = set()
 
-    async def start(self, request: ExecutionRequest, execution: object) -> None:
+    async def prepare_start(self, request: ExecutionRequest, execution: ExecutionRecord, identity: object) -> None:
+        del request, execution, identity
+
+    async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
+        del request
+        if execution.execution_id in self._started:
+            return
+        self._started.add(execution.execution_id)
         self.calls += 1
         await asyncio.sleep(0.01)
 
-    async def cancel(self, execution: object) -> None:
+    async def cancel(self, execution: object) -> CancelEffectOutcome:
+        del execution
+        return CancelEffectOutcome.CONFIRMED
+
+    def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None:
+        del execution_id, tenant_id
         return None
 
 

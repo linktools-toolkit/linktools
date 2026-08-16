@@ -9,8 +9,8 @@ from pathlib import Path
 from linktools.core import environ
 from pydantic_ai_harness.memory import SearchableMemoryStore
 
-from ..agent import AgentCompiler, AgentDefinition, AgentExecutor
-from ..core import AuthorizationPolicy
+from ..agent import AgentDefinitionCatalog, AgentExecutor
+from ..core import AuthorizationPolicy, HmacCursorSigner
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore
 from ..task import LocalTaskGraphLauncher
@@ -27,7 +27,6 @@ from ._subagent import SubagentDispatcher
 from .service_api import ExecutionHistoryReader
 from .state import (
     RecoveryCheckpointState,
-    RecoveryHandoffPhase,
     RuntimeDomain,
     RuntimeRetentionMode,
     RuntimeState,
@@ -39,7 +38,7 @@ _logger = environ.get_logger("ai.runtime.factory")
 async def build_local_runtime(
     *,
     state: RuntimeState,
-    compiler: AgentCompiler,
+    catalog: AgentDefinitionCatalog,
     authorization: AuthorizationPolicy,
     tenant_id: str,
     namespace: str,
@@ -50,7 +49,6 @@ async def build_local_runtime(
 ) -> Runtime:
     if not state.ready:
         raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-    definitions: dict[str, AgentDefinition] = {}
     execution = DefaultExecutionService(
         state.execution,
         state._object_store(RuntimeDomain.EXECUTION),
@@ -59,7 +57,7 @@ async def build_local_runtime(
         history_reader=history_reader,
         release_terminal=state.retention.release_execution_handoff,
     )
-    dispatcher = SubagentDispatcher(compiler, definitions, execution)
+    dispatcher = SubagentDispatcher(catalog, execution)
     executor = AgentExecutor(execution_root=execution_root)
 
     def build_memory_store(
@@ -97,7 +95,7 @@ async def build_local_runtime(
             namespace,
             state.steps,
             executor,
-            definitions,
+            catalog,
             tenant_id=tenant_id,
             execution_root=execution_root,
             step_reads={
@@ -125,7 +123,7 @@ async def build_local_runtime(
             _cursor_signer("session", grant_key),
             release_terminal=state.retention.release_session,
         )
-        task_runner = RuntimeTaskNodeRunner(execution, definitions, compiler)
+        task_runner = RuntimeTaskNodeRunner(execution, catalog)
         task_launcher = LocalTaskGraphLauncher(
             state.task.tasks,
             task_runner,
@@ -152,6 +150,7 @@ async def build_local_runtime(
             state.execution.executions,
             state.execution.events,
             authorization,
+            backend.worker_failure,
         )
         artifact = DefaultArtifactService(
             state.artifact,
@@ -163,7 +162,7 @@ async def build_local_runtime(
             (task_launcher.shutdown, backend.close, state.close)
         )
         runtime = Runtime(
-            compiler,
+            catalog,
             execution,
             session,
             task,
@@ -172,15 +171,9 @@ async def build_local_runtime(
             event,
             artifact,
             tenant_id=tenant_id,
-            definitions=definitions,
             close_callback=coordinator.close,
         )
-        await _compile_recovery_definitions(
-            compiler,
-            definitions,
-            state,
-            tenant_id=tenant_id,
-        )
+        await _validate_recovery_definitions(catalog, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:
             await backend.reconcile()
     except BaseException:
@@ -198,9 +191,8 @@ async def build_local_runtime(
     return runtime
 
 
-async def _compile_recovery_definitions(
-    compiler: AgentCompiler,
-    definitions: dict[str, AgentDefinition],
+async def _validate_recovery_definitions(
+    catalog: AgentDefinitionCatalog,
     state: RuntimeState,
     *,
     tenant_id: str,
@@ -209,36 +201,35 @@ async def _compile_recovery_definitions(
     for checkpoint in checkpoints:
         if (
             checkpoint.state is RecoveryCheckpointState.COMPLETED
-            or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
         ):
             continue
         try:
             definition = (
-                await compiler.compile_subagent(agent_id=checkpoint.input.agent_id)
+                catalog.subagent_definition(checkpoint.input.agent_id)
                 if checkpoint.input.parent_execution_id is not None
-                else await compiler.compile(agent_id=checkpoint.input.agent_id)
+                else catalog.root_definition(checkpoint.input.agent_id)
             )
         except AIError as error:
-            if error.code is ErrorCode.AGENT_NOT_FOUND:
-                raise AIError(
-                    ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
-                    safe_details={
-                        "execution_id": checkpoint.execution_id,
-                        "agent_id": checkpoint.input.agent_id,
-                    },
-                ) from error
-            raise
+            raise AIError(
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                safe_details={
+                    "execution_id": checkpoint.execution_id,
+                    "agent_id": checkpoint.input.agent_id,
+                },
+            ) from error
+        if definition.spec.id != checkpoint.input.agent_id:
+            raise AIError(
+                ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
+                safe_details={"execution_id": checkpoint.execution_id},
+            )
         if definition.digest != checkpoint.input.binding_digest:
             raise AIError(
                 ErrorCode.AGENT_DEFINITION_UNAVAILABLE,
                 safe_details={"execution_id": checkpoint.execution_id},
             )
-        definitions[checkpoint.input.binding_digest] = definition
 
 
-def _cursor_signer(name: str, grant_key: bytes):
-    from ..core import HmacCursorSigner
-
+def _cursor_signer(name: str, grant_key: bytes) -> HmacCursorSigner:
     return HmacCursorSigner(name, grant_key)
 
 
