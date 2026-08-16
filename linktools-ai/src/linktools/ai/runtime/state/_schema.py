@@ -198,7 +198,7 @@ def build_runtime_sql_metadata(
             nullable=frozenset({"result_digest", "error_code"}),
         )
     if "ai_runtime_events" in tables:
-        table(
+        events_table = table(
             "ai_runtime_events",
             {
                 **common,
@@ -211,6 +211,14 @@ def build_runtime_sql_metadata(
             ("namespace_digest", "tenant_id", "identity_digest"),
             table_comment="Runtime execution events",
         )
+        if events_table is not None:
+            sql_query_index(
+                events_table,
+                "namespace_digest",
+                "tenant_id",
+                "execution_id",
+                mysql_length=128,
+            )
     if "ai_runtime_task_graphs" in tables:
         table(
             "ai_runtime_task_graphs",
@@ -224,7 +232,7 @@ def build_runtime_sql_metadata(
             table_comment="Runtime task graphs",
         )
     if "ai_runtime_task_nodes" in tables:
-        table(
+        nodes_table = table(
             "ai_runtime_task_nodes",
             {
                 **common,
@@ -259,6 +267,14 @@ def build_runtime_sql_metadata(
                 }
             ),
         )
+        if nodes_table is not None:
+            sql_query_index(
+                nodes_table,
+                "namespace_digest",
+                "tenant_id",
+                "graph_id",
+                mysql_length=128,
+            )
     if "ai_runtime_evaluations" in tables:
         table(
             "ai_runtime_evaluations",
@@ -511,7 +527,7 @@ def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
         return owner_table
 
     if "ai_step_runs" in names:
-        table(
+        runs_table = table(
             "ai_step_runs",
             {
                 **common,
@@ -531,8 +547,23 @@ def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
             table_comment="Step runs",
             nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}),
         )
+        if runs_table is not None:
+            sql_query_index(
+                runs_table,
+                "namespace_digest",
+                "tenant_id",
+                "conversation_id",
+                mysql_length=128,
+            )
+            sql_query_index(
+                runs_table,
+                "namespace_digest",
+                "tenant_id",
+                "parent_run_id",
+                mysql_length=128,
+            )
     if "ai_step_events" in names:
-        table(
+        events_table = table(
             "ai_step_events",
             {
                 **common,
@@ -556,8 +587,16 @@ def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
                 {"conversation_id", "parent_run_id", "agent_name", "tool_call_id", "tool_name", "error"}
             ),
         )
+        if events_table is not None:
+            sql_query_index(
+                events_table,
+                "namespace_digest",
+                "tenant_id",
+                "run_id",
+                mysql_length=128,
+            )
     if "ai_step_snapshots" in names:
-        table(
+        snapshots_table = table(
             "ai_step_snapshots",
             {
                 **common,
@@ -578,6 +617,14 @@ def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
             table_comment="Step snapshots",
             nullable=frozenset({"conversation_id", "parent_run_id", "agent_name"}),
         )
+        if snapshots_table is not None:
+            sql_query_index(
+                snapshots_table,
+                "namespace_digest",
+                "tenant_id",
+                "run_id",
+                mysql_length=128,
+            )
     if "ai_step_effects" in names:
         effects = table(
             "ai_step_effects",

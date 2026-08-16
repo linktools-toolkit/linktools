@@ -42,7 +42,6 @@ from ._revision import (
     LayerMetadataView,
     MetadataState,
     RevisionSource,
-    StorageRevisionSource,
 )
 
 KeyT = TypeVar("KeyT", bound=Hashable)
@@ -139,9 +138,12 @@ class StorageOverlay(Generic[KeyT, ValueT, InfoT]):
         self.preload_concurrency = preload_concurrency
         self._cache_tasks: dict[str, asyncio.Task[ValueT | None]] = {}
         self._cache_task_lock = asyncio.Lock()
-        source = revision_source or StorageRevisionSource(primary)
         self._views = (
-            LayerMetadataView(primary, LayerRefreshPolicy.REVISIONED, revision_source=source),
+            LayerMetadataView(
+                primary,
+                LayerRefreshPolicy.REVISIONED,
+                revision_source=revision_source,
+            ),
             *(LayerMetadataView(layer.backend, layer.refresh) for layer in layer_values),
         )
         self._writer_index = next(

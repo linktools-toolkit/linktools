@@ -13,6 +13,7 @@ from ..errors import AIError, ErrorCode
 
 SqlValue: TypeAlias = str | int | bool | bytes | datetime | None
 _logger = environ.get_logger("ai.storage.dialects")
+_SQL_DELETE_RETURNING_BATCH_LIMIT = 64
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -458,23 +459,49 @@ class MySQLDialect(SQLiteDialect):
         where: "ColumnElement[bool]",
         returning: "Sequence[str]",
     ) -> "tuple[RowMapping, ...]":
-        from sqlalchemy import delete, select
+        from sqlalchemy import and_, delete, or_, select
 
-        columns = [table.c[column] for column in returning]
-        rows = tuple(
+        primary_columns = tuple(table.primary_key.columns)
+        if not primary_columns:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return_columns = tuple(table.c[column] for column in returning)
+        selected = tuple(
             (
                 await session.execute(
-                    select(*columns).where(where).with_for_update()
+                    select(*primary_columns, *return_columns).where(where)
                 )
             )
             .mappings()
             .all()
         )
-        if rows:
-            result = await session.execute(delete(table).where(where))
-            if result.rowcount != len(rows):
-                return ()
-        return rows
+        if not selected:
+            return ()
+
+        deleted_count = 0
+        for offset in range(0, len(selected), _SQL_DELETE_RETURNING_BATCH_LIMIT):
+            batch = selected[offset : offset + _SQL_DELETE_RETURNING_BATCH_LIMIT]
+            predicates = []
+            for row in batch:
+                values = []
+                for column in (*primary_columns, *return_columns):
+                    value = row[column.key]
+                    values.append(
+                        column.is_(None) if value is None else column == value
+                    )
+                predicates.append(and_(*values))
+            result = await session.execute(
+                delete(table).where(and_(where, or_(*predicates)))
+            )
+            deleted_count += result.rowcount
+        if deleted_count != len(selected):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return tuple(
+            {
+                column: row[column]
+                for column in returning
+            }
+            for row in selected
+        )
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         return _classify_error(error, ("duplicate entry", "1062"))

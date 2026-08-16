@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Private database-current Runtime repositories."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
@@ -216,8 +216,27 @@ class _SqlSessionRepository(_SqlRepositoryBase):
 
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        record = await self.get(session_id, tenant_id=tenant_id)
-        return None if record is None else ResourceRef(ResourceKind.SESSION, session_id, tenant_id, record.owner_principal_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_sessions")
+            row = (
+                await session.execute(
+                    select(table.c.session_id, table.c.owner_principal_id).where(
+                        *self._where(table, session_id=session_id)
+                    )
+                )
+            ).mappings().first()
+        return (
+            None
+            if row is None
+            else ResourceRef(
+                ResourceKind.SESSION,
+                str(row["session_id"]),
+                tenant_id,
+                str(row["owner_principal_id"]),
+            )
+        )
 
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None:
         self._check_tenant(tenant_id)
@@ -252,10 +271,7 @@ class _SqlSessionRepository(_SqlRepositoryBase):
             if result.rowcount != 1:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             self._transaction.mark_changed()
-            row = await self._one(session, table, *self._where(table, session_id=session_id))
-        if row is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._from_row(row)
+        return next_record
 
     async def advance_continuation(self, session_id: str, *, tenant_id: str, expected: ConversationCursor | None, next_cursor: ConversationCursor) -> SessionRecord:
         self._check_tenant(tenant_id)
@@ -295,13 +311,10 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
         )
 
     def _record_values(self, record: IdempotencyRecord) -> dict[str, object]:
-        identity_digest = canonical_identity_digest(
-            "runtime-idempotency",
-            {
-                "runtime_domain": self._runtime_domain.value,
-                "scope": record.scope,
-                "idempotency_key_digest": record.idempotency_key_digest,
-            },
+        identity_digest = _idempotency_identity_digest(
+            self._runtime_domain,
+            record.scope,
+            record.idempotency_key_digest,
         )
         return self._values(
             {
@@ -320,6 +333,49 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             "updated_at": record.updated_at,
         }
 
+    async def _lookup_identity(
+        self,
+        session: "AsyncSession",
+        table: "Table",
+        *,
+        scope: str,
+        idempotency_key_digest: str,
+    ) -> Mapping[str, object] | None:
+        expected_digest = _idempotency_identity_digest(
+            self._runtime_domain,
+            scope,
+            idempotency_key_digest,
+        )
+        row = await self._one(
+            session,
+            table,
+            *self._where(
+                table,
+                runtime_domain=self._runtime_domain.value,
+                identity_digest=expected_digest,
+            ),
+        )
+        if row is None:
+            return None
+        try:
+            persisted_domain = RuntimeDomain(str(row["runtime_domain"]))
+        except (KeyError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        persisted_digest = _idempotency_identity_digest(
+            persisted_domain,
+            str(row["scope"]),
+            str(row["idempotency_key_digest"]),
+        )
+        if persisted_digest != str(row["identity_digest"]):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            persisted_domain is not self._runtime_domain
+            or str(row["scope"]) != scope
+            or str(row["idempotency_key_digest"]) != idempotency_key_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return row
+
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         self._check_tenant(record.tenant_id)
         expected_kind = {
@@ -332,15 +388,11 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             table = self._table("ai_runtime_idempotency")
             if await self._insert(session, table, self._record_values(record)):
                 return record
-            row = await self._one(
+            row = await self._lookup_identity(
                 session,
                 table,
-                *self._where(
-                    table,
-                    runtime_domain=self._runtime_domain.value,
-                    scope=record.scope,
-                    idempotency_key_digest=record.idempotency_key_digest,
-                ),
+                scope=record.scope,
+                idempotency_key_digest=record.idempotency_key_digest,
             )
         if row is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -353,15 +405,11 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
         self._check_tenant(tenant_id)
         async with self._read_session() as session:
             table = self._table("ai_runtime_idempotency")
-            row = await self._one(
+            row = await self._lookup_identity(
                 session,
                 table,
-                *self._where(
-                    table,
-                    runtime_domain=self._runtime_domain.value,
-                    scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
-                ),
+                scope=scope,
+                idempotency_key_digest=idempotency_key_digest,
             )
         return None if row is None else self._from_row(row)
 
@@ -419,6 +467,11 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
                     *self._where(
                         table,
                         runtime_domain=self._runtime_domain.value,
+                        identity_digest=_idempotency_identity_digest(
+                            self._runtime_domain,
+                            scope,
+                            idempotency_key_digest,
+                        ),
                         scope=scope,
                         idempotency_key_digest=idempotency_key_digest,
                         status=expected_status.value,
@@ -429,19 +482,7 @@ class _SqlIdempotencyRepository(_SqlRepositoryBase):
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-            row = await self._one(
-                session,
-                table,
-                *self._where(
-                    table,
-                    runtime_domain=self._runtime_domain.value,
-                    scope=scope,
-                    idempotency_key_digest=idempotency_key_digest,
-                ),
-            )
-        if row is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._from_row(row)
+        return next_record
 
 
 class _SqlExecutionRepository(_SqlRepositoryBase):
@@ -494,7 +535,22 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
 
     async def get_header(self, execution_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get(execution_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.EXECUTION, execution_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_executions")
+            row = (
+                await session.execute(
+                    select(table.c.execution_id).where(
+                        *self._where(table, execution_id=execution_id)
+                    )
+                )
+            ).first()
+        return (
+            None
+            if row is None
+            else ResourceRef(ResourceKind.EXECUTION, str(row[0]), tenant_id)
+        )
 
     async def get(self, execution_id: str, *, tenant_id: str) -> ExecutionRecord | None:
         self._check_tenant(tenant_id)
@@ -517,10 +573,7 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-            row = await self._one(session, table, *self._where(table, execution_id=execution_id))
-        if row is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._from_row(row)
+        return next_record
 
     async def list_by_session(self, session_id: str, *, tenant_id: str, statuses: frozenset[ExecutionStatus] | None = None) -> tuple[ExecutionRecord, ...]:
         self._check_tenant(tenant_id)
@@ -554,15 +607,11 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
             raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
         async with self._mutation() as session:
             idempotency_table = self._table("ai_runtime_idempotency")
-            identity_row = await self._one(
+            identity_row = await self._idempotency._lookup_identity(
                 session,
                 idempotency_table,
-                *self._where(
-                    idempotency_table,
-                    runtime_domain=RuntimeDomain.EXECUTION.value,
-                    scope=reservation.idempotency.scope,
-                    idempotency_key_digest=reservation.idempotency.idempotency_key_digest,
-                ),
+                scope=reservation.idempotency.scope,
+                idempotency_key_digest=reservation.idempotency.idempotency_key_digest,
             )
             if identity_row is not None:
                 identity = self._idempotency._from_row(identity_row)
@@ -891,11 +940,49 @@ class _SqlOperationRepository(_SqlRepositoryBase):
 
         return OperationLedgerRecord(str(row["operation_id"]), self._tenant_id, ResourceKind(str(row["resource_kind"])), str(row["resource_id"]), None if row["execution_id"] is None else str(row["execution_id"]), OperationKind(str(row["operation_kind"])), OperationStatus(str(row["status"])), str(row["request_digest"]), None if row["result_ref"] is None else str(row["result_ref"]), None if row["result_digest"] is None else str(row["result_digest"]), None if row["error_code"] is None else str(row["error_code"]), bool(row["compactable"]), int(row["sequence"]), _utc(row["created_at"]), _utc(row["updated_at"]))
 
+    async def _lookup_identity(
+        self,
+        session: "AsyncSession",
+        table: "Table",
+        operation_id: str,
+    ) -> Mapping[str, object] | None:
+        expected_digest = _operation_identity_digest(
+            self._owner_domain,
+            operation_id,
+        )
+        row = await self._one(
+            session,
+            table,
+            *self._where(
+                table,
+                runtime_domain=self._owner_domain.value,
+                operation_digest=expected_digest,
+            ),
+        )
+        if row is None:
+            return None
+        try:
+            persisted_domain = RuntimeDomain(str(row["runtime_domain"]))
+        except (KeyError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        persisted_digest = _operation_identity_digest(
+            persisted_domain,
+            str(row["operation_id"]),
+        )
+        if persisted_digest != str(row["operation_digest"]):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            persisted_domain is not self._owner_domain
+            or str(row["operation_id"]) != operation_id
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return row
+
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord:
         self._check_tenant(record.tenant_id)
         async with self._mutation() as session:
             table = self._table("ai_runtime_operations")
-            row = await self._one(session, table, *self._where(table, runtime_domain=self._owner_domain.value, operation_id=record.operation_id))
+            row = await self._lookup_identity(session, table, record.operation_id)
             if row is not None:
                 current = self._from_row(row)
                 if (
@@ -934,12 +1021,9 @@ class _SqlOperationRepository(_SqlRepositoryBase):
                 record.resource_kind,
                 record.resource_id,
             )
-            operation_digest = canonical_identity_digest(
-                "runtime-operation",
-                {
-                    "runtime_domain": self._owner_domain.value,
-                    "operation_id": record.operation_id,
-                },
+            operation_digest = _operation_identity_digest(
+                self._owner_domain,
+                record.operation_id,
             )
             values = self._values(
                 {
@@ -971,7 +1055,7 @@ class _SqlOperationRepository(_SqlRepositoryBase):
         self._check_tenant(tenant_id)
         async with self._read_session() as session:
             table = self._table("ai_runtime_operations")
-            row = await self._one(session, table, *self._where(table, runtime_domain=self._owner_domain.value, operation_id=operation_id))
+            row = await self._lookup_identity(session, table, operation_id)
         return None if row is None else self._from_row(row)
 
     async def compare_and_swap(self, operation_id: str, *, tenant_id: str, expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord:
@@ -981,7 +1065,28 @@ class _SqlOperationRepository(_SqlRepositoryBase):
         self._check_tenant(next_record.tenant_id)
         async with self._mutation() as session:
             table = self._table("ai_runtime_operations")
-            result = await session.execute(update(table).where(*self._where(table, runtime_domain=self._owner_domain.value, operation_id=operation_id, status=expected_status.value)).values(status=next_record.status.value, result_ref=next_record.result_ref, result_digest=next_record.result_digest, error_code=next_record.error_code, updated_at=next_record.updated_at))
+            result = await session.execute(
+                update(table)
+                .where(
+                    *self._where(
+                        table,
+                        runtime_domain=self._owner_domain.value,
+                        operation_digest=_operation_identity_digest(
+                            self._owner_domain,
+                            operation_id,
+                        ),
+                        operation_id=operation_id,
+                        status=expected_status.value,
+                    )
+                )
+                .values(
+                    status=next_record.status.value,
+                    result_ref=next_record.result_ref,
+                    result_digest=next_record.result_digest,
+                    error_code=next_record.error_code,
+                    updated_at=next_record.updated_at,
+                )
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
@@ -1000,43 +1105,52 @@ class _SqlOperationRepository(_SqlRepositoryBase):
 
     async def compact_terminal(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, through_sequence: int) -> str:
         self._check_tenant(tenant_id)
-        from sqlalchemy import delete, select
+        from sqlalchemy import and_
+
+        returning = (
+            "operation_id",
+            "resource_kind",
+            "resource_id",
+            "execution_id",
+            "operation_kind",
+            "status",
+            "request_digest",
+            "result_ref",
+            "result_digest",
+            "error_code",
+            "compactable",
+            "sequence",
+            "created_at",
+            "updated_at",
+        )
 
         async with self._mutation() as session:
             table = self._table("ai_runtime_operations")
-            rows = (
-                await session.execute(
-                    select(table)
-                    .where(
-                        *self._where(
-                            table,
-                            runtime_domain=self._owner_domain.value,
-                            resource_kind=resource_kind.value,
-                            resource_id=resource_id,
-                        ),
-                        table.c.sequence <= through_sequence,
-                        table.c.compactable.is_(True),
-                        table.c.status.not_in((OperationStatus.PENDING.value, OperationStatus.RUNNING.value)),
-                    )
-                    .order_by(table.c.sequence)
-                )
-            ).mappings().all()
-            records = tuple(self._from_row(row) for row in rows)
+            where = (
+                *self._where(
+                    table,
+                    runtime_domain=self._owner_domain.value,
+                    resource_kind=resource_kind.value,
+                    resource_id=resource_id,
+                ),
+                table.c.sequence <= through_sequence,
+                table.c.compactable.is_(True),
+                table.c.status.not_in(
+                    (OperationStatus.PENDING.value, OperationStatus.RUNNING.value)
+                ),
+            )
+            rows = await self._context.dialect.delete_returning(
+                session,
+                table=table,
+                where=and_(*where),
+                returning=returning,
+            )
+            records = tuple(
+                self._from_row(row)
+                for row in sorted(rows, key=lambda item: int(item["sequence"]))
+            )
             digest = canonical_sha256([asdict(record) for record in records])
             if records:
-                await session.execute(
-                    delete(table).where(
-                        *self._where(
-                            table,
-                            runtime_domain=self._owner_domain.value,
-                            resource_kind=resource_kind.value,
-                            resource_id=resource_id,
-                        ),
-                        table.c.sequence <= through_sequence,
-                        table.c.compactable.is_(True),
-                        table.c.status.not_in((OperationStatus.PENDING.value, OperationStatus.RUNNING.value)),
-                    )
-                )
                 self._transaction.mark_changed()
             return digest
 
@@ -1048,7 +1162,18 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
 
     async def get_header(self, memory_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get(memory_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.MEMORY, memory_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_memories")
+            row = (
+                await session.execute(
+                    select(table.c.memory_id).where(
+                        *self._where(table, memory_id=memory_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.MEMORY, str(row[0]), tenant_id)
 
     async def get(self, memory_id: str, *, tenant_id: str) -> MemoryRecord | None:
         self._check_tenant(tenant_id)
@@ -1180,7 +1305,18 @@ class _SqlArtifactRepository(_SqlRepositoryBase):
 
     async def get_header(self, artifact_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get_metadata(artifact_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.ARTIFACT, artifact_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_artifacts")
+            row = (
+                await session.execute(
+                    select(table.c.artifact_id).where(
+                        *self._where(table, artifact_id=artifact_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.ARTIFACT, str(row[0]), tenant_id)
 
     async def get_metadata(self, artifact_id: str, *, tenant_id: str) -> ArtifactRecord | None:
         self._check_tenant(tenant_id)
@@ -1241,19 +1377,125 @@ def _task_dependencies_from_sql(value: object) -> tuple[str, ...]:
 
 
 class _SqlTaskRepository(_SqlRepositoryBase):
-    async def _graph_rows(self, session: "AsyncSession", graph_id: str, *, lock: bool) -> tuple[Mapping[str, object] | None, tuple[Mapping[str, object], ...]]:
+    async def _graph_snapshot(
+        self,
+        session: "AsyncSession",
+        graph_id: str,
+    ) -> tuple[Mapping[str, object] | None, tuple[Mapping[str, object], ...]]:
         from sqlalchemy import select
 
         graphs = self._table("ai_runtime_task_graphs")
         nodes = self._table("ai_runtime_task_nodes")
-        graph_query = select(graphs).where(*self._where(graphs, graph_id=graph_id))
-        node_query = select(nodes).where(*self._where(nodes, graph_id=graph_id)).order_by(nodes.c.node_id)
-        if lock:
-            graph_query = graph_query.with_for_update()
-            node_query = node_query.with_for_update()
-        graph_row = (await session.execute(graph_query)).mappings().first()
-        node_rows = tuple((await session.execute(node_query)).mappings().all()) if graph_row is not None else ()
-        return graph_row, node_rows
+        node_columns = tuple(
+            nodes.c[column].label(f"node_{column}")
+            for column in nodes.c.keys()
+        )
+        statement = (
+            select(
+                graphs.c.graph_id.label("graph_graph_id"),
+                graphs.c.status.label("graph_status"),
+                graphs.c.revision.label("graph_revision"),
+                *node_columns,
+            )
+            .select_from(
+                graphs.outerjoin(
+                    nodes,
+                    (nodes.c.namespace_digest == graphs.c.namespace_digest)
+                    & (nodes.c.tenant_id == graphs.c.tenant_id)
+                    & (nodes.c.graph_id == graphs.c.graph_id),
+                )
+            )
+            .where(*self._where(graphs, graph_id=graph_id))
+            .order_by(nodes.c.node_id)
+        )
+        rows = (await session.execute(statement)).mappings().all()
+        if not rows:
+            return None, ()
+        expected_graph = (
+            str(rows[0]["graph_graph_id"]),
+            str(rows[0]["graph_status"]),
+            int(rows[0]["graph_revision"]),
+        )
+        graph_row = {
+            "graph_id": expected_graph[0],
+            "status": expected_graph[1],
+            "revision": expected_graph[2],
+        }
+        node_rows: list[Mapping[str, object]] = []
+        for row in rows:
+            current_graph = (
+                str(row["graph_graph_id"]),
+                str(row["graph_status"]),
+                int(row["graph_revision"]),
+            )
+            if current_graph != expected_graph:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if row["node_node_id"] is None:
+                continue
+            node_rows.append(
+                {
+                    column: row[f"node_{column}"]
+                    for column in nodes.c.keys()
+                }
+            )
+        return graph_row, tuple(node_rows)
+
+    async def _graph_row(
+        self,
+        session: "AsyncSession",
+        graph_id: str,
+    ) -> Mapping[str, object] | None:
+        from sqlalchemy import select
+
+        table = self._table("ai_runtime_task_graphs")
+        return (
+            await session.execute(
+                select(table).where(*self._where(table, graph_id=graph_id))
+            )
+        ).mappings().first()
+
+    async def _node_row(
+        self,
+        session: "AsyncSession",
+        graph_id: str,
+        node_id: str,
+    ) -> Mapping[str, object] | None:
+        from sqlalchemy import select
+
+        table = self._table("ai_runtime_task_nodes")
+        return (
+            await session.execute(
+                select(table).where(
+                    *self._where(table, graph_id=graph_id, node_id=node_id)
+                )
+            )
+        ).mappings().first()
+
+    async def _dependency_rows(
+        self,
+        session: "AsyncSession",
+        graph_id: str,
+        dependencies: tuple[str, ...],
+    ) -> dict[str, Mapping[str, object]]:
+        from sqlalchemy import select
+
+        if not dependencies:
+            return {}
+        table = self._table("ai_runtime_task_nodes")
+        rows = (
+            await session.execute(
+                select(table)
+                .where(
+                    *self._where(table, graph_id=graph_id),
+                    table.c.node_id.in_(dependencies),
+                )
+                .order_by(table.c.node_id)
+            )
+        ).mappings().all()
+        result = {str(row["node_id"]): row for row in rows}
+        if len(result) != len(dependencies):
+            raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
+        return result
 
     def _view(self, graph_row: Mapping[str, object], node_rows: tuple[Mapping[str, object], ...]) -> "TaskGraphView":
         from ...task import TaskGraphView
@@ -1282,64 +1524,12 @@ class _SqlTaskRepository(_SqlRepositoryBase):
             row["execution_id"],
         )
 
-    async def _locked_graph(self, session: "AsyncSession", graph_id: str) -> Mapping[str, object]:
-        from sqlalchemy import select
-
-        table = self._table("ai_runtime_task_graphs")
-        row = (
-            await session.execute(
-                select(table).where(*self._where(table, graph_id=graph_id)).with_for_update()
-            )
-        ).mappings().first()
-        if row is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return row
-
-    async def _locked_node(self, session: "AsyncSession", graph_id: str, node_id: str) -> Mapping[str, object]:
-        from sqlalchemy import select
-
-        table = self._table("ai_runtime_task_nodes")
-        row = (
-            await session.execute(
-                select(table)
-                .where(*self._where(table, graph_id=graph_id, node_id=node_id))
-                .with_for_update()
-            )
-        ).mappings().first()
-        if row is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        return row
-
-    async def _locked_dependency_nodes(
-        self,
-        session: "AsyncSession",
-        graph_id: str,
-        dependencies: tuple[str, ...],
-    ) -> dict[str, Mapping[str, object]]:
-        from sqlalchemy import select
-
-        if not dependencies:
-            return {}
-        table = self._table("ai_runtime_task_nodes")
-        rows = (
-            await session.execute(
-                select(table)
-                .where(*self._where(table, graph_id=graph_id), table.c.node_id.in_(dependencies))
-                .order_by(table.c.node_id)
-                .with_for_update()
-            )
-        ).mappings().all()
-        values = {str(row["node_id"]): row for row in rows}
-        if len(values) != len(dependencies):
-            raise AIError(ErrorCode.TASK_DEPENDENCY_UNKNOWN)
-        return values
-
-    async def _update_node(
+    async def _node_cas(
         self,
         session: "AsyncSession",
         row: Mapping[str, object],
         **values: object,
-    ) -> None:
+    ) -> Mapping[str, object]:
         from sqlalchemy import update
 
         table = self._table("ai_runtime_task_nodes")
@@ -1348,14 +1538,21 @@ class _SqlTaskRepository(_SqlRepositoryBase):
             .where(
                 *self._where(table, graph_id=str(row["graph_id"]), node_id=str(row["node_id"])),
                 table.c.revision == int(row["revision"]),
+                table.c.status == str(row["status"]),
             )
             .values(**values, revision=int(row["revision"]) + 1)
         )
-        if result.rowcount != 1:
+        if result.rowcount == 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.rowcount != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._transaction.mark_changed()
+        updated = dict(row)
+        updated.update(values)
+        updated["revision"] = int(row["revision"]) + 1
+        return updated
 
-    async def _update_graph(
+    async def _graph_cas(
         self,
         session: "AsyncSession",
         row: Mapping[str, object],
@@ -1372,80 +1569,163 @@ class _SqlTaskRepository(_SqlRepositoryBase):
             )
             .values(status=status.value, revision=int(row["revision"]) + 1)
         )
-        if result.rowcount != 1:
+        if result.rowcount == 0:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.rowcount != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         self._transaction.mark_changed()
         value = dict(row)
         value["status"] = status.value
         value["revision"] = int(row["revision"]) + 1
         return value
 
+    async def _cancel_nodes(
+        self,
+        session: "AsyncSession",
+        graph_id: str,
+        node_ids: Sequence[str],
+    ) -> None:
+        if not node_ids:
+            return
+        from sqlalchemy import update
+
+        table = self._table("ai_runtime_task_nodes")
+        terminal = tuple(
+            status.value
+            for status in (
+                TaskStatus.SUCCEEDED,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+                TaskStatus.BLOCKED,
+            )
+        )
+        result = await session.execute(
+            update(table)
+            .where(
+                *self._where(table, graph_id=graph_id),
+                table.c.node_id.in_(node_ids),
+                table.c.status.not_in(terminal),
+            )
+            .values(
+                status=TaskStatus.CANCELLED.value,
+                owner=None,
+                lease_expires_at=None,
+                revision=table.c.revision + 1,
+            )
+        )
+        if result.rowcount == 0 and node_ids:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if result.rowcount != len(node_ids):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        self._transaction.mark_changed()
+
     async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get_graph(graph_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.TASK_GRAPH, graph_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_task_graphs")
+            row = (
+                await session.execute(
+                    select(table.c.graph_id).where(
+                        *self._where(table, graph_id=graph_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.TASK_GRAPH, str(row[0]), tenant_id)
 
     async def create_graph(self, graph: "TaskGraph", *, tenant_id: str) -> "TaskGraphView":
         self._check_tenant(tenant_id)
         from ...task import TaskGraphView
 
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_task_graphs")
-            graph_id = graph.graph_id
-            if not await self._insert(session, table, self._values({"graph_id": graph_id}) | {"status": TaskStatus.PENDING.value, "revision": 0}):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            node_table = self._table("ai_runtime_task_nodes")
-            for node in graph.nodes:
-                values = self._values({"graph_id": graph_id, "node_id": node.node_id, "identity_digest": canonical_identity_digest("runtime-task-node", {"graph_id": graph_id, "node_id": node.node_id})}) | {
-                    "dependencies": list(node.dependencies),
-                    "input": node.input,
-                    "budget_cost": node.budget_cost,
-                    "status": TaskStatus.PENDING.value,
-                    "revision": 0,
-                    "owner": None,
-                    "fence": 0,
-                    "lease_expires_at": None,
-                    "execution_id": None,
-                    "result_digest": None,
-                    "error_code": None,
-                    "error_digest": None,
-                }
-                if not await self._insert(session, node_table, values):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+        from sqlalchemy.exc import IntegrityError
+
+        graph_id = graph.graph_id
+        try:
+            async with self._mutation() as session:
+                graph_table = self._table("ai_runtime_task_graphs")
+                node_table = self._table("ai_runtime_task_nodes")
+                await session.execute(
+                    graph_table.insert().values(
+                        **self._values({"graph_id": graph_id}),
+                        status=TaskStatus.PENDING.value,
+                        revision=0,
+                    )
+                )
+                node_rows = [
+                    self._values(
+                        {
+                            "graph_id": graph_id,
+                            "node_id": node.node_id,
+                            "identity_digest": canonical_identity_digest(
+                                "runtime-task-node",
+                                {"graph_id": graph_id, "node_id": node.node_id},
+                            ),
+                            "dependencies": list(node.dependencies),
+                            "input": node.input,
+                            "budget_cost": node.budget_cost,
+                            "status": TaskStatus.PENDING.value,
+                            "revision": 0,
+                            "owner": None,
+                            "fence": 0,
+                            "lease_expires_at": None,
+                            "execution_id": None,
+                            "result_digest": None,
+                            "error_code": None,
+                            "error_digest": None,
+                        }
+                    )
+                    for node in graph.nodes
+                ]
+                if node_rows:
+                    await session.execute(node_table.insert(), node_rows)
+                self._transaction.mark_changed()
+        except IntegrityError as error:
+            if self._context.dialect.classify_integrity_error(error).value == "unique_conflict":
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
         return TaskGraphView(graph_id, TaskStatus.PENDING, graph.nodes)
 
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None":
         self._check_tenant(tenant_id)
         async with self._read_session() as session:
-            row, nodes = await self._graph_rows(session, graph_id, lock=False)
+            row, nodes = await self._graph_snapshot(session, graph_id)
         return None if row is None else self._view(row, nodes)
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView":
         self._check_tenant(tenant_id)
         terminal = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
         async with self._mutation() as session:
-            graph_row = await self._locked_graph(session, graph_id)
-            _, node_rows = await self._graph_rows(session, graph_id, lock=True)
-            updated_nodes: list[Mapping[str, object]] = []
-            if TaskStatus(str(graph_row["status"])) in terminal:
-                for row in node_rows:
-                    if TaskStatus(str(row["status"])) not in terminal:
-                        await self._update_node(session, row, status=TaskStatus.CANCELLED.value, owner=None, lease_expires_at=None)
-                        value = dict(row)
-                        value.update(status=TaskStatus.CANCELLED.value, owner=None, lease_expires_at=None, revision=int(row["revision"]) + 1)
-                        updated_nodes.append(value)
-                    else:
-                        updated_nodes.append(row)
-                _logger.debug(
-                    "SQL task graph reconciled: graph=%s status=%s",
-                    graph_id,
-                    graph_row["status"],
-                )
-                return self._view(graph_row, tuple(updated_nodes))
-
-            by_id = {
+            graph_row, node_rows = await self._graph_snapshot(session, graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            original = {
                 str(row["node_id"]): dict(row)
                 for row in node_rows
             }
+            by_id = {node_id: dict(row) for node_id, row in original.items()}
+            graph_status = TaskStatus(str(graph_row["status"]))
+            if graph_status in terminal:
+                changed_ids = tuple(
+                    node_id
+                    for node_id, row in sorted(by_id.items())
+                    if TaskStatus(str(row["status"])) not in terminal
+                )
+                if not changed_ids:
+                    return self._view(graph_row, node_rows)
+                graph_row = await self._graph_cas(session, graph_row, graph_status)
+                await self._cancel_nodes(session, graph_id, changed_ids)
+                for node_id in changed_ids:
+                    by_id[node_id].update(
+                        status=TaskStatus.CANCELLED.value,
+                        owner=None,
+                        lease_expires_at=None,
+                        revision=int(by_id[node_id]["revision"]) + 1,
+                    )
+                return self._view(
+                    graph_row,
+                    tuple(by_id[node_id] for node_id in sorted(by_id)),
+                )
             changed = True
             while changed:
                 changed = False
@@ -1476,13 +1756,6 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                                 "reason": "dependency_failed",
                             }
                         )
-                        await self._update_node(
-                            session,
-                            row,
-                            status=TaskStatus.BLOCKED.value,
-                            error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
-                            error_digest=digest,
-                        )
                         updated = dict(row)
                         updated.update(
                             status=TaskStatus.BLOCKED.value,
@@ -1494,11 +1767,6 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                         item is TaskStatus.SUCCEEDED
                         for item in dependency_statuses
                     ):
-                        await self._update_node(
-                            session,
-                            row,
-                            status=TaskStatus.READY.value,
-                        )
                         updated = dict(row)
                         updated.update(
                             status=TaskStatus.READY.value,
@@ -1508,38 +1776,82 @@ class _SqlTaskRepository(_SqlRepositoryBase):
                         continue
                     by_id[node_id] = updated
                     changed = True
-            updated_nodes = [by_id[node_id] for node_id in sorted(by_id)]
-            next_status = _task_graph_status(
-                tuple(TaskStatus(str(row["status"])) for row in updated_nodes)
+            changed_ids = tuple(
+                node_id
+                for node_id in sorted(by_id)
+                if any(
+                    by_id[node_id].get(field) != original[node_id].get(field)
+                    for field in ("status", "error_code", "error_digest")
+                )
             )
-            if next_status is not TaskStatus(str(graph_row["status"])):
-                graph_row = await self._update_graph(session, graph_row, next_status)
+            next_status = _task_graph_status(
+                tuple(
+                    TaskStatus(str(by_id[node_id]["status"]))
+                    for node_id in sorted(by_id)
+                )
+            )
+            if not changed_ids and next_status is graph_status:
+                return self._view(graph_row, node_rows)
+            graph_row = await self._graph_cas(session, graph_row, next_status)
+            for node_id in changed_ids:
+                target = by_id[node_id]
+                values: dict[str, object] = {"status": target["status"]}
+                if target.get("error_code") != original[node_id].get("error_code"):
+                    values["error_code"] = target.get("error_code")
+                if target.get("error_digest") != original[node_id].get("error_digest"):
+                    values["error_digest"] = target.get("error_digest")
+                by_id[node_id] = await self._node_cas(
+                    session,
+                    original[node_id],
+                    **values,
+                )
             _logger.debug(
                 "SQL task graph reconciled: graph=%s status=%s",
                 graph_id,
                 graph_row["status"],
             )
-            return self._view(graph_row, tuple(updated_nodes))
+            return self._view(
+                graph_row,
+                tuple(by_id[node_id] for node_id in sorted(by_id)),
+            )
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView":
         self._check_tenant(tenant_id)
         terminal = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
         async with self._mutation() as session:
-            graph_row = await self._locked_graph(session, graph_id)
-            _, node_rows = await self._graph_rows(session, graph_id, lock=True)
+            graph_row, node_rows = await self._graph_snapshot(session, graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             graph_status = TaskStatus(str(graph_row["status"]))
-            if graph_status not in terminal:
-                graph_row = await self._update_graph(session, graph_row, TaskStatus.CANCELLED)
-            updated_nodes: list[Mapping[str, object]] = []
-            for row in node_rows:
-                if TaskStatus(str(row["status"])) not in terminal:
-                    await self._update_node(session, row, status=TaskStatus.CANCELLED.value, owner=None, lease_expires_at=None)
-                    value = dict(row)
-                    value.update(status=TaskStatus.CANCELLED.value, owner=None, lease_expires_at=None, revision=int(row["revision"]) + 1)
-                    updated_nodes.append(value)
-                else:
-                    updated_nodes.append(row)
-            return self._view(graph_row, tuple(updated_nodes))
+            changed_ids = tuple(
+                str(row["node_id"])
+                for row in node_rows
+                if TaskStatus(str(row["status"])) not in terminal
+            )
+            if graph_status in terminal and not changed_ids:
+                return self._view(graph_row, node_rows)
+            next_status = (
+                TaskStatus.CANCELLED
+                if graph_status not in terminal
+                else graph_status
+            )
+            graph_row = await self._graph_cas(session, graph_row, next_status)
+            await self._cancel_nodes(session, graph_id, changed_ids)
+            updated = {
+                str(row["node_id"]): dict(row)
+                for row in node_rows
+            }
+            for node_id in changed_ids:
+                updated[node_id].update(
+                    status=TaskStatus.CANCELLED.value,
+                    owner=None,
+                    lease_expires_at=None,
+                    revision=int(updated[node_id]["revision"]) + 1,
+                )
+            return self._view(
+                graph_row,
+                tuple(updated[node_id] for node_id in sorted(updated)),
+            )
 
     async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> "TaskLease":
         self._check_tenant(tenant_id)
@@ -1551,22 +1863,35 @@ class _SqlTaskRepository(_SqlRepositoryBase):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         terminal = {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}
         async with self._mutation() as session:
-            graph_row = await self._locked_graph(session, graph_id)
+            graph_row = await self._graph_row(session, graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if TaskStatus(str(graph_row["status"])) in terminal:
                 raise AIError(ErrorCode.TASK_NOT_READY)
-            current = await self._locked_node(session, graph_id, node_id)
+            current = await self._node_row(session, graph_id, node_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             status = TaskStatus(str(current["status"]))
             now = datetime.now(timezone.utc)
-            expired = status is TaskStatus.RUNNING and _optional_utc(current["lease_expires_at"]) is not None and _optional_utc(current["lease_expires_at"]) <= now
+            lease_expiry = _optional_utc(current["lease_expires_at"])
+            expired = status is TaskStatus.RUNNING and lease_expiry is not None and lease_expiry <= now
             if status not in {TaskStatus.PENDING, TaskStatus.READY} and not expired:
                 raise AIError(ErrorCode.TASK_NOT_READY)
             dependencies = _task_dependencies_from_sql(current["dependencies"])
-            dependency_rows = await self._locked_dependency_nodes(session, graph_id, dependencies)
+            dependency_rows = await self._dependency_rows(session, graph_id, dependencies)
             if any(TaskStatus(str(row["status"])) is not TaskStatus.SUCCEEDED for row in dependency_rows.values()):
                 raise AIError(ErrorCode.TASK_NOT_READY)
             fence = int(current["fence"]) + 1
             expiry = now + timedelta(seconds=lease_seconds)
-            await self._update_node(session, current, status=TaskStatus.RUNNING.value, owner=owner, fence=fence, lease_expires_at=expiry)
+            await self._graph_cas(session, graph_row, TaskStatus(str(graph_row["status"])))
+            await self._node_cas(
+                session,
+                current,
+                status=TaskStatus.RUNNING.value,
+                owner=owner,
+                fence=fence,
+                lease_expires_at=expiry,
+            )
         _logger.debug("SQL task node claimed: graph=%s node=%s fence=%s", graph_id, node_id, fence)
         return TaskLease(graph_id, node_id, tenant_id, owner, fence, expiry)
 
@@ -1575,12 +1900,17 @@ class _SqlTaskRepository(_SqlRepositoryBase):
         if lease.tenant_id != tenant_id or not 1 <= lease_seconds <= 3600:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         async with self._mutation() as session:
-            await self._locked_graph(session, lease.graph_id)
-            current = await self._locked_node(session, lease.graph_id, lease.node_id)
+            graph_row = await self._graph_row(session, lease.graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._node_row(session, lease.graph_id, lease.node_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if not _lease_matches(current, lease):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             expiry = datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
-            await self._update_node(session, current, lease_expires_at=expiry)
+            await self._graph_cas(session, graph_row, TaskStatus(str(graph_row["status"])))
+            await self._node_cas(session, current, lease_expires_at=expiry)
         return replace(lease, lease_expires_at=expiry)
 
     async def complete(self, lease: "TaskLease", *, tenant_id: str, execution_id: "str | None", result_digest: str) -> "TaskTerminalRecord":
@@ -1588,11 +1918,24 @@ class _SqlTaskRepository(_SqlRepositoryBase):
         from ...task import TaskTerminalRecord
 
         async with self._mutation() as session:
-            await self._locked_graph(session, lease.graph_id)
-            current = await self._locked_node(session, lease.graph_id, lease.node_id)
+            graph_row = await self._graph_row(session, lease.graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._node_row(session, lease.graph_id, lease.node_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if not _lease_matches(current, lease):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
-            await self._update_node(session, current, status=TaskStatus.SUCCEEDED.value, owner=None, execution_id=execution_id, result_digest=result_digest, lease_expires_at=None)
+            await self._graph_cas(session, graph_row, TaskStatus(str(graph_row["status"])))
+            await self._node_cas(
+                session,
+                current,
+                status=TaskStatus.SUCCEEDED.value,
+                owner=None,
+                execution_id=execution_id,
+                result_digest=result_digest,
+                lease_expires_at=None,
+            )
         return TaskTerminalRecord(lease.node_id, lease.owner, lease.fence, TaskStatus.SUCCEEDED, result_digest, None, None, execution_id=execution_id)
 
     async def fail(self, lease: "TaskLease", *, tenant_id: str, error_code: str, error_digest: str) -> "TaskTerminalRecord":
@@ -1600,11 +1943,24 @@ class _SqlTaskRepository(_SqlRepositoryBase):
         from ...task import TaskTerminalRecord
 
         async with self._mutation() as session:
-            await self._locked_graph(session, lease.graph_id)
-            current = await self._locked_node(session, lease.graph_id, lease.node_id)
+            graph_row = await self._graph_row(session, lease.graph_id)
+            if graph_row is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            current = await self._node_row(session, lease.graph_id, lease.node_id)
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if not _lease_matches(current, lease):
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
-            await self._update_node(session, current, status=TaskStatus.FAILED.value, owner=None, error_code=error_code, error_digest=error_digest, lease_expires_at=None)
+            await self._graph_cas(session, graph_row, TaskStatus(str(graph_row["status"])))
+            await self._node_cas(
+                session,
+                current,
+                status=TaskStatus.FAILED.value,
+                owner=None,
+                error_code=error_code,
+                error_digest=error_digest,
+                lease_expires_at=None,
+            )
         return TaskTerminalRecord(lease.node_id, lease.owner, lease.fence, TaskStatus.FAILED, None, error_code, error_digest)
 
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> "tuple[TaskNodeView, ...]":
@@ -1620,7 +1976,18 @@ class _SqlTaskRepository(_SqlRepositoryBase):
 class _SqlEvaluationRepository(_SqlRepositoryBase):
     async def get_header(self, evaluation_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get(evaluation_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.EVALUATION, evaluation_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_evaluations")
+            row = (
+                await session.execute(
+                    select(table.c.evaluation_id).where(
+                        *self._where(table, evaluation_id=evaluation_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.EVALUATION, str(row[0]), tenant_id)
 
     async def create(self, record: EvaluationRecord) -> EvaluationRecord:
         self._check_tenant(record.tenant_id)
@@ -1667,7 +2034,18 @@ class _SqlEvaluationRepository(_SqlRepositoryBase):
 class _SqlApprovalRepository(_SqlRepositoryBase):
     async def get_header(self, approval_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get(approval_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.APPROVAL, approval_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_approvals")
+            row = (
+                await session.execute(
+                    select(table.c.approval_id).where(
+                        *self._where(table, approval_id=approval_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.APPROVAL, str(row[0]), tenant_id)
 
     async def create(self, record: ApprovalRecord) -> ApprovalRecord:
         self._check_tenant(record.tenant_id)
@@ -1717,7 +2095,18 @@ class _SqlApprovalRepository(_SqlRepositoryBase):
 class _SqlExternalCallRepository(_SqlRepositoryBase):
     async def get_header(self, call_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
-        return None if await self.get(call_id, tenant_id=tenant_id) is None else ResourceRef(ResourceKind.EXTERNAL_CALL, call_id, tenant_id)
+        from sqlalchemy import select
+
+        async with self._read_session() as session:
+            table = self._table("ai_runtime_external_calls")
+            row = (
+                await session.execute(
+                    select(table.c.call_id).where(
+                        *self._where(table, call_id=call_id)
+                    )
+                )
+            ).first()
+        return None if row is None else ResourceRef(ResourceKind.EXTERNAL_CALL, str(row[0]), tenant_id)
 
     async def create_call(self, record: ExternalCallRecord) -> ExternalCallRecord:
         self._check_tenant(record.tenant_id)
@@ -2045,6 +2434,34 @@ def _operation_stream_digest(
             "runtime_domain": runtime_domain.value,
             "resource_kind": resource_kind.value,
             "resource_id": resource_id,
+        },
+    )
+
+
+def _idempotency_identity_digest(
+    runtime_domain: RuntimeDomain,
+    scope: str,
+    idempotency_key_digest: str,
+) -> str:
+    return canonical_identity_digest(
+        "runtime-idempotency",
+        {
+            "runtime_domain": runtime_domain.value,
+            "scope": scope,
+            "idempotency_key_digest": idempotency_key_digest,
+        },
+    )
+
+
+def _operation_identity_digest(
+    runtime_domain: RuntimeDomain,
+    operation_id: str,
+) -> str:
+    return canonical_identity_digest(
+        "runtime-operation",
+        {
+            "runtime_domain": runtime_domain.value,
+            "operation_id": operation_id,
         },
     )
 

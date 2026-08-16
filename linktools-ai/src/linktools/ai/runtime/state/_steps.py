@@ -51,6 +51,12 @@ if TYPE_CHECKING:
 _logger = environ.get_logger("ai.runtime.state.steps")
 _ARCHIVE_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY})
 _ARCHIVE_ORDER = (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
+_SQL_RUN_BATCH_LIMIT = 256
+_SQL_OPTIMISTIC_RETRY_LIMIT = 8
+
+
+class _StepRetry(Exception):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +351,7 @@ class FilesystemStepArchive(StagingStepStore):
             if self._manage_writer_lock:
                 await self._lifetime_lock.release()
             raise
+
         _logger.debug(
             "step archive initialized: domain=%s tenant_scope=%s",
             self._runtime_domain.value,
@@ -591,18 +598,198 @@ class SqlStepArchive(StepStore):
                     _logger.error("SQL step context cleanup failed after initialize error", exc_info=environ.debug)
             raise
 
-    async def get_run(self, *, run_id: str) -> RunRecord | None:
-        await self._ensure_ready()
+    def _run_epoch(self, row: Mapping[str, object]) -> tuple[int, int, int]:
+        values = (
+            row.get("last_event_index"),
+            row.get("last_snapshot_index"),
+            row.get("last_effect_index"),
+        )
+        try:
+            if any(isinstance(value, bool) for value in values):
+                raise ValueError
+            epoch = tuple(int(value) for value in values)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if any(value < 0 for value in epoch):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return epoch
+
+    async def _read_run_row(
+        self,
+        connection: object,
+        run_id: str,
+    ) -> Mapping[str, object] | None:
         from sqlalchemy import select
 
         table = self._metadata.tables["ai_step_runs"]
-        key = _namespace_digest(self.namespace)
-        async with self._begin() as connection:
-            row = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == run_id).with_for_update())).mappings().first()
-            result = None if row is None else _run_from_sql(row)
-            if row is not None:
-                await self._validate_run_indexes(connection, run_id, row)
+        return (
+            await connection.execute(
+                select(table).where(
+                    table.c.namespace_digest == _namespace_digest(self.namespace),
+                    table.c.tenant_id == self.tenant_id,
+                    table.c.runtime_domain == self._runtime_domain.value,
+                    table.c.run_id == run_id,
+                )
+            )
+        ).mappings().first()
+
+    async def _read_run_epochs(
+        self,
+        connection: object,
+        run_ids: Sequence[str],
+    ) -> dict[str, tuple[int, int, int]]:
+        from sqlalchemy import select
+
+        table = self._metadata.tables["ai_step_runs"]
+        result: dict[str, tuple[int, int, int]] = {}
+        unique = tuple(dict.fromkeys(run_ids))
+        for offset in range(0, len(unique), _SQL_RUN_BATCH_LIMIT):
+            batch = unique[offset : offset + _SQL_RUN_BATCH_LIMIT]
+            if not batch:
+                continue
+            rows = (
+                await connection.execute(
+                    select(
+                        table.c.run_id,
+                        table.c.last_event_index,
+                        table.c.last_snapshot_index,
+                        table.c.last_effect_index,
+                    ).where(
+                        table.c.namespace_digest == _namespace_digest(self.namespace),
+                        table.c.tenant_id == self.tenant_id,
+                        table.c.runtime_domain == self._runtime_domain.value,
+                        table.c.run_id.in_(batch),
+                    )
+                )
+            ).mappings().all()
+            for row in rows:
+                result[str(row["run_id"])] = self._run_epoch(row)
         return result
+
+    def _archive_families(self) -> tuple[tuple[str, str, object], ...]:
+        families: list[tuple[str, str, object]] = []
+        if "ai_step_events" in self._metadata.tables:
+            families.append(("events", "event_index", self._metadata.tables["ai_step_events"]))
+        if "ai_step_snapshots" in self._metadata.tables:
+            families.append(("snapshots", "snapshot_index", self._metadata.tables["ai_step_snapshots"]))
+        if "ai_step_effects" in self._metadata.tables:
+            families.append(("effects", "effect_index", self._metadata.tables["ai_step_effects"]))
+        return tuple(families)
+
+    async def _load_index_metrics(
+        self,
+        connection: object,
+        run_ids: Sequence[str],
+    ) -> dict[str, dict[str, dict[str, object]]]:
+        from sqlalchemy import String, func, literal, select, union_all
+
+        unique = tuple(dict.fromkeys(run_ids))
+        families = self._archive_families()
+        result = {
+            run_id: {
+                family: {
+                    "row_count": 0,
+                    "distinct_count": 0,
+                    "min_index": None,
+                    "max_index": None,
+                }
+                for family, _, _ in families
+            }
+            for run_id in unique
+        }
+        for offset in range(0, len(unique), _SQL_RUN_BATCH_LIMIT):
+            batch = unique[offset : offset + _SQL_RUN_BATCH_LIMIT]
+            if not batch or not families:
+                continue
+            statements = []
+            for family, index_name, table in families:
+                conditions = [
+                    table.c.namespace_digest == _namespace_digest(self.namespace),
+                    table.c.tenant_id == self.tenant_id,
+                    table.c.run_id.in_(batch),
+                ]
+                if family == "snapshots":
+                    conditions.append(
+                        table.c.runtime_domain == self._runtime_domain.value
+                    )
+                index_column = table.c[index_name]
+                statements.append(
+                    select(
+                        literal(family, type_=String()).label("family"),
+                        table.c.run_id,
+                        func.count().label("row_count"),
+                        func.count(func.distinct(index_column)).label("distinct_count"),
+                        func.min(index_column).label("min_index"),
+                        func.max(index_column).label("max_index"),
+                    )
+                    .where(*conditions)
+                    .group_by(table.c.run_id)
+                )
+            rows = (await connection.execute(union_all(*statements))).mappings().all()
+            for row in rows:
+                run_id = str(row["run_id"])
+                family = str(row["family"])
+                if run_id not in result or family not in result[run_id]:
+                    continue
+                result[run_id][family] = {
+                    "row_count": int(row["row_count"]),
+                    "distinct_count": int(row["distinct_count"]),
+                    "min_index": None if row["min_index"] is None else int(row["min_index"]),
+                    "max_index": None if row["max_index"] is None else int(row["max_index"]),
+                }
+        return result
+
+    def _validate_metrics(
+        self,
+        run_row: Mapping[str, object],
+        metrics: Mapping[str, Mapping[str, object]],
+    ) -> None:
+        epoch = self._run_epoch(run_row)
+        for last, family in zip(
+            epoch,
+            ("events", "snapshots", "effects"),
+            strict=True,
+        ):
+            if family not in metrics:
+                continue
+            value = metrics[family]
+            expected = {
+                "row_count": last,
+                "distinct_count": last,
+                "min_index": None if last == 0 else 1,
+                "max_index": None if last == 0 else last,
+            }
+            if any(value.get(name) != expected[name] for name in expected):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    async def _stable_run(
+        self,
+        run_id: str,
+    ) -> tuple[Mapping[str, object] | None, dict[str, dict[str, object]]]:
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                row = await self._read_run_row(connection, run_id)
+                if row is None:
+                    return None, {}
+                initial = self._run_epoch(row)
+                metrics = (await self._load_index_metrics(connection, (run_id,)))[run_id]
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                if final is None or final != initial:
+                    stable = False
+                else:
+                    self._validate_metrics(row, metrics)
+                    stable = True
+            if stable:
+                return row, metrics
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        await self._ensure_ready()
+        row, _ = await self._stable_run(run_id)
+        return None if row is None else _run_from_sql(row)
 
     async def list_runs(self, *, parent_run_id: str | None = None, conversation_id: str | None = None) -> list[RunRecord]:
         await self._ensure_ready()
@@ -620,12 +807,30 @@ class SqlStepArchive(StepStore):
         if conversation_id is not None:
             query = query.where(table.c.conversation_id == conversation_id)
         query = query.order_by(table.c.started_at, table.c.run_id)
-        async with self._begin() as connection:
-            rows = (await connection.execute(query.with_for_update())).mappings().all()
-            for row in rows:
-                await self._validate_run_indexes(connection, str(row["run_id"] ), row)
-            result = [_run_from_sql(row) for row in rows]
-        return result
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                rows = (await connection.execute(query)).mappings().all()
+                run_ids = tuple(str(row["run_id"]) for row in rows)
+                initial_epochs = {
+                    str(row["run_id"]): self._run_epoch(row)
+                    for row in rows
+                }
+                metrics = await self._load_index_metrics(connection, run_ids)
+                final_epochs = await self._read_run_epochs(connection, run_ids)
+                stable = all(
+                    final_epochs.get(run_id) == epoch
+                    for run_id, epoch in initial_epochs.items()
+                )
+                if stable:
+                    for row in rows:
+                        self._validate_metrics(row, metrics[str(row["run_id"])])
+                    result = [_run_from_sql(row) for row in rows]
+            if stable:
+                return result
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         await self._ensure_ready()
@@ -635,17 +840,37 @@ class SqlStepArchive(StepStore):
 
         table = self._metadata.tables["ai_step_events"]
         key = _namespace_digest(self.namespace)
-        async with self._begin() as connection:
-            runs = self._metadata.tables["ai_step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
-            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id).order_by(table.c.event_index))).mappings().all()
-            if run_row is None:
-                if rows:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return []
-            await self._validate_run_indexes(connection, run_id, run_row)
-            result = [_event_from_sql(row) for row in rows]
-        return result
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                run_row = await self._read_run_row(connection, run_id)
+                rows = (
+                    await connection.execute(
+                        select(table)
+                        .where(
+                            table.c.namespace_digest == key,
+                            table.c.tenant_id == self.tenant_id,
+                            table.c.run_id == run_id,
+                        )
+                        .order_by(table.c.event_index)
+                    )
+                ).mappings().all()
+                if run_row is None:
+                    if rows:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return []
+                initial = self._run_epoch(run_row)
+                metrics = (await self._load_index_metrics(connection, (run_id,)))[run_id]
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                stable = final == initial
+                if stable:
+                    self._validate_metrics(run_row, metrics)
+                    result = [_event_from_sql(row) for row in rows]
+            if stable:
+                return result
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def _execution_projection(self, *, run_id: str) -> _ExecutionProjection | None:
         if self._runtime_domain is not RuntimeDomain.EXECUTION:
@@ -654,51 +879,62 @@ class SqlStepArchive(StepStore):
         from sqlalchemy import select
 
         key = _namespace_digest(self.namespace)
-        runs = self._metadata.tables["ai_step_runs"]
         events = self._metadata.tables["ai_step_events"]
         snapshots = self._metadata.tables["ai_step_snapshots"]
-        async with self._begin() as connection:
-            run_row = (
-                await connection.execute(
-                    select(runs).where(
-                        runs.c.namespace_digest == key,
-                        runs.c.tenant_id == self.tenant_id,
-                        runs.c.runtime_domain == self._runtime_domain.value,
-                        runs.c.run_id == run_id,
-                    ).with_for_update()
-                )
-            ).mappings().first()
-            if run_row is None:
-                return None
-            event_rows = (
-                await connection.execute(
-                    select(events)
-                    .where(events.c.namespace_digest == key, events.c.tenant_id == self.tenant_id, events.c.run_id == run_id)
-                    .order_by(events.c.event_index)
-                )
-            ).mappings().all()
-            snapshot_rows = (
-                await connection.execute(
-                    select(snapshots)
-                    .where(
-                        snapshots.c.namespace_digest == key,
-                        snapshots.c.tenant_id == self.tenant_id,
-                        snapshots.c.runtime_domain == self._runtime_domain.value,
-                        snapshots.c.run_id == run_id,
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                run_row = await self._read_run_row(connection, run_id)
+                if run_row is None:
+                    return None
+                event_rows = (
+                    await connection.execute(
+                        select(events)
+                        .where(
+                            events.c.namespace_digest == key,
+                            events.c.tenant_id == self.tenant_id,
+                            events.c.run_id == run_id,
+                        )
+                        .order_by(events.c.event_index)
                     )
-                    .order_by(snapshots.c.snapshot_index)
-                )
                 ).mappings().all()
-            _validate_step_indexes(int(run_row["last_event_index"]), event_rows, "event_index")
-            _validate_step_indexes(int(run_row["last_snapshot_index"]), snapshot_rows, "snapshot_index")
-            result_run = _run_from_sql(run_row)
-            result_events = tuple(_event_from_sql(row) for row in event_rows)
-            result_snapshots = tuple(dict(row) for row in snapshot_rows)
-        return _ExecutionProjection(
-            run=result_run,
-            events=result_events,
-            snapshots=tuple([await _snapshot_from_sql(row, self.object_store) for row in result_snapshots]),
-        )
+                snapshot_rows = (
+                    await connection.execute(
+                        select(snapshots)
+                        .where(
+                            snapshots.c.namespace_digest == key,
+                            snapshots.c.tenant_id == self.tenant_id,
+                            snapshots.c.runtime_domain == self._runtime_domain.value,
+                            snapshots.c.run_id == run_id,
+                        )
+                        .order_by(snapshots.c.snapshot_index)
+                    )
+                ).mappings().all()
+                initial = self._run_epoch(run_row)
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                stable = final == initial
+                if stable:
+                    _validate_step_indexes(initial[0], event_rows, "event_index")
+                    _validate_step_indexes(initial[1], snapshot_rows, "snapshot_index")
+                    result = _ExecutionProjection(
+                        run=_run_from_sql(run_row),
+                        events=tuple(_event_from_sql(row) for row in event_rows),
+                        snapshots=tuple(dict(row) for row in snapshot_rows),
+                    )
+            if stable:
+                return _ExecutionProjection(
+                    run=result.run,
+                    events=result.events,
+                    snapshots=tuple(
+                        [
+                            await _snapshot_from_sql(row, self.object_store)
+                            for row in result.snapshots
+                        ]
+                    ),
+                )
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def _recovery_effect_projection(self, *, run_id: str) -> _RecoveryEffectProjection | None:
         if self._runtime_domain is not RuntimeDomain.RECOVERY:
@@ -707,46 +943,153 @@ class SqlStepArchive(StepStore):
         from sqlalchemy import select
 
         key = _namespace_digest(self.namespace)
-        runs = self._metadata.tables["ai_step_runs"]
         effects = self._metadata.tables["ai_step_effects"]
-        async with self._begin() as connection:
-            run_row = (
-                await connection.execute(
-                    select(runs).where(
-                        runs.c.namespace_digest == key,
-                        runs.c.tenant_id == self.tenant_id,
-                        runs.c.runtime_domain == self._runtime_domain.value,
-                        runs.c.run_id == run_id,
-                    ).with_for_update()
-                )
-            ).mappings().first()
-            if run_row is None:
-                return None
-            effect_rows = (
-                await connection.execute(
-                    select(effects)
-                    .where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == run_id)
-                    .order_by(effects.c.effect_index)
-                )
-            ).mappings().all()
-            _validate_step_indexes(int(run_row["last_effect_index"]), effect_rows, "effect_index")
-            result = _RecoveryEffectProjection(run=_run_from_sql(run_row), effects=tuple(_effect_from_sql(row) for row in effect_rows))
-        return result
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                run_row = await self._read_run_row(connection, run_id)
+                if run_row is None:
+                    return None
+                effect_rows = (
+                    await connection.execute(
+                        select(effects)
+                        .where(
+                            effects.c.namespace_digest == key,
+                            effects.c.tenant_id == self.tenant_id,
+                            effects.c.run_id == run_id,
+                        )
+                        .order_by(effects.c.effect_index)
+                    )
+                ).mappings().all()
+                initial = self._run_epoch(run_row)
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                stable = final == initial
+                if stable:
+                    _validate_step_indexes(initial[2], effect_rows, "effect_index")
+                    result = _RecoveryEffectProjection(
+                        run=_run_from_sql(run_row),
+                        effects=tuple(_effect_from_sql(row) for row in effect_rows),
+                    )
+            if stable:
+                return result
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
         await self._ensure_ready()
-        from sqlalchemy import select
+        from sqlalchemy import and_, func, select
 
         table = self._metadata.tables["ai_step_snapshots"]
         key = _namespace_digest(self.namespace)
         async with self._begin() as connection:
             runs = self._metadata.tables["ai_step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
-            if run_row is None:
+            metrics = (
+                select(
+                    table.c.namespace_digest.label("metric_namespace_digest"),
+                    table.c.tenant_id.label("metric_tenant_id"),
+                    table.c.runtime_domain.label("metric_runtime_domain"),
+                    table.c.run_id.label("metric_run_id"),
+                    func.count().label("metric_row_count"),
+                    func.count(func.distinct(table.c.snapshot_index)).label(
+                        "metric_distinct_count"
+                    ),
+                    func.min(table.c.snapshot_index).label("metric_min_index"),
+                    func.max(table.c.snapshot_index).label("metric_max_index"),
+                )
+                .where(
+                    table.c.namespace_digest == key,
+                    table.c.tenant_id == self.tenant_id,
+                    table.c.runtime_domain == self._runtime_domain.value,
+                    table.c.run_id == run_id,
+                )
+                .group_by(
+                    table.c.namespace_digest,
+                    table.c.tenant_id,
+                    table.c.runtime_domain,
+                    table.c.run_id,
+                )
+                .subquery("snapshot_metrics")
+            )
+            snapshot_columns = tuple(
+                table.c[column].label(f"snapshot_{column}")
+                for column in table.c.keys()
+            )
+            statement = (
+                select(
+                    runs.c.run_id.label("run_id"),
+                    runs.c.last_snapshot_index.label("last_snapshot_index"),
+                    metrics.c.metric_row_count,
+                    metrics.c.metric_distinct_count,
+                    metrics.c.metric_min_index,
+                    metrics.c.metric_max_index,
+                    *snapshot_columns,
+                )
+                .select_from(
+                    runs.outerjoin(
+                        metrics,
+                        and_(
+                            metrics.c.metric_namespace_digest == runs.c.namespace_digest,
+                            metrics.c.metric_tenant_id == runs.c.tenant_id,
+                            metrics.c.metric_runtime_domain == runs.c.runtime_domain,
+                            metrics.c.metric_run_id == runs.c.run_id,
+                        ),
+                    ).outerjoin(
+                        table,
+                        and_(
+                            table.c.namespace_digest == key,
+                            table.c.tenant_id == self.tenant_id,
+                            table.c.runtime_domain == self._runtime_domain.value,
+                            table.c.run_id == run_id,
+                            table.c.snapshot_index == metrics.c.metric_max_index,
+                        ),
+                    )
+                )
+                .where(
+                    runs.c.namespace_digest == key,
+                    runs.c.tenant_id == self.tenant_id,
+                    runs.c.runtime_domain == self._runtime_domain.value,
+                    runs.c.run_id == run_id,
+                )
+            )
+            row = (await connection.execute(statement)).mappings().first()
+            if row is None:
                 return None
-            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == run_id).order_by(table.c.snapshot_index))).mappings().all()
-            _validate_step_indexes(int(run_row["last_snapshot_index"]), rows, "snapshot_index")
-            row = dict(rows[-1]) if rows else None
+            last = int(row["last_snapshot_index"])
+            row_count = 0 if row["metric_row_count"] is None else int(row["metric_row_count"])
+            distinct_count = (
+                0
+                if row["metric_distinct_count"] is None
+                else int(row["metric_distinct_count"])
+            )
+            min_index = None if row["metric_min_index"] is None else int(row["metric_min_index"])
+            max_index = None if row["metric_max_index"] is None else int(row["metric_max_index"])
+            snapshot_row = None
+            if row["snapshot_id"] is not None:
+                snapshot_row = {
+                    column: row[f"snapshot_{column}"]
+                    for column in table.c.keys()
+                }
+            if last == 0:
+                valid = (
+                    row_count == 0
+                    and distinct_count == 0
+                    and min_index is None
+                    and max_index is None
+                    and snapshot_row is None
+                )
+            else:
+                valid = (
+                    row_count == last
+                    and distinct_count == last
+                    and min_index == 1
+                    and max_index == last
+                    and snapshot_row is not None
+                    and int(snapshot_row["snapshot_index"]) == last
+                )
+            if not valid:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            row = snapshot_row
         if row is None or (not include_interrupted and str(row["state"]) != "complete"):
             return None
         return await _snapshot_from_sql(row, self.object_store)
@@ -759,195 +1102,485 @@ class SqlStepArchive(StepStore):
 
         table = self._metadata.tables["ai_step_effects"]
         key = _namespace_digest(self.namespace)
-        async with self._begin() as connection:
-            runs = self._metadata.tables["ai_step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
-            query = select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id, table.c.tool_call_id == tool_call_id).order_by(table.c.effect_index.desc()).limit(1)
-            row = (await connection.execute(query)).mappings().first()
-            if run_row is None:
-                if row is not None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return None
-            await self._validate_run_indexes(connection, run_id, run_row)
-        return None if row is None else _effect_from_sql(row)
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                run_row = await self._read_run_row(connection, run_id)
+                row = (
+                    await connection.execute(
+                        select(table)
+                        .where(
+                            table.c.namespace_digest == key,
+                            table.c.tenant_id == self.tenant_id,
+                            table.c.run_id == run_id,
+                            table.c.tool_call_id == tool_call_id,
+                        )
+                        .order_by(table.c.effect_index.desc())
+                        .limit(1)
+                    )
+                ).mappings().first()
+                if run_row is None:
+                    if row is not None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return None
+                initial = self._run_epoch(run_row)
+                metrics = (await self._load_index_metrics(connection, (run_id,)))[run_id]
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                stable = final == initial
+                if stable:
+                    self._validate_metrics(run_row, metrics)
+            if stable:
+                return None if row is None else _effect_from_sql(row)
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         await self._ensure_ready()
         if "ai_step_effects" not in self._metadata.tables:
             return []
-        from sqlalchemy import select
+        from sqlalchemy import and_, func, select
 
         table = self._metadata.tables["ai_step_effects"]
         key = _namespace_digest(self.namespace)
-        async with self._begin() as connection:
-            runs = self._metadata.tables["ai_step_runs"]
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == run_id).with_for_update())).mappings().first()
-            rows = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.run_id == run_id).order_by(table.c.effect_index))).mappings().all()
-            if run_row is None:
-                if rows:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return []
-            await self._validate_run_indexes(connection, run_id, run_row)
-        latest: dict[str, ToolEffectRecord] = {}
-        for row in rows:
-            effect = _effect_from_sql(row)
-            latest[effect.tool_call_id] = effect
-        return [effect for effect in latest.values() if effect.status == "started"]
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            async with self._begin() as connection:
+                run_row = await self._read_run_row(connection, run_id)
+                latest = (
+                    select(
+                        table.c.namespace_digest.label("latest_namespace_digest"),
+                        table.c.tenant_id.label("latest_tenant_id"),
+                        table.c.run_id.label("latest_run_id"),
+                        table.c.tool_call_id.label("latest_tool_call_id"),
+                        func.min(table.c.effect_index).label("first_index"),
+                        func.max(table.c.effect_index).label("latest_index"),
+                    )
+                    .where(
+                        table.c.namespace_digest == key,
+                        table.c.tenant_id == self.tenant_id,
+                        table.c.run_id == run_id,
+                    )
+                    .group_by(
+                        table.c.namespace_digest,
+                        table.c.tenant_id,
+                        table.c.run_id,
+                        table.c.tool_call_id,
+                    )
+                    .subquery("latest_effects")
+                )
+                effect_columns = tuple(
+                    table.c[column].label(f"effect_{column}")
+                    for column in table.c.keys()
+                )
+                statement = (
+                    select(*effect_columns, latest.c.first_index)
+                    .select_from(
+                        latest.join(
+                            table,
+                            and_(
+                                table.c.namespace_digest == latest.c.latest_namespace_digest,
+                                table.c.tenant_id == latest.c.latest_tenant_id,
+                                table.c.run_id == latest.c.latest_run_id,
+                                table.c.tool_call_id == latest.c.latest_tool_call_id,
+                                table.c.effect_index == latest.c.latest_index,
+                            ),
+                        )
+                    )
+                    .where(table.c.status == "started")
+                    .order_by(latest.c.first_index)
+                )
+                rows = (await connection.execute(statement)).mappings().all()
+                if run_row is None:
+                    if rows:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    return []
+                initial = self._run_epoch(run_row)
+                metrics = (await self._load_index_metrics(connection, (run_id,)))[run_id]
+                final = (await self._read_run_epochs(connection, (run_id,))).get(run_id)
+                stable = final == initial
+                if stable:
+                    self._validate_metrics(run_row, metrics)
+                    result = [
+                        _effect_from_sql(
+                            {
+                                column: row[f"effect_{column}"]
+                                for column in table.c.keys()
+                            }
+                        )
+                        for row in rows
+                    ]
+            if stable:
+                return result
+            if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def register_run(self, record: RunRecord) -> None:
         await self._ensure_ready()
-        from sqlalchemy import insert, select
+        from sqlalchemy import insert
         from sqlalchemy.exc import IntegrityError
 
         table = self._metadata.tables["ai_step_runs"]
         key = _namespace_digest(self.namespace)
+        existing, _ = await self._stable_run(record.run_id)
+        if existing is not None:
+            if _run_from_sql(existing) != record:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return
         try:
             async with self._begin() as connection:
-                current = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == record.run_id).with_for_update())).mappings().first()
-                if current is not None:
-                    await self._validate_run_indexes(connection, record.run_id, current)
-                    if _run_from_sql(current) != record:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                else:
-                    await connection.execute(
-                        insert(table).values(
-                            namespace_digest=key,
-                            tenant_id=self.tenant_id,
-                            runtime_domain=self._runtime_domain.value,
-                            run_id=record.run_id,
-                            identity_digest=_step_identity_digest(
-                                self._runtime_domain.value,
-                                record.run_id,
-                            ),
-                            conversation_id=record.conversation_id,
-                            parent_run_id=record.parent_run_id,
-                            agent_name=record.agent_name,
-                            metadata=dict(record.metadata),
-                            last_event_index=0,
-                            last_snapshot_index=0,
-                            last_effect_index=0,
-                            started_at=record.started_at,
-                        )
+                await connection.execute(
+                    insert(table).values(
+                        namespace_digest=key,
+                        tenant_id=self.tenant_id,
+                        runtime_domain=self._runtime_domain.value,
+                        run_id=record.run_id,
+                        identity_digest=_step_identity_digest(
+                            self._runtime_domain.value,
+                            record.run_id,
+                        ),
+                        conversation_id=record.conversation_id,
+                        parent_run_id=record.parent_run_id,
+                        agent_name=record.agent_name,
+                        metadata=dict(record.metadata),
+                        last_event_index=0,
+                        last_snapshot_index=0,
+                        last_effect_index=0,
+                        started_at=record.started_at,
                     )
+                )
             return
-        except IntegrityError:
-            async with self._begin() as connection:
-                current = (await connection.execute(select(table).where(table.c.namespace_digest == key, table.c.tenant_id == self.tenant_id, table.c.runtime_domain == self._runtime_domain.value, table.c.run_id == record.run_id).with_for_update())).mappings().first()
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                await self._validate_run_indexes(connection, record.run_id, current)
-                if _run_from_sql(current) != record:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+        except IntegrityError as error:
+            if self._context.dialect.classify_integrity_error(error).value != "unique_conflict":
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            current, _ = await self._stable_run(record.run_id)
+            if current is not None and _run_from_sql(current) == record:
+                return
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from None
+
+    async def _candidate_rows(
+        self,
+        connection: object,
+        table: object,
+        *,
+        family: str,
+        run_id: str,
+        value: object,
+    ) -> Sequence[Mapping[str, object]]:
+        from sqlalchemy import select
+
+        predicates = [
+            table.c.namespace_digest == _namespace_digest(self.namespace),
+            table.c.tenant_id == self.tenant_id,
+            table.c.run_id == run_id,
+        ]
+        if family == "event":
+            event = value
+            fields = {
+                "kind": event.kind,
+                "step_index": event.step_index,
+                "conversation_id": event.conversation_id,
+                "parent_run_id": event.parent_run_id,
+                "agent_name": event.agent_name,
+                "tool_call_id": event.tool_call_id,
+                "tool_name": event.tool_name,
+            }
+        elif family == "snapshot":
+            snapshot, payload = value
+            fields = {
+                "runtime_domain": self._runtime_domain.value,
+                "step_index": snapshot.step_index,
+                "state": snapshot.state,
+                "conversation_id": snapshot.conversation_id,
+                "parent_run_id": snapshot.parent_run_id,
+                "agent_name": snapshot.agent_name,
+                "media_store_id": payload.get("object_store_id"),
+            }
+        else:
+            record = value
+            fields = {
+                "tool_call_id": record.tool_call_id,
+                "tool_name": record.tool_name,
+                "status": record.status,
+                "idempotency_key": record.idempotency_key,
+            }
+        for name, field_value in fields.items():
+            column = table.c[name]
+            predicates.append(
+                column.is_(None) if field_value is None else column == field_value
+            )
+        return (
+            await connection.execute(select(table).where(*predicates))
+        ).mappings().all()
+
+    async def _reserve_run_index(
+        self,
+        connection: object,
+        run_row: Mapping[str, object],
+        family: str,
+    ) -> int:
+        from sqlalchemy import update
+
+        counters = self._run_epoch(run_row)
+        names = {
+            "event": "last_event_index",
+            "snapshot": "last_snapshot_index",
+            "effect": "last_effect_index",
+        }
+        column_name = names[family]
+        table = self._metadata.tables["ai_step_runs"]
+        values = {column_name: counters[("event", "snapshot", "effect").index(family)] + 1}
+        statement = update(table).where(
+            table.c.namespace_digest == _namespace_digest(self.namespace),
+            table.c.tenant_id == self.tenant_id,
+            table.c.runtime_domain == self._runtime_domain.value,
+            table.c.run_id == str(run_row["run_id"]),
+            table.c.last_event_index == counters[0],
+            table.c.last_snapshot_index == counters[1],
+            table.c.last_effect_index == counters[2],
+        ).values(**values)
+        result = await connection.execute(statement)
+        if result.rowcount == 0:
+            raise _StepRetry
+        if result.rowcount != 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return values[column_name]
 
     async def append_event(self, event: StepEvent) -> None:
         await self._ensure_ready()
         if self._runtime_domain is not RuntimeDomain.EXECUTION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        from sqlalchemy import insert, select, update
+        events = self._metadata.tables["ai_step_events"]
+        from sqlalchemy import insert
+        from sqlalchemy.exc import IntegrityError
 
         key = _namespace_digest(self.namespace)
-        runs = self._metadata.tables["ai_step_runs"]
-        events = self._metadata.tables["ai_step_events"]
-        async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == event.run_id).with_for_update())).mappings().first()
-            if run_row is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            await self._validate_run_indexes(connection, event.run_id, run_row)
-            previous_rows = (
-                await connection.execute(
-                    select(events)
-                    .where(
-                        events.c.namespace_digest == key,
-                        events.c.tenant_id == self.tenant_id,
-                        events.c.run_id == event.run_id,
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            try:
+                duplicate = False
+                async with self._begin() as connection:
+                    run_row = await self._read_run_row(connection, event.run_id)
+                    if run_row is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    metrics = (await self._load_index_metrics(connection, (event.run_id,)))[event.run_id]
+                    current_epoch = self._run_epoch(run_row)
+                    final_epoch = (await self._read_run_epochs(connection, (event.run_id,))).get(event.run_id)
+                    if final_epoch != current_epoch:
+                        raise _StepRetry
+                    self._validate_metrics(run_row, metrics)
+                    candidates = await self._candidate_rows(
+                        connection,
+                        events,
+                        family="event",
+                        run_id=event.run_id,
+                        value=event,
                     )
-                    .order_by(events.c.event_index)
+                    duplicate = any(_event_from_sql(row) == event for row in candidates)
+                    if not duplicate:
+                        index = await self._reserve_run_index(connection, run_row, "event")
+                        try:
+                            await connection.execute(
+                                insert(events).values(
+                                    namespace_digest=key,
+                                    tenant_id=self.tenant_id,
+                                    run_id=event.run_id,
+                                    event_index=index,
+                                    identity_digest=_step_identity_digest(
+                                        "event", event.run_id, index
+                                    ),
+                                    kind=event.kind,
+                                    step_index=event.step_index,
+                                    timestamp=event.timestamp,
+                                    conversation_id=event.conversation_id,
+                                    parent_run_id=event.parent_run_id,
+                                    agent_name=event.agent_name,
+                                    tool_call_id=event.tool_call_id,
+                                    tool_name=event.tool_name,
+                                    error=event.error,
+                                    metadata=dict(event.metadata),
+                                )
+                            )
+                        except IntegrityError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if duplicate:
+                    return
+                _logger.debug(
+                    "SQL step event appended: run=%s index=%s attempt=%s",
+                    event.run_id,
+                    index,
+                    attempt + 1,
                 )
-            ).mappings().all()
-            if any(_event_from_sql(previous) == event for previous in previous_rows):
                 return
-            index = int(run_row["last_event_index"]) + 1
-            await connection.execute(insert(events).values(namespace_digest=key, tenant_id=self.tenant_id, run_id=event.run_id, event_index=index, identity_digest=_step_identity_digest("event", event.run_id, index), kind=event.kind, step_index=event.step_index, timestamp=event.timestamp, conversation_id=event.conversation_id, parent_run_id=event.parent_run_id, agent_name=event.agent_name, tool_call_id=event.tool_call_id, tool_name=event.tool_name, error=event.error, metadata=dict(event.metadata)))
-            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == event.run_id).values(last_event_index=index))
+            except _StepRetry:
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self._ensure_ready()
         if self._runtime_domain not in _ARCHIVE_DOMAINS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        from sqlalchemy import insert, select, update
+        preflight, _ = await self._stable_run(snapshot.run_id)
+        if preflight is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        payload = await _snapshot_json(
+            snapshot,
+            self.object_store,
+            self._media_prefix(),
+        )
+        from sqlalchemy import insert
+        from sqlalchemy.exc import IntegrityError
 
-        key = _namespace_digest(self.namespace)
-        runs = self._metadata.tables["ai_step_runs"]
         snapshots = self._metadata.tables["ai_step_snapshots"]
-        async with self._begin() as preflight_connection:
-            preflight_row = (
-                await preflight_connection.execute(
-                select(runs).where(
-                    runs.c.namespace_digest == key,
-                    runs.c.tenant_id == self.tenant_id,
-                    runs.c.runtime_domain == self._runtime_domain.value,
-                    runs.c.run_id == snapshot.run_id,
+        key = _namespace_digest(self.namespace)
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            try:
+                duplicate = False
+                async with self._begin() as connection:
+                    run_row = await self._read_run_row(connection, snapshot.run_id)
+                    if run_row is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    metrics = (await self._load_index_metrics(connection, (snapshot.run_id,)))[snapshot.run_id]
+                    current_epoch = self._run_epoch(run_row)
+                    final_epoch = (await self._read_run_epochs(connection, (snapshot.run_id,))).get(snapshot.run_id)
+                    if final_epoch != current_epoch:
+                        raise _StepRetry
+                    self._validate_metrics(run_row, metrics)
+                    candidates = await self._candidate_rows(
+                        connection,
+                        snapshots,
+                        family="snapshot",
+                        run_id=snapshot.run_id,
+                        value=(snapshot, payload),
+                    )
+                    duplicate = any(
+                        _snapshot_row_matches(row, payload, snapshot)
+                        for row in candidates
+                    )
+                    if not duplicate:
+                        index = await self._reserve_run_index(
+                            connection,
+                            run_row,
+                            "snapshot",
+                        )
+                        try:
+                            await connection.execute(
+                                insert(snapshots).values(
+                                    namespace_digest=key,
+                                    tenant_id=self.tenant_id,
+                                    runtime_domain=self._runtime_domain.value,
+                                    run_id=snapshot.run_id,
+                                    snapshot_index=index,
+                                    identity_digest=_step_identity_digest(
+                                        "snapshot",
+                                        self._runtime_domain.value,
+                                        snapshot.run_id,
+                                        index,
+                                    ),
+                                    step_index=snapshot.step_index,
+                                    state=snapshot.state,
+                                    conversation_id=snapshot.conversation_id,
+                                    parent_run_id=snapshot.parent_run_id,
+                                    agent_name=snapshot.agent_name,
+                                    timestamp=snapshot.timestamp,
+                                    media_store_id=self.object_store.store_id,
+                                    messages=payload["messages"],
+                                )
+                            )
+                        except IntegrityError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if duplicate:
+                    return
+                _logger.debug(
+                    "SQL step snapshot saved: run=%s index=%s attempt=%s",
+                    snapshot.run_id,
+                    index,
+                    attempt + 1,
                 )
-                )
-            ).mappings().first()
-            if preflight_row is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            await self._validate_run_indexes(preflight_connection, snapshot.run_id, preflight_row)
-        payload = await _snapshot_json(snapshot, self.object_store, self._media_prefix())
-        async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == snapshot.run_id).with_for_update())).mappings().first()
-            if run_row is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            await self._validate_run_indexes(connection, snapshot.run_id, run_row)
-            previous_rows = (await connection.execute(select(snapshots).where(snapshots.c.namespace_digest == key, snapshots.c.tenant_id == self.tenant_id, snapshots.c.runtime_domain == self._runtime_domain.value, snapshots.c.run_id == snapshot.run_id).order_by(snapshots.c.snapshot_index))).mappings().all()
-            if any(_snapshot_row_matches(previous_row, payload, snapshot) for previous_row in previous_rows):
                 return
-            index = int(run_row["last_snapshot_index"]) + 1
-            await connection.execute(
-                insert(snapshots).values(
-                    namespace_digest=key,
-                    tenant_id=self.tenant_id,
-                    runtime_domain=self._runtime_domain.value,
-                    run_id=snapshot.run_id,
-                    snapshot_index=index,
-                    identity_digest=_step_identity_digest(
-                        "snapshot",
-                        self._runtime_domain.value,
-                        snapshot.run_id,
-                        index,
-                    ),
-                    step_index=snapshot.step_index,
-                    state=snapshot.state,
-                    conversation_id=snapshot.conversation_id,
-                    parent_run_id=snapshot.parent_run_id,
-                    agent_name=snapshot.agent_name,
-                    timestamp=snapshot.timestamp,
-                    media_store_id=self.object_store.store_id,
-                    messages=payload["messages"],
-                )
-            )
-            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == snapshot.run_id).values(last_snapshot_index=index))
+            except _StepRetry:
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
         await self._ensure_ready()
         if self._runtime_domain is not RuntimeDomain.RECOVERY:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        from sqlalchemy import insert, select, update
+        from sqlalchemy import insert
+        from sqlalchemy.exc import IntegrityError
 
         key = _namespace_digest(self.namespace)
-        runs = self._metadata.tables["ai_step_runs"]
         effects = self._metadata.tables["ai_step_effects"]
-        async with self._begin() as connection:
-            run_row = (await connection.execute(select(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == record.run_id).with_for_update())).mappings().first()
-            if run_row is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            await self._validate_run_indexes(connection, record.run_id, run_row)
-            previous_rows = (await connection.execute(select(effects).where(effects.c.namespace_digest == key, effects.c.tenant_id == self.tenant_id, effects.c.run_id == record.run_id).order_by(effects.c.effect_index))).mappings().all()
-            if any(_effect_from_sql(previous_row) == record for previous_row in previous_rows):
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            try:
+                duplicate = False
+                async with self._begin() as connection:
+                    run_row = await self._read_run_row(connection, record.run_id)
+                    if run_row is None:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    metrics = (await self._load_index_metrics(connection, (record.run_id,)))[record.run_id]
+                    current_epoch = self._run_epoch(run_row)
+                    final_epoch = (await self._read_run_epochs(connection, (record.run_id,))).get(record.run_id)
+                    if final_epoch != current_epoch:
+                        raise _StepRetry
+                    self._validate_metrics(run_row, metrics)
+                    candidates = await self._candidate_rows(
+                        connection,
+                        effects,
+                        family="effect",
+                        run_id=record.run_id,
+                        value=record,
+                    )
+                    duplicate = any(_effect_from_sql(row) == record for row in candidates)
+                    if not duplicate:
+                        index = await self._reserve_run_index(
+                            connection,
+                            run_row,
+                            "effect",
+                        )
+                        try:
+                            await connection.execute(
+                                insert(effects).values(
+                                    namespace_digest=key,
+                                    tenant_id=self.tenant_id,
+                                    run_id=record.run_id,
+                                    effect_index=index,
+                                    identity_digest=_step_identity_digest(
+                                        "effect", record.run_id, index
+                                    ),
+                                    tool_call_id=record.tool_call_id,
+                                    tool_name=record.tool_name,
+                                    status=record.status,
+                                    started_at=record.started_at,
+                                    ended_at=record.ended_at,
+                                    idempotency_key=record.idempotency_key,
+                                    effect_summary=json.dumps(
+                                        record.effect_summary,
+                                        sort_keys=True,
+                                        separators=(",", ":"),
+                                    ),
+                                )
+                            )
+                        except IntegrityError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                if duplicate:
+                    return
+                _logger.debug(
+                    "SQL step effect recorded: run=%s index=%s attempt=%s",
+                    record.run_id,
+                    index,
+                    attempt + 1,
+                )
                 return
-            index = int(run_row["last_effect_index"]) + 1
-            await connection.execute(insert(effects).values(namespace_digest=key, tenant_id=self.tenant_id, run_id=record.run_id, effect_index=index, identity_digest=_step_identity_digest("effect", record.run_id, index), tool_call_id=record.tool_call_id, tool_name=record.tool_name, status=record.status, started_at=record.started_at, ended_at=record.ended_at, idempotency_key=record.idempotency_key, effect_summary=json.dumps(record.effect_summary, sort_keys=True, separators=(",", ":"))))
-            await connection.execute(update(runs).where(runs.c.namespace_digest == key, runs.c.tenant_id == self.tenant_id, runs.c.runtime_domain == self._runtime_domain.value, runs.c.run_id == record.run_id).values(last_effect_index=index))
+            except _StepRetry:
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def close(self) -> None:
         self._ready = False
@@ -1633,7 +2266,7 @@ async def _snapshot_from_json(value: dict[str, object], object_store: ObjectStor
 
 
 async def _snapshot_from_sql(value: Mapping[str, object], object_store: ObjectStore) -> ContinuableSnapshot:
-    object_store_id = value.get("object_store_id")
+    object_store_id = value.get("media_store_id")
     if not isinstance(object_store_id, str):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     if object_store_id != object_store.store_id:
@@ -1660,7 +2293,7 @@ def _snapshot_row_matches(row: Mapping[str, object], payload: Mapping[str, objec
         and row.get("agent_name") == snapshot.agent_name
         and _datetime(row["timestamp"]) == snapshot.timestamp.astimezone(timezone.utc)
         and str(row["state"]) == snapshot.state
-        and row.get("object_store_id") == payload.get("object_store_id")
+        and row.get("media_store_id") == payload.get("object_store_id")
     )
 
 

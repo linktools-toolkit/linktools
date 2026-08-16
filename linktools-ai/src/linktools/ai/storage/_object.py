@@ -7,7 +7,7 @@ import hashlib
 import os
 import re
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +44,22 @@ _STORE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _KEY_SEGMENT = re.compile(r"[A-Za-z0-9._-]+\Z")
 _RESERVED_STORE_IDS = frozenset({"builtin", "memory", "transient"})
 _SQL_CHUNK_SIZE = 1024 * 1024
+_SQL_BATCH_KEY_LIMIT = 256
+
+
+@dataclass(frozen=True, slots=True)
+class _SqlLoadedObject:
+    key: str
+    digest: str
+    size: int
+    chunks: tuple[bytes, ...]
+
+
+class _ObjectInsertConflict(Exception):
+    def __init__(self, error: BaseException) -> None:
+        super().__init__(str(error))
+        self.error = error
+
 
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
@@ -375,91 +391,250 @@ class SqlObjectStore:
         from sqlalchemy import insert, select
         from sqlalchemy.exc import IntegrityError
 
-        async with self._lock:
+        async def _write() -> ObjectStat:
             object_key_digest = _key_digest(key)
             try:
                 async with self._begin() as connection:
-                    result = await connection.execute(
-                        insert(objects).values(
-                            object_key=key,
-                            object_key_digest=object_key_digest,
-                            digest=expected_digest,
-                            size=expected_size,
+                    try:
+                        result = await connection.execute(
+                            insert(objects).values(
+                                object_key=key,
+                                object_key_digest=object_key_digest,
+                                digest=expected_digest,
+                                size=expected_size,
+                            )
                         )
-                    )
+                    except IntegrityError as error:
+                        raise _ObjectInsertConflict(error) from error
                     object_id = int(result.inserted_primary_key[0])
                     rows = [
-                        {"object_id": object_id, "chunk_index": index, "content": data[offset : offset + _SQL_CHUNK_SIZE]}
+                        {
+                            "object_id": object_id,
+                            "chunk_index": index,
+                            "content": data[offset : offset + _SQL_CHUNK_SIZE],
+                        }
                         for index, offset in enumerate(range(0, len(data), _SQL_CHUNK_SIZE))
                     ]
                     if rows:
-                        await connection.execute(insert(chunks_table), rows)
-            except IntegrityError:
+                        try:
+                            await connection.execute(insert(chunks_table), rows)
+                        except IntegrityError as error:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            except _ObjectInsertConflict as conflict:
+                dialect = dialect_for_name(self._engine.dialect.name)
+                if dialect.classify_integrity_error(conflict.error).value != "unique_conflict":
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from conflict.error
                 async with self._connect() as connection:
-                    current_row = (
+                    rows = (
                         await connection.execute(
-                            select(objects.c.digest, objects.c.size).where(
-                                objects.c.object_key_digest == object_key_digest,
-                                objects.c.object_key == key,
-                            )
+                            select(
+                                objects.c.object_key,
+                                objects.c.object_key_digest,
+                                objects.c.digest,
+                                objects.c.size,
+                            ).where(objects.c.object_key_digest == object_key_digest)
                         )
-                    ).first()
-                existing = None if current_row is None else ObjectStat(key, str(current_row.digest), int(current_row.size))
-                if existing == ObjectStat(key, expected_digest, expected_size):
+                    ).mappings().all()
+                if not rows:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if len(rows) != 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                row = rows[0]
+                stored_key = str(row["object_key"])
+                stored_key_digest = str(row["object_key_digest"])
+                if _key_digest(stored_key) != stored_key_digest:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if stored_key != key:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                existing = _object_stat(
+                    stored_key,
+                    str(row["digest"]),
+                    int(row["size"]),
+                )
+                if existing.digest == expected_digest and existing.size == expected_size:
                     return existing
-                raise AIError(ErrorCode.STORAGE_CONFLICT) from None
-        return ObjectStat(key, expected_digest, expected_size)
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return ObjectStat(key, expected_digest, expected_size)
+
+        if self._engine.dialect.name == "sqlite":
+            async with self._lock:
+                result = await _write()
+        else:
+            result = await _write()
+        _logger.debug(
+            "SQL object stored: store=%s object_key_digest=%s size=%s",
+            self.store_id,
+            _key_digest(key),
+            expected_size,
+        )
+        return result
 
     async def stat(self, key: str) -> ObjectStat | None:
-        _validate_key(key)
-        objects = self._metadata.tables["ai_storage_objects"]
-        from sqlalchemy import select
-
-        async with self._connect() as connection:
-            object_key_digest = _key_digest(key)
-            row = (
-                await connection.execute(
-                    select(objects.c.digest, objects.c.size).where(
-                        objects.c.object_key_digest == object_key_digest,
-                        objects.c.object_key == key,
-                    )
-                )
-            ).first()
-        if row is None:
+        rows = await self.stat_many((key,))
+        if key not in rows:
             return None
-        return ObjectStat(key, str(row.digest), int(row.size))
+        return rows[key]
 
-    async def _open(self, key: str) -> AsyncIterator[bytes]:
-        _validate_key(key)
+    async def stat_many(self, keys: Sequence[str]) -> dict[str, ObjectStat]:
+        requested = _unique_object_keys(keys)
+        if not requested:
+            return {}
+        loaded = await self._load_headers_many(requested)
+        return {
+            key: _object_stat(value.key, value.digest, value.size)
+            for key, value in loaded.items()
+        }
+
+    async def read_many(self, refs: Sequence[ObjectRef]) -> dict[str, bytes]:
+        requested: dict[str, ObjectRef] = {}
+        for ref in refs:
+            if ref.store_id != self.store_id:
+                raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+            current = requested.get(ref.key)
+            if current is not None and (
+                current.digest != ref.digest or current.size != ref.size
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            requested[ref.key] = ref
+        if not requested:
+            return {}
+        loaded = await self._load_many(tuple(requested))
+        if len(loaded) != len(requested):
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        result: dict[str, bytes] = {}
+        for key, ref in requested.items():
+            value = loaded[key]
+            if value.digest != ref.digest or value.size != ref.size:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            result[key] = b"".join(value.chunks)
+        return result
+
+    async def _load_many(self, keys: Sequence[str]) -> dict[str, _SqlLoadedObject]:
+        requested = _unique_object_keys(keys)
+        if not requested:
+            return {}
+        digest_keys = _object_digest_keys(requested)
         objects = self._metadata.tables["ai_storage_objects"]
         chunks_table = self._metadata.tables["ai_storage_object_chunks"]
         from sqlalchemy import select
 
+        loaded: dict[str, _SqlLoadedObject] = {}
         async with self._connect() as connection:
-            object_key_digest = _key_digest(key)
-            row = (
-                await connection.execute(
-                    select(objects.c.id, objects.c.digest, objects.c.size).where(
-                        objects.c.object_key_digest == object_key_digest,
-                        objects.c.object_key == key,
+            for batch in _batches(digest_keys):
+                statement = (
+                    select(
+                        objects.c.id.label("object_id"),
+                        objects.c.object_key,
+                        objects.c.object_key_digest,
+                        objects.c.digest,
+                        objects.c.size,
+                        chunks_table.c.chunk_index,
+                        chunks_table.c.content,
                     )
+                    .select_from(
+                        objects.outerjoin(
+                            chunks_table,
+                            chunks_table.c.object_id == objects.c.id,
+                        )
+                    )
+                    .where(objects.c.object_key_digest.in_(batch))
+                    .order_by(objects.c.id, chunks_table.c.chunk_index)
                 )
-            ).first()
-            if row is None:
-                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            items = (await connection.execute(select(chunks_table.c.chunk_index, chunks_table.c.content).where(chunks_table.c.object_id == row.id).order_by(chunks_table.c.chunk_index))).all()
-        digest = hashlib.sha256()
-        size = 0
-        for expected_index, (index, content) in enumerate(items):
-            if int(index) != expected_index:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            value = bytes(content)
-            digest.update(value)
-            size += len(value)
-            yield value
-        expected_chunks = 0 if int(row.size) == 0 else (int(row.size) + _SQL_CHUNK_SIZE - 1) // _SQL_CHUNK_SIZE
-        if len(items) != expected_chunks or size != int(row.size) or digest.hexdigest() != str(row.digest):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                rows = (await connection.execute(statement)).mappings().all()
+                groups: dict[int, list[object]] = {}
+                for row in rows:
+                    object_id = int(row["object_id"])
+                    groups.setdefault(object_id, []).append(row)
+                for object_rows in groups.values():
+                    row = object_rows[0]
+                    stored_key = str(row["object_key"])
+                    stored_key_digest = str(row["object_key_digest"])
+                    stored_digest = str(row["digest"])
+                    if _key_digest(stored_key) != stored_key_digest:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if stored_key not in requested:
+                        if stored_key_digest in digest_keys:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        continue
+                    if stored_key_digest != _key_digest(stored_key):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if stored_key in loaded:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    try:
+                        stored_size = int(row["size"])
+                    except (TypeError, ValueError) as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    stat = _object_stat(stored_key, stored_digest, stored_size)
+                    chunks = _validate_sql_chunks(
+                        object_rows,
+                        stat.digest,
+                        stat.size,
+                    )
+                    loaded[stored_key] = _SqlLoadedObject(
+                        stored_key,
+                        stat.digest,
+                        stat.size,
+                        chunks,
+                    )
+        return loaded
+
+    async def _load_headers_many(self, keys: Sequence[str]) -> dict[str, _SqlLoadedObject]:
+        requested = _unique_object_keys(keys)
+        if not requested:
+            return {}
+        digest_keys = _object_digest_keys(requested)
+        objects = self._metadata.tables["ai_storage_objects"]
+        from sqlalchemy import select
+
+        loaded: dict[str, _SqlLoadedObject] = {}
+        async with self._connect() as connection:
+            for batch in _batches(digest_keys):
+                rows = (
+                    await connection.execute(
+                        select(
+                            objects.c.object_key,
+                            objects.c.object_key_digest,
+                            objects.c.digest,
+                            objects.c.size,
+                        )
+                        .where(objects.c.object_key_digest.in_(batch))
+                        .order_by(objects.c.id)
+                    )
+                ).mappings().all()
+                for row in rows:
+                    stored_key = str(row["object_key"])
+                    stored_key_digest = str(row["object_key_digest"])
+                    if _key_digest(stored_key) != stored_key_digest:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if stored_key not in requested:
+                        if stored_key_digest in digest_keys:
+                            raise AIError(ErrorCode.STORAGE_CONFLICT)
+                        continue
+                    if stored_key in loaded:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    try:
+                        stat = _object_stat(
+                            stored_key,
+                            str(row["digest"]),
+                            int(row["size"]),
+                        )
+                    except (TypeError, ValueError) as error:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                    loaded[stored_key] = _SqlLoadedObject(
+                        stored_key,
+                        stat.digest,
+                        stat.size,
+                        (),
+                    )
+        return loaded
+
+    async def _open(self, key: str) -> AsyncIterator[bytes]:
+        loaded = await self._load_many((key,))
+        value = loaded.get(key)
+        if value is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        for chunk in value.chunks:
+            yield chunk
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
@@ -552,6 +727,79 @@ async def _collect(chunks: AsyncIterator[bytes], expected_size: int, expected_di
     if len(data) != expected_size or digest.hexdigest() != expected_digest:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     return bytes(data)
+
+
+def _unique_object_keys(keys: Sequence[str]) -> tuple[str, ...]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        _validate_key(key)
+        if key not in seen:
+            seen.add(key)
+            result.append(key)
+    return tuple(result)
+
+
+def _object_digest_keys(keys: Sequence[str]) -> tuple[str, ...]:
+    digests: dict[str, str] = {}
+    for key in keys:
+        digest = _key_digest(key)
+        previous = digests.get(digest)
+        if previous is not None and previous != key:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        digests[digest] = key
+    return tuple(digests)
+
+
+def _batches(values: Sequence[str]) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        tuple(values[offset : offset + _SQL_BATCH_KEY_LIMIT])
+        for offset in range(0, len(values), _SQL_BATCH_KEY_LIMIT)
+    )
+
+
+def _validate_sql_chunks(
+    rows: Sequence[object],
+    expected_digest: str,
+    expected_size: int,
+) -> tuple[bytes, ...]:
+    digest = hashlib.sha256()
+    size = 0
+    chunks: list[bytes] = []
+    sentinel = False
+    for row in rows:
+        chunk_index = row["chunk_index"]
+        content = row["content"]
+        if chunk_index is None or content is None:
+            if chunk_index is not None or content is not None or sentinel or len(rows) != 1:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            sentinel = True
+            continue
+        if sentinel:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            index = int(chunk_index)
+            value = bytes(content)
+        except (TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if index != len(chunks):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        chunks.append(value)
+        digest.update(value)
+        size += len(value)
+    expected_count = 0 if expected_size == 0 else (expected_size + _SQL_CHUNK_SIZE - 1) // _SQL_CHUNK_SIZE
+    if len(chunks) != expected_count or size != expected_size:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if digest.hexdigest() != expected_digest:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return tuple(chunks)
+
+
+def _object_stat(key: str, digest: str, size: int) -> ObjectStat:
+    try:
+        return ObjectStat(key, digest, size)
+    except (TypeError, ValueError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _validate_store_id(value: str) -> None:

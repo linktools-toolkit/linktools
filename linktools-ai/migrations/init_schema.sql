@@ -126,6 +126,7 @@ CREATE TABLE `ai_runtime_events` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_namespace_digest_tenant_id_execution_id` (`namespace_digest`, `tenant_id`, `execution_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime execution events';
@@ -168,6 +169,7 @@ CREATE TABLE `ai_runtime_task_nodes` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_namespace_digest_tenant_id_graph_id` (`namespace_digest`, `tenant_id`, `graph_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Runtime task nodes';
@@ -397,6 +399,8 @@ CREATE TABLE `ai_step_runs` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_namespace_digest_tenant_id_conversation_id` (`namespace_digest`, `tenant_id`, `conversation_id`(128)),
+  KEY `ix_namespace_digest_tenant_id_parent_run_id` (`namespace_digest`, `tenant_id`, `parent_run_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Step runs';
@@ -422,6 +426,7 @@ CREATE TABLE `ai_step_events` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_namespace_digest_tenant_id_run_id` (`namespace_digest`, `tenant_id`, `run_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Step events';
@@ -446,6 +451,7 @@ CREATE TABLE `ai_step_snapshots` (
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_namespace_digest_tenant_id_identity_digest` (`namespace_digest`, `tenant_id`, `identity_digest`),
+  KEY `ix_namespace_digest_tenant_id_run_id` (`namespace_digest`, `tenant_id`, `run_id`(128)),
   KEY `ix_updated_at` (`updated_at`),
   KEY `ix_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='Step snapshots';
