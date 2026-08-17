@@ -62,6 +62,7 @@ class ErrorCode(StrEnum):
     STORAGE_CONFLICT = "STORAGE_CONFLICT"
     STORAGE_INTEGRITY_ERROR = "STORAGE_INTEGRITY_ERROR"
     STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
+    STORAGE_COMMIT_UNKNOWN = "STORAGE_COMMIT_UNKNOWN"
     STORAGE_DEPENDENCY_NOT_READY = "STORAGE_DEPENDENCY_NOT_READY"
     OPTIONAL_DEPENDENCY_MISSING = "OPTIONAL_DEPENDENCY_MISSING"
     OUTPUT_SCHEMA_DRIFT = "OUTPUT_SCHEMA_DRIFT"
@@ -145,24 +146,29 @@ class AIError(Error):
         code: ErrorCode,
         message: str = "",
         *,
-        category: 'str | None' = None,
-        retryable: 'bool | None' = None,
-        operation_id: 'str | None' = None,
-        safe_details: 'Mapping[str, object] | None' = None,
+        category: "str | None" = None,
+        retryable: "bool | None" = None,
+        operation_id: "str | None" = None,
+        safe_details: "Mapping[str, object] | None" = None,
     ) -> None:
         super().__init__(message or code.value)
         self.code = code
         self.category = category or code.value.split("_", 1)[0]
-        self.retryable = code in {
-            ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
-            ErrorCode.SERVICE_NOT_READY,
-            ErrorCode.STORAGE_CACHE_CORRUPT,
-            ErrorCode.STORAGE_OWNER_MISMATCH,
-            ErrorCode.STORAGE_UNAVAILABLE,
-            ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
-            ErrorCode.SESSION_ACTIVE_EXECUTIONS,
-            ErrorCode.SESSION_CLEANUP_REQUIRED,
-        } if retryable is None else retryable
+        self.retryable = (
+            code
+            in {
+                ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
+                ErrorCode.SERVICE_NOT_READY,
+                ErrorCode.STORAGE_CACHE_CORRUPT,
+                ErrorCode.STORAGE_OWNER_MISMATCH,
+                ErrorCode.STORAGE_UNAVAILABLE,
+                ErrorCode.STORAGE_DEPENDENCY_NOT_READY,
+                ErrorCode.SESSION_ACTIVE_EXECUTIONS,
+                ErrorCode.SESSION_CLEANUP_REQUIRED,
+            }
+            if retryable is None
+            else retryable
+        )
         self.operation_id = operation_id
         self.safe_details = dict(safe_details or {})
 

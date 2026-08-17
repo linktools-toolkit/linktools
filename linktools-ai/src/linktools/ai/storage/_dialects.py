@@ -146,9 +146,12 @@ class SQLiteDialect:
     ) -> InsertResult:
         from sqlalchemy.dialects.sqlite import insert
 
-        statement = insert(table).values(dict(values)).on_conflict_do_nothing(
-            index_elements=list(index_elements)
-        ).returning(table.c.id)
+        statement = (
+            insert(table)
+            .values(dict(values))
+            .on_conflict_do_nothing(index_elements=list(index_elements))
+            .returning(table.c.id)
+        )
         row = (await session.execute(statement)).first()
         return InsertResult(row is not None, None if row is None else int(row[0]))
 
@@ -164,8 +167,10 @@ class SQLiteDialect:
             return
         from sqlalchemy.dialects.sqlite import insert
 
-        statement = insert(table).values([dict(row) for row in rows]).on_conflict_do_nothing(
-            index_elements=list(index_elements)
+        statement = (
+            insert(table)
+            .values([dict(row) for row in rows])
+            .on_conflict_do_nothing(index_elements=list(index_elements))
         )
         await session.execute(statement)
 
@@ -180,9 +185,13 @@ class SQLiteDialect:
     ) -> None:
         from sqlalchemy.dialects.sqlite import insert
 
-        statement = insert(table).values(dict(values)).on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_=dict(set_values),
+        statement = (
+            insert(table)
+            .values(dict(values))
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=dict(set_values),
+            )
         )
         await session.execute(statement)
 
@@ -196,15 +205,24 @@ class SQLiteDialect:
         index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int:
+        from sqlalchemy import func
         from sqlalchemy.dialects.sqlite import insert
 
         value_column = table.c[column]
         insert_values = dict(values)
         insert_values[column] = step
-        statement = insert(table).values(insert_values).on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_={column: value_column + step},
-        ).returning(value_column)
+        set_values = {column: value_column + step}
+        if "updated_at" in table.c:
+            set_values["updated_at"] = func.current_timestamp()
+        statement = (
+            insert(table)
+            .values(insert_values)
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=set_values,
+            )
+            .returning(value_column)
+        )
         return int((await session.execute(statement)).scalar_one())
 
     async def upsert_many(
@@ -265,9 +283,12 @@ class PostgreSQLDialect(SQLiteDialect):
     ) -> InsertResult:
         from sqlalchemy.dialects.postgresql import insert
 
-        statement = insert(table).values(dict(values)).on_conflict_do_nothing(
-            index_elements=list(index_elements)
-        ).returning(table.c.id)
+        statement = (
+            insert(table)
+            .values(dict(values))
+            .on_conflict_do_nothing(index_elements=list(index_elements))
+            .returning(table.c.id)
+        )
         row = (await session.execute(statement)).first()
         return InsertResult(row is not None, None if row is None else int(row[0]))
 
@@ -283,8 +304,10 @@ class PostgreSQLDialect(SQLiteDialect):
             return
         from sqlalchemy.dialects.postgresql import insert
 
-        statement = insert(table).values([dict(row) for row in rows]).on_conflict_do_nothing(
-            index_elements=list(index_elements)
+        statement = (
+            insert(table)
+            .values([dict(row) for row in rows])
+            .on_conflict_do_nothing(index_elements=list(index_elements))
         )
         await session.execute(statement)
 
@@ -299,9 +322,13 @@ class PostgreSQLDialect(SQLiteDialect):
     ) -> None:
         from sqlalchemy.dialects.postgresql import insert
 
-        statement = insert(table).values(dict(values)).on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_=dict(set_values),
+        statement = (
+            insert(table)
+            .values(dict(values))
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=dict(set_values),
+            )
         )
         await session.execute(statement)
 
@@ -315,15 +342,24 @@ class PostgreSQLDialect(SQLiteDialect):
         index_elements: "Sequence[str]",
         step: int = 1,
     ) -> int:
+        from sqlalchemy import func
         from sqlalchemy.dialects.postgresql import insert
 
         value_column = table.c[column]
         insert_values = dict(values)
         insert_values[column] = step
-        statement = insert(table).values(insert_values).on_conflict_do_update(
-            index_elements=list(index_elements),
-            set_={column: value_column + step},
-        ).returning(value_column)
+        set_values = {column: value_column + step}
+        if "updated_at" in table.c:
+            set_values["updated_at"] = func.current_timestamp()
+        statement = (
+            insert(table)
+            .values(insert_values)
+            .on_conflict_do_update(
+                index_elements=list(index_elements),
+                set_=set_values,
+            )
+            .returning(value_column)
+        )
         return int((await session.execute(statement)).scalar_one())
 
     async def upsert_many(
@@ -419,9 +455,10 @@ class MySQLDialect(SQLiteDialect):
         value_column = table.c[column]
         insert_values = dict(values)
         insert_values[column] = step
-        statement = insert(table).values(insert_values).on_duplicate_key_update(
-            **{column: func.last_insert_id(value_column + step)}
-        )
+        set_values = {column: func.last_insert_id(value_column + step)}
+        if "updated_at" in table.c:
+            set_values["updated_at"] = func.current_timestamp()
+        statement = insert(table).values(insert_values).on_duplicate_key_update(**set_values)
         result = await session.execute(statement)
         if result.rowcount == 1:
             return step
@@ -446,9 +483,7 @@ class MySQLDialect(SQLiteDialect):
 
         statement = insert(table).values([dict(row) for row in rows])
         await session.execute(
-            statement.on_duplicate_key_update(
-                **{column: statement.inserted[column] for column in set_columns}
-            )
+            statement.on_duplicate_key_update(**{column: statement.inserted[column] for column in set_columns})
         )
 
     async def delete_returning(
@@ -466,13 +501,7 @@ class MySQLDialect(SQLiteDialect):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return_columns = tuple(table.c[column] for column in returning)
         selected = tuple(
-            (
-                await session.execute(
-                    select(*primary_columns, *return_columns).where(where)
-                )
-            )
-            .mappings()
-            .all()
+            (await session.execute(select(*primary_columns, *return_columns).where(where))).mappings().all()
         )
         if not selected:
             return ()
@@ -485,23 +514,13 @@ class MySQLDialect(SQLiteDialect):
                 values = []
                 for column in (*primary_columns, *return_columns):
                     value = row[column.key]
-                    values.append(
-                        column.is_(None) if value is None else column == value
-                    )
+                    values.append(column.is_(None) if value is None else column == value)
                 predicates.append(and_(*values))
-            result = await session.execute(
-                delete(table).where(and_(where, or_(*predicates)))
-            )
+            result = await session.execute(delete(table).where(and_(where, or_(*predicates))))
             deleted_count += result.rowcount
         if deleted_count != len(selected):
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        return tuple(
-            {
-                column: row[column]
-                for column in returning
-            }
-            for row in selected
-        )
+        return tuple({column: row[column] for column in returning} for row in selected)
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         return _classify_error(error, ("duplicate entry", "1062"))

@@ -116,7 +116,9 @@ def sql_integer_id() -> "BigInteger":
     return BigInteger().with_variant(Integer, "sqlite")
 
 
-def sql_id_column(comment: str = "Auto-increment primary key") -> "Column":
+def sql_id_column(
+    comment: str = "Surrogate row identifier used only by the SQL backend.",
+) -> "Column":
     from sqlalchemy import Column
 
     return Column(
@@ -138,11 +140,36 @@ def sql_text_key(length: int = 256) -> "String":
     )
 
 
-def sql_digest() -> "CHAR":
+def sql_sha256() -> "CHAR":
     from sqlalchemy import CHAR
     from sqlalchemy.dialects import mysql
 
     return CHAR(64).with_variant(mysql.CHAR(64, charset="utf8mb4", collation="utf8mb4_bin"), "mysql")
+
+
+def sql_digest() -> "CHAR":
+    """Return the canonical SQL SHA-256 type."""
+    return sql_sha256()
+
+
+def sql_state() -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(64).with_variant(
+        mysql.VARCHAR(64, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
+
+
+def sql_sort_key() -> "String":
+    from sqlalchemy import String
+    from sqlalchemy.dialects import mysql
+
+    return String(128).with_variant(
+        mysql.VARCHAR(128, charset="utf8mb4", collation="utf8mb4_bin"),
+        "mysql",
+    )
 
 
 def sql_blob() -> "LargeBinary":
@@ -160,7 +187,8 @@ def sql_audit_columns(
     updated_comment: str = "Update timestamp",
     created_comment: str = "Creation timestamp",
 ) -> "tuple[Column, Column]":
-    from sqlalchemy import Column, DateTime, DefaultClause, text
+    from sqlalchemy import Column, DefaultClause, TIMESTAMP
+    from sqlalchemy.dialects import mysql
     from sqlalchemy.ext.compiler import compiles
     from sqlalchemy.sql.elements import ClauseElement
 
@@ -168,7 +196,10 @@ def sql_audit_columns(
         inherit_cache = True
 
         def __str__(self) -> str:
-            return "CURRENT_TIMESTAMP"
+            return "CURRENT_TIMESTAMP(6)"
+
+    class AuditCreatedTimestamp(ClauseElement):
+        inherit_cache = True
 
     @compiles(AuditCurrentTimestamp)
     def compile_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
@@ -176,23 +207,40 @@ def sql_audit_columns(
 
     @compiles(AuditCurrentTimestamp, "mysql")
     def compile_mysql_audit_timestamp(element: object, compiler: object, **kwargs: object) -> str:
-        return "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+        return "CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6)"
 
+    @compiles(AuditCreatedTimestamp)
+    def compile_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP"
+
+    @compiles(AuditCreatedTimestamp, "mysql")
+    def compile_mysql_created_timestamp(element: object, compiler: object, **kwargs: object) -> str:
+        return "CURRENT_TIMESTAMP(6)"
+
+    timestamp_type = TIMESTAMP(timezone=True).with_variant(mysql.TIMESTAMP(fsp=6), "mysql")
     return (
         Column(
             "updated_at",
-            DateTime(timezone=True),
+            timestamp_type,
             nullable=False,
             server_default=DefaultClause(AuditCurrentTimestamp()),
             comment=updated_comment,
         ),
         Column(
             "created_at",
-            DateTime(timezone=True),
+            timestamp_type,
             nullable=False,
-            server_default=text("CURRENT_TIMESTAMP"),
+            server_default=DefaultClause(AuditCreatedTimestamp()),
             comment=created_comment,
         ),
+    )
+
+
+def sql_audit_indexes(table: "Table") -> "tuple[Index, Index]":
+    """Return the required timestamp query indexes for a physical table."""
+    return (
+        sql_query_index(table, "updated_at"),
+        sql_query_index(table, "created_at"),
     )
 
 
@@ -293,10 +341,15 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
                 and not actual_column.get("autoincrement")
                 and actual_column.get("computed") is None
             ):
-                _schema_mismatch(table=expected_table.name, category="unsafe_extra_column", column=str(actual_column["name"]))
+                _schema_mismatch(
+                    table=expected_table.name, category="unsafe_extra_column", column=str(actual_column["name"])
+                )
 
         expected_pk = tuple(column.name for column in expected_table.primary_key.columns)
-        actual_pk = tuple(inspector.get_pk_constraint(expected_table.name, schema=expected_table.schema).get("constrained_columns") or ())
+        actual_pk = tuple(
+            inspector.get_pk_constraint(expected_table.name, schema=expected_table.schema).get("constrained_columns")
+            or ()
+        )
         if actual_pk != expected_pk:
             _schema_mismatch(table=expected_table.name, category="primary_key")
         _validate_autoincrement(dialect_name, expected_table, actual_columns, actual_pk)
@@ -304,8 +357,7 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
         expected_unique = {
             tuple(column.name for column in constraint.columns)
             for constraint in expected_table.constraints
-            if isinstance(constraint, UniqueConstraint)
-            and _ddl_matches(constraint, dialect_name)
+            if isinstance(constraint, UniqueConstraint) and _ddl_matches(constraint, dialect_name)
         }
         expected_unique.update(
             tuple(column.name for column in index.columns)
@@ -330,8 +382,7 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
         expected_indexes = {
             tuple(column.name for column in index.columns)
             for index in expected_table.indexes
-            if not index.unique
-            and _ddl_matches(index, dialect_name)
+            if not index.unique and _ddl_matches(index, dialect_name)
         }
         if not expected_indexes.issubset(actual_non_unique):
             _schema_mismatch(table=expected_table.name, category="index")
@@ -339,7 +390,9 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
         expected_fks = {
             _foreign_key_signature(
                 constrained_columns=tuple(column.name for column in constraint.columns),
-                referred_schema=next(iter(constraint.elements)).target_fullname.split(".")[0] if next(iter(constraint.elements)).target_fullname.count(".") == 2 else None,
+                referred_schema=next(iter(constraint.elements)).target_fullname.split(".")[0]
+                if next(iter(constraint.elements)).target_fullname.count(".") == 2
+                else None,
                 referred_table=next(iter(constraint.elements)).column.table.name,
                 referred_columns=tuple(element.column.name for element in constraint.elements),
                 ondelete=next(iter(constraint.elements)).ondelete,
@@ -365,7 +418,10 @@ def _validate_connection_schema(connection: "Connection", metadata: "MetaData") 
             for constraint in expected_table.constraints
             if isinstance(constraint, CheckConstraint)
         }
-        actual_checks = {str(item.get("sqltext", "")).strip() for item in inspector.get_check_constraints(expected_table.name, schema=expected_table.schema)}
+        actual_checks = {
+            str(item.get("sqltext", "")).strip()
+            for item in inspector.get_check_constraints(expected_table.name, schema=expected_table.schema)
+        }
         if actual_checks != expected_checks:
             _schema_mismatch(table=expected_table.name, category="check")
 
@@ -388,10 +444,7 @@ def _validate_comments(inspector: Any, dialect_name: str, table: Any) -> None:
     table_comment = inspector.get_table_comment(table.name, schema=table.schema).get("text")
     if table_comment != table.comment:
         _schema_mismatch(table=table.name, category="table_comment")
-    actual_columns = {
-        str(column["name"]): column
-        for column in inspector.get_columns(table.name, schema=table.schema)
-    }
+    actual_columns = {str(column["name"]): column for column in inspector.get_columns(table.name, schema=table.schema)}
     for column in table.columns:
         if actual_columns[column.name].get("comment") != column.comment:
             _schema_mismatch(table=table.name, category="column_comment", column=column.name)
@@ -416,7 +469,9 @@ def _validate_column_compatibility(
     expected_type = expected.type.dialect_impl(connection.dialect)
     actual_type = actual.get("type")
     dialect_name = connection.dialect.name
-    if _type_family(expected_type) != _type_family(actual_type) and not _boolean_compatible(dialect_name, expected_type, actual_type):
+    if _type_family(expected_type) != _type_family(actual_type) and not _boolean_compatible(
+        dialect_name, expected_type, actual_type
+    ):
         _schema_mismatch(table=table_name, category="type", column=expected.name)
     if isinstance(expected_type, CHAR):
         if not _is_fixed_char(actual_type) or _type_length(actual_type) != expected_type.length:
@@ -467,16 +522,16 @@ def _validate_server_default(
         return
     expected_value = _normalize_current_timestamp_default(dialect_name, expected.server_default.arg)
     actual_value = _normalize_current_timestamp_default(dialect_name, actual.get("default"))
-    if expected_value != "current_timestamp":
-        _schema_mismatch(table=table_name, category="server_default", column=expected.name)
-    if dialect_name == "mysql" and expected.name == "updated_at":
-        if actual_value != "current_timestamponupdatecurrent_timestamp":
+    if expected_value in {"current_timestamp", "current_timestamp(6)"}:
+        allowed = {"current_timestamp", "current_timestamp()", "current_timestamp(6)"}
+        if dialect_name == "postgresql":
+            allowed.add("now()")
+        if dialect_name == "mysql" and expected.name == "updated_at":
+            allowed.add("current_timestamp(6)onupdatecurrent_timestamp(6)")
+        if actual_value not in allowed:
             _schema_mismatch(table=table_name, category="server_default", column=expected.name)
         return
-    allowed = {"current_timestamp", "current_timestamp()"}
-    if dialect_name == "postgresql":
-        allowed.add("now()")
-    if actual_value not in allowed:
+    if actual_value != expected_value:
         _schema_mismatch(table=table_name, category="server_default", column=expected.name)
 
 
@@ -488,13 +543,19 @@ def _foreign_key_signature(
     referred_columns: tuple[str, ...],
     ondelete: str | None,
 ) -> tuple[object, ...]:
-    return (constrained_columns, referred_schema, referred_table, referred_columns, ondelete.upper() if ondelete else None)
+    return (
+        constrained_columns,
+        referred_schema,
+        referred_table,
+        referred_columns,
+        ondelete.upper() if ondelete else None,
+    )
 
 
 def _normalize_current_timestamp_default(dialect_name: str, value: object) -> str | None:
     if value is None:
         return None
-    if type(value).__name__ == "AuditCurrentTimestamp":
+    if type(value).__name__ in {"AuditCurrentTimestamp", "AuditCreatedTimestamp"}:
         return "current_timestamp"
     text = "".join(str(value).split()).lower()
     while text.startswith("(") and text.endswith(")"):
@@ -517,11 +578,17 @@ def _validate_mysql_options(inspector: Any, table_name: str, schema: str | None)
         _schema_mismatch(table=table_name, category="mysql_options")
 
 
-def _validate_autoincrement(dialect_name: str, table: Any, actual_columns: Mapping[str, Any], actual_pk: tuple[str, ...]) -> None:
+def _validate_autoincrement(
+    dialect_name: str, table: Any, actual_columns: Mapping[str, Any], actual_pk: tuple[str, ...]
+) -> None:
     if len(actual_pk) != 1:
         return
     expected = table.c[actual_pk[0]]
-    if not expected.primary_key or expected.autoincrement not in (True, "auto") or _type_family(expected.type) != "integer":
+    if (
+        not expected.primary_key
+        or expected.autoincrement not in (True, "auto")
+        or _type_family(expected.type) != "integer"
+    ):
         return
     actual = actual_columns[actual_pk[0]]
     if dialect_name == "sqlite":
@@ -600,7 +667,13 @@ def _is_fixed_char(value: object) -> bool:
 def _is_unbounded_text(value: object) -> bool:
     name = type(value).__name__.lower()
     rendered = _type_name(value)
-    return name in {"text", "longtext", "mediumtext", "tinytext", "clob"} or rendered in {"text", "longtext", "mediumtext", "tinytext", "clob"}
+    return name in {"text", "longtext", "mediumtext", "tinytext", "clob"} or rendered in {
+        "text",
+        "longtext",
+        "mediumtext",
+        "tinytext",
+        "clob",
+    }
 
 
 def _boolean_compatible(dialect_name: str, expected: object, actual: object) -> bool:
@@ -683,7 +756,11 @@ __all__ = [
     "validate_sql",
     "sql_blob",
     "sql_digest",
+    "sql_sha256",
+    "sql_sort_key",
+    "sql_state",
     "sql_audit_columns",
+    "sql_audit_indexes",
     "sql_integer_id",
     "sql_id_column",
     "sql_query_index",

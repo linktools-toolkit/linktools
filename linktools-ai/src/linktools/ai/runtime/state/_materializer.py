@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Materialize RuntimeState domain contracts and owned resources."""
+"""Materialize Runtime repositories and their owned StateStore resources."""
 
-import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 
@@ -10,6 +10,7 @@ from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    FilesystemObjectStore,
     InMemoryObjectStore,
     ObjectStore,
     SqlObjectStore,
@@ -18,6 +19,7 @@ from ...storage import (
     TransientObjectStore,
     build_object_sql_metadata,
     create_sql_storage_context,
+    namespace_digest,
 )
 from ._contracts import (
     ArtifactState,
@@ -26,18 +28,26 @@ from ._contracts import (
     ExecutionState,
     MemoryState,
     RecoveryState,
-    RuntimeRepository,
     TaskState,
 )
-from ._filesystem import _build_filesystem_domain, _FilesystemDomainBackend
-from ._memory import _build_in_memory_domains
+from ._filesystem import FilesystemStateStore
+from ._memory import MemoryStateStore
 from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
+from ._repositories import build_repository_bundle
 from ._retention import RuntimeRetentionController
-from ._steps import InMemoryStepArchive, RuntimeStepStore, StagingStepStore
-from ._transaction import TransactionHub
+from ._sql import SqlStateStore
+from ._steps import InMemoryStepArchive, RuntimeStepStore, StagingStepStore, StateStepArchive
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
-_OBJECT_DOMAINS = frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.MEMORY, RuntimeDomain.ARTIFACT, RuntimeDomain.RECOVERY})
+_OBJECT_DOMAINS = frozenset(
+    {
+        RuntimeDomain.CONVERSATION,
+        RuntimeDomain.EXECUTION,
+        RuntimeDomain.MEMORY,
+        RuntimeDomain.ARTIFACT,
+        RuntimeDomain.RECOVERY,
+    }
+)
 _STEP_DOMAINS = (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY)
 
 
@@ -65,18 +75,18 @@ class _RuntimeObjectRouter:
         try:
             return self._stores[domain]
         except KeyError as error:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
 
     def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
         store = self.object_store(domain)
         if isinstance(store, TransientObjectStore):
-            return store.scoped(_transient_scope(domain, owner_scope))
+            return store.scoped(f"runtime:{domain.value}:{owner_scope}")
         return store
 
     async def release_object_scope(self, domain: RuntimeDomain, *, owner_scope: str) -> None:
         store = self.object_store(domain)
         if isinstance(store, TransientObjectStore):
-            await store.release_scope(_transient_scope(domain, owner_scope))
+            await store.release_scope(f"runtime:{domain.value}:{owner_scope}")
 
     async def clear_transient(self) -> None:
         seen: set[int] = set()
@@ -91,212 +101,196 @@ async def materialize_runtime_state(
     *,
     namespace: str,
     tenant_id: str,
-    object_store: "ObjectStore | None",
+    object_store: ObjectStore | None,
 ) -> _MaterializedRuntimeState:
-    """Acquire every selected component and return independent close actions."""
-    cleanup: list[Callable[[], Awaitable[None]]] = []
-    hub = TransactionHub()
-    memory_domains = frozenset(domain for domain in RuntimeDomain if plan.route(domain).kind == "memory")
-    states: dict[RuntimeDomain, object] = {}
-    filesystem_backends: dict[RuntimeDomain, _FilesystemDomainBackend] = {}
+    stores: dict[RuntimeDomain, object] = {}
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
-    components: tuple[RuntimeRepository, ...] = ()
+    cleanups: list[Callable[[], Awaitable[None]]] = []
     try:
-        if memory_domains:
-            from ._memory import RuntimeTransactionBinding
-
-            binding = RuntimeTransactionBinding()
-            parts = _build_in_memory_domains(
-                namespace=namespace,
-                domains=memory_domains,
-                transaction_hub=hub,
-                transaction_binding=binding,
-            )
-            states.update(parts.states)
-            components = parts.components
-            await _initialize_components(components, cleanup)
-        if len(states) != len(memory_domains):
-            missing = sorted(domain.value for domain in memory_domains if domain not in states)
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"domains": missing})
-
         for domain in RuntimeDomain:
             route = plan.route(domain)
-            if route.kind != "filesystem":
-                continue
-            if route.path is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            backend = await _build_filesystem_domain(
-                route.path,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                domain=domain,
-            )
-            await backend.prepare()
-            filesystem_backends[domain] = backend
-            states[domain] = backend.state
-            cleanup.append(backend.release)
-            await _initialize_components(backend.components, cleanup)
-            components = (*components, *backend.components)
-
-        for route, domains in _sql_route_groups(plan):
-            owns_engine = route.kind == "sqlite"
-            if owns_engine:
+            if route.kind == "memory":
+                store: object = MemoryStateStore()
+                await store.initialize()
+                cleanups.append(store.close)
+            elif route.kind == "filesystem":
                 if route.path is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                try:
+                store = FilesystemStateStore(
+                    route.path / namespace_digest(namespace) / _tenant_scope_digest(tenant_id),
+                    namespace=namespace,
+                    tenant_id=tenant_id,
+                    runtime_domain=domain.value,
+                )
+                await store.initialize()
+                cleanups.append(store.close)
+            elif route.kind in {"sqlite", "sql"}:
+                if route.kind == "sqlite":
+                    if route.path is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     route.path.parent.mkdir(parents=True, exist_ok=True)
-                except OSError as error:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "failed to prepare SQLite runtime directory") from error
-                from sqlalchemy.ext.asyncio import create_async_engine
+                    from sqlalchemy.ext.asyncio import create_async_engine
 
-                engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
+                    engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
+                    context = create_sql_storage_context(engine, owns_engine=True)
+                else:
+                    if route.engine is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    context = create_sql_storage_context(route.engine)
+                from sqlalchemy import MetaData
+
+                from ._schema import build_runtime_sql_metadata
+
+                metadata = MetaData()
+                build_runtime_sql_metadata(frozenset({domain}), metadata=metadata)
+                if object_store is None and domain in _OBJECT_DOMAINS:
+                    build_object_sql_metadata(metadata=metadata)
+                await context.initialize(metadata=metadata)
+                store = SqlStateStore(context.engine, metadata=metadata, context=context)
+                await store.initialize()
+                sql_contexts[domain] = context
+                cleanups.append(store.close)
+                cleanups.append(context.close)
             else:
-                if route.engine is None:
-                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                engine = route.engine
-            context = create_sql_storage_context(engine, owns_engine=owns_engine)
-            cleanup.append(context.close)
-            group_plan = RuntimeStatePlan(**{
-                item.value: plan.route(item) if item in domains else RuntimeStatePlan().route(item)
-                for item in RuntimeDomain
-            })
-            from sqlalchemy import MetaData
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stores[domain] = store
 
-            from ._schema import build_runtime_sql_metadata, build_step_sql_metadata
+        bundles = {
+            domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)
+            for domain in RuntimeDomain
+        }
+        components = tuple(
+            value
+            for bundle in bundles.values()
+            for value in bundle.values()
+            if hasattr(value, "initialize") and hasattr(value, "close")
+        )
+        for component in _unique(components):
+            await component.initialize()
 
-            metadata = MetaData()
-            build_runtime_sql_metadata(group_plan, metadata=metadata)
-            for step_domain in _STEP_DOMAINS:
-                if step_domain in domains:
-                    build_step_sql_metadata(step_domain, metadata=metadata)
-            if object_store is None and domains & _OBJECT_DOMAINS:
-                build_object_sql_metadata(metadata=metadata)
-            await context.initialize(metadata=metadata)
-            sql_contexts.update({domain: context for domain in domains})
-            from ._sql import _build_sql_domains
-
-            parts = _build_sql_domains(
-                context,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                domains=domains,
-                metadata=metadata,
-                transaction_hub=hub,
-            )
-            states.update(parts.states)
-            components = (*components, *parts.components)
-            await _initialize_components(parts.components, cleanup)
-
-        objects = _build_object_router(plan, object_store, filesystem_backends, sql_contexts)
-        steps = _build_steps(plan, objects, filesystem_backends, sql_contexts, namespace=namespace, tenant_id=tenant_id)
-        try:
-            await steps.initialize()
-        except BaseException:
-            raise
-        cleanup.append(steps.close)
+        states = _states(bundles)
+        objects = _build_object_router(plan, object_store, stores, sql_contexts)
+        steps = _build_steps(plan, stores, namespace=namespace, tenant_id=tenant_id)
+        await steps.initialize()
+        cleanups.append(steps.close)
         retention = RuntimeRetentionController(
-            conversation=_state(states, RuntimeDomain.CONVERSATION),
-            execution=_state(states, RuntimeDomain.EXECUTION),
-            memory=_state(states, RuntimeDomain.MEMORY),
-            artifact=_state(states, RuntimeDomain.ARTIFACT),
-            task=_state(states, RuntimeDomain.TASK),
-            evaluation=_state(states, RuntimeDomain.EVALUATION),
-            recovery=_state(states, RuntimeDomain.RECOVERY),
+            conversation=states.conversation,
+            execution=states.execution,
+            memory=states.memory,
+            artifact=states.artifact,
+            task=states.task,
+            evaluation=states.evaluation,
+            recovery=states.recovery,
             objects=objects,
             steps=steps,
             plan=plan,
             namespace=namespace,
         )
-        normal_actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
-        normal_actions.extend(_close_once(component.close) for component in _unique_reversed(components))
-        normal_actions.extend(backend.release for backend in _unique_reversed(tuple(filesystem_backends.values())))
-        normal_actions.extend(_close_once(context.close) for context in _unique_reversed(tuple(sql_contexts.values())))
-        _logger.info("runtime state materialized: namespace=%s domains=%s", namespace, sorted(domain.value for domain in RuntimeDomain))
+        actions: list[Callable[[], Awaitable[None]]] = [steps.preflight_close, retention.close, steps.close]
+        actions.extend(cleanups)
+        _logger.info(
+            "runtime state materialized: namespace=%s domains=%s",
+            namespace,
+            ",".join(domain.value for domain in RuntimeDomain),
+        )
         return _MaterializedRuntimeState(
-            conversation=_state(states, RuntimeDomain.CONVERSATION),
-            execution=_state(states, RuntimeDomain.EXECUTION),
-            memory=_state(states, RuntimeDomain.MEMORY),
-            artifact=_state(states, RuntimeDomain.ARTIFACT),
-            task=_state(states, RuntimeDomain.TASK),
-            evaluation=_state(states, RuntimeDomain.EVALUATION),
-            recovery=_state(states, RuntimeDomain.RECOVERY),
+            conversation=states.conversation,
+            execution=states.execution,
+            memory=states.memory,
+            artifact=states.artifact,
+            task=states.task,
+            evaluation=states.evaluation,
+            recovery=states.recovery,
             objects=objects,
             steps=steps,
             retention=retention,
             metrics=StorageMetrics(),
-            close_actions=tuple(normal_actions),
+            close_actions=tuple(actions),
         )
     except BaseException as primary:
-        await _cleanup_reverse(cleanup, primary)
-        raise
+        for cleanup in reversed(cleanups):
+            try:
+                await cleanup()
+            except BaseException:
+                _logger.error("runtime materialization cleanup failed", exc_info=True)
+        raise primary
 
 
-async def _initialize_components(components: tuple[RuntimeRepository, ...], cleanup: list[Callable[[], Awaitable[None]]]) -> None:
-    initialized: set[int] = set()
-    for component in components:
-        if id(component) in initialized:
-            continue
-        await component.initialize()
-        initialized.add(id(component))
-        cleanup.append(component.close)
+def _states(bundles: Mapping[RuntimeDomain, Mapping[str, object]]) -> object:
+    try:
+        return type(
+            "RuntimeStates",
+            (),
+            {
+                "conversation": ConversationState(
+                    bundles[RuntimeDomain.CONVERSATION]["sessions"], bundles[RuntimeDomain.CONVERSATION]["operations"]
+                ),
+                "execution": ExecutionState(
+                    bundles[RuntimeDomain.EXECUTION]["executions"],
+                    bundles[RuntimeDomain.EXECUTION]["events"],
+                    bundles[RuntimeDomain.EXECUTION]["idempotency"],
+                    bundles[RuntimeDomain.EXECUTION]["operations"],
+                ),
+                "memory": MemoryState(
+                    bundles[RuntimeDomain.MEMORY]["records"], bundles[RuntimeDomain.MEMORY]["operations"]
+                ),
+                "artifact": ArtifactState(
+                    bundles[RuntimeDomain.ARTIFACT]["records"], bundles[RuntimeDomain.ARTIFACT]["operations"]
+                ),
+                "task": TaskState(bundles[RuntimeDomain.TASK]["tasks"], bundles[RuntimeDomain.TASK]["operations"]),
+                "evaluation": EvaluationState(
+                    bundles[RuntimeDomain.EVALUATION]["records"],
+                    bundles[RuntimeDomain.EVALUATION]["idempotency"],
+                    bundles[RuntimeDomain.EVALUATION]["operations"],
+                ),
+                "recovery": RecoveryState(
+                    bundles[RuntimeDomain.RECOVERY]["approvals"],
+                    bundles[RuntimeDomain.RECOVERY]["external_calls"],
+                    bundles[RuntimeDomain.RECOVERY]["checkpoints"],
+                    bundles[RuntimeDomain.RECOVERY]["operations"],
+                    bundles[RuntimeDomain.RECOVERY]["tools"],
+                ),
+            },
+        )()
+    except KeyError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
 
 def _build_object_router(
     plan: RuntimeStatePlan,
-    external: "ObjectStore | None",
-    filesystem_backends: Mapping[RuntimeDomain, _FilesystemDomainBackend],
-    sql_contexts: Mapping[RuntimeDomain, SqlStorageContext],
+    external: ObjectStore | None,
+    stores: Mapping[RuntimeDomain, object],
+    contexts: Mapping[RuntimeDomain, SqlStorageContext],
 ) -> _RuntimeObjectRouter:
-    stores: dict[RuntimeDomain, ObjectStore] = {}
+    values: dict[RuntimeDomain, ObjectStore] = {}
     for domain in _OBJECT_DOMAINS:
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.DURABLE and external is not None:
-            stores[domain] = external
+            values[domain] = external
         elif route.retention is RuntimeRetentionMode.VOLATILE:
-            stores[domain] = InMemoryObjectStore()
+            values[domain] = InMemoryObjectStore()
         elif route.retention is RuntimeRetentionMode.TRANSIENT:
-            stores[domain] = TransientObjectStore()
-        elif route.kind == "filesystem" and domain in filesystem_backends:
-            stores[domain] = filesystem_backends[domain].object_store
-        elif route.kind in {"sqlite", "sql"} and domain in sql_contexts:
-            stores[domain] = SqlObjectStore.from_context(sql_contexts[domain])
+            values[domain] = TransientObjectStore()
+        elif route.kind == "filesystem" and route.path is not None:
+            values[domain] = FilesystemObjectStore(route.path / "objects")
+        elif route.kind in {"sqlite", "sql"} and domain in contexts:
+            values[domain] = SqlObjectStore.from_context(contexts[domain])
         else:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
-    return _RuntimeObjectRouter(stores)
+    return _RuntimeObjectRouter(values)
 
 
 def _build_steps(
-    plan: RuntimeStatePlan,
-    objects: _RuntimeObjectRouter,
-    filesystem_backends: Mapping[RuntimeDomain, _FilesystemDomainBackend],
-    sql_contexts: Mapping[RuntimeDomain, SqlStorageContext],
-    *,
-    namespace: str,
-    tenant_id: str,
+    plan: RuntimeStatePlan, stores: Mapping[RuntimeDomain, object], *, namespace: str, tenant_id: str
 ) -> RuntimeStepStore:
     archives: dict[RuntimeDomain, object] = {}
     for domain in _STEP_DOMAINS:
         route = plan.route(domain)
         if route.retention is RuntimeRetentionMode.TRANSIENT and domain is not RuntimeDomain.CONVERSATION:
             continue
-        if route.kind == "filesystem":
-            from ._steps import FilesystemStepArchive
-
-            archives[domain] = FilesystemStepArchive._from_runtime_scope(
-                filesystem_backends[domain].physical_root,
-                runtime_domain=domain,
-                object_store=objects.object_store(domain),
-            )
-        elif route.kind in {"sqlite", "sql"}:
-            from ._steps import SqlStepArchive
-
-            archives[domain] = SqlStepArchive.from_runtime(
-                sql_contexts[domain].engine,
-                namespace=namespace,
-                tenant_id=tenant_id,
-                runtime_domain=domain,
-                object_store=objects.object_store(domain),
-                context=sql_contexts[domain],
+        if route.retention is RuntimeRetentionMode.DURABLE:
+            archives[domain] = StateStepArchive(
+                stores[domain], namespace=namespace, tenant_id=tenant_id, runtime_domain=domain
             )
         else:
             archives[domain] = InMemoryStepArchive(domain)
@@ -311,69 +305,18 @@ def _build_steps(
     )
 
 
-def _state(states: Mapping[RuntimeDomain, object], domain: RuntimeDomain) -> object:
-    try:
-        return states[domain]
-    except KeyError as error:
-        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR, safe_details={"domain": domain.value}) from error
-
-
-def _sql_route_groups(plan: RuntimeStatePlan) -> tuple[tuple[object, frozenset[RuntimeDomain]], ...]:
-    groups: list[tuple[object, frozenset[RuntimeDomain]]] = []
-    for domain in RuntimeDomain:
-        route = plan.route(domain)
-        if route.kind not in {"sqlite", "sql"}:
-            continue
-        for index, (existing, domains) in enumerate(groups):
-            same = route.kind == existing.kind and (
-                route.kind == "sqlite" and route.path == existing.path
-                or route.kind == "sql" and route.engine is existing.engine
-            )
-            if same:
-                groups[index] = (existing, domains | {domain})
-                break
-        else:
-            groups.append((route, frozenset({domain})))
-    return tuple(groups)
-
-
-def _unique_reversed(values: tuple[object, ...]) -> tuple[object, ...]:
+def _unique(values: tuple[object, ...]) -> tuple[object, ...]:
     result: list[object] = []
     seen: set[int] = set()
-    for value in reversed(values):
+    for value in values:
         if id(value) not in seen:
             result.append(value)
             seen.add(id(value))
     return tuple(result)
 
 
-async def _cleanup_reverse(actions: list[Callable[[], Awaitable[None]]], primary: BaseException) -> None:
-    del primary
-    for action in reversed(actions):
-        task = asyncio.create_task(action(), name="linktools-runtime-state-cleanup")
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            try:
-                await asyncio.shield(task)
-            except BaseException:
-                _logger.error("runtime state cleanup failed after cancellation", exc_info=True)
-            continue
-        except BaseException:
-            _logger.error("runtime state cleanup failed", exc_info=True)
-
-
-def _close_once(close_method: Callable[[], Awaitable[None]]) -> Callable[[], Awaitable[None]]:
-    async def close() -> None:
-        await close_method()
-
-    return close
-
-
-def _transient_scope(domain: RuntimeDomain, owner_scope: str) -> str:
-    if not owner_scope:
-        raise ValueError("owner_scope must not be empty")
-    return f"runtime:{domain.value}:{owner_scope}"
+def _tenant_scope_digest(tenant_id: str) -> str:
+    return hashlib.sha256(("tenant:" + tenant_id).encode("utf-8")).hexdigest()
 
 
 __all__ = ["materialize_runtime_state"]

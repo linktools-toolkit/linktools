@@ -1,258 +1,706 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Private SQL Runtime transaction and lifecycle composition primitives."""
+"""SQL implementation of the backend-neutral Runtime StateStore."""
 
-import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+import sys
+from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
-from ...storage import SqlStorageContext, is_retryable_sql_transaction
-from ._contracts import RuntimeRepository
+from ...storage import (
+    SqlStorageContext,
+    create_sql_storage_context,
+    is_retryable_sql_transaction,
+)
+from ._schema import build_runtime_sql_metadata
 from ._plan import RuntimeDomain
-from ._transaction import (
-    TransactionHub,
-    _SqlRetryableTransactionConflict,
+from ._store import (
+    FactQuery,
+    OperationQuery,
+    RecordQuery,
+    StateCallback,
+    StoredAlias,
+    StoredFact,
+    StoredOperation,
+    StoredRecord,
+    active_state_transaction,
+    bind_state_transaction,
+    decode_sort_key,
+    encode_sort_key,
+    reset_state_transaction,
+    validate_record_identity,
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import MetaData, Table
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-
-
+ValueT = TypeVar("ValueT")
 _logger = environ.get_logger("ai.runtime.state.sql")
 
 
-class _SqlRuntimeTransaction:
-    def __init__(self, context: SqlStorageContext, hub: TransactionHub, owner_domain: RuntimeDomain) -> None:
-        self._context = context
-        self._hub = hub
-        self._owner_domain = owner_domain
-        self._session: "AsyncSession | None" = None
+class SqlStateStore:
+    """Optimistic SQL StateStore backed by the five primitive tables."""
+
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        *,
+        metadata: "MetaData | None" = None,
+        context: "SqlStorageContext | None" = None,
+    ) -> None:
+        self._context = context or create_sql_storage_context(engine)
+        self._owns_context = context is None
+        self._metadata = (
+            metadata if metadata is not None else build_runtime_sql_metadata(frozenset({RuntimeDomain.CONVERSATION}))
+        )
+        self._closed = False
+        self._initialized = False
+        self._active_depth = 0
+
+    @property
+    def context(self) -> SqlStorageContext:
+        return self._context
+
+    async def initialize(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        await self._context.initialize(metadata=self._metadata)
+        self._initialized = True
+        _logger.info(
+            "SQL StateStore initialized: dialect=%s tables=%s",
+            self._context.dialect.name,
+            len(self._metadata.tables),
+        )
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._initialized = False
+        if self._owns_context:
+            await self._context.close()
+        _logger.debug("SQL StateStore closed")
+
+    async def read(self, fn: StateCallback[ValueT]) -> ValueT:
+        self._ensure_ready()
+        active = active_state_transaction(self)
+        if active is not None:
+            return await fn(active)
+        async with self._session() as session:
+            return await fn(_SqlTransaction(session, self._metadata, self._context))
+
+    async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
+        self._ensure_ready()
+        active = active_state_transaction(self)
+        if active is not None:
+            self._active_depth += 1
+            try:
+                return await fn(active)
+            finally:
+                self._active_depth -= 1
+        for attempt in range(8):
+            session = self._context.sessions()
+            transaction_context = session.begin()
+            token: object | None = None
+            callback_completed = False
+            try:
+                await transaction_context.__aenter__()
+                transaction = _SqlTransaction(session, self._metadata, self._context)
+                token = bind_state_transaction(self, transaction)
+                self._active_depth = 1
+                try:
+                    result = await fn(transaction)
+                    callback_completed = True
+                except BaseException:
+                    await transaction_context.__aexit__(*sys.exc_info())
+                    raise
+                await transaction_context.__aexit__(None, None, None)
+                _logger.debug("SQL StateStore mutation committed: attempt=%s", attempt + 1)
+                return result
+            except AIError:
+                raise
+            except BaseException as error:
+                if callback_completed:
+                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+                if is_retryable_sql_transaction(error) and not _connection_invalidated(error):
+                    _logger.warning("retrying transient SQL StateStore mutation: attempt=%s", attempt + 1)
+                    continue
+                await self._raise_storage_error(error)
+            finally:
+                if token is not None:
+                    reset_state_transaction(token)
+                self._active_depth = 0
+                await session.close()
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+    async def validate_integrity(self) -> None:
+        self._ensure_ready()
+        async with self._session() as session:
+            transaction = _SqlTransaction(session, self._metadata, self._context)
+            from sqlalchemy import select
+
+            records = transaction._table("ai_state_records")
+            aliases = transaction._table("ai_state_aliases")
+            facts = transaction._table("ai_state_facts")
+            sequences = transaction._table("ai_state_sequences")
+            record_rows = (await session.execute(select(records))).mappings().all()
+            for row in record_rows:
+                _record_from_row(row)
+            sequence_rows = (await session.execute(select(sequences.c.value))).all()
+            if any(int(row[0]) < 0 for row in sequence_rows):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            orphan_alias = await session.scalar(
+                select(aliases.c.id)
+                .select_from(aliases.outerjoin(records, aliases.c.record_key_digest == records.c.key_digest))
+                .where(records.c.id.is_(None))
+                .limit(1)
+            )
+            orphan_fact = await session.scalar(
+                select(facts.c.id)
+                .select_from(facts.outerjoin(records, facts.c.owner_key_digest == records.c.key_digest))
+                .where(records.c.id.is_(None))
+                .limit(1)
+            )
+            if orphan_alias is not None or orphan_fact is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            fact_rows = (await session.execute(select(facts))).mappings().all()
+            for row in fact_rows:
+                _fact_from_row(row)
+            operation_table = transaction._table("ai_state_operations")
+            operation_rows = (await session.execute(select(operation_table))).mappings().all()
+            for row in operation_rows:
+                _operation_from_row(row)
+            table = transaction._table("ai_state_facts")
+            rows = (await session.execute(select(table.c.stream_digest, table.c.sequence))).all()
+            grouped: dict[str, list[int]] = {}
+            for stream, sequence in rows:
+                grouped.setdefault(str(stream), []).append(int(sequence))
+            for values in grouped.values():
+                if sorted(values) != list(range(1, max(values) + 1)):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info("SQL StateStore integrity validated")
 
     @asynccontextmanager
-    async def mutation(self) -> AsyncIterator[None]:
-        await self._hub.enter(self._owner_domain)
-        outer = self._hub.depth == 1
-        session = self._session
+    async def _session(self):
+        session = self._context.sessions()
         try:
-            if outer:
-                session = self._context.sessions()
-                self._session = session
-                try:
-                    await session.begin()
-                except BaseException as error:
-                    cleanup_failed = await self._rollback_close(session)
-                    self._session = None
-                    try:
-                        await self._exit_hub(type(error))
-                    except BaseException:
-                        cleanup_failed = True
-                    if cleanup_failed:
-                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-                    if is_retryable_sql_transaction(error):
-                        raise _SqlRetryableTransactionConflict from error
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            elif session is None:
-                raise RuntimeError("SQL session requested outside owner transaction")
-            try:
-                yield
-            except BaseException as error:
-                if not outer:
-                    await self._exit_hub(type(error))
-                    raise
-                await self._rollback_close_exit(error, session)
-                if isinstance(error, AIError):
-                    raise
-                if is_retryable_sql_transaction(error):
-                    raise _SqlRetryableTransactionConflict from error
-                from sqlalchemy.exc import IntegrityError
-
-                if isinstance(error, IntegrityError):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            if not outer:
-                await self._exit_hub(None)
-                return
-            try:
-                await session.commit()
-            except BaseException as error:
-                cleanup_failed = await self._rollback_close(session)
-                self._session = None
-                try:
-                    await self._exit_hub(type(error))
-                except BaseException:
-                    cleanup_failed = True
-                if cleanup_failed:
-                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-                if is_retryable_sql_transaction(error):
-                    raise _SqlRetryableTransactionConflict from error
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            try:
-                await session.close()
-            except BaseException as error:
-                self._session = None
-                await self._exit_hub(None)
-                _logger.error("SQL session close failed after commit: domain=%s committed=True close_failed=True", self._owner_domain.value, exc_info=environ.debug)
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-            self._session = None
-            await self._exit_hub(None)
-        except AIError:
-            raise
-
-    def mark_changed(self) -> None:
-        self._hub.mark_changed(self._owner_domain)
-
-    def current_session(self) -> "AsyncSession":
-        if asyncio.current_task() is not self._hub.active_task or self._hub.active_domain is not self._owner_domain or self._hub.depth <= 0 or self._session is None:
-            raise RuntimeError("SQL session requested outside owner transaction")
-        return self._session
-
-    async def _rollback_close_exit(self, error: BaseException, session: "AsyncSession") -> None:
-        failed = False
-        try:
-            await session.rollback()
-        except BaseException:
-            failed = True
-        try:
+            yield session
+        finally:
             await session.close()
-        except BaseException:
-            failed = True
-        self._session = None
-        try:
-            await self._exit_hub(type(error))
-        except BaseException:
-            failed = True
-        if failed:
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
-    async def _rollback_close(self, session: "AsyncSession") -> bool:
-        failed = False
-        try:
-            await session.rollback()
-        except BaseException:
-            failed = True
-            _logger.error(
-                "SQL transaction rollback failed: domain=%s",
-                self._owner_domain.value,
-                exc_info=environ.debug,
-            )
-        try:
-            await session.close()
-        except BaseException:
-            failed = True
-            _logger.error(
-                "SQL session close failed: domain=%s",
-                self._owner_domain.value,
-                exc_info=environ.debug,
-            )
-        return failed
+    def _ensure_ready(self) -> None:
+        if self._closed:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        if not self._initialized:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
-    async def _exit_hub(self, error_type: object) -> None:
-        await self._hub.exit(self._owner_domain, error_type)
+    async def _raise_storage_error(self, error: BaseException) -> None:
+        from sqlalchemy.exc import IntegrityError
 
-def _build_sql_domains(
-    context: SqlStorageContext,
-    *,
-    namespace: str,
-    tenant_id: str,
-    domains: frozenset[RuntimeDomain],
-    metadata: object,
-    transaction_hub: TransactionHub | None = None,
-) -> object:
-    from ._repositories import (
-        _SqlApprovalRepository,
-        _SqlArtifactRepository,
-        _SqlEvaluationRepository,
-        _SqlEventRepository,
-        _SqlExecutionRepository,
-        _SqlExternalCallRepository,
-        _SqlIdempotencyRepository,
-        _SqlMemoryRepository,
-        _SqlOperationRepository,
-        _SqlRecoveryCheckpointRepository,
-        _SqlSessionRepository,
-        _SqlTaskRepository,
-        _SqlToolRepository,
-    )
-    hub = transaction_hub or TransactionHub()
-    sql_transactions = {
-        domain: _SqlRuntimeTransaction(context, hub, domain)
-        for domain in domains
-    }
-    sql_components: list[RuntimeRepository] = []
-    sql_operations = {
-        domain: _SqlOperationRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=domain, transaction=sql_transactions[domain])
-        for domain in sql_transactions
-    }
-    sql_components.extend(sql_operations.values())
-    sql_sessions = None
-    if RuntimeDomain.CONVERSATION in domains:
-        sql_sessions = _SqlSessionRepository(
-            context,
-            metadata,
-            namespace=namespace,
-            tenant_id=tenant_id,
-            owner_domain=RuntimeDomain.CONVERSATION,
-            transaction=sql_transactions[RuntimeDomain.CONVERSATION],
-            operation=sql_operations[RuntimeDomain.CONVERSATION],
+        if isinstance(error, IntegrityError):
+            raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+
+def _connection_invalidated(error: BaseException) -> bool:
+    from sqlalchemy.exc import DBAPIError
+
+    return isinstance(error, DBAPIError) and error.connection_invalidated
+
+
+class _SqlTransaction:
+    def __init__(
+        self,
+        session: "AsyncSession",
+        metadata: "MetaData",
+        context: SqlStorageContext,
+    ) -> None:
+        self._session = session
+        self._metadata = metadata
+        self._context = context
+
+    async def now(self) -> datetime:
+        return await self._context.dialect.database_now(self._session)
+
+    async def get_record(self, key: bytes) -> StoredRecord | None:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_records")
+        row = (
+            (await self._session.execute(select(table).where(table.c.key_digest == _hex(key)))).mappings().one_or_none()
         )
-        sql_components.append(sql_sessions)
-    sql_idempotency = {
-        domain: _SqlIdempotencyRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=domain, transaction=sql_transactions[domain], runtime_domain=domain)
-        for domain in (RuntimeDomain.EXECUTION, RuntimeDomain.EVALUATION)
-        if domain in sql_transactions
+        return None if row is None else _record_from_row(row)
+
+    async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
+        if not keys:
+            return {}
+        from sqlalchemy import select
+
+        table = self._table("ai_state_records")
+        rows = (
+            (await self._session.execute(select(table).where(table.c.key_digest.in_(tuple(_hex(key) for key in keys)))))
+            .mappings()
+            .all()
+        )
+        values = tuple(_record_from_row(row) for row in rows)
+        return {value.key_digest: value for value in values}
+
+    async def insert_record(self, record: StoredRecord) -> None:
+        from sqlalchemy import insert
+
+        await self._session.execute(insert(self._table("ai_state_records")).values(_record_values(record)))
+
+    async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
+        from sqlalchemy import update
+
+        if record.storage_version != expected_storage_version + 1:
+            raise ValueError("replacement must increment storage_version exactly once")
+        result = await self._session.execute(
+            update(self._table("ai_state_records"))
+            .where(
+                self._table("ai_state_records").c.key_digest == _hex(record.key_digest),
+                self._table("ai_state_records").c.storage_version == expected_storage_version,
+            )
+            .values(_record_values(record, updating=True))
+        )
+        return result.rowcount == 1
+
+    async def update_record_lease(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+        lease_owner: str | None,
+        lease_fence: int,
+        lease_expires_at: datetime | None,
+    ) -> bool:
+        from sqlalchemy import func, update
+
+        table = self._table("ai_state_records")
+        result = await self._session.execute(
+            update(table)
+            .where(
+                table.c.key_digest == _hex(key),
+                table.c.storage_version == expected_storage_version,
+            )
+            .values(
+                lease_owner=lease_owner,
+                lease_fence=lease_fence,
+                lease_expires_at=lease_expires_at,
+                storage_version=expected_storage_version + 1,
+                updated_at=func.current_timestamp(),
+            )
+        )
+        return result.rowcount == 1
+
+    async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
+        from sqlalchemy import delete
+
+        table = self._table("ai_state_records")
+        statement = delete(table).where(table.c.key_digest == _hex(key))
+        if expected_storage_version is not None:
+            statement = statement.where(table.c.storage_version == expected_storage_version)
+        result = await self._session.execute(statement)
+        if result.rowcount != 1:
+            return False
+        await self._session.execute(
+            delete(self._table("ai_state_aliases")).where(
+                self._table("ai_state_aliases").c.record_key_digest == _hex(key)
+            )
+        )
+        await self._session.execute(
+            delete(self._table("ai_state_facts")).where(self._table("ai_state_facts").c.owner_key_digest == _hex(key))
+        )
+        return True
+
+    async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
+        from sqlalchemy import and_, or_, select
+
+        table = self._table("ai_state_records")
+        conditions = []
+        if query.partition_digest is not None:
+            conditions.append(table.c.partition_digest == _hex(query.partition_digest))
+        if query.scope_digest is not None:
+            conditions.append(table.c.scope_digest == _hex(query.scope_digest))
+        if query.parent_digest is not None:
+            conditions.append(table.c.parent_digest == _hex(query.parent_digest))
+        if query.states is not None:
+            conditions.append(table.c.state.in_(tuple(query.states)))
+        if query.after_sort_key is not None and query.after_key_digest is not None:
+            conditions.append(
+                or_(
+                    table.c.sort_key > encode_sort_key(query.after_sort_key),
+                    and_(
+                        table.c.sort_key == encode_sort_key(query.after_sort_key),
+                        table.c.key_digest > _hex(query.after_key_digest),
+                    ),
+                )
+            )
+        statement = (
+            select(table)
+            .where(*conditions)
+            .order_by(
+                table.c.sort_key,
+                table.c.key_digest,
+            )
+        )
+        if query.limit is not None:
+            statement = statement.limit(query.limit)
+        rows = (await self._session.execute(statement)).mappings().all()
+        return tuple(_record_from_row(row) for row in rows)
+
+    async def resolve_alias(self, alias: bytes) -> bytes | None:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_aliases")
+        records = self._table("ai_state_records")
+        row = (
+            await self._session.execute(
+                select(table.c.record_key_digest, records.c.id)
+                .select_from(table.outerjoin(records, table.c.record_key_digest == records.c.key_digest))
+                .where(table.c.alias_digest == _hex(alias))
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        if row.id is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return _hex_or_none(row.record_key_digest)
+
+    async def insert_alias(self, alias: StoredAlias) -> None:
+        from sqlalchemy import insert, select
+
+        records = self._table("ai_state_records")
+        if (
+            await self._session.scalar(
+                select(records.c.id).where(records.c.key_digest == _hex(alias.record_key_digest))
+            )
+            is None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        await self._session.execute(
+            insert(self._table("ai_state_aliases")).values(
+                {
+                    "alias_digest": _hex(alias.alias_digest),
+                    "record_key_digest": _hex(alias.record_key_digest),
+                }
+            )
+        )
+
+    async def get_sequence(self, key: bytes) -> int:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_sequences")
+        value = await self._session.scalar(select(table.c.value).where(table.c.key_digest == _hex(key)))
+        return 0 if value is None else int(value)
+
+    async def get_sequences(self, keys: Sequence[bytes]) -> Mapping[bytes, int]:
+        if not keys:
+            return {}
+        from sqlalchemy import select
+
+        table = self._table("ai_state_sequences")
+        rows = (
+            (await self._session.execute(select(table).where(table.c.key_digest.in_(tuple(_hex(key) for key in keys)))))
+            .mappings()
+            .all()
+        )
+        return {bytes.fromhex(str(row["key_digest"])): int(row["value"]) for row in rows}
+
+    async def next_sequence(self, key: bytes) -> int:
+        table = self._table("ai_state_sequences")
+        return await self._context.dialect.upsert_increment(
+            self._session,
+            table=table,
+            values={"key_digest": _hex(key), "value": 1},
+            column="value",
+            index_elements=("key_digest",),
+        )
+
+    async def advance_sequence(self, key: bytes, expected: int) -> int:
+        from sqlalchemy import func, update
+
+        table = self._table("ai_state_sequences")
+        result = await self._session.execute(
+            update(table)
+            .where(table.c.key_digest == _hex(key), table.c.value == expected)
+            .values(value=expected + 1, updated_at=func.current_timestamp())
+        )
+        if result.rowcount != 1:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return expected + 1
+
+    async def delete_sequence(self, key: bytes) -> None:
+        from sqlalchemy import delete
+
+        await self._session.execute(
+            delete(self._table("ai_state_sequences")).where(self._table("ai_state_sequences").c.key_digest == _hex(key))
+        )
+
+    async def insert_fact(self, fact: StoredFact) -> None:
+        from sqlalchemy import insert, select
+
+        owner = self._table("ai_state_records")
+        if (
+            await self._session.scalar(select(owner.c.id).where(owner.c.key_digest == _hex(fact.owner_key_digest)))
+            is None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._session.execute(insert(self._table("ai_state_facts")).values(_fact_values(fact)))
+
+    async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
+        from sqlalchemy import func, select
+
+        table = self._table("ai_state_facts")
+        owners = self._table("ai_state_records")
+        conditions = [table.c.stream_digest == _hex(query.stream_digest)]
+        if query.after_sequence is not None:
+            conditions.append(table.c.sequence > query.after_sequence)
+        if query.subject_digest is not None:
+            conditions.append(table.c.subject_digest == _hex(query.subject_digest))
+        if query.latest_per_subject:
+            ranked = (
+                select(
+                    table,
+                    func.row_number()
+                    .over(
+                        partition_by=table.c.subject_digest,
+                        order_by=table.c.sequence.desc(),
+                    )
+                    .label("_subject_rank"),
+                )
+                .where(*conditions)
+                .subquery()
+            )
+            statement = (
+                select(ranked, owners.c.id.label("_owner_id"))
+                .select_from(
+                    ranked.outerjoin(
+                        owners,
+                        ranked.c.owner_key_digest == owners.c.key_digest,
+                    )
+                )
+                .where(ranked.c._subject_rank == 1)
+                .order_by(ranked.c.sequence)
+            )
+        else:
+            statement = (
+                select(table, owners.c.id.label("_owner_id"))
+                .select_from(table.outerjoin(owners, table.c.owner_key_digest == owners.c.key_digest))
+                .where(*conditions)
+                .order_by(table.c.sequence)
+            )
+        rows = (await self._session.execute(statement)).mappings().all()
+        if any(row["_owner_id"] is None for row in rows):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        facts = tuple(_fact_from_row(row) for row in rows)
+        if query.latest_per_subject:
+            latest: dict[bytes | None, StoredFact] = {}
+            for fact in facts:
+                latest[fact.subject_digest] = fact
+            facts = tuple(sorted(latest.values(), key=lambda fact: fact.sequence))
+        if query.limit is not None:
+            facts = facts[: query.limit]
+        return facts
+
+    async def delete_fact_streams(self, owner_key: bytes) -> None:
+        from sqlalchemy import delete
+
+        await self._session.execute(
+            delete(self._table("ai_state_facts")).where(
+                self._table("ai_state_facts").c.owner_key_digest == _hex(owner_key)
+            )
+        )
+
+    async def insert_operation(self, value: StoredOperation) -> None:
+        from sqlalchemy import insert
+
+        await self._session.execute(insert(self._table("ai_state_operations")).values(_operation_values(value)))
+
+    async def get_operation(self, key: bytes) -> StoredOperation | None:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_operations")
+        row = (
+            (await self._session.execute(select(table).where(table.c.key_digest == _hex(key)))).mappings().one_or_none()
+        )
+        return None if row is None else _operation_from_row(row)
+
+    async def replace_operation(self, value: StoredOperation, *, expected_state: str) -> bool:
+        from sqlalchemy import update
+
+        table = self._table("ai_state_operations")
+        result = await self._session.execute(
+            update(table)
+            .where(table.c.key_digest == _hex(value.key_digest), table.c.state == expected_state)
+            .values(_operation_values(value, updating=True))
+        )
+        return result.rowcount == 1
+
+    async def list_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        from sqlalchemy import select
+
+        table = self._table("ai_state_operations")
+        conditions = []
+        if query.stream_digest is not None:
+            conditions.append(table.c.stream_digest == _hex(query.stream_digest))
+        if query.states is not None:
+            conditions.append(table.c.state.in_(tuple(query.states)))
+        if query.through_sequence is not None:
+            conditions.append(table.c.sequence <= query.through_sequence)
+        statement = select(table).where(*conditions).order_by(table.c.sequence, table.c.key_digest)
+        if query.limit is not None:
+            statement = statement.limit(query.limit)
+        rows = (await self._session.execute(statement)).mappings().all()
+        return tuple(_operation_from_row(row) for row in rows)
+
+    async def delete_operations(self, query: OperationQuery) -> tuple[StoredOperation, ...]:
+        values = await self.list_operations(query)
+        from sqlalchemy import delete
+
+        if values:
+            await self._session.execute(
+                delete(self._table("ai_state_operations")).where(
+                    self._table("ai_state_operations").c.key_digest.in_(
+                        tuple(_hex(value.key_digest) for value in values)
+                    )
+                )
+            )
+        return values
+
+    def _table(self, name: str) -> "Table":
+        try:
+            return self._metadata.tables[name]
+        except KeyError as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _record_values(record: StoredRecord, *, updating: bool = False) -> dict[str, object]:
+    values: dict[str, object] = {
+        "key_digest": _hex(record.key_digest),
+        "partition_digest": _hex(record.partition_digest),
+        "scope_digest": None if record.scope_digest is None else _hex(record.scope_digest),
+        "parent_digest": None if record.parent_digest is None else _hex(record.parent_digest),
+        "kind": record.kind,
+        "sort_key": encode_sort_key(record.sort_key),
+        "state": record.state,
+        "storage_version": record.storage_version,
+        "lease_owner": record.lease_owner,
+        "lease_fence": record.lease_fence,
+        "lease_expires_at": record.lease_expires_at,
+        "payload_json": dict(record.data),
     }
-    sql_components.extend(sql_idempotency.values())
-    sql_events = None
-    sql_executions = None
-    if RuntimeDomain.EXECUTION in sql_transactions:
-        sql_events = _SqlEventRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.EXECUTION, transaction=sql_transactions[RuntimeDomain.EXECUTION])
-        sql_components.append(sql_events)
-        sql_executions = _SqlExecutionRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.EXECUTION, transaction=sql_transactions[RuntimeDomain.EXECUTION], idempotency=sql_idempotency[RuntimeDomain.EXECUTION], events=sql_events, operations=sql_operations[RuntimeDomain.EXECUTION])
-        sql_components.append(sql_executions)
-    sql_memory = _SqlMemoryRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.MEMORY, transaction=sql_transactions[RuntimeDomain.MEMORY], operations=sql_operations[RuntimeDomain.MEMORY]) if RuntimeDomain.MEMORY in domains else None
-    sql_artifact = _SqlArtifactRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.ARTIFACT, transaction=sql_transactions[RuntimeDomain.ARTIFACT]) if RuntimeDomain.ARTIFACT in domains else None
-    sql_task = _SqlTaskRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.TASK, transaction=sql_transactions[RuntimeDomain.TASK]) if RuntimeDomain.TASK in domains else None
-    sql_evaluation = _SqlEvaluationRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.EVALUATION, transaction=sql_transactions[RuntimeDomain.EVALUATION]) if RuntimeDomain.EVALUATION in domains else None
-    sql_checkpoint = _SqlRecoveryCheckpointRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
-    sql_tool = _SqlToolRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
-    sql_approval = _SqlApprovalRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
-    sql_external = _SqlExternalCallRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
-    sql_components.extend(item for item in (sql_memory, sql_artifact, sql_task, sql_evaluation, sql_approval, sql_external, sql_checkpoint, sql_tool) if item is not None)
-    from ._contracts import (
-        ArtifactState,
-        ConversationState,
-        EvaluationState,
-        ExecutionState,
-        MemoryState,
-        RecoveryState,
-        TaskState,
+    if updating:
+        from sqlalchemy import func
+
+        values["updated_at"] = func.current_timestamp()
+    return values
+
+
+def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
+    record = StoredRecord(
+        bytes.fromhex(str(row["key_digest"])),
+        bytes.fromhex(str(row["partition_digest"])),
+        _hex_or_none(row["scope_digest"]),
+        _hex_or_none(row["parent_digest"]),
+        str(row["kind"]),
+        decode_sort_key(str(row["sort_key"])),
+        None if row["state"] is None else str(row["state"]),
+        int(row["storage_version"]),
+        None if row["lease_owner"] is None else str(row["lease_owner"]),
+        int(row["lease_fence"]),
+        _datetime_or_none(row["lease_expires_at"]),
+        dict(row["payload_json"]),
     )
-    from ._memory import _DomainRepositoryParts
+    try:
+        validate_record_identity(record)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    return record
 
-    states: dict[RuntimeDomain, object] = {}
-    if sql_sessions is not None:
-        states[RuntimeDomain.CONVERSATION] = ConversationState(sql_sessions, sql_operations[RuntimeDomain.CONVERSATION])
-    if sql_executions is not None and sql_events is not None:
-        states[RuntimeDomain.EXECUTION] = ExecutionState(sql_executions, sql_events, sql_idempotency[RuntimeDomain.EXECUTION], sql_operations[RuntimeDomain.EXECUTION])
-    if sql_memory is not None:
-        states[RuntimeDomain.MEMORY] = MemoryState(sql_memory, sql_operations[RuntimeDomain.MEMORY])
-    if sql_artifact is not None:
-        states[RuntimeDomain.ARTIFACT] = ArtifactState(sql_artifact, sql_operations[RuntimeDomain.ARTIFACT])
-    if sql_task is not None:
-        states[RuntimeDomain.TASK] = TaskState(sql_task, sql_operations[RuntimeDomain.TASK])
-    if sql_evaluation is not None:
-        states[RuntimeDomain.EVALUATION] = EvaluationState(sql_evaluation, sql_idempotency[RuntimeDomain.EVALUATION], sql_operations[RuntimeDomain.EVALUATION])
-    if all(value is not None for value in (sql_approval, sql_external, sql_checkpoint, sql_tool)):
-        states[RuntimeDomain.RECOVERY] = RecoveryState(sql_approval, sql_external, sql_checkpoint, sql_operations[RuntimeDomain.RECOVERY], sql_tool)
-    if frozenset(states) != domains:
+
+def _fact_values(fact: StoredFact) -> dict[str, object]:
+    return {
+        "stream_digest": _hex(fact.stream_digest),
+        "sequence": fact.sequence,
+        "owner_key_digest": _hex(fact.owner_key_digest),
+        "kind": fact.kind,
+        "subject_digest": None if fact.subject_digest is None else _hex(fact.subject_digest),
+        "state": fact.state,
+        "payload_json": dict(fact.data),
+    }
+
+
+def _fact_from_row(row: Mapping[str, object]) -> StoredFact:
+    return StoredFact(
+        bytes.fromhex(str(row["stream_digest"])),
+        int(row["sequence"]),
+        bytes.fromhex(str(row["owner_key_digest"])),
+        str(row["kind"]),
+        _hex_or_none(row["subject_digest"]),
+        None if row["state"] is None else str(row["state"]),
+        dict(row["payload_json"]),
+    )
+
+
+def _operation_values(value: StoredOperation, *, updating: bool = False) -> dict[str, object]:
+    values: dict[str, object] = {
+        "key_digest": _hex(value.key_digest),
+        "stream_digest": _hex(value.stream_digest),
+        "sequence": value.sequence,
+        "state": value.state,
+        "compactable": value.compactable,
+        "payload_json": dict(value.data),
+    }
+    if updating:
+        from sqlalchemy import func
+
+        values["updated_at"] = func.current_timestamp()
+    return values
+
+
+def _operation_from_row(row: Mapping[str, object]) -> StoredOperation:
+    return StoredOperation(
+        bytes.fromhex(str(row["key_digest"])),
+        bytes.fromhex(str(row["stream_digest"])),
+        int(row["sequence"]),
+        str(row["state"]),
+        bool(row["compactable"]),
+        dict(row["payload_json"]),
+    )
+
+
+def _hex(value: bytes) -> str:
+    if not isinstance(value, bytes) or len(value) != 32:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-    _logger.info("SQL domains composed: namespace=%s tenant=%s domains=%s", namespace, tenant_id, sorted(domain.value for domain in domains))
-    return _DomainRepositoryParts(states, tuple(dict.fromkeys(sql_components)))
+    return value.hex()
 
 
-__all__ = []
+def _hex_or_none(value: object) -> bytes | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) != 64:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        return bytes.fromhex(value)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+
+
+def _datetime_or_none(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+__all__ = ["SqlStateStore"]

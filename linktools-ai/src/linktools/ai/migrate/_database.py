@@ -11,7 +11,6 @@ from ..asset import build_asset_sql_metadata
 from ..runtime.state import (
     RuntimeDomain,
     build_runtime_sql_metadata,
-    build_step_sql_metadata,
 )
 from ..storage import build_object_sql_metadata, provision_sql
 
@@ -25,24 +24,22 @@ if TYPE_CHECKING:
 
 
 def build_sql_schema_metadata() -> "MetaData":
-    """Build the complete Runtime, Step, Object, and Asset schema."""
+    """Build the complete Runtime, Object, and Asset schema."""
     from sqlalchemy import MetaData
 
     metadata = MetaData()
     build_runtime_sql_metadata(frozenset(RuntimeDomain), metadata=metadata)
-    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
-        build_step_sql_metadata(domain, metadata=metadata)
     build_object_sql_metadata(metadata=metadata)
     build_asset_sql_metadata(metadata=metadata)
-    if len(metadata.tables) != 24:
-        raise RuntimeError("complete SQL schema must contain exactly 24 tables")
+    if len(metadata.tables) != 10:
+        raise RuntimeError("complete SQL schema must contain exactly 10 tables")
     return metadata
 
 
 async def provision_database(engine: "AsyncEngine") -> None:
     """Provision the complete schema from the explicit migration boundary."""
     await provision_sql(engine, build_sql_schema_metadata())
-    _logger.info("complete SQL schema provisioned: tables=24")
+    _logger.info("complete SQL schema provisioned: tables=10")
 
 
 async def provision_runtime_database(
@@ -60,9 +57,6 @@ async def provision_runtime_database(
 
     metadata = MetaData()
     build_runtime_sql_metadata(selected, metadata=metadata)
-    for domain in (RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY):
-        if domain in selected:
-            build_step_sql_metadata(domain, metadata=metadata)
     if object_store is None and selected & frozenset(
         {
             RuntimeDomain.CONVERSATION,

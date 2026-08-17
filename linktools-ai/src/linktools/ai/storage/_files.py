@@ -2,10 +2,13 @@
 # -*- coding: utf-8 -*-
 """Root-contained atomic file primitives."""
 
+import hashlib
 import json
 import os
 import re
+import shutil
 import tempfile
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,14 +52,14 @@ def write_bytes_atomic(path: Path, value: bytes, *, fsync: bool = False) -> None
         raise
 
 
-def read_json(path: Path) -> 'dict[str, JsonValue]':
+def read_json(path: Path) -> "dict[str, JsonValue]":
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("JSON root must be an object")
     return value
 
 
-def write_json_atomic(path: Path, value: 'dict[str, JsonValue]', *, fsync: bool = False) -> None:
+def write_json_atomic(path: Path, value: "dict[str, JsonValue]", *, fsync: bool = False) -> None:
     write_bytes_atomic(
         path,
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
@@ -81,6 +84,185 @@ def sync_directory(path: Path) -> None:
             return
     finally:
         os.close(descriptor)
+
+
+class FilesystemJournal:
+    """Shared crash-safe journal for granular filesystem stores."""
+
+    def __init__(self, root: Path, *, error_code: ErrorCode) -> None:
+        self._root = root
+        self._transaction = root / ".txn"
+        self._error_code = error_code
+
+    def stage(
+        self,
+        desired: Mapping[str, bytes],
+        previous: Mapping[str, bytes],
+        *,
+        base_generation: int,
+        target_generation: int,
+    ) -> dict[str, object]:
+        if target_generation != base_generation + 1:
+            raise AIError(self._error_code)
+        try:
+            if (self._transaction / "commit").exists():
+                raise AIError(self._error_code)
+            if self._transaction.exists():
+                shutil.rmtree(self._transaction)
+                sync_directory(self._root)
+            stage = self._transaction / "stage"
+            stage.mkdir(parents=True)
+            writes: list[dict[str, str]] = []
+            for relative, content in desired.items():
+                if previous.get(relative) == content:
+                    continue
+                path = validate_root_path(
+                    stage,
+                    _safe_relative(relative, self._error_code),
+                )
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                _sync_file(path)
+                writes.append(
+                    {
+                        "path": relative,
+                        "sha256": _sha256(content),
+                    }
+                )
+            _sync_tree(stage)
+            plan: dict[str, object] = {
+                "journal_version": 1,
+                "base_generation": base_generation,
+                "target_generation": target_generation,
+                "writes": writes,
+                "deletes": sorted(previous.keys() - desired.keys()),
+            }
+            self.validate(plan, base_generation=base_generation)
+            _write_journal_json(self._transaction / "plan.json", plan)
+            sync_directory(self._transaction)
+            _write_journal_text(self._transaction / "commit", "1")
+            sync_directory(self._transaction)
+            return plan
+        except AIError:
+            raise
+        except (OSError, TypeError, ValueError) as error:
+            raise AIError(self._error_code) from error
+
+    def validate(
+        self,
+        plan: Mapping[str, object],
+        *,
+        base_generation: int | None = None,
+    ) -> None:
+        if plan.get("journal_version") != 1:
+            raise AIError(self._error_code)
+        base = plan.get("base_generation")
+        target = plan.get("target_generation")
+        if not isinstance(base, int) or not isinstance(target, int) or target != base + 1:
+            raise AIError(self._error_code)
+        if base_generation is not None and base != base_generation:
+            raise AIError(self._error_code)
+        writes = plan.get("writes")
+        deletes = plan.get("deletes")
+        if not isinstance(writes, list) or not isinstance(deletes, list):
+            raise AIError(self._error_code)
+        written_paths: set[str] = set()
+        deleted_paths: set[str] = set()
+        for item in writes:
+            if not isinstance(item, Mapping):
+                raise AIError(self._error_code)
+            relative = _safe_relative(str(item.get("path", "")), self._error_code)
+            digest = item.get("sha256")
+            if (
+                relative != str(item.get("path"))
+                or relative in written_paths
+                or not isinstance(digest, str)
+                or len(digest) != 64
+            ):
+                raise AIError(self._error_code)
+            try:
+                int(digest, 16)
+            except ValueError as error:
+                raise AIError(self._error_code) from error
+            written_paths.add(relative)
+        for value in deletes:
+            relative = _safe_relative(str(value), self._error_code)
+            if relative in deleted_paths or relative in written_paths:
+                raise AIError(self._error_code)
+            deleted_paths.add(relative)
+
+    def publish(self, plan: Mapping[str, object]) -> None:
+        try:
+            self.validate(plan)
+            stage = self._transaction / "stage"
+            writes = plan["writes"]
+            deletes = plan["deletes"]
+            if not isinstance(writes, list) or not isinstance(deletes, list):
+                raise AIError(self._error_code)
+            for item in writes:
+                if not isinstance(item, Mapping):
+                    raise AIError(self._error_code)
+                relative = _safe_relative(str(item["path"]), self._error_code)
+                source = validate_root_path(stage, relative)
+                destination = validate_root_path(self._root, relative)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if source.is_file():
+                    os.replace(source, destination)
+                    sync_directory(destination.parent)
+                elif not destination.is_file() or _sha256(destination.read_bytes()) != str(item["sha256"]):
+                    raise AIError(self._error_code)
+            for value in deletes:
+                relative = _safe_relative(str(value), self._error_code)
+                path = validate_root_path(self._root, relative)
+                existed = path.exists()
+                path.unlink(missing_ok=True)
+                if existed:
+                    sync_directory(path.parent)
+        except AIError:
+            raise
+        except (OSError, TypeError, ValueError) as error:
+            raise AIError(self._error_code) from error
+
+    def complete(self) -> None:
+        try:
+            if self._transaction.exists():
+                shutil.rmtree(self._transaction)
+                sync_directory(self._root)
+        except OSError as error:
+            raise AIError(self._error_code) from error
+
+    def recover(
+        self,
+        read_generation: Callable[[], int],
+        write_generation: Callable[[int], None],
+    ) -> None:
+        marker = self._transaction / "commit"
+        if not marker.exists():
+            if self._transaction.exists():
+                shutil.rmtree(self._transaction)
+                sync_directory(self._root)
+            return
+        try:
+            plan = _read_journal_json(self._transaction / "plan.json")
+            current = read_generation()
+            base = plan.get("base_generation")
+            self.validate(
+                plan,
+                base_generation=current if current == base else None,
+            )
+            if current not in {int(plan["base_generation"]), int(plan["target_generation"])}:
+                raise AIError(self._error_code)
+            self.publish(plan)
+            target = int(plan["target_generation"])
+            if current != target:
+                write_generation(target)
+                sync_directory(self._root)
+            shutil.rmtree(self._transaction)
+            sync_directory(self._root)
+        except AIError:
+            raise
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            raise AIError(self._error_code) from error
 
 
 def atomic_write_bytes(path: "str | Path", value: bytes) -> None:
@@ -148,8 +330,7 @@ def safe_child(
 ) -> Path:
     root_path = Path(root).resolve(strict=False)
     values = tuple(
-        part.value if isinstance(part, (StorageId, StoragePath, Sha256Digest)) else part
-        for part in validated_parts
+        part.value if isinstance(part, (StorageId, StoragePath, Sha256Digest)) else part for part in validated_parts
     )
     candidate = root_path.joinpath(*values).resolve(strict=False)
     try:
@@ -160,6 +341,7 @@ def safe_child(
 
 
 __all__ = [
+    "FilesystemJournal",
     "Sha256Digest",
     "StorageId",
     "StoragePath",
@@ -174,3 +356,50 @@ __all__ = [
     "write_bytes_atomic",
     "write_json_atomic",
 ]
+
+
+def _sha256(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _safe_relative(value: str, error_code: ErrorCode) -> str:
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or not value
+        or "\x00" in value
+        or "\\" in value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise AIError(error_code)
+    return value
+
+
+def _write_journal_json(path: Path, value: Mapping[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    _sync_file(path)
+
+
+def _write_journal_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+    _sync_file(path)
+
+
+def _read_journal_json(path: Path) -> dict[str, object]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("filesystem journal JSON must be an object")
+    return value
+
+
+def _sync_file(path: Path) -> None:
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def _sync_tree(root: Path) -> None:
+    for path in sorted((value for value in root.rglob("*") if value.is_dir()), reverse=True):
+        sync_directory(path)
+    sync_directory(root)

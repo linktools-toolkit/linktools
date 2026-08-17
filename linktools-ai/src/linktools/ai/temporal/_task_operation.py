@@ -135,8 +135,7 @@ class _RuntimeTaskOperation:
             _validate_node_view_shape(current)
             if current.status in _TERMINAL_STATUSES:
                 _logger.info(
-                    "Temporal task lease reached durable terminal state: "
-                    "graph=%s node=%s status=%s",
+                    "Temporal task lease reached durable terminal state: graph=%s node=%s status=%s",
                     lease.graph_id,
                     lease.node_id,
                     current.status.value,
@@ -199,9 +198,7 @@ class _RuntimeTaskOperation:
                     lease,
                     tenant_id=request.tenant_id,
                     error_code=ErrorCode.EXECUTION_FAILED.value,
-                    error_digest=canonical_sha256(
-                        {"type": "ExecutionResult", "code": result.status}
-                    ),
+                    error_digest=canonical_sha256({"type": "ExecutionResult", "code": result.status}),
                 )
             except AIError as error:
                 if error.code is not ErrorCode.TASK_FENCE_STALE:
@@ -219,9 +216,7 @@ class _RuntimeTaskOperation:
             tenant_id=request.tenant_id,
         )
         updated = await self._read_node(request, node, reconcile=False)
-        expected_status = (
-            TaskStatus.SUCCEEDED if result.status == "SUCCEEDED" else TaskStatus.FAILED
-        )
+        expected_status = TaskStatus.SUCCEEDED if result.status == "SUCCEEDED" else TaskStatus.FAILED
         if updated.status is not expected_status:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return updated
@@ -239,8 +234,7 @@ class _RuntimeTaskOperation:
         if current.status not in _TERMINAL_STATUSES:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
-            "Temporal task stale settle recovered from durable state: "
-            "graph=%s node=%s status=%s fence=%s",
+            "Temporal task stale settle recovered from durable state: graph=%s node=%s status=%s fence=%s",
             request.graph_id,
             node.node_id,
             current.status.value,
@@ -271,16 +265,13 @@ class _RuntimeTaskOperation:
             request.graph_id,
             tenant_id=request.tenant_id,
         )
-        updated = await self._read_node(request, node, reconcile=False)
-        if updated.status is not current.status:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         _logger.info(
             "Temporal task node settled from durable state: graph=%s node=%s status=%s",
             request.graph_id,
             node.node_id,
-            updated.status.value,
+            current.status.value,
         )
-        return updated
+        return current
 
     async def _fail_prepare(
         self,
@@ -289,9 +280,7 @@ class _RuntimeTaskOperation:
         lease: TaskLease,
         error: AIError,
     ) -> TaskNodeView:
-        error_digest = canonical_sha256(
-            {"type": type(error).__name__, "code": error.code.value}
-        )
+        error_digest = canonical_sha256({"type": type(error).__name__, "code": error.code.value})
         await self._repository.fail(
             lease,
             tenant_id=request.tenant_id,
@@ -344,10 +333,7 @@ class _RuntimeTaskOperation:
             current.execution_id,
             principal=principal,
         )
-        if (
-            node_result.execution_id != current.execution_id
-            or node_result.result_digest != current.result_digest
-        ):
+        if node_result.execution_id != current.execution_id or node_result.result_digest != current.result_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _load_request(self, request: TaskWorkflowInput):
@@ -430,11 +416,7 @@ def _validate_node_view(
     node: TaskNode,
     graph_id: str,
 ) -> None:
-    if (
-        current.graph_id != graph_id
-        or current.node_id != node.node_id
-        or current.dependencies != node.dependencies
-    ):
+    if current.graph_id != graph_id or current.node_id != node.node_id or current.dependencies != node.dependencies:
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     _validate_node_view_shape(current)
 
@@ -519,10 +501,7 @@ def _is_digest(value: "str | None") -> bool:
 
 
 def _lease_is_active(current: TaskNodeView) -> bool:
-    return (
-        current.lease_expires_at is not None
-        and current.lease_expires_at > datetime.now(timezone.utc)
-    )
+    return current.lease_expires_at is not None and current.lease_expires_at > datetime.now(timezone.utc)
 
 
 def _task_owner(

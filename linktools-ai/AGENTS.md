@@ -85,12 +85,36 @@ Layer precedence is primary first, followed by declared fallback layers. Tombsto
 ## 5. SQL rules
 
 - Runtime, Step, ObjectStore, and Asset builders register only tables they own into an optional shared `MetaData`.
-- `migrations/init_schema.sql` is the manually maintained 24-table DBA reference; there is no schema registry or manifest table.
+- `migrations/init_schema.sql` is the manually maintained DBA reference; there is no schema registry or manifest table.
 - SQLite requires WAL and process-scoped coordination. MySQL and PostgreSQL use shared-database coordination.
 - Filesystem coordination uses `filelock`; do not add `fcntl`, `msvcrt`, or platform-specific advisory-lock code.
 - Keep schema creation out of runtime startup. Tests and deployment tooling call `provision_database()` explicitly.
 - Public SQL backends receive an `AsyncEngine`; composition creates one `SqlStorageContext` and shares its session factory internally. Each operation creates its own `AsyncSession`.
 - Add logs at database preparation, schema validation, transaction retry, lease transition, and backend initialization boundaries.
+
+The DBA reference must also satisfy these schema constraints:
+
+1. All business tables use the `ai_` prefix.
+2. There is no schema manifest table.
+3. Every table and column has a business `COMMENT`.
+4. Placeholder comments are prohibited.
+5. Every table uses an `id BIGINT AUTO_INCREMENT` surrogate primary key.
+6. `updated_at` is immediately before `created_at`.
+7. MySQL `updated_at` uses `DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`.
+8. Every table retains `ix_updated_at` and `ix_created_at`.
+9. Unique-key names use `uk_<ordered_columns>`.
+10. Index names use `ix_<ordered_columns>`.
+11. MySQL index names do not contain table names.
+12. Composite unique and index keys contain at most three physical columns.
+13. SHA-256 values use `CHAR(64)` with `utf8mb4_bin`.
+14. Wide columns carrying uniqueness never use prefix unique keys.
+15. Ordinary non-unique wide indexes use a 128-character prefix.
+16. Redundant indexes fully covered by unique or primary keys are prohibited.
+17. Low-selectivity status single-column indexes are prohibited.
+18. Foreign keys are prohibited.
+19. `FLOAT` columns are prohibited.
+20. `JSON` and `LONGBLOB` are limited to the real fields in this schema.
+21. The DDL and canonical metadata describe the same schema.
 
 ## 6. Python and logging style
 

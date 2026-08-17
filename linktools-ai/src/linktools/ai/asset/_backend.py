@@ -65,6 +65,19 @@ class InMemoryAssetBackend:
     async def initialize(self) -> None:
         return None
 
+    async def validate_integrity(self) -> None:
+        async with self._lock:
+            for key, history in self._versions.items():
+                if not history or self._entries.get(key, (None,))[0] != history[-1][0]:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if [info.revision.value for info, _ in history] != list(range(1, len(history) + 1)):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                for info, value in history:
+                    if info.status is StorageEntryStatus.NORMAL and (
+                        info.etag != _etag(value) or info.size != len(value)
+                    ):
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
     async def head_revision(self) -> StorageRevision:
         async with self._lock:
             return self._store_revision()
@@ -93,8 +106,7 @@ class InMemoryAssetBackend:
             return {
                 key: current[1]
                 for key in keys
-                if (current := self._entries.get(key)) is not None
-                and current[0].status is StorageEntryStatus.NORMAL
+                if (current := self._entries.get(key)) is not None and current[0].status is StorageEntryStatus.NORMAL
             }
 
     async def stat(self, key: AssetKey) -> "AssetInfo | None":
@@ -114,7 +126,11 @@ class InMemoryAssetBackend:
             self._require_writable()
             previous = self._entries.get(key)
             self._check_revision(previous, expected_revision)
-            if previous is not None and previous[0].status is StorageEntryStatus.NORMAL and previous[0].etag == _etag(value):
+            if (
+                previous is not None
+                and previous[0].status is StorageEntryStatus.NORMAL
+                and previous[0].etag == _etag(value)
+            ):
                 return StoragePutResult(previous[0], previous[0].revision, self._store_revision(), False)
             self._revision += 1
             info = self._next_info(
@@ -197,7 +213,9 @@ class InMemoryAssetBackend:
             if mutates:
                 self._revision += 1
             store_revision = self._store_revision()
-            results: list[StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]] = []
+            results: list[
+                StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
+            ] = []
             for change in changes:
                 current = previous[change.key]
                 if change.operation is StorageOperation.PUT:
@@ -268,15 +286,8 @@ class InMemoryAssetBackend:
     def export_state(self) -> "dict[str, object]":
         return {
             "store_revision": self._revision,
-            "entries": [
-                _encode_entry(info, value)
-                for info, value in self._entries.values()
-            ],
-            "versions": [
-                _encode_entry(info, value)
-                for history in self._versions.values()
-                for info, value in history
-            ],
+            "entries": [_encode_entry(info, value) for info, value in self._entries.values()],
+            "versions": [_encode_entry(info, value) for history in self._versions.values() for info, value in history],
         }
 
     def import_state(self, raw: object) -> None:
@@ -292,11 +303,7 @@ class InMemoryAssetBackend:
             info, value = _decode_entry(item, self._root)
             histories.setdefault(info.key, []).append((info, value))
         if current is None:
-            entries = {
-                key: history[-1]
-                for key, history in histories.items()
-                if history
-            }
+            entries = {key: history[-1] for key, history in histories.items() if history}
         elif isinstance(current, list):
             entries = {}
             for item in current:
