@@ -106,11 +106,12 @@ def build_runtime_sql_metadata(
                 "cwd": (Text(), "Working directory"),
                 "metadata": (JSON(), "Extended metadata"),
                 "continuation_step_run_id": (sql_text_key(), "Continuation Step run identifier"),
+                "active_execution_id": (sql_text_key(128), "Durably admitted execution identifier"),
                 "closed_at": (DateTime(timezone=True), "Close time"),
             },
             ("namespace_digest", "tenant_id", "session_id"),
             table_comment="Runtime sessions",
-            nullable=frozenset({"cwd", "continuation_step_run_id", "closed_at"}),
+            nullable=frozenset({"cwd", "continuation_step_run_id", "active_execution_id", "closed_at"}),
         )
     if "ai_runtime_executions" in tables:
         table(

@@ -40,6 +40,8 @@ CREATE TABLE `ai_runtime_sessions` (
   `cwd` TEXT COMMENT 'Working directory',
   `metadata` JSON NOT NULL COMMENT 'Extended metadata',
   `continuation_step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Continuation Step run identifier',
+  `active_execution_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
+    COMMENT 'Durably admitted execution identifier',
   `closed_at` DATETIME COMMENT 'Close time',
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT 'Update timestamp',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT 'Creation timestamp',

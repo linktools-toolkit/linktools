@@ -185,13 +185,33 @@ class _SqlRepositoryBase:
 
 class _SqlSessionRepository(_SqlRepositoryBase):
     def _from_row(self, row: Mapping[str, object]) -> SessionRecord:
-        return SessionRecord(
-            str(row["session_id"]), self._tenant_id, str(row["owner_principal_id"]), str(row["binding_digest"]),
-            SessionStatus(str(row["status"])), int(row["revision"]), int(row["resource_generation"]),
-            None if row["cwd"] is None else str(row["cwd"]), row["metadata"] or {}, _utc(row["created_at"]),
-            _utc(row["updated_at"]), None if row["closed_at"] is None else _utc(row["closed_at"]),
-            None if row["continuation_step_run_id"] is None else ConversationCursor(str(row["continuation_step_run_id"])),
-        )
+        try:
+            return SessionRecord(
+                session_id=str(row["session_id"]),
+                tenant_id=self._tenant_id,
+                owner_principal_id=str(row["owner_principal_id"]),
+                binding_digest=str(row["binding_digest"]),
+                status=SessionStatus(str(row["status"])),
+                revision=int(row["revision"]),
+                resource_generation=int(row["resource_generation"]),
+                cwd=None if row["cwd"] is None else str(row["cwd"]),
+                metadata=row["metadata"] or {},
+                created_at=_utc(row["created_at"]),
+                updated_at=_utc(row["updated_at"]),
+                closed_at=None if row["closed_at"] is None else _utc(row["closed_at"]),
+                active_execution_id=(
+                    None
+                    if row["active_execution_id"] is None
+                    else str(row["active_execution_id"])
+                ),
+                continuation=(
+                    None
+                    if row["continuation_step_run_id"] is None
+                    else ConversationCursor(str(row["continuation_step_run_id"]))
+                ),
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
 
     def _record_values(self, record: SessionRecord) -> dict[str, object]:
         return self._values({"session_id": record.session_id}) | {
@@ -203,6 +223,7 @@ class _SqlSessionRepository(_SqlRepositoryBase):
             "cwd": record.cwd,
             "metadata": dict(record.metadata),
             "continuation_step_run_id": None if record.continuation is None else record.continuation.step_run_id,
+            "active_execution_id": record.active_execution_id,
             "closed_at": record.closed_at,
             "created_at": record.created_at,
             "updated_at": record.updated_at,
@@ -265,16 +286,162 @@ class _SqlSessionRepository(_SqlRepositoryBase):
 
         async with self._mutation() as session:
             table = self._table("ai_runtime_sessions")
+            row = await self._one(session, table, *self._where(table, session_id=session_id))
+            if row is None or int(row["revision"]) != expected_revision:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            current = self._from_row(row)
+            if (
+                next_record.revision != expected_revision + 1
+                or next_record.tenant_id != tenant_id
+                or next_record.session_id != session_id
+            ):
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if next_record.status is SessionStatus.CLOSED and current.active_execution_id is not None:
+                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
             values = self._record_values(next_record)
-            for name in ("namespace_digest", "tenant_id", "session_id", "created_at"):
+            for name in ("namespace_digest", "tenant_id", "session_id", "created_at", "active_execution_id"):
                 values.pop(name, None)
             result = await session.execute(update(table).where(*self._where(table, session_id=session_id, revision=expected_revision)).values(**values))
             if result.rowcount != 1:
                 raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
             self._transaction.mark_changed()
-        return next_record
+        return replace(next_record, active_execution_id=current.active_execution_id)
 
-    async def advance_continuation(self, session_id: str, *, tenant_id: str, expected: ConversationCursor | None, next_cursor: ConversationCursor) -> SessionRecord:
+    async def admit_execution(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: ConversationCursor | None,
+    ) -> SessionRecord:
+        self._check_tenant(tenant_id)
+        if not execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        from sqlalchemy import update
+
+        async with self._mutation() as session:
+            table = self._table("ai_runtime_sessions")
+            result = await session.execute(
+                update(table)
+                .where(
+                    *self._where(
+                        table,
+                        session_id=session_id,
+                        status=SessionStatus.OPEN.value,
+                    ),
+                    table.c.active_execution_id.is_(None),
+                    _continuation_clause(table, expected),
+                )
+                .values(
+                    active_execution_id=execution_id,
+                    updated_at=table.c.updated_at,
+                )
+            )
+            if result.rowcount == 1:
+                row = await self._one(session, table, *self._where(table, session_id=session_id))
+                if row is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                self._transaction.mark_changed()
+                return self._from_row(row)
+            row = await self._one(session, table, *self._where(table, session_id=session_id))
+            current = None if row is None else self._from_row(row)
+            return _classify_admission_failure(current, execution_id, expected)
+
+    async def release_execution(self, session_id: str, *, tenant_id: str, execution_id: str) -> SessionRecord:
+        self._check_tenant(tenant_id)
+        from sqlalchemy import update
+
+        async with self._mutation() as session:
+            table = self._table("ai_runtime_sessions")
+            result = await session.execute(
+                update(table)
+                .where(
+                    *self._where(
+                        table,
+                        session_id=session_id,
+                        active_execution_id=execution_id,
+                    ),
+                    table.c.status != SessionStatus.CLOSED.value,
+                )
+                .values(
+                    active_execution_id=None,
+                    updated_at=table.c.updated_at,
+                )
+            )
+            row = await self._one(session, table, *self._where(table, session_id=session_id))
+            if row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            current = self._from_row(row)
+            if result.rowcount == 1:
+                self._transaction.mark_changed()
+                return current
+            if current.status is SessionStatus.CLOSED and current.active_execution_id is not None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.active_execution_id != execution_id:
+                return current
+            if current.active_execution_id is None:
+                return current
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+    async def transition_status(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected: frozenset[SessionStatus],
+        next_status: SessionStatus,
+        closed_at: datetime | None = None,
+        require_no_active: bool = False,
+    ) -> SessionRecord:
+        self._check_tenant(tenant_id)
+        _validate_session_transition(expected, next_status, closed_at)
+        from sqlalchemy import update
+
+        updated_at = datetime.now(timezone.utc)
+        async with self._mutation() as session:
+            table = self._table("ai_runtime_sessions")
+            clauses = list(self._where(table, session_id=session_id))
+            clauses.append(table.c.status.in_(tuple(status.value for status in expected)))
+            if require_no_active or next_status is SessionStatus.CLOSED:
+                clauses.append(table.c.active_execution_id.is_(None))
+            result = await session.execute(
+                update(table)
+                .where(*clauses)
+                .values(
+                    status=next_status.value,
+                    revision=table.c.revision + 1,
+                    updated_at=updated_at,
+                    closed_at=closed_at,
+                )
+            )
+            row = await self._one(session, table, *self._where(table, session_id=session_id))
+            if row is None:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if result.rowcount != 1:
+                current = self._from_row(row)
+                if (
+                    current.status not in expected
+                ):
+                    raise AIError(ErrorCode.SESSION_CONFLICT)
+                if (
+                    (require_no_active or next_status is SessionStatus.CLOSED)
+                    and current.active_execution_id is not None
+                ):
+                    raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            self._transaction.mark_changed()
+            return self._from_row(row)
+
+    async def advance_continuation(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: ConversationCursor | None,
+        next_cursor: ConversationCursor,
+    ) -> SessionRecord:
         self._check_tenant(tenant_id)
         from sqlalchemy import update
 
@@ -282,20 +449,124 @@ class _SqlSessionRepository(_SqlRepositoryBase):
             table = self._table("ai_runtime_sessions")
             row = await self._one(session, table, *self._where(table, session_id=session_id))
             if row is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             current = self._from_row(row)
-            if current.status is not SessionStatus.OPEN or current.continuation != expected:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            updated = replace(current, continuation=next_cursor, revision=current.revision + 1, updated_at=datetime.now(timezone.utc))
+            if current.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if current.active_execution_id != execution_id or current.continuation != expected:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status not in {
+                SessionStatus.OPEN,
+                SessionStatus.CLOSING,
+                SessionStatus.CLEANUP_REQUIRED,
+            }:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if current.continuation == next_cursor:
+                return current
             result = await session.execute(
                 update(table)
-                .where(*self._where(table, session_id=session_id, revision=current.revision, status=SessionStatus.OPEN.value, continuation_step_run_id=None if expected is None else expected.step_run_id))
-                .values(continuation_step_run_id=next_cursor.step_run_id, revision=updated.revision, updated_at=updated.updated_at)
+                .where(
+                    *self._where(
+                        table,
+                        session_id=session_id,
+                        active_execution_id=execution_id,
+                    ),
+                    table.c.status.in_(tuple(status.value for status in {
+                        SessionStatus.OPEN,
+                        SessionStatus.CLOSING,
+                        SessionStatus.CLEANUP_REQUIRED,
+                    })),
+                    _continuation_clause(table, expected),
+                )
+                .values(
+                    continuation_step_run_id=next_cursor.step_run_id,
+                    revision=table.c.revision + 1,
+                    updated_at=datetime.now(timezone.utc),
+                )
             )
             if result.rowcount != 1:
+                latest = await self._one(session, table, *self._where(table, session_id=session_id))
+                if latest is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                current = self._from_row(latest)
+                if current.continuation == next_cursor:
+                    return current
+                if current.status is SessionStatus.CLOSED:
+                    raise AIError(ErrorCode.SESSION_CONFLICT)
+                if current.active_execution_id != execution_id or current.continuation != expected:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()
-        return updated
+            updated_row = await self._one(
+                session,
+                table,
+                *self._where(table, session_id=session_id),
+            )
+            if updated_row is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._from_row(updated_row)
+
+
+def _validate_session_transition(
+    expected: frozenset[SessionStatus],
+    next_status: SessionStatus,
+    closed_at: datetime | None,
+) -> None:
+    if next_status is SessionStatus.CLOSED:
+        if closed_at is None or closed_at.tzinfo is None:
+            raise ValueError("closed sessions require an aware closed_at")
+    elif closed_at is not None:
+        raise ValueError("non-closed sessions cannot have closed_at")
+    allowed = {
+        (SessionStatus.OPEN, SessionStatus.CLOSING),
+        (SessionStatus.CLOSING, SessionStatus.CLEANUP_REQUIRED),
+        (SessionStatus.CLOSING, SessionStatus.CLOSED),
+        (SessionStatus.CLEANUP_REQUIRED, SessionStatus.CLOSED),
+    }
+    if not any(
+        status in expected and (status, next_status) in allowed
+        for status in SessionStatus
+    ):
+        raise ValueError("invalid session status transition")
+
+
+def _continuation_clause(
+    table: "Table",
+    cursor: ConversationCursor | None,
+) -> object:
+    if cursor is None:
+        return table.c.continuation_step_run_id.is_(None)
+    return table.c.continuation_step_run_id == cursor.step_run_id
+
+
+def _classify_admission_failure(
+    current: SessionRecord | None,
+    execution_id: str,
+    expected: ConversationCursor | None,
+) -> SessionRecord:
+    if current is None:
+        raise AIError(ErrorCode.SESSION_CONFLICT)
+    if current.active_execution_id == execution_id:
+        if current.status is SessionStatus.CLOSED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status not in {
+            SessionStatus.OPEN,
+            SessionStatus.CLOSING,
+            SessionStatus.CLEANUP_REQUIRED,
+        }:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        if current.continuation == expected:
+            return current
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    if current.active_execution_id is not None:
+        if current.status is SessionStatus.CLOSED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        raise AIError(ErrorCode.SESSION_BUSY)
+    if current.status is not SessionStatus.OPEN:
+        raise AIError(ErrorCode.SESSION_CONFLICT)
+    if current.continuation != expected:
+        raise AIError(ErrorCode.SESSION_BUSY)
+    raise AIError(ErrorCode.SESSION_CONFLICT)
 
 
 class _SqlIdempotencyRepository(_SqlRepositoryBase):

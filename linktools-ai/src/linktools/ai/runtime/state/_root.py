@@ -256,6 +256,11 @@ def _validate_state_configuration(plan: RuntimeStatePlan, object_store: "ObjectS
         for domain in RuntimeDomain
     ):
         raise ValueError("object_store requires at least one durable object-capable RuntimeDomain")
+    if plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE:
+        if plan.route(RuntimeDomain.EXECUTION).retention is not RuntimeRetentionMode.DURABLE:
+            raise ValueError("durable conversation requires durable execution")
+        if plan.route(RuntimeDomain.RECOVERY).retention is not RuntimeRetentionMode.DURABLE:
+            raise ValueError("durable conversation requires durable recovery")
 
 
 def _normalize_path(value: "str | Path") -> Path:
@@ -283,7 +288,7 @@ def _handoff_digest(plan: RuntimeStatePlan, object_store: "ObjectStore | None") 
             if object_store is not None and domain in object_domains and route.retention is RuntimeRetentionMode.DURABLE
             else "builtin" if route.retention is RuntimeRetentionMode.DURABLE else "transient" if route.retention is RuntimeRetentionMode.TRANSIENT else "memory",
         }
-    return canonical_sha256({"version": 5, **routes})
+    return canonical_sha256({"version": 6, **routes})
 
 
 __all__ = ["RuntimeState"]

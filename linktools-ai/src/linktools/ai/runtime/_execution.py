@@ -159,6 +159,7 @@ class ExecutionBackend(Protocol):
         execution: ExecutionRecord,
         identity: ExecutionStartIdentity,
     ) -> None: ...
+    async def abort_start(self, execution: ExecutionRecord) -> None: ...
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
@@ -461,10 +462,6 @@ class DefaultExecutionService:
                 idempotency_key_digest=idempotency_key_digest,
             )
             return ExecutionHandle(existing.resource_id)
-        if session_id is not None:
-            active = await self._state.executions.list_by_session(session_id, tenant_id=request.principal.tenant_id)
-            if any(item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} for item in active):
-                raise AIError(ErrorCode.SESSION_BUSY)
         now = datetime.now(timezone.utc)
         execution = ExecutionRecord(
             execution_id=execution_id,
@@ -580,7 +577,16 @@ class DefaultExecutionService:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         identity = ExecutionStartIdentity(scope, idempotency_key_digest, request_digest)
-        await self._backend.prepare_start(request, execution, identity)
+        try:
+            await self._backend.prepare_start(request, execution, identity)
+        except AIError as error:
+            if error.code in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+                await self._reject_pending_start(
+                    execution,
+                    identity=identity,
+                    error=error,
+                )
+            raise
         try:
             started = await self._state.executions.claim_start(
                 ExecutionStartClaim(
@@ -604,6 +610,7 @@ class DefaultExecutionService:
                 or current is None
                 or current.status not in {
                     ExecutionStatus.STARTED,
+                    ExecutionStatus.CANCELLING,
                     ExecutionStatus.FINALIZING,
                     ExecutionStatus.SUCCEEDED,
                     ExecutionStatus.FAILED,
@@ -618,6 +625,125 @@ class DefaultExecutionService:
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
         )
+
+    async def _reject_pending_start(
+        self,
+        execution: ExecutionRecord,
+        *,
+        identity: ExecutionStartIdentity,
+        error: AIError,
+    ) -> ExecutionRecord:
+        if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = await self._state.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        idempotency = await self._state.idempotency.get(
+            identity.scope,
+            identity.idempotency_key_digest,
+            tenant_id=current.tenant_id,
+        )
+        if (
+            idempotency is None
+            or idempotency.runtime_domain is not RuntimeDomain.EXECUTION
+            or idempotency.scope != identity.scope
+            or idempotency.idempotency_key_digest != identity.idempotency_key_digest
+            or idempotency.resource_kind is not ResourceKind.EXECUTION
+            or idempotency.resource_id != current.execution_id
+            or idempotency.tenant_id != current.tenant_id
+            or idempotency.request_digest != identity.request_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            if (
+                current.status is not ExecutionStatus.FAILED
+                or current.error_code != error.code.value
+                or idempotency.status is not IdempotencyStatus.FAILED
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            terminal = current
+        else:
+            if current.status is not ExecutionStatus.PENDING_START:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            if idempotency.status is not IdempotencyStatus.RESERVED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            now = datetime.now(timezone.utc)
+            terminal = _next_execution(
+                current,
+                ExecutionStatus.FAILED,
+                now,
+                error_code=error.code.value,
+                terminal_event=True,
+            )
+            try:
+                await self._state.executions.commit_terminal(
+                    ExecutionTerminalCommit(
+                        expected_revision=current.revision,
+                        expected_event_sequence=current.event_sequence,
+                        execution=terminal,
+                        result=ResultRecord(
+                            current.execution_id,
+                            current.tenant_id,
+                            None,
+                            None,
+                            None,
+                            None,
+                            StopReason.ERROR,
+                            UsageMetrics(),
+                            now,
+                        ),
+                        terminal_event_type=ExecutionEventType.EXECUTION_FAILED,
+                        terminal_event_payload={"error_code": error.code.value},
+                        idempotency=IdempotencyTerminalUpdate(
+                            idempotency.scope,
+                            idempotency.idempotency_key_digest,
+                            idempotency.status,
+                            IdempotencyStatus.FAILED,
+                            idempotency.request_digest,
+                            None,
+                            error.code.value,
+                        ),
+                    )
+                )
+            except AIError as commit_error:
+                if commit_error.code not in {
+                    ErrorCode.STORAGE_CONFLICT,
+                    ErrorCode.EXECUTION_RESULT_CONFLICT,
+                }:
+                    raise
+                latest = await self._state.executions.get(
+                    current.execution_id,
+                    tenant_id=current.tenant_id,
+                )
+                if (
+                    latest is None
+                    or latest.status is not ExecutionStatus.FAILED
+                    or latest.error_code != error.code.value
+                ):
+                    raise
+                terminal = latest
+        try:
+            if self._backend is not None:
+                await self._backend.abort_start(terminal)
+        except BaseException:
+            _logger.error(
+                "pending start cleanup failed: execution=%s",
+                terminal.execution_id,
+                exc_info=environ.debug,
+            )
+        _logger.info(
+            "pending start rejected: execution=%s code=%s",
+            terminal.execution_id,
+            error.code.value,
+        )
+        return terminal
 
     async def _launch_started(
         self,
@@ -865,6 +991,7 @@ class DefaultExecutionService:
         if latest is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         execution = latest
+        prepared_before_claim = execution.status is ExecutionStatus.PENDING_START
         if execution.status is ExecutionStatus.FINALIZING:
             resolved = await self._resolve_cancel_race(
                 execution_id,
@@ -1008,6 +1135,16 @@ class DefaultExecutionService:
                 if resolved is not None:
                     return resolved
                 raise
+            await self._release_session_admission(cancelling_current)
+            if prepared_before_claim:
+                try:
+                    await self._backend.abort_start(terminal)
+                except BaseException:
+                    _logger.error(
+                        "pending cancellation cleanup failed: execution=%s",
+                        execution_id,
+                        exc_info=environ.debug,
+                    )
             _logger.info("execution cancelled: execution=%s operation=%s", execution_id, operation.operation_id)
         except asyncio.CancelledError:
             raise
@@ -1036,6 +1173,22 @@ class DefaultExecutionService:
                 )
             raise
         return CancelExecutionResult(execution_id, True)
+
+    async def _release_session_admission(self, execution: ExecutionRecord) -> None:
+        if execution.session_id is None:
+            return
+        try:
+            await self._sessions.release_execution(
+                execution.session_id,
+                tenant_id=execution.tenant_id,
+                execution_id=execution.execution_id,
+            )
+        except BaseException:
+            _logger.error(
+                "session admission release failed after cancellation: execution=%s",
+                execution.execution_id,
+                exc_info=environ.debug,
+            )
 
     async def _resolve_cancel_race(
         self,

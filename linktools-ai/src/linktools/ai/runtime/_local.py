@@ -33,6 +33,7 @@ from ..core import (
     Principal,
     ResourceKind,
     ResourceRef,
+    SessionStatus,
     StopReason,
     UsageMetrics,
     canonical_json_bytes,
@@ -178,6 +179,9 @@ class LocalExecutionBackend:
         if execution.status is not ExecutionStatus.PENDING_START:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if not self._recovery_enabled:
+            await self._ensure_session_admission(execution)
+            if await self._cancel_admitted_start_if_closing(execution):
+                return
             return
         definition = self._catalog.definition(execution.binding_digest)
         now = datetime.now(timezone.utc)
@@ -224,10 +228,116 @@ class LocalExecutionBackend:
             await self._recovery.checkpoints.create(candidate)
             self._metrics.count("recovery.checkpoint.admitted", domain="recovery", target="runtime")
             _logger.info("recovery admission persisted: execution=%s", execution.execution_id)
-            return
-        if not _admission_matches(existing, candidate):
+        elif not _admission_matches(existing, candidate):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        _logger.debug("recovery admission replayed: execution=%s", execution.execution_id)
+        else:
+            _logger.debug("recovery admission replayed: execution=%s", execution.execution_id)
+        await self._ensure_session_admission(execution)
+        await self._cancel_admitted_start_if_closing(execution)
+
+    async def _cancel_admitted_start_if_closing(self, execution: ExecutionRecord) -> bool:
+        if execution.session_id is None:
+            return False
+        session = await self._conversation.sessions.get(
+            execution.session_id,
+            tenant_id=execution.tenant_id,
+        )
+        if session is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if session.status is SessionStatus.OPEN:
+            return False
+        if session.status not in {
+            SessionStatus.CLOSING,
+            SessionStatus.CLEANUP_REQUIRED,
+        } or session.active_execution_id != execution.execution_id:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        await self._commit_terminal(
+            execution,
+            ExecutionStatus.CANCELLED,
+            None,
+            ErrorCode.EXECUTION_CANCELLED.value,
+            StopReason.CANCELLED,
+        )
+        _logger.info(
+            "admitted start cancelled by session close: execution=%s",
+            execution.execution_id,
+        )
+        return True
+
+    async def _ensure_session_admission(self, execution: ExecutionRecord) -> None:
+        if execution.session_id is None:
+            return
+        if execution.parent_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected = await self._expected_session_cursor(execution)
+        released_stale_owner = False
+        for _ in range(2):
+            session = await self._conversation.sessions.get(
+                execution.session_id,
+                tenant_id=execution.tenant_id,
+            )
+            if session is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            owner_id = session.active_execution_id
+            if owner_id == execution.execution_id:
+                if session.status not in {
+                    SessionStatus.OPEN,
+                    SessionStatus.CLOSING,
+                    SessionStatus.CLEANUP_REQUIRED,
+                } or session.continuation != expected:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return
+            if owner_id is not None:
+                owner = await self._execution.executions.get(
+                    owner_id,
+                    tenant_id=execution.tenant_id,
+                )
+                if owner is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (
+                    owner.execution_id != owner_id
+                    or owner.tenant_id != execution.tenant_id
+                    or owner.session_id != execution.session_id
+                    or owner.parent_execution_id is not None
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if owner.status not in {
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }:
+                    if session.status is not SessionStatus.OPEN:
+                        raise AIError(ErrorCode.SESSION_CONFLICT)
+                    raise AIError(ErrorCode.SESSION_BUSY)
+                if released_stale_owner:
+                    raise AIError(ErrorCode.SESSION_BUSY)
+                await self._conversation.sessions.release_execution(
+                    execution.session_id,
+                    tenant_id=execution.tenant_id,
+                    execution_id=owner_id,
+                )
+                _logger.info(
+                    "released terminal session owner: session=%s execution=%s",
+                    execution.session_id,
+                    owner_id,
+                )
+                released_stale_owner = True
+                continue
+            if session.continuation != expected:
+                raise AIError(ErrorCode.SESSION_BUSY)
+            await self._conversation.sessions.admit_execution(
+                execution.session_id,
+                tenant_id=execution.tenant_id,
+                execution_id=execution.execution_id,
+                expected=expected,
+            )
+            _logger.info(
+                "session admission acquired: session=%s execution=%s",
+                execution.session_id,
+                execution.execution_id,
+            )
+            return
+        raise AIError(ErrorCode.SESSION_BUSY)
 
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
         await self._validate_start(request, execution)
@@ -259,6 +369,23 @@ class LocalExecutionBackend:
             return
         if current.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.session_id is not None:
+            session = await self._conversation.sessions.get(
+                current.session_id,
+                tenant_id=current.tenant_id,
+            )
+            if session is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if session.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if session.status not in {
+                SessionStatus.OPEN,
+                SessionStatus.CLOSING,
+                SessionStatus.CLEANUP_REQUIRED,
+            }:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if session.active_execution_id != current.execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         existing = self._tasks.get(execution.execution_id)
         if existing is not None:
             if not existing.done():
@@ -281,6 +408,43 @@ class LocalExecutionBackend:
             execution.execution_id,
             execution.binding_digest,
         )
+
+    async def abort_start(self, execution: ExecutionRecord) -> None:
+        current = await self._execution.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status not in {
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.session_id is not None:
+            await self._conversation.sessions.release_execution(
+                current.session_id,
+                tenant_id=current.tenant_id,
+                execution_id=current.execution_id,
+            )
+        if not self._recovery_enabled:
+            return
+        checkpoint = await self._recovery.checkpoints.get(
+            current.execution_id,
+            tenant_id=current.tenant_id,
+        )
+        if checkpoint is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if checkpoint.state is RecoveryCheckpointState.COMPLETED:
+            return
+        if (
+            checkpoint.state is not RecoveryCheckpointState.ADMITTED
+            or checkpoint.handoff_phase is not RecoveryHandoffPhase.NONE
+            or checkpoint.terminal_handoff is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._finish_checkpoint(checkpoint)
+        _logger.info("start admission aborted: execution=%s", current.execution_id)
 
     def _task_done(self, execution_id: str, task: asyncio.Task[None]) -> None:
         if task.cancelled():
@@ -376,6 +540,12 @@ class LocalExecutionBackend:
             principal = Principal(recovery_input.principal_id, checkpoint.tenant_id, recovery_input.principal_kind)
             execution = await self._execution.executions.get(checkpoint.execution_id, tenant_id=checkpoint.tenant_id)
             if execution is not None and execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+                if execution.session_id is not None:
+                    await self._conversation.sessions.release_execution(
+                        execution.session_id,
+                        tenant_id=execution.tenant_id,
+                        execution_id=execution.execution_id,
+                    )
                 await self._finish_checkpoint(checkpoint)
                 continue
             if execution is not None:
@@ -391,6 +561,13 @@ class LocalExecutionBackend:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if execution is None:
                 execution = await self._create_recovery_execution(checkpoint)
+            if checkpoint.state in {
+                RecoveryCheckpointState.ADMITTED,
+                RecoveryCheckpointState.ACTIVE,
+                RecoveryCheckpointState.WAITING,
+            }:
+                if not await self._reconcile_session_recovery(execution):
+                    continue
             if (
                 checkpoint.state is RecoveryCheckpointState.ADMITTED
                 and execution.status is ExecutionStatus.PENDING_START
@@ -432,6 +609,8 @@ class LocalExecutionBackend:
                 RecoveryCheckpointState.ACTIVE,
                 RecoveryCheckpointState.WAITING,
             }:
+                if execution.status is not ExecutionStatus.STARTED:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 await self._ensure_recovery_idempotency(
                     checkpoint,
                     expected_status=IdempotencyStatus.STARTED,
@@ -446,6 +625,74 @@ class LocalExecutionBackend:
             )
             await self.launch(request, execution)
             _logger.info("local recovery execution relaunched: tenant=%s execution=%s", checkpoint.tenant_id, checkpoint.execution_id)
+
+    async def _reconcile_session_recovery(self, execution: ExecutionRecord) -> bool:
+        if execution.session_id is None:
+            return True
+        session = await self._conversation.sessions.get(
+            execution.session_id,
+            tenant_id=execution.tenant_id,
+        )
+        if session is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.status is ExecutionStatus.FINALIZING:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if session.status is SessionStatus.CLOSED:
+            if execution.status is not ExecutionStatus.PENDING_START:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            await self._commit_terminal(
+                execution,
+                ExecutionStatus.FAILED,
+                None,
+                ErrorCode.SESSION_CONFLICT.value,
+                StopReason.ERROR,
+            )
+            return False
+        if session.status in {SessionStatus.CLOSING, SessionStatus.CLEANUP_REQUIRED}:
+            if execution.status is ExecutionStatus.FINALIZING:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution.status is ExecutionStatus.PENDING_START:
+                if session.active_execution_id == execution.execution_id:
+                    await self._commit_terminal(
+                        execution,
+                        ExecutionStatus.CANCELLED,
+                        None,
+                        ErrorCode.EXECUTION_CANCELLED.value,
+                        StopReason.CANCELLED,
+                    )
+                else:
+                    await self._commit_terminal(
+                        execution,
+                        ExecutionStatus.FAILED,
+                        None,
+                        ErrorCode.SESSION_CONFLICT.value,
+                        StopReason.ERROR,
+                    )
+            elif session.active_execution_id == execution.execution_id:
+                await self._commit_terminal(
+                    execution,
+                    ExecutionStatus.CANCELLED,
+                    None,
+                    ErrorCode.EXECUTION_CANCELLED.value,
+                    StopReason.CANCELLED,
+                )
+            else:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return False
+        try:
+            await self._ensure_session_admission(execution)
+        except AIError as error:
+            if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+                raise
+            await self._commit_terminal(
+                execution,
+                ExecutionStatus.FAILED,
+                None,
+                error.code.value,
+                StopReason.ERROR,
+            )
+            return False
+        return True
 
     async def _reconcile_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
         handoff = checkpoint.terminal_handoff
@@ -528,12 +775,15 @@ class LocalExecutionBackend:
             try:
                 await self._resolve_handoff_conversation(checkpoint, handoff)
             except AIError as error:
-                if error.code is not ErrorCode.SESSION_BUSY:
+                if error.code not in {
+                    ErrorCode.SESSION_BUSY,
+                    ErrorCode.SESSION_CONFLICT,
+                }:
                     raise
                 checkpoint = await self._rewrite_prepared_success_handoff(
                     checkpoint,
                     target_status=ExecutionStatus.FAILED,
-                    error_code=ErrorCode.SESSION_BUSY.value,
+                    error_code=error.code.value,
                     stop_reason=StopReason.ERROR,
                 )
                 return await self._reconcile_handoff(checkpoint)
@@ -549,6 +799,22 @@ class LocalExecutionBackend:
             )
         if checkpoint.handoff_phase is RecoveryHandoffPhase.EXECUTION_COMMITTED:
             await self._validate_committed_handoff(checkpoint)
+            execution = await self._execution.executions.get(
+                checkpoint.execution_id,
+                tenant_id=checkpoint.tenant_id,
+            )
+            if execution is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if execution.session_id is not None:
+                await self._conversation.sessions.release_execution(
+                    execution.session_id,
+                    tenant_id=execution.tenant_id,
+                    execution_id=execution.execution_id,
+                )
+                _logger.info(
+                    "session admission released after recovery terminal: execution=%s",
+                    execution.execution_id,
+                )
             await self._complete_handoff(checkpoint)
 
     async def _create_recovery_execution(self, checkpoint: RecoveryCheckpoint) -> ExecutionRecord:
@@ -557,7 +823,12 @@ class LocalExecutionBackend:
         if session_id is not None:
             session = await self._conversation.sessions.get(session_id, tenant_id=checkpoint.tenant_id)
             if session is None:
-                session_id = None
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        status = (
+            ExecutionStatus.PENDING_START
+            if checkpoint.state is RecoveryCheckpointState.ADMITTED
+            else ExecutionStatus.STARTED
+        )
         execution = ExecutionRecord(
             execution_id=checkpoint.execution_id,
             tenant_id=checkpoint.tenant_id,
@@ -568,7 +839,7 @@ class LocalExecutionBackend:
             source_execution_id=recovery_input.source_execution_id,
             base_execution_id=recovery_input.base_execution_id,
             lineage_kind=ExecutionLineageKind(recovery_input.lineage_kind),
-            status=ExecutionStatus.STARTED,
+            status=status,
             revision=0,
             event_sequence=0,
             agent_run_sequence=checkpoint.agent_run_sequence,
@@ -684,17 +955,25 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session.continuation == intent.next_cursor:
             return
+        if session.status is SessionStatus.CLOSED:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        if session.active_execution_id != checkpoint.execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session.continuation != intent.expected_cursor:
-            raise AIError(ErrorCode.SESSION_BUSY)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             await self._conversation.sessions.advance_continuation(
                 intent.session_id,
                 tenant_id=checkpoint.tenant_id,
+                execution_id=checkpoint.execution_id,
                 expected=intent.expected_cursor,
                 next_cursor=intent.next_cursor,
             )
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code not in {
+                ErrorCode.STORAGE_CONFLICT,
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+            }:
                 raise
             latest = await self._conversation.sessions.get(
                 intent.session_id,
@@ -704,8 +983,10 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if latest.continuation == intent.next_cursor:
                 return
-            if latest.continuation != intent.expected_cursor:
-                raise AIError(ErrorCode.SESSION_BUSY)
+            if latest.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if latest.active_execution_id != checkpoint.execution_id or latest.continuation != intent.expected_cursor:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             raise
 
     async def _advance_handoff(self, checkpoint: RecoveryCheckpoint, phase: RecoveryHandoffPhase) -> RecoveryCheckpoint:
@@ -903,14 +1184,20 @@ class LocalExecutionBackend:
             if current.session_id is not None and current.status is not ExecutionStatus.FINALIZING:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         elif current.status not in {
+            ExecutionStatus.PENDING_START,
             ExecutionStatus.STARTED,
             ExecutionStatus.FINALIZING,
             ExecutionStatus.CANCELLING,
         }:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected_idempotency_status = (
+            IdempotencyStatus.RESERVED
+            if current.status is ExecutionStatus.PENDING_START
+            else IdempotencyStatus.STARTED
+        )
         await self._ensure_recovery_idempotency(
             checkpoint,
-            expected_status=IdempotencyStatus.STARTED,
+            expected_status=expected_idempotency_status,
         )
         await self.verify_terminal_projection(
             current,
@@ -1203,14 +1490,20 @@ class LocalExecutionBackend:
                     exc_info=True,
                 )
                 return
-            committed = await self._commit_success(
+            await self._commit_success(
                 current,
                 definition,
                 result.output,
                 result.usage,
                 run_id,
             )
-            operation_result = "success" if committed else "cancelled"
+            persisted = await self._execution.executions.get(
+                execution_id,
+                tenant_id=original.tenant_id,
+            )
+            if persisted is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            operation_result = _execution_operation_result(persisted.status)
             _logger.debug("local execution completed: execution=%s run=%s", execution_id, run_id)
         except asyncio.CancelledError:
             current = await self._execution.executions.get(execution_id, tenant_id=original.tenant_id)
@@ -1218,6 +1511,12 @@ class LocalExecutionBackend:
                 raise
             if current is not None and current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                 await self._commit_terminal(current, ExecutionStatus.CANCELLED, None, ErrorCode.EXECUTION_CANCELLED.value, StopReason.CANCELLED, run_id=run_id)
+            persisted = await self._execution.executions.get(
+                execution_id,
+                tenant_id=original.tenant_id,
+            )
+            if persisted is not None:
+                operation_result = _execution_operation_result(persisted.status)
             raise
         except Exception:
             _logger.error(
@@ -1372,7 +1671,7 @@ class LocalExecutionBackend:
         output: JsonValue,
         usage: UsageMetrics,
         run_id: str,
-    ) -> bool:
+    ) -> None:
         payload = canonical_json_bytes(output)
         object_ref = await put_runtime_object(
             self._execution_objects,
@@ -1389,7 +1688,8 @@ class LocalExecutionBackend:
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
         }:
-            return True
+            await self._release_session_admission_best_effort(current)
+            return
         if self._recovery_enabled:
             await self._commit_terminal(
                 current,
@@ -1402,9 +1702,9 @@ class LocalExecutionBackend:
                 run_id=run_id,
                 usage=usage,
             )
-            return True
+            return
         if current.status is ExecutionStatus.CANCELLING:
-            return False
+            return
         await self.verify_terminal_projection(current, ExecutionStatus.SUCCEEDED, run_id)
         if current.session_id is not None:
             expected_cursor = await self._expected_session_cursor(current)
@@ -1414,13 +1714,13 @@ class LocalExecutionBackend:
                     "session success lost to cancellation: execution=%s",
                     current.execution_id,
                 )
-                return False
+                return
             if current.status in {
                 ExecutionStatus.SUCCEEDED,
                 ExecutionStatus.FAILED,
                 ExecutionStatus.CANCELLED,
             }:
-                return True
+                return
             try:
                 await self._commit_session_conversation(
                     current,
@@ -1445,7 +1745,7 @@ class LocalExecutionBackend:
                         StopReason.ERROR,
                         run_id=run_id,
                     )
-                return False
+                return
         await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,
@@ -1457,7 +1757,7 @@ class LocalExecutionBackend:
             run_id=run_id,
             usage=usage,
         )
-        return True
+        return
 
     async def _expected_session_cursor(
         self,
@@ -1555,17 +1855,25 @@ class LocalExecutionBackend:
         next_cursor = ConversationCursor(source_run_id)
         if session.continuation == next_cursor:
             return
+        if session.status is SessionStatus.CLOSED:
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        if session.active_execution_id != execution.execution_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if session.continuation != expected_cursor:
-            raise AIError(ErrorCode.SESSION_BUSY)
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
             await self._conversation.sessions.advance_continuation(
                 execution.session_id or "",
                 tenant_id=execution.tenant_id,
+                execution_id=execution.execution_id,
                 expected=expected_cursor,
                 next_cursor=next_cursor,
             )
         except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
+            if error.code not in {
+                ErrorCode.STORAGE_CONFLICT,
+                ErrorCode.STORAGE_INTEGRITY_ERROR,
+            }:
                 raise
             latest = await self._conversation.sessions.get(
                 execution.session_id or "",
@@ -1575,8 +1883,10 @@ class LocalExecutionBackend:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if latest.continuation == next_cursor:
                 return
-            if latest.continuation != expected_cursor:
-                raise AIError(ErrorCode.SESSION_BUSY)
+            if latest.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if latest.active_execution_id != execution.execution_id or latest.continuation != expected_cursor:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             raise
         _logger.info(
             "session conversation committed: execution=%s run=%s",
@@ -1612,6 +1922,7 @@ class LocalExecutionBackend:
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
         }:
+            await self._release_session_admission_best_effort(current)
             return
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
@@ -1768,6 +2079,26 @@ class LocalExecutionBackend:
             current.execution_id,
             status.value,
         )
+        await self._release_session_admission_best_effort(current)
+
+    async def _release_session_admission_best_effort(
+        self,
+        execution: ExecutionRecord,
+    ) -> None:
+        if execution.session_id is None:
+            return
+        try:
+            await self._conversation.sessions.release_execution(
+                execution.session_id,
+                tenant_id=execution.tenant_id,
+                execution_id=execution.execution_id,
+            )
+        except BaseException:
+            _logger.error(
+                "session admission release failed after terminal: execution=%s",
+                execution.execution_id,
+                exc_info=environ.debug,
+            )
 
     async def _capture_usage(self, execution_id: str, usage: UsageMetrics) -> None:
         self._captured_usage[execution_id] = usage
@@ -1856,6 +2187,16 @@ def _is_infrastructure_error(error: Exception) -> bool:
         ErrorCode.RUNTIME_DEPENDENCY_NOT_READY,
         ErrorCode.SERVICE_NOT_READY,
     }
+
+
+def _execution_operation_result(status: ExecutionStatus) -> str:
+    if status is ExecutionStatus.SUCCEEDED:
+        return "success"
+    if status is ExecutionStatus.FAILED:
+        return "failure"
+    if status in {ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING}:
+        return "cancelled"
+    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
 
 __all__ = ["LocalExecutionBackend"]

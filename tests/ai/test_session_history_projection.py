@@ -54,6 +54,7 @@ def _session(session_id: str = "session") -> SessionRecord:
         created_at=now,
         updated_at=now,
         closed_at=None,
+        active_execution_id=None,
     )
 
 
@@ -62,6 +63,34 @@ def _reader(state: RuntimeState) -> StepSessionHistoryReader:
         store=state.steps.read_store(RuntimeDomain.CONVERSATION),
         cursor_signer=HmacCursorSigner("session-history", b"session-history-key"),
     )
+
+
+async def _advance(
+    state: RuntimeState,
+    expected: ConversationCursor | None,
+    next_cursor: ConversationCursor,
+) -> None:
+    execution_id = "history-execution"
+    await state.conversation.sessions.admit_execution(
+        "session",
+        tenant_id="tenant",
+        execution_id=execution_id,
+        expected=expected,
+    )
+    try:
+        await state.conversation.sessions.advance_continuation(
+            "session",
+            tenant_id="tenant",
+            execution_id=execution_id,
+            expected=expected,
+            next_cursor=next_cursor,
+        )
+    finally:
+        await state.conversation.sessions.release_execution(
+            "session",
+            tenant_id="tenant",
+            execution_id=execution_id,
+        )
 
 
 def _service(state: RuntimeState) -> DefaultSessionService:
@@ -154,12 +183,7 @@ async def test_empty_and_committed_session_history_use_continuation_only() -> No
             segment_sequence=1,
         )
         await _materialize(state, run_id, ('  {"question":"你好\\nworld"}  ',))
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor(run_id),
-        )
+        await _advance(state, None, ConversationCursor(run_id))
 
         page = await service.history("session", principal=principal)
         assert [(item.item_kind, item.content) for item in page.items] == [
@@ -180,22 +204,16 @@ async def test_session_history_cursor_binds_to_current_continuation() -> None:
         first_run = "session-history-first"
         second_run = "session-history-second"
         await _materialize(state, first_run, ("A", "B"))
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor(first_run),
-        )
+        await _advance(state, None, ConversationCursor(first_run))
         service = _service(state)
         first_page = await service.history("session", principal=Principal("owner", "tenant"), limit=2)
         assert first_page.next_cursor is not None
 
         await _materialize(state, second_run, ("A", "B", "C"))
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=ConversationCursor(first_run),
-            next_cursor=ConversationCursor(second_run),
+        await _advance(
+            state,
+            ConversationCursor(first_run),
+            ConversationCursor(second_run),
         )
         with pytest.raises(AIError) as error:
             await service.history(
@@ -256,12 +274,7 @@ async def test_session_history_uses_projection_v1_mapping_and_empty_strings() ->
                 ),
             ],
         )
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor(run_id),
-        )
+        await _advance(state, None, ConversationCursor(run_id))
 
         page = await _service(state).history(
             "session",
@@ -305,12 +318,7 @@ async def test_session_history_fork_copies_continuation_without_execution_lookup
         await state.conversation.sessions.create(_session())
         run_id = "session-history-fork-run"
         await _materialize(state, run_id, ("A",))
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor(run_id),
-        )
+        await _advance(state, None, ConversationCursor(run_id))
         service = _service(state)
         principal = Principal("owner", "tenant")
         await service.fork(
@@ -332,12 +340,7 @@ async def test_session_history_reports_missing_committed_snapshot() -> None:
     await state.initialize(namespace="session-history-missing", tenant_id="tenant")
     try:
         await state.conversation.sessions.create(_session())
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor("missing-run"),
-        )
+        await _advance(state, None, ConversationCursor("missing-run"))
         with pytest.raises(AIError) as error:
             await _service(state).history(
                 "session",
@@ -355,12 +358,7 @@ async def test_durable_session_history_survives_runtime_state_reopen(tmp_path) -
     run_id = "session-history-durable-run"
     await state.conversation.sessions.create(_session())
     await _materialize(state, run_id, ("A", "B"))
-    await state.conversation.sessions.advance_continuation(
-        "session",
-        tenant_id="tenant",
-        expected=None,
-        next_cursor=ConversationCursor(run_id),
-    )
+    await _advance(state, None, ConversationCursor(run_id))
     before_close = await _service(state).history(
         "session",
         principal=Principal("owner", "tenant"),
@@ -389,12 +387,7 @@ async def test_sql_session_history_survives_runtime_state_reopen(tmp_path) -> No
         await state.conversation.sessions.create(_session())
         run_id = "session-history-sql-run"
         await _materialize(state, run_id, ("SQL",))
-        await state.conversation.sessions.advance_continuation(
-            "session",
-            tenant_id="tenant",
-            expected=None,
-            next_cursor=ConversationCursor(run_id),
-        )
+        await _advance(state, None, ConversationCursor(run_id))
         before_close = await _service(state).history(
             "session",
             principal=Principal("owner", "tenant"),

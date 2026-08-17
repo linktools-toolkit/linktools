@@ -65,7 +65,14 @@ class SessionRecord:
     created_at: datetime
     updated_at: datetime
     closed_at: "datetime | None"
+    active_execution_id: "str | None"
     continuation: "ConversationCursor | None" = None
+
+    def __post_init__(self) -> None:
+        if self.active_execution_id is not None and not self.active_execution_id.strip():
+            raise ValueError("active execution identifier cannot be empty")
+        if self.status is SessionStatus.CLOSED and self.active_execution_id is not None:
+            raise ValueError("closed session cannot have an active execution")
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,7 +462,34 @@ class SessionRepository(RuntimeRepository, Protocol):
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
     async def compare_and_swap(self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord) -> SessionRecord: ...
-    async def advance_continuation(self, session_id: str, *, tenant_id: str, expected: "ConversationCursor | None", next_cursor: ConversationCursor) -> SessionRecord: ...
+    async def admit_execution(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: "ConversationCursor | None",
+    ) -> SessionRecord: ...
+    async def release_execution(self, session_id: str, *, tenant_id: str, execution_id: str) -> SessionRecord: ...
+    async def transition_status(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected: frozenset[SessionStatus],
+        next_status: SessionStatus,
+        closed_at: "datetime | None" = None,
+        require_no_active: bool = False,
+    ) -> SessionRecord: ...
+    async def advance_continuation(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        execution_id: str,
+        expected: "ConversationCursor | None",
+        next_cursor: ConversationCursor,
+    ) -> SessionRecord: ...
 
 
 class ExecutionRepository(RuntimeRepository, Protocol):

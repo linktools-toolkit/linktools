@@ -49,6 +49,7 @@ from .service_api import (
 from .state._contracts import (
     ConversationCursor,
     ConversationState,
+    ExecutionRecord,
     ExecutionRepository,
     OperationLedgerInput,
     OperationLedgerRecord,
@@ -143,6 +144,7 @@ class DefaultSessionService:
             created_at=now,
             updated_at=now,
             closed_at=None,
+            active_execution_id=None,
             continuation=None,
         )
         try:
@@ -207,16 +209,16 @@ class DefaultSessionService:
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
-            executions = await self._executions.list_by_session(session_id, tenant_id=principal.tenant_id)
-            active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
+            record = await self._reconcile_terminal_admission(record)
+            active_execution = await self._active_admitted_execution(record)
+            active = () if active_execution is None else (active_execution.execution_id,)
             return LoadedSession(await self._view(record, principal), active)
 
     async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
+            record = await self._reconcile_terminal_admission(record)
             await self._authorization.authorize(request.principal, AuthorizationAction.EXECUTION_RUN, ResourceRef(ResourceKind.EXECUTION, session_id, request.principal.tenant_id))
-            if record.status is not SessionStatus.OPEN:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
             if record.binding_digest != binding_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             return await self._execution.run_for_session(
@@ -256,6 +258,7 @@ class DefaultSessionService:
                 created_at=now,
                 updated_at=now,
                 closed_at=None,
+                active_execution_id=None,
                 continuation=source.continuation,
             )
             try:
@@ -325,68 +328,224 @@ class DefaultSessionService:
             return await self._close(session_id, request)
 
     async def _close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
-        current = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
+        await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
         digest = canonical_sha256({"action": "session.close", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "force": request.force, "wait_timeout_seconds": request.wait_timeout_seconds})
         operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
         if operation.result_ref:
             closed = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if closed is not None:
+                closed = await self._reconcile_terminal_admission(closed)
                 view = await self._view(closed, request.principal)
                 if closed.status is SessionStatus.CLOSED:
                     await self._request_session_release(session_id, request.principal.tenant_id, closed.continuation)
                 return view
-        executions = await self._active_executions(session_id, request.principal.tenant_id)
-        active = executions
-        if active and not request.force:
-            raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+        current = await self._conversation.sessions.get(
+            session_id,
+            tenant_id=request.principal.tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        current = await self._reconcile_terminal_admission(current)
         if current.status is SessionStatus.CLOSED:
-            await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
+            await self._complete_operation(
+                operation,
+                request.principal.tenant_id,
+                session_id,
+                canonical_sha256({"session_id": session_id, "revision": current.revision}),
+            )
             view = await self._view(current, request.principal)
-            await self._request_session_release(session_id, request.principal.tenant_id, current.continuation)
+            await self._request_session_release(
+                session_id,
+                request.principal.tenant_id,
+                current.continuation,
+            )
             return view
         if current.status is SessionStatus.CLEANUP_REQUIRED and not request.force:
             raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
-        if current.status is SessionStatus.OPEN:
-            now = datetime.now(timezone.utc)
-            current = await self._conversation.sessions.compare_and_swap(
-                session_id,
-                tenant_id=request.principal.tenant_id,
-                expected_revision=current.revision,
-                next_record=replace(current, status=SessionStatus.CLOSING, revision=current.revision + 1, updated_at=now),
-            )
-        if active and request.force:
-            for execution in active:
-                await self._execution.cancel(
-                    execution.execution_id,
-                    CancelExecutionRequest(
-                        request.principal,
-                        f"{request.idempotency_key}/{execution.execution_id}",
-                        True,
-                    ),
+
+        if not request.force:
+            if current.status is SessionStatus.OPEN:
+                try:
+                    current = await self._conversation.sessions.transition_status(
+                        session_id,
+                        tenant_id=request.principal.tenant_id,
+                        expected=frozenset({SessionStatus.OPEN}),
+                        next_status=SessionStatus.CLOSING,
+                        require_no_active=True,
+                    )
+                except AIError as error:
+                    if error.code not in {
+                        ErrorCode.SESSION_ACTIVE_EXECUTIONS,
+                        ErrorCode.SESSION_CONFLICT,
+                    }:
+                        raise
+                    latest = await self._conversation.sessions.get(
+                        session_id,
+                        tenant_id=request.principal.tenant_id,
+                    )
+                    if latest is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if latest.status is SessionStatus.OPEN and latest.active_execution_id is not None:
+                        raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+                    if latest.status is SessionStatus.OPEN:
+                        current = await self._conversation.sessions.transition_status(
+                            session_id,
+                            tenant_id=request.principal.tenant_id,
+                            expected=frozenset({SessionStatus.OPEN}),
+                            next_status=SessionStatus.CLOSING,
+                            require_no_active=True,
+                        )
+                    elif latest.status is SessionStatus.CLEANUP_REQUIRED:
+                        raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+                    else:
+                        current = latest
+            if current.status is SessionStatus.CLOSING:
+                current = await self._close_idle_session(
+                    session_id,
+                    request.principal.tenant_id,
+                    current,
                 )
-            try:
-                await asyncio.wait_for(
-                    self._wait_for_no_active(session_id, request.principal.tenant_id),
-                    timeout=request.wait_timeout_seconds,
-                )
-            except asyncio.TimeoutError as error:
-                now = datetime.now(timezone.utc)
-                cleanup = replace(current, status=SessionStatus.CLEANUP_REQUIRED, revision=current.revision + 1, updated_at=now)
-                await self._conversation.sessions.compare_and_swap(
+        else:
+            if current.status is SessionStatus.OPEN:
+                try:
+                    current = await self._conversation.sessions.transition_status(
+                        session_id,
+                        tenant_id=request.principal.tenant_id,
+                        expected=frozenset({SessionStatus.OPEN}),
+                        next_status=SessionStatus.CLOSING,
+                    )
+                except AIError as error:
+                    if error.code not in {
+                        ErrorCode.STORAGE_CONFLICT,
+                        ErrorCode.SESSION_CONFLICT,
+                    }:
+                        raise
+                    current = await self._conversation.sessions.get(
+                        session_id,
+                        tenant_id=request.principal.tenant_id,
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if current.status is SessionStatus.OPEN:
+                        current = await self._conversation.sessions.transition_status(
+                            session_id,
+                            tenant_id=request.principal.tenant_id,
+                            expected=frozenset({SessionStatus.OPEN}),
+                            next_status=SessionStatus.CLOSING,
+                        )
+            while True:
+                current = await self._conversation.sessions.get(
                     session_id,
                     tenant_id=request.principal.tenant_id,
-                    expected_revision=current.revision,
-                    next_record=cleanup,
                 )
-                raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
-        now = datetime.now(timezone.utc)
-        closing = replace(current, status=SessionStatus.CLOSED, revision=current.revision + 1, updated_at=now, closed_at=now)
-        updated = await self._conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=current.revision, next_record=closing)
-        await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
-        _logger.debug("session closed: session=%s revision=%s force=%s", session_id, updated.revision, request.force)
-        view = await self._view(updated, request.principal)
-        await self._request_session_release(session_id, request.principal.tenant_id, updated.continuation)
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                current = await self._reconcile_terminal_admission(current)
+                if current.active_execution_id is None:
+                    break
+                execution = await self._active_admitted_execution(current)
+                if execution is None:
+                    continue
+                if execution.status is not ExecutionStatus.FINALIZING:
+                    await self._execution.cancel(
+                        execution.execution_id,
+                        CancelExecutionRequest(
+                            request.principal,
+                            f"{request.idempotency_key}/{execution.execution_id}",
+                            True,
+                        ),
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._wait_for_no_active(
+                            session_id,
+                            request.principal.tenant_id,
+                        ),
+                        timeout=request.wait_timeout_seconds,
+                    )
+                except asyncio.TimeoutError as error:
+                    current = await self._conversation.sessions.get(
+                        session_id,
+                        tenant_id=request.principal.tenant_id,
+                    )
+                    if current is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if current.status is SessionStatus.CLOSING:
+                        await self._conversation.sessions.transition_status(
+                            session_id,
+                            tenant_id=request.principal.tenant_id,
+                            expected=frozenset({SessionStatus.CLOSING}),
+                            next_status=SessionStatus.CLEANUP_REQUIRED,
+                        )
+                    raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED) from error
+                break
+            current = await self._conversation.sessions.get(
+                session_id,
+                tenant_id=request.principal.tenant_id,
+            )
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status in {SessionStatus.CLOSING, SessionStatus.CLEANUP_REQUIRED}:
+                current = await self._close_idle_session(
+                    session_id,
+                    request.principal.tenant_id,
+                    current,
+                )
+
+        await self._complete_operation(
+            operation,
+            request.principal.tenant_id,
+            session_id,
+            canonical_sha256({"session_id": session_id, "revision": current.revision}),
+        )
+        _logger.debug(
+            "session closed: session=%s revision=%s force=%s",
+            session_id,
+            current.revision,
+            request.force,
+        )
+        view = await self._view(current, request.principal)
+        await self._request_session_release(
+            session_id,
+            request.principal.tenant_id,
+            current.continuation,
+        )
         return view
+
+    async def _close_idle_session(
+        self,
+        session_id: str,
+        tenant_id: str,
+        current: SessionRecord,
+    ) -> SessionRecord:
+        if current.active_execution_id is not None:
+            raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+        try:
+            return await self._conversation.sessions.transition_status(
+                session_id,
+                tenant_id=tenant_id,
+                expected=frozenset({current.status}),
+                next_status=SessionStatus.CLOSED,
+                closed_at=datetime.now(timezone.utc),
+                require_no_active=True,
+            )
+        except AIError as error:
+            if error.code not in {
+                ErrorCode.SESSION_ACTIVE_EXECUTIONS,
+                ErrorCode.SESSION_CONFLICT,
+            }:
+                raise
+            latest = await self._conversation.sessions.get(
+                session_id,
+                tenant_id=tenant_id,
+            )
+            if latest is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if latest.status is SessionStatus.CLOSED:
+                return latest
+            if latest.active_execution_id is not None:
+                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+            raise
 
     @asynccontextmanager
     async def _session_consumer(self, session_id: str, tenant_id: str):
@@ -442,16 +601,17 @@ class DefaultSessionService:
             state.continuation = continuation
             self._handoff_condition.notify_all()
 
-    async def _active_executions(self, session_id: str, tenant_id: str) -> tuple:
-        records = await self._executions.list_by_session(session_id, tenant_id=tenant_id)
-        return tuple(
-            record
-            for record in records
-            if record.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}
-        )
-
     async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
-        while await self._active_executions(session_id, tenant_id):
+        while True:
+            record = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
+            if record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            execution = await self._active_admitted_execution(record)
+            if execution is None:
+                if record.active_execution_id is not None:
+                    await self._reconcile_terminal_admission(record)
+                    continue
+                return
             await asyncio.sleep(0.05)
 
     async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
@@ -465,9 +625,57 @@ class DefaultSessionService:
         return record
 
     async def _view(self, record: SessionRecord, principal: Principal) -> SessionView:
-        executions = await self._executions.list_by_session(record.session_id, tenant_id=principal.tenant_id)
-        active = tuple(sorted(item.execution_id for item in executions if item.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}))
+        active_execution = await self._active_admitted_execution(record)
+        active = () if active_execution is None else (active_execution.execution_id,)
         return SessionView(record.session_id, record.binding_digest, record.status, record.revision, record.resource_generation, record.cwd, active, record.metadata)
+
+    async def _active_admitted_execution(
+        self,
+        record: SessionRecord,
+    ) -> "ExecutionRecord | None":
+        execution_id = record.active_execution_id
+        if execution_id is None:
+            return None
+        execution = await self._executions.get(execution_id, tenant_id=record.tenant_id)
+        if (
+            execution is None
+            or execution.execution_id != execution_id
+            or execution.tenant_id != record.tenant_id
+            or execution.session_id != record.session_id
+            or execution.parent_execution_id is not None
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if execution.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
+            return None
+        return execution
+
+    async def _reconcile_terminal_admission(self, record: SessionRecord) -> SessionRecord:
+        execution_id = record.active_execution_id
+        if execution_id is None:
+            return record
+        if await self._active_admitted_execution(record) is not None:
+            return record
+        await self._conversation.sessions.release_execution(
+            record.session_id,
+            tenant_id=record.tenant_id,
+            execution_id=execution_id,
+        )
+        updated = await self._conversation.sessions.get(
+            record.session_id,
+            tenant_id=record.tenant_id,
+        )
+        if updated is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _logger.info(
+            "released stale session admission: session=%s execution=%s",
+            record.session_id,
+            execution_id,
+        )
+        return updated
 
     async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, operation_kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
         operation_id = idempotency_key_digest(operation_id)

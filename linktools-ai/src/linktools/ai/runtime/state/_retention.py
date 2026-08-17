@@ -48,6 +48,7 @@ class RuntimeRetentionController:
         plan: RuntimeStatePlan,
         namespace: str,
     ) -> None:
+        self._conversation = conversation
         self._execution = execution
         self._objects = objects
         self._steps = steps
@@ -69,6 +70,12 @@ class RuntimeRetentionController:
 
     async def release_execution_handoff(self, execution_id: str, *, tenant_id: str) -> None:
         execution = await self._execution.executions.get(execution_id, tenant_id=tenant_id)
+        if execution is not None and execution.session_id is not None:
+            await self._conversation.sessions.release_execution(
+                execution.session_id,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+            )
         candidates: tuple[str, ...] = ()
         if execution is not None:
             candidates = tuple(

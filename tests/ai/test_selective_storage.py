@@ -29,8 +29,8 @@ async def test_filesystem_state_writes_domain_manifest(tmp_path) -> None:
     state = RuntimeState.from_plan(
         RuntimeStatePlan(
             conversation=RuntimeStateRoute.filesystem(root / "conversation"),
-            execution=RuntimeStateRoute.memory(),
-            recovery=RuntimeStateRoute.transient(),
+            execution=RuntimeStateRoute.filesystem(root / "execution"),
+            recovery=RuntimeStateRoute.filesystem(root / "recovery"),
         )
     )
     await state.initialize(namespace="selective", tenant_id="tenant")

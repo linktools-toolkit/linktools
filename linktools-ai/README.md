@@ -85,6 +85,8 @@ String user content is returned exactly as supplied.
 Conversation retention follows the RuntimeState route: `DURABLE` survives a
 Runtime reopen, `VOLATILE` is limited to the current RuntimeState lifetime,
 and `TRANSIENT` is only guaranteed for the owner retention lifetime.
+When Conversation is durable, Execution and Recovery must also be durable so
+Session admission and crash recovery share the same persistent state.
 
 ## 2. Asset loading
 
@@ -199,6 +201,8 @@ models = ModelRegistry.openai(model="gpt-4o-mini")
 runtime_state = RuntimeState.from_plan(
     RuntimeStatePlan(
         conversation=RuntimeStateRoute.sql(engine),
+        execution=RuntimeStateRoute.sql(engine),
+        recovery=RuntimeStateRoute.sql(engine),
         memory=RuntimeStateRoute.sql(engine),
     )
 )

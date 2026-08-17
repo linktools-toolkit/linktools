@@ -166,7 +166,13 @@ def _default_runtime_state(workspace: Workspace) -> RuntimeState:
     plan = RuntimeStatePlan(
         conversation=RuntimeStateRoute.filesystem(
             workspace.storage_root / "runtime" / "conversation"
-        )
+        ),
+        execution=RuntimeStateRoute.filesystem(
+            workspace.storage_root / "runtime" / "execution"
+        ),
+        recovery=RuntimeStateRoute.filesystem(
+            workspace.storage_root / "runtime" / "recovery"
+        ),
     )
     return RuntimeState.from_plan(plan)
 

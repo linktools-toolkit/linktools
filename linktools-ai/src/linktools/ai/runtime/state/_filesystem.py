@@ -718,7 +718,26 @@ def _time(value: str) -> datetime:
 def _session_from_json(value: dict[str, JsonValue]) -> SessionRecord:
     raw_cursor = value.get("continuation")
     continuation = None if raw_cursor is None else ConversationCursor(str(raw_cursor["step_run_id"]))
-    return SessionRecord(session_id=str(value["session_id"]), tenant_id=str(value["tenant_id"]), owner_principal_id=str(value["owner_principal_id"]), binding_digest=str(value["binding_digest"]), status=SessionStatus(str(value["status"])), revision=int(value["revision"]), resource_generation=int(value["resource_generation"]), cwd=None if value.get("cwd") is None else str(value["cwd"]), metadata=value.get("metadata", {}), created_at=_time(value["created_at"]), updated_at=_time(value["updated_at"]), closed_at=None if value.get("closed_at") is None else _time(value["closed_at"]), continuation=continuation)
+    return SessionRecord(
+        session_id=str(value["session_id"]),
+        tenant_id=str(value["tenant_id"]),
+        owner_principal_id=str(value["owner_principal_id"]),
+        binding_digest=str(value["binding_digest"]),
+        status=SessionStatus(str(value["status"])),
+        revision=int(value["revision"]),
+        resource_generation=int(value["resource_generation"]),
+        cwd=None if value.get("cwd") is None else str(value["cwd"]),
+        metadata=value.get("metadata", {}),
+        created_at=_time(value["created_at"]),
+        updated_at=_time(value["updated_at"]),
+        closed_at=None if value.get("closed_at") is None else _time(value["closed_at"]),
+        active_execution_id=(
+            None
+            if value["active_execution_id"] is None
+            else str(value["active_execution_id"])
+        ),
+        continuation=continuation,
+    )
 
 
 def _execution_from_json(value: dict[str, JsonValue]) -> ExecutionRecord:

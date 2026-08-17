@@ -25,7 +25,11 @@ def _scope(root: Path, namespace: str, tenant_id: str) -> Path:
 
 
 def _plan(root: Path) -> RuntimeStatePlan:
-    return RuntimeStatePlan(conversation=RuntimeStateRoute.filesystem(root))
+    return RuntimeStatePlan(
+        conversation=RuntimeStateRoute.filesystem(root),
+        execution=RuntimeStateRoute.filesystem(root / "execution"),
+        recovery=RuntimeStateRoute.filesystem(root / "recovery"),
+    )
 
 
 async def _create_session(state: RuntimeState, tenant_id: str, session_id: str) -> None:
@@ -44,6 +48,7 @@ async def _create_session(state: RuntimeState, tenant_id: str, session_id: str) 
             created_at=now,
             updated_at=now,
             closed_at=None,
+            active_execution_id=None,
         )
     )
 
