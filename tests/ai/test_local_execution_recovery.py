@@ -13,6 +13,7 @@ import pytest
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
+from linktools.ai.runtime._execution import CancelEffectOutcome
 from linktools.ai.runtime._local import LocalExecutionBackend
 from linktools.ai.runtime.state import ExecutionRecord
 
@@ -99,6 +100,7 @@ def _backend(error: Exception) -> LocalExecutionBackend:
     )
     backend._recovery_enabled = False
     backend._namespace = "test"
+    backend._tenant_id = "tenant"
     backend._steps = object()
     backend._executor = _Executor(error)
     backend._execution_root = Path(".")
@@ -106,6 +108,7 @@ def _backend(error: Exception) -> LocalExecutionBackend:
     backend._subagent_dispatcher = None
     backend._metrics = _Metrics()
     backend._tasks = {}
+    backend._worker_failures = {}
     backend._captured_usage = {}
     backend._history = lambda execution: _empty_history(execution)
     return backend
@@ -133,6 +136,7 @@ async def test_local_business_failure_commits_failed_without_escaping() -> None:
 
     assert len(failures) == 1
     assert isinstance(failures[0], ValueError)
+    assert backend._execution.executions.record.agent_run_sequence == 1
 
 
 @pytest.mark.asyncio
@@ -169,10 +173,75 @@ async def test_local_worker_failure_is_consumed_and_observable() -> None:
 
     task = asyncio.create_task(fail(), name="ai-execution-execution")
     backend._tasks["execution"] = task
-    task.add_done_callback(backend._task_done)
+    task.add_done_callback(
+        lambda completed: backend._task_done("execution", completed)
+    )
     await asyncio.gather(task, return_exceptions=True)
     await asyncio.sleep(0)
 
     failure = backend.worker_failure("execution", tenant_id="tenant")
     assert failure is not None
     assert failure.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+
+
+@pytest.mark.asyncio
+async def test_local_old_worker_callback_cannot_clear_new_owner() -> None:
+    backend = object.__new__(LocalExecutionBackend)
+    backend._tasks = {}
+    backend._captured_usage = {}
+    backend._worker_failures = {}
+
+    async def fail() -> None:
+        raise RuntimeError("old worker failed")
+
+    async def wait() -> None:
+        await asyncio.Event().wait()
+
+    old_task = asyncio.create_task(fail())
+    new_task = asyncio.create_task(wait())
+    try:
+        await asyncio.sleep(0)
+        captured = object()
+        backend._tasks["execution"] = new_task
+        backend._captured_usage["execution"] = captured
+
+        backend._task_done("execution", old_task)
+
+        assert backend._tasks["execution"] is new_task
+        assert backend._captured_usage["execution"] is captured
+        assert "execution" not in backend._worker_failures
+    finally:
+        new_task.cancel()
+        await asyncio.gather(old_task, new_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    (ExecutionStatus.SUCCEEDED, ExecutionStatus.CANCELLED, ExecutionStatus.CANCELLING),
+)
+async def test_local_cancel_without_worker_confirms_durable_terminal_state(
+    status: ExecutionStatus,
+) -> None:
+    backend = _backend(ValueError("unused"))
+    current = replace(_record(), status=status)
+    backend._execution.executions.record = current
+
+    assert await backend.cancel(current) == CancelEffectOutcome.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_local_cancel_before_worker_coroutine_starts_confirms_side_effect_stop() -> None:
+    backend = _backend(ValueError("unused"))
+    current = replace(_record(), status=ExecutionStatus.CANCELLING)
+    backend._execution.executions.record = current
+
+    async def wait() -> None:
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(wait())
+    backend._tasks["execution"] = task
+    outcome = await backend.cancel(current)
+
+    assert outcome is CancelEffectOutcome.CONFIRMED
+    assert backend._tasks == {}

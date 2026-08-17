@@ -284,12 +284,23 @@ class _ExecutionRepository(_Base):
             identity = await self._idempotency.get(claim.scope, claim.idempotency_key_digest, tenant_id=claim.tenant_id)
             if current is None or identity is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-            if current.status is not ExecutionStatus.PENDING_START or current.revision != claim.expected_revision or current.event_sequence != claim.expected_event_sequence or current.agent_run_sequence != 0:
+            if (
+                current.status is not ExecutionStatus.PENDING_START
+                or current.revision != claim.expected_revision
+                or current.event_sequence != claim.expected_event_sequence
+                or current.agent_run_sequence != 0
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if identity.status is not IdempotencyStatus.RESERVED or identity.runtime_domain is not RuntimeDomain.EXECUTION or identity.resource_kind is not ResourceKind.EXECUTION or identity.resource_id != claim.execution_id or identity.request_digest != claim.request_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = claim.started_at
-            started = replace(current, status=ExecutionStatus.STARTED, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=now, agent_run_sequence=1)
+            started = replace(
+                current,
+                status=ExecutionStatus.STARTED,
+                revision=current.revision + 1,
+                event_sequence=current.event_sequence + 1,
+                updated_at=now,
+            )
             started_identity = replace(identity, status=IdempotencyStatus.STARTED, updated_at=now)
             event = ExecutionEventRecord(claim.execution_id, claim.tenant_id, claim.expected_event_sequence + 1, ExecutionEventType.EXECUTION_STARTED, {})
             self._records[key] = started

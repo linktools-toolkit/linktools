@@ -31,6 +31,13 @@ from linktools.ai.runtime._tool import ToolOperationRecord
 from linktools.ai.runtime.state import (
     RuntimeStatePlan,
 )
+from linktools.ai.runtime.state._contracts import (
+    RecoveryCheckpoint,
+    RecoveryCheckpointState,
+    RecoveryExecutionInput,
+    RecoveryHandoffPhase,
+    RecoveryIdempotencyInput,
+)
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec
 from linktools.ai.storage import InMemoryObjectStore
 from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
@@ -94,6 +101,55 @@ def test_classification_fields_reject_noncanonical_values(value: str) -> None:
 def test_runtime_state_plan_rejects_an_invalid_domain() -> None:
     with pytest.raises(ValueError):
         RuntimeStatePlan(conversation="invalid")
+
+
+def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
+    now = datetime.now(timezone.utc)
+    recovery_input = RecoveryExecutionInput(
+        user_prompt="prompt",
+        principal_id="principal",
+        principal_kind="user",
+        session_id=None,
+        memory_scope=None,
+        agent_id="default",
+        binding_digest="binding",
+        lineage_kind="RUN",
+        parent_execution_id=None,
+        root_execution_id="execution",
+        source_execution_id=None,
+        base_execution_id=None,
+        idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
+    )
+
+    def checkpoint(
+        state: RecoveryCheckpointState,
+        sequence: int,
+        step_run_id: str | None,
+        pending_operation_id: str | None = None,
+    ) -> RecoveryCheckpoint:
+        return RecoveryCheckpoint(
+            execution_id="execution",
+            tenant_id="tenant",
+            input=recovery_input,
+            step_run_id=step_run_id,
+            agent_run_sequence=sequence,
+            state=state,
+            handoff_phase=RecoveryHandoffPhase.NONE,
+            terminal_handoff=None,
+            handoff_contract_digest=None,
+            pending_operation_id=pending_operation_id,
+            revision=0,
+            created_at=now,
+            updated_at=now,
+        )
+
+    with pytest.raises(ValueError):
+        checkpoint(RecoveryCheckpointState.ADMITTED, 1, None)
+    with pytest.raises(ValueError):
+        checkpoint(RecoveryCheckpointState.ADMITTED, 0, None, "operation")
+    with pytest.raises(ValueError):
+        checkpoint(RecoveryCheckpointState.ACTIVE, 0, None)
+    assert checkpoint(RecoveryCheckpointState.COMPLETED, 0, None).agent_run_sequence == 0
 
 
 def test_subagent_tool_schema_accepts_json_payload() -> None:

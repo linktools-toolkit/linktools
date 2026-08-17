@@ -287,6 +287,7 @@ def test_package_public_surface_and_optional_dependency_isolation() -> None:
         "RuntimeMemoryStore",
         "StaticPrincipalProvider",
         "StepExecutionHistoryReader",
+        "StepSessionHistoryReader",
     ]
     assert model.__all__ == ["ModelBinding", "ModelRegistry", "ModelResolver"]
     assert {

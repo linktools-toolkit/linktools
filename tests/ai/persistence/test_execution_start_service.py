@@ -4,13 +4,16 @@
 """Execution service start-claim race coverage."""
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-from linktools.ai.core import Page, Principal, TenantAuthorizationPolicy
+from linktools.ai.core import ExecutionStatus, Page, Principal, TenantAuthorizationPolicy
 from linktools.ai.errors import AIError, ErrorCode
+from linktools.ai.migrate import provision_database
 from linktools.ai.runtime import ExecutionRequest, RuntimeDomain, RuntimeState
 from linktools.ai.runtime.state import ExecutionRecord
 from linktools.ai.runtime._execution import CancelEffectOutcome, DefaultExecutionService
+from sqlalchemy.ext.asyncio import create_async_engine
 
 
 class _History:
@@ -69,7 +72,141 @@ async def test_execution_start_claim_has_one_launcher_winner() -> None:
     first, second = await asyncio.gather(service.run("a" * 64, request), service.run("a" * 64, request))
     assert first.execution_id == second.execution_id
     assert launcher.calls == 1
+    started = await state.execution.executions.get(first.execution_id, tenant_id="tenant")
+    assert started is not None
+    assert started.agent_run_sequence == 0
+    first_attempt = await state.execution.executions.claim_next_agent_run(
+        first.execution_id,
+        tenant_id="tenant",
+        expected_revision=started.revision,
+        expected_agent_run_sequence=0,
+    )
+    assert first_attempt.agent_run_sequence == 1
+    second_attempt = await state.execution.executions.claim_next_agent_run(
+        first.execution_id,
+        tenant_id="tenant",
+        expected_revision=first_attempt.revision,
+        expected_agent_run_sequence=1,
+    )
+    assert second_attempt.agent_run_sequence == 2
     await state.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'runtime.db'}")
+    await provision_database(engine)
+    state = RuntimeState.sql(engine)
+    await state.initialize(namespace="sql-start", tenant_id="tenant")
+    try:
+        service = DefaultExecutionService(
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
+            TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
+            backend=_Launcher(),
+            history_reader=_History(),
+        )
+        request = ExecutionRequest(
+            "hello",
+            Principal("owner", "tenant"),
+            "sql-start-key",
+        )
+        handle = await service.run("b" * 64, request)
+        started = await state.execution.executions.get(handle.execution_id, tenant_id="tenant")
+        assert started is not None
+        assert started.agent_run_sequence == 0
+    finally:
+        await state.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_filesystem_execution_start_keeps_attempt_sequence_zero(tmp_path) -> None:
+    state = RuntimeState.filesystem(tmp_path / "runtime")
+    await state.initialize(namespace="filesystem-start", tenant_id="tenant")
+    try:
+        service = DefaultExecutionService(
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
+            TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
+            backend=_Launcher(),
+            history_reader=_History(),
+        )
+        handle = await service.run(
+            "c" * 64,
+            ExecutionRequest(
+                "hello",
+                Principal("owner", "tenant"),
+                "filesystem-start-key",
+            ),
+        )
+        started = await state.execution.executions.get(
+            handle.execution_id,
+            tenant_id="tenant",
+        )
+        assert started is not None
+        assert started.agent_run_sequence == 0
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_verifier_can_be_bound_once() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="terminal-verifier", tenant_id="tenant")
+    try:
+        service = DefaultExecutionService(
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
+            TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
+            history_reader=_History(),
+        )
+
+        with pytest.raises(ValueError):
+            service.bind_terminal_verifier(None)
+
+        async def verifier(
+            execution: ExecutionRecord,
+            status: ExecutionStatus,
+            required_step_run_id: str | None,
+        ) -> None:
+            del execution, status, required_step_run_id
+
+        service.bind_terminal_verifier(verifier)
+        with pytest.raises(RuntimeError):
+            service.bind_terminal_verifier(verifier)
+    finally:
+        await state.close()
+
+
+@pytest.mark.asyncio
+async def test_launch_missing_record_is_storage_integrity_failure() -> None:
+    state = RuntimeState.in_memory()
+    await state.initialize(namespace="launch-integrity", tenant_id="tenant")
+    try:
+        service = DefaultExecutionService(
+            state.execution,
+            state._object_store(RuntimeDomain.EXECUTION),
+            TenantAuthorizationPolicy(),
+            sessions=state.conversation.sessions,
+            backend=_Launcher(),
+            history_reader=_History(),
+        )
+
+        with pytest.raises(AIError) as error:
+            await service._launch_started(
+                ExecutionRequest("hello", Principal("owner", "tenant"), "launch-key"),
+                SimpleNamespace(execution_id="missing", tenant_id="tenant"),
+                scope="scope",
+                idempotency_key_digest="digest",
+            )
+
+        assert error.value.code is ErrorCode.STORAGE_INTEGRITY_ERROR
+    finally:
+        await state.close()
 
 
 @pytest.mark.asyncio

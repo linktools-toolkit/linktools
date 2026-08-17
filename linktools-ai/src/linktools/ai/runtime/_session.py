@@ -41,6 +41,8 @@ from .service_api import (
     ListSessionRequest,
     LoadedSession,
     ResumeSessionRequest,
+    SessionHistoryItem,
+    SessionHistoryReader,
     SessionView,
     UpdateSessionRequest,
 )
@@ -75,6 +77,14 @@ class _SessionHandoffState:
 class SessionQueryApi(Protocol):
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
+    async def history(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: 'str | None' = None,
+        limit: int = 100,
+    ) -> 'Page[SessionHistoryItem]': ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
 
 
@@ -89,12 +99,23 @@ class SessionApi(SessionQueryApi, Protocol):
 class DefaultSessionService:
     """Enforce session ownership, binding immutability, and revision CAS."""
 
-    def __init__(self, conversation: ConversationState, executions: ExecutionRepository, authorization: AuthorizationPolicy, execution: ExecutionService, cursor_signer: CursorSigner, *, release_terminal: _SessionReleaseCallback | None = None) -> None:
+    def __init__(
+        self,
+        conversation: ConversationState,
+        executions: ExecutionRepository,
+        authorization: AuthorizationPolicy,
+        execution: ExecutionService,
+        cursor_signer: CursorSigner,
+        *,
+        history_reader: SessionHistoryReader,
+        release_terminal: _SessionReleaseCallback | None = None,
+    ) -> None:
         self._conversation = conversation
         self._executions = executions
         self._authorization = authorization
         self._execution = execution
         self._cursor_signer = cursor_signer
+        self._history_reader = history_reader
         self._release_terminal = release_terminal or _no_release_terminal
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
@@ -141,6 +162,33 @@ class DefaultSessionService:
         async with self._session_consumer(session_id, principal.tenant_id):
             record = await self._authorized(session_id, principal, AuthorizationAction.SESSION_READ)
             return await self._view(record, principal)
+
+    async def history(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: "str | None" = None,
+        limit: int = 100,
+    ) -> "Page[SessionHistoryItem]":
+        async with self._session_consumer(session_id, principal.tenant_id):
+            record = await self._authorized(
+                session_id,
+                principal,
+                AuthorizationAction.SESSION_READ,
+            )
+            continuation = (
+                None
+                if record.continuation is None
+                else record.continuation.step_run_id
+            )
+            return await self._history_reader.history(
+                session_id,
+                tenant_id=principal.tenant_id,
+                continuation_step_run_id=continuation,
+                cursor=cursor,
+                limit=limit,
+            )
 
     async def list(self, request: ListSessionRequest) -> Page[SessionView]:
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_READ, ResourceRef(ResourceKind.SESSION, "list", request.principal.tenant_id))

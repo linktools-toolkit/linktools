@@ -330,11 +330,17 @@ class RecoveryCheckpoint:
     updated_at: datetime
 
     def __post_init__(self) -> None:
+        if self.agent_run_sequence < 0:
+            raise ValueError("recovery checkpoint sequence must be non-negative")
         if self.state is RecoveryCheckpointState.ADMITTED and (
-            self.step_run_id is not None or self.pending_operation_id is not None
+            self.agent_run_sequence != 0
+            or self.step_run_id is not None
+            or self.pending_operation_id is not None
         ):
             raise ValueError("admitted recovery checkpoint cannot have an attempt")
-        if self.state in {RecoveryCheckpointState.ACTIVE, RecoveryCheckpointState.WAITING} and self.step_run_id is None:
+        if self.state in {RecoveryCheckpointState.ACTIVE, RecoveryCheckpointState.WAITING} and (
+            self.agent_run_sequence < 1 or self.step_run_id is None
+        ):
             raise ValueError("active recovery checkpoint requires an attempt")
         if self.handoff_phase is RecoveryHandoffPhase.NONE:
             if self.terminal_handoff is not None or self.handoff_contract_digest is not None:

@@ -24,7 +24,7 @@ from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
 from ._runtime_service import Runtime
 from ._session import DefaultSessionService
 from ._subagent import SubagentDispatcher
-from .service_api import ExecutionHistoryReader
+from .service_api import ExecutionHistoryReader, SessionHistoryReader
 from .state import (
     RecoveryCheckpointState,
     RuntimeDomain,
@@ -44,6 +44,7 @@ async def build_local_runtime(
     namespace: str,
     execution_root: Path,
     history_reader: ExecutionHistoryReader,
+    session_history_reader: SessionHistoryReader,
     memory_store_factory: "Callable[[str, str, str, ObjectStore, bool], SearchableMemoryStore] | None",
     grant_key: bytes,
 ) -> Runtime:
@@ -114,6 +115,7 @@ async def build_local_runtime(
             subagent_dispatcher=dispatcher,
         )
         execution.bind_backend(backend)
+        execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(
             state.conversation,
@@ -121,6 +123,7 @@ async def build_local_runtime(
             authorization,
             execution,
             _cursor_signer("session", grant_key),
+            history_reader=session_history_reader,
             release_terminal=state.retention.release_session,
         )
         task_runner = RuntimeTaskNodeRunner(execution, catalog)

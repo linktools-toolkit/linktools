@@ -686,13 +686,39 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = self._from_row(execution_row)
             identity = self._idempotency._from_row(identity_row)
-            if current.status is not ExecutionStatus.PENDING_START or current.revision != claim.expected_revision or current.event_sequence != claim.expected_event_sequence or identity.status is not IdempotencyStatus.RESERVED or identity.resource_id != claim.execution_id or identity.request_digest != claim.request_digest:
+            if (
+                current.status is not ExecutionStatus.PENDING_START
+                or current.revision != claim.expected_revision
+                or current.event_sequence != claim.expected_event_sequence
+                or current.agent_run_sequence != 0
+                or identity.status is not IdempotencyStatus.RESERVED
+                or identity.resource_id != claim.execution_id
+                or identity.request_digest != claim.request_digest
+            ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            started = replace(current, status=ExecutionStatus.STARTED, revision=current.revision + 1, event_sequence=current.event_sequence + 1, agent_run_sequence=1, updated_at=claim.started_at)
+            started = replace(
+                current,
+                status=ExecutionStatus.STARTED,
+                revision=current.revision + 1,
+                event_sequence=current.event_sequence + 1,
+                updated_at=claim.started_at,
+            )
             values = self._record_values(started)
             for name in ("namespace_digest", "tenant_id", "execution_id", "created_at"):
                 values.pop(name, None)
-            result = await session.execute(update(execution_table).where(*self._where(execution_table, execution_id=claim.execution_id, revision=claim.expected_revision, event_sequence=claim.expected_event_sequence)).values(**values))
+            result = await session.execute(
+                update(execution_table)
+                .where(
+                    *self._where(
+                        execution_table,
+                        execution_id=claim.execution_id,
+                        revision=claim.expected_revision,
+                        event_sequence=claim.expected_event_sequence,
+                        agent_run_sequence=0,
+                    )
+                )
+                .values(**values)
+            )
             if result.rowcount != 1:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             self._transaction.mark_changed()

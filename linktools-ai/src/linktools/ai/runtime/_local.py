@@ -223,8 +223,6 @@ class LocalExecutionBackend:
 
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
         await self._validate_start(request, execution)
-        if execution.status is not ExecutionStatus.STARTED:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if self._recovery_enabled:
             checkpoint = await self._recovery.checkpoints.get(
                 execution.execution_id,
@@ -232,29 +230,61 @@ class LocalExecutionBackend:
             )
             if checkpoint is None or checkpoint.state is RecoveryCheckpointState.COMPLETED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        existing = self._tasks.get(execution.execution_id)
-        if existing is not None and not existing.done():
+        current = await self._execution.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if (
+            current.tenant_id != execution.tenant_id
+            or current.binding_digest != execution.binding_digest
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+            ExecutionStatus.CANCELLING,
+        }:
             return
-        task = asyncio.create_task(self._run(request, execution), name=f"ai-execution-{execution.execution_id}")
+        if current.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        existing = self._tasks.get(execution.execution_id)
+        if existing is not None:
+            if not existing.done():
+                return
+            self._task_done(execution.execution_id, existing)
+            if execution.execution_id in self._worker_failures:
+                return
+        if execution.execution_id in self._worker_failures:
+            return
+        task = asyncio.create_task(self._run(request, current), name=f"ai-execution-{execution.execution_id}")
         self._tasks[execution.execution_id] = task
-        task.add_done_callback(self._task_done)
+        task.add_done_callback(
+            lambda completed, execution_id=execution.execution_id: self._task_done(
+                execution_id,
+                completed,
+            )
+        )
         _logger.debug(
             "local execution launched: execution=%s definition=%s",
             execution.execution_id,
             execution.binding_digest,
         )
 
-    def _task_done(self, task: asyncio.Task[None]) -> None:
-        execution_id = _execution_id_from_task_name(task.get_name())
-        if execution_id is not None and self._tasks.get(execution_id) is task:
-            self._tasks.pop(execution_id, None)
-            self._captured_usage.pop(execution_id, None)
+    def _task_done(self, execution_id: str, task: asyncio.Task[None]) -> None:
         if task.cancelled():
+            error = None
+        else:
+            try:
+                error = task.exception()
+            except asyncio.CancelledError:
+                error = None
+        if self._tasks.get(execution_id) is not task:
             return
-        try:
-            error = task.exception()
-        except asyncio.CancelledError:
-            return
+        self._tasks.pop(execution_id, None)
+        self._captured_usage.pop(execution_id, None)
         if error is None:
             return
         if isinstance(error, AIError):
@@ -264,10 +294,9 @@ class LocalExecutionBackend:
                 ErrorCode.STORAGE_INTEGRITY_ERROR,
                 {"phase": "local_execution_worker"},
             )
-        if execution_id is not None:
-            details = dict(failure.safe_details)
-            details["execution_id"] = execution_id
-            self._worker_failures[execution_id] = _WorkerFailure(failure.code, details)
+        details = dict(failure.safe_details)
+        details["execution_id"] = execution_id
+        self._worker_failures[execution_id] = _WorkerFailure(failure.code, details)
         _logger.error(
             "local execution worker failed: execution=%s code=%s",
             execution_id,
@@ -287,12 +316,29 @@ class LocalExecutionBackend:
         task = self._tasks.get(execution.execution_id)
         if task is None:
             current = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
-            if current is not None and current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+            if current is not None and current.status in {
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+                ExecutionStatus.CANCELLING,
+            }:
                 return CancelEffectOutcome.CONFIRMED
             return CancelEffectOutcome.UNKNOWN
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
-        return CancelEffectOutcome.CONFIRMED
+        self._task_done(execution.execution_id, task)
+        current = await self._execution.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if current is not None and current.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+            ExecutionStatus.CANCELLING,
+        }:
+            return CancelEffectOutcome.CONFIRMED
+        return CancelEffectOutcome.UNKNOWN
 
     async def reconcile(self) -> None:
         """Rebuild transient execution state from recovery-owned checkpoints."""
@@ -512,11 +558,7 @@ class LocalExecutionBackend:
             status=ExecutionStatus.STARTED,
             revision=0,
             event_sequence=0,
-            agent_run_sequence=(
-                checkpoint.agent_run_sequence + 1
-                if checkpoint.state is RecoveryCheckpointState.ADMITTED
-                else checkpoint.agent_run_sequence
-            ),
+            agent_run_sequence=checkpoint.agent_run_sequence,
             error_code=None,
             safe_error_details={},
             created_at=checkpoint.created_at,
@@ -683,13 +725,19 @@ class LocalExecutionBackend:
 
     async def close(self) -> None:
         self._accepting = False
-        tasks = tuple(self._tasks.values())
-        for task in tasks:
+        tasks = tuple(self._tasks.items())
+        for _, task in tasks:
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(
+                *(task for _, task in tasks),
+                return_exceptions=True,
+            )
+        for execution_id, task in tasks:
+            self._task_done(execution_id, task)
         self._tasks.clear()
         self._captured_usage.clear()
+        self._worker_failures.clear()
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
         execution_id = original.execution_id
@@ -852,8 +900,6 @@ class LocalExecutionBackend:
             raise
         finally:
             self._metrics.operation("execution", "runtime", operation_result, operation_started_at)
-            self._tasks.pop(execution_id, None)
-            self._captured_usage.pop(execution_id, None)
 
     async def _finish_checkpoint(self, checkpoint: RecoveryCheckpoint) -> None:
         if checkpoint.state is RecoveryCheckpointState.COMPLETED:
@@ -1260,11 +1306,6 @@ def _admission_matches(existing: RecoveryCheckpoint, candidate: RecoveryCheckpoi
         and existing.handoff_contract_digest is None
         and existing.pending_operation_id is None
     )
-
-
-def _execution_id_from_task_name(name: str) -> str | None:
-    prefix = "ai-execution-"
-    return name[len(prefix) :] if name.startswith(prefix) and len(name) > len(prefix) else None
 
 
 def _is_infrastructure_error(error: Exception) -> bool:

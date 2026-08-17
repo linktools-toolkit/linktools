@@ -4,8 +4,10 @@
 
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from linktools.core import environ
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -22,6 +24,7 @@ from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, StepStore
 from ..core import (
     CursorPayload,
     CursorSigner,
+    ExecutionStatus,
     JsonValue,
     Page,
     canonical_sha256,
@@ -33,9 +36,20 @@ from ..errors import AIError, ErrorCode
 from ..runtime.service_api import (
     ExecutionHistoryItem,
     ExecutionTraceItem,
+    SessionHistoryItem,
     TranscriptItem,
 )
 from ..runtime.state import ExecutionRecord, ExecutionRepository
+
+_logger = environ.get_logger("ai.adapter.history")
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectedHistoryItem:
+    item_kind: str
+    content: JsonValue
+    tool_name: "str | None" = None
+    tool_call_id: "str | None" = None
 
 
 class StepExecutionHistoryReader:
@@ -85,8 +99,31 @@ class StepExecutionHistoryReader:
                 run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=item.execution_id, segment_sequence=segment_sequence)
                 snapshot = await self._store.latest_snapshot(run_id=run_id)
                 if snapshot is None:
+                    if item.status is ExecutionStatus.SUCCEEDED and segment_sequence == item.agent_run_sequence:
+                        raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     continue
-                snapshot_items = [projected for message in snapshot.messages for projected in _message_items(item.execution_id, message)]
+                if (
+                    snapshot.run_id != run_id
+                    or snapshot.conversation_id
+                    != step_conversation_id(
+                        namespace=self._namespace,
+                        tenant_id=tenant_id,
+                        execution_id=item.execution_id,
+                    )
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                snapshot_items = [
+                    ExecutionHistoryItem(
+                        item.execution_id,
+                        0,
+                        projected.item_kind,
+                        projected.content,
+                        projected.tool_name,
+                        projected.tool_call_id,
+                    )
+                    for message in snapshot.messages
+                    for projected in _project_message(message)
+                ]
                 values = _merge_history_occurrences(values, snapshot_items)
         source_revision = canonical_sha256(
             {
@@ -110,14 +147,26 @@ class StepExecutionHistoryReader:
         if record is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         if record.agent_run_sequence == 0:
+            if record.status is ExecutionStatus.SUCCEEDED:
+                raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
         await self._history_tree(record, tenant_id)
         final_run_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id, segment_sequence=record.agent_run_sequence)
         snapshot = await self._store.latest_snapshot(run_id=final_run_id)
         if snapshot is None:
-            if record.status.value == "SUCCEEDED":
+            if record.status is ExecutionStatus.SUCCEEDED:
                 raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
             return Page((), None)
+        if (
+            snapshot.run_id != final_run_id
+            or snapshot.conversation_id
+            != step_conversation_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=execution_id,
+            )
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=execution_id)
         values: list[str] = []
         for message in snapshot.messages:
@@ -157,25 +206,142 @@ class StepExecutionHistoryReader:
         await visit(root, 0)
         return result
 
+
     async def _segment_events(self, record: ExecutionRecord, tenant_id: str) -> list[tuple[int, list[StepEvent]]]:
         if record.agent_run_sequence < 0:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        conversation_id = step_conversation_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=record.execution_id)
-        terminal = record.status.value in {"SUCCEEDED", "FAILED", "CANCELLED"}
+        if record.status is ExecutionStatus.SUCCEEDED and record.agent_run_sequence == 0:
+            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+        conversation_id = step_conversation_id(
+            namespace=self._namespace,
+            tenant_id=tenant_id,
+            execution_id=record.execution_id,
+        )
         result: list[tuple[int, list[StepEvent]]] = []
         for sequence in range(1, record.agent_run_sequence + 1):
-            deterministic_id = step_run_id(namespace=self._namespace, tenant_id=tenant_id, execution_id=record.execution_id, segment_sequence=sequence)
+            deterministic_id = step_run_id(
+                namespace=self._namespace,
+                tenant_id=tenant_id,
+                execution_id=record.execution_id,
+                segment_sequence=sequence,
+            )
             run = await self._store.get_run(run_id=deterministic_id)
             if run is None:
-                if not terminal and sequence == record.agent_run_sequence:
-                    continue
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (
+                    record.status is ExecutionStatus.SUCCEEDED
+                    and sequence == record.agent_run_sequence
+                ):
+                    raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
+                continue
             _validate_run(run, deterministic_id, conversation_id, sequence)
             events = await self._store.list_events(run_id=deterministic_id)
-            if any(event.run_id != deterministic_id or event.conversation_id not in {None, conversation_id} for event in events):
+            if any(
+                event.run_id != deterministic_id
+                or event.conversation_id not in {None, conversation_id}
+                for event in events
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             result.append((sequence, events))
         return result
+
+
+class StepSessionHistoryReader:
+    """Project one committed Conversation snapshot into Session history."""
+
+    def __init__(self, *, store: StepStore, cursor_signer: CursorSigner) -> None:
+        self._store = store
+        self._cursor_signer = cursor_signer
+
+    async def history(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        continuation_step_run_id: "str | None",
+        cursor: "str | None",
+        limit: int,
+    ) -> "Page[SessionHistoryItem]":
+        if not 1 <= limit <= 200:
+            raise AIError(ErrorCode.PAGE_LIMIT_INVALID)
+        if continuation_step_run_id is None:
+            if cursor is not None:
+                raise AIError(ErrorCode.CURSOR_INVALID)
+            return Page((), None)
+        run = await self._store.get_run(run_id=continuation_step_run_id)
+        if run is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if run.run_id != continuation_step_run_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        snapshot = await self._store.latest_snapshot(
+            run_id=continuation_step_run_id,
+            include_interrupted=True,
+        )
+        if snapshot is None:
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        if (
+            snapshot.run_id != continuation_step_run_id
+            or snapshot.conversation_id != run.conversation_id
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if snapshot.state != "complete":
+            raise AIError(ErrorCode.SESSION_HISTORY_UNAVAILABLE)
+        projected = [
+            item
+            for message in snapshot.messages
+            for item in _project_message(message)
+        ]
+        source_revision = canonical_sha256(
+            {
+                "session_id": session_id,
+                "continuation_step_run_id": continuation_step_run_id,
+                "items": [
+                    {
+                        "item_kind": item.item_kind,
+                        "content": item.content,
+                        "tool_name": item.tool_name,
+                        "tool_call_id": item.tool_call_id,
+                    }
+                    for item in projected
+                ],
+            }
+        )
+        start = _session_history_cursor_offset(
+            cursor,
+            tenant_id,
+            session_id,
+            source_revision,
+            len(projected),
+            self._cursor_signer,
+        )
+        selected = tuple(
+            SessionHistoryItem(
+                start + index + 1,
+                item.item_kind,
+                item.content,
+                item.tool_name,
+                item.tool_call_id,
+            )
+            for index, item in enumerate(projected[start:start + limit])
+        )
+        next_offset = start + len(selected)
+        next_cursor = (
+            _session_history_cursor(
+                tenant_id,
+                session_id,
+                source_revision,
+                next_offset,
+                self._cursor_signer,
+            )
+            if next_offset < len(projected)
+            else None
+        )
+        _logger.debug(
+            "session history projected: session=%s continuation=%s items=%s",
+            session_id,
+            continuation_step_run_id,
+            len(projected),
+        )
+        return Page(selected, next_cursor)
 
 
 def _trace_item(record: ExecutionRecord, segment_sequence: int, depth: int, ordinal: int, event: StepEvent) -> "ExecutionTraceItem | None":
@@ -232,7 +398,8 @@ def _history_cursor_offset(cursor: str | None, tenant_id: str, execution_id: str
     except AIError as error:
         raise AIError(ErrorCode.CURSOR_INVALID) from error
     if (
-        payload.tenant_id != tenant_id
+        payload.cursor_version != 1
+        or payload.tenant_id != tenant_id
         or payload.resource_kind != "execution_history"
         or payload.filter_digest != canonical_sha256({"execution_id": execution_id})
         or payload.sort_key != source_revision
@@ -258,6 +425,54 @@ def _history_cursor(tenant_id: str, execution_id: str, source_revision: str, off
     )
 
 
+def _session_history_cursor_offset(
+    cursor: str | None,
+    tenant_id: str,
+    session_id: str,
+    source_revision: str,
+    size: int,
+    signer: CursorSigner,
+) -> int:
+    if cursor is None:
+        return 0
+    try:
+        payload = signer.decode(cursor)
+    except AIError as error:
+        raise AIError(ErrorCode.CURSOR_INVALID) from error
+    if (
+        payload.cursor_version != 1
+        or payload.tenant_id != tenant_id
+        or payload.resource_kind != "session_history"
+        or payload.filter_digest != canonical_sha256({"session_id": session_id})
+        or payload.sort_key != source_revision
+    ):
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    offset = payload.snapshot_or_store_revision
+    if offset < 0 or offset > size:
+        raise AIError(ErrorCode.CURSOR_INVALID)
+    return offset
+
+
+def _session_history_cursor(
+    tenant_id: str,
+    session_id: str,
+    source_revision: str,
+    offset: int,
+    signer: CursorSigner,
+) -> str:
+    return signer.encode(
+        CursorPayload(
+            1,
+            tenant_id,
+            "session_history",
+            canonical_sha256({"session_id": session_id}),
+            source_revision,
+            offset,
+            int(time.time()) + 3600,
+        )
+    )
+
+
 def _merge_history_occurrences(accumulated: list[ExecutionHistoryItem], snapshot: list[ExecutionHistoryItem]) -> list[ExecutionHistoryItem]:
     maximum = min(len(accumulated), len(snapshot))
     for overlap in range(maximum, 0, -1):
@@ -266,42 +481,56 @@ def _merge_history_occurrences(accumulated: list[ExecutionHistoryItem], snapshot
     return [*accumulated, *snapshot]
 
 
-def _message_items(execution_id: str, message: object) -> tuple[ExecutionHistoryItem, ...]:
+def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
     if isinstance(message, ModelRequest):
-        values: list[ExecutionHistoryItem] = []
+        values: list[_ProjectedHistoryItem] = []
         for part in message.parts:
             if isinstance(part, SystemPromptPart):
-                values.append(ExecutionHistoryItem(execution_id, 0, "system", _json_content(part.content)))
+                values.append(_ProjectedHistoryItem("system", _json_content(part.content)))
             elif isinstance(part, UserPromptPart):
                 content = _user_content(part)
-                if content:
-                    values.append(ExecutionHistoryItem(execution_id, 0, "user", content))
+                if content is not None:
+                    values.append(_ProjectedHistoryItem("user", content))
             elif isinstance(part, ToolReturnPart):
-                values.append(ExecutionHistoryItem(execution_id, 0, "tool_result", _json_content(part.content), part.tool_name, part.tool_call_id))
+                values.append(
+                    _ProjectedHistoryItem(
+                        "tool_result",
+                        _json_content(part.content),
+                        part.tool_name,
+                        part.tool_call_id,
+                    )
+                )
             elif isinstance(part, RetryPromptPart):
-                values.append(ExecutionHistoryItem(execution_id, 0, "retry", str(part.content)))
+                values.append(_ProjectedHistoryItem("retry", str(part.content)))
         return tuple(values)
     if isinstance(message, ModelResponse):
         values = []
         for part in message.parts:
-            if isinstance(part, TextPart) and part.content:
-                values.append(ExecutionHistoryItem(execution_id, 0, "assistant", part.content))
+            if isinstance(part, TextPart):
+                values.append(_ProjectedHistoryItem("assistant", part.content))
             elif isinstance(part, ToolCallPart):
-                values.append(ExecutionHistoryItem(execution_id, 0, "tool_call", part.args_as_dict(), part.tool_name, part.tool_call_id))
+                values.append(
+                    _ProjectedHistoryItem(
+                        "tool_call",
+                        part.args_as_dict(),
+                        part.tool_name,
+                        part.tool_call_id,
+                    )
+                )
         return tuple(values)
     return ()
 
 
 def _user_content(part: UserPromptPart) -> "str | list[str] | None":
     if isinstance(part.content, str):
-        return part.content or None
+        return part.content
     values: list[str] = []
     for item in part.content:
-        if isinstance(item, str) and item:
+        if isinstance(item, str):
             values.append(item)
-        elif isinstance(item, TextContent) and item.content:
+        elif isinstance(item, TextContent):
             values.append(item.content)
-    return values or None
+    return values if values else None
 
 
 def _json_content(value: object) -> JsonValue:
@@ -326,4 +555,4 @@ def _user_text(part: UserPromptPart) -> list[str]:
     return values
 
 
-__all__ = ["StepExecutionHistoryReader"]
+__all__ = ["StepExecutionHistoryReader", "StepSessionHistoryReader"]

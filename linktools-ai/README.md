@@ -60,14 +60,42 @@ Named Agents use one handle:
 result = await runtime.agent("coding").run("review this change", principal=principal)
 ```
 
+### 1.3 Committed Session history
+
+```python
+page = await runtime.session.history(
+    session_id,
+    principal=principal,
+    cursor=None,
+    limit=100,
+)
+```
+
+Session history reads the current committed conversation snapshot referenced by
+the Session continuation. It is not an execution audit log: active, failed,
+and cancelled turns are excluded until a successful conversation commit. A
+fork starts from the source continuation and advances independently.
+
+The history API is a linktools projection of supported text, tool, retry, and
+JSON-compatible parts; it is not a raw PydanticAI multimodal serialization
+API. String user content is returned exactly as supplied.
+
+Conversation retention follows the RuntimeState route: `DURABLE` survives a
+Runtime reopen, `VOLATILE` is limited to the current RuntimeState lifetime,
+and `TRANSIENT` is only guaranteed for the owner retention lifetime.
+
 ## 2. Asset loading
 
 ### 2.1 Default workspace loader
 
-`ai-run` and `open_workspace_runtime()` read declarations from `<project>/.linktools/assets` through `Workspace.storage_root`. The default Asset source is a read-only `DirectoryAssetBackend`, while generated defaults use the selected Asset writer.
+`ai-run` and `open_workspace_runtime()` read declarations from
+`<project>/.linktools` through `Workspace.storage_root`. The default Asset
+source is a read-only `DirectoryAssetBackend`. Workspace startup composes the
+generated default Agent in memory and freezes Agent definitions before Runtime
+construction.
 
 ```text
-.linktools/assets/
+.linktools/
 ├── agents/<id>
 ├── mcp/<id>
 └── skills/<id>/SKILL.md
@@ -75,7 +103,14 @@ result = await runtime.agent("coding").run("review this change", principal=princ
 
 Agent and MCP declarations use their JSON codecs even though the canonical filenames have no suffix. Skills default to the directory layout shown above and may also use the single-file JSON representation.
 
-Workspace startup discovers declarations, resolves each configured capability source, and freezes the resulting Agent definitions before Runtime construction.
+Startup discovers declarations and resolves each configured capability source
+before composing the generated default Agent.
+
+When a string `UserPromptPart` is projected into an execution history item, its
+`content` is preserved exactly. History does not trim, normalize, decode,
+re-encode, summarize, or redact that source string.
+History may contain user items from sessions, forks, and subagents; this
+contract does not guarantee their count or position.
 
 ### 2.2 Custom logical Asset types
 
@@ -90,7 +125,7 @@ async with open_workspace_runtime(
         CapabilitySource(asset_binding=my_binding, provider=my_provider),
     ),
 ) as runtime:
-    result = await runtime.run("use the custom capability", principal=principal)
+    result = await runtime.run("use the custom capability")
 ```
 
 Bindings are frozen before loading starts. Register every variant, codec, identity rule, and default write representation during composition.

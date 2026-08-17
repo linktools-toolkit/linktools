@@ -10,7 +10,11 @@ from dataclasses import replace
 
 from linktools.core import environ
 
-from ..adapter import RuntimeMemoryStore, StepExecutionHistoryReader
+from ..adapter import (
+    RuntimeMemoryStore,
+    StepExecutionHistoryReader,
+    StepSessionHistoryReader,
+)
 from ..agent import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -123,6 +127,25 @@ async def _source_refs(
         )
         for entry in entries
     )
+
+
+def _merge_default_capabilities(
+    explicit: Sequence[AgentCapabilityRef],
+    discovered: Sequence[AgentCapabilityRef],
+) -> tuple[AgentCapabilityRef, ...]:
+    discovered_keys = {(ref.provider, ref.id) for ref in discovered}
+    explicit_keys: set[tuple[str, str]] = set()
+    merged: list[AgentCapabilityRef] = []
+    for ref in explicit:
+        key = ref.provider, ref.id
+        merged.append(replace(ref, required=True) if key in discovered_keys else ref)
+        explicit_keys.add(key)
+    merged.extend(
+        ref
+        for ref in discovered
+        if (ref.provider, ref.id) not in explicit_keys
+    )
+    return tuple(merged)
 
 
 def _build_default_models(workspace: Workspace) -> ModelRegistry:
@@ -270,11 +293,15 @@ async def _compose_runtime(
         )
 
     grant_key = _grant_key(workspace)
-    history = StepExecutionHistoryReader(
+    execution_history = StepExecutionHistoryReader(
         namespace=workspace.workspace_id,
         executions=state.execution.executions,
         store=state.steps.read_store(RuntimeDomain.EXECUTION),
         cursor_signer=HmacCursorSigner("execution-history", grant_key),
+    )
+    session_history = StepSessionHistoryReader(
+        store=state.steps.read_store(RuntimeDomain.CONVERSATION),
+        cursor_signer=HmacCursorSigner("session-history", grant_key),
     )
     return await build_local_runtime(
         state=state,
@@ -283,7 +310,8 @@ async def _compose_runtime(
         tenant_id=tenant_id,
         namespace=workspace.workspace_id,
         execution_root=workspace.root,
-        history_reader=history,
+        history_reader=execution_history,
+        session_history_reader=session_history,
         memory_store_factory=memory_store_factory,
         grant_key=grant_key,
     )
@@ -357,10 +385,13 @@ async def _build_catalog(
             ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
         )
     else:
-        existing = {(ref.provider, ref.id): ref for ref in default.capabilities}
-        for ref in source_refs:
-            existing[(ref.provider, ref.id)] = ref
-        default = replace(default, capabilities=tuple(existing.values()))
+        default = replace(
+            default,
+            capabilities=_merge_default_capabilities(
+                default.capabilities,
+                source_refs,
+            ),
+        )
     specs["default"] = default
     roots: dict[str, AgentDefinition] = {}
     for agent_id in sorted(specs):

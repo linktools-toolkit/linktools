@@ -188,6 +188,7 @@ class DefaultExecutionService:
         self._history_reader = history_reader
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
+        self._terminal_verifier_is_default = terminal_verifier is None
         self._subagent_cancellation: _SubagentCancellation | None = None
         self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._session_locks_guard = asyncio.Lock()
@@ -200,6 +201,14 @@ class DefaultExecutionService:
         if self._backend is not None:
             raise RuntimeError("execution backend is already bound")
         self._backend = backend
+
+    def bind_terminal_verifier(self, verifier: _ExecutionTerminalVerifier) -> None:
+        if verifier is None:
+            raise ValueError("terminal verifier is required")
+        if not self._terminal_verifier_is_default:
+            raise RuntimeError("terminal verifier is already bound")
+        self._terminal_verifier = verifier
+        self._terminal_verifier_is_default = False
 
     def bind_subagent_cancellation(self, cancellation: _SubagentCancellation) -> None:
         if self._subagent_cancellation is not None:
@@ -540,13 +549,24 @@ class DefaultExecutionService:
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        launch_record = await self._state.executions.get(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+        )
+        if launch_record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if launch_record.status in {
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+            ExecutionStatus.CANCELLING,
+        }:
+            return
+        if launch_record.status is ExecutionStatus.START_UNKNOWN:
+            raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
+        if launch_record.status is not ExecutionStatus.STARTED:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            launch_record = await self._state.executions.get(
-                execution.execution_id,
-                tenant_id=execution.tenant_id,
-            )
-            if launch_record is None or launch_record.status is not ExecutionStatus.STARTED:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             await self._backend.launch(request, launch_record)
         except asyncio.CancelledError:
             raise

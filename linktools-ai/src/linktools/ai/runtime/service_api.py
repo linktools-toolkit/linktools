@@ -138,6 +138,26 @@ class ExecutionHistoryItem:
             raise ValueError("execution history item is invalid")
 
 
+@dataclass(frozen=True, slots=True)
+class SessionHistoryItem:
+    sequence: int
+    item_kind: str
+    content: JsonValue
+    tool_name: "str | None" = None
+    tool_call_id: "str | None" = None
+
+    def __post_init__(self) -> None:
+        if self.sequence < 1 or self.item_kind not in {
+            "system",
+            "user",
+            "assistant",
+            "tool_call",
+            "tool_result",
+            "retry",
+        }:
+            raise ValueError("session history item is invalid")
+
+
 class ExecutionHistoryReader(Protocol):
     async def history(
         self,
@@ -165,6 +185,18 @@ class ExecutionHistoryReader(Protocol):
         cursor: str | None,
         limit: int,
     ) -> Page[TranscriptItem]: ...
+
+
+class SessionHistoryReader(Protocol):
+    async def history(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        continuation_step_run_id: "str | None",
+        cursor: "str | None",
+        limit: int,
+    ) -> "Page[SessionHistoryItem]": ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,6 +511,14 @@ class SessionService(Protocol):
     async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView: ...
     async def get(self, session_id: str, *, principal: Principal) -> SessionView: ...
     async def list(self, request: ListSessionRequest) -> 'Page[SessionView]': ...
+    async def history(
+        self,
+        session_id: str,
+        *,
+        principal: Principal,
+        cursor: 'str | None' = None,
+        limit: int = 100,
+    ) -> 'Page[SessionHistoryItem]': ...
     async def load(self, session_id: str, *, principal: Principal) -> LoadedSession: ...
     async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle: ...
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView: ...
@@ -536,7 +576,7 @@ __all__ = [
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
     "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
-    "ExecutionHistoryItem", "ExecutionHistoryReader",
+    "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",
     "ReplayEvaluationRequest", "ResumeSessionRequest",
     "RetryExecutionRequest", "RunEvaluationRequest", "SessionService", "SessionView",

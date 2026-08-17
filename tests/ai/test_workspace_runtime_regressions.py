@@ -8,9 +8,9 @@ from linktools.ai.adapter import RuntimeMemoryStore
 from linktools.ai.capability import SkillCapabilityProvider
 from linktools.ai.model import ModelRegistry
 from linktools.ai.runtime import RuntimeDomain, RuntimeState
-from linktools.ai.spec import AgentSpec, AgentSpecCodec, builtin_asset_bindings
+from linktools.ai.spec import AgentCapabilityRef, AgentSpec, AgentSpecCodec, builtin_asset_bindings
 from linktools.ai.workspace import CapabilitySource, Workspace, open_workspace_runtime
-from linktools.ai.workspace._factory import _build_asset_repository
+from linktools.ai.workspace._factory import _build_asset_repository, _merge_default_capabilities
 
 
 class _MCPSourceProvider:
@@ -20,6 +20,39 @@ class _MCPSourceProvider:
 def _mcp_source() -> CapabilitySource:
     bindings = {binding.kind: binding for binding in builtin_asset_bindings()}
     return CapabilitySource(bindings["mcp"], _MCPSourceProvider())
+
+
+def test_default_capability_merge_preserves_explicit_values_and_order() -> None:
+    explicit = (
+        AgentCapabilityRef(
+            "custom",
+            "prod",
+            revision=7,
+            required=False,
+            config={"mode": "strict"},
+        ),
+        AgentCapabilityRef("custom", "prod", required=True),
+        AgentCapabilityRef("other", "explicit", required=False),
+    )
+    discovered = (
+        AgentCapabilityRef("custom", "prod", required=True),
+        AgentCapabilityRef("custom", "auto-only", required=True),
+    )
+
+    merged = _merge_default_capabilities(explicit, discovered)
+
+    assert merged[:2] == (
+        AgentCapabilityRef(
+            "custom",
+            "prod",
+            revision=7,
+            required=True,
+            config={"mode": "strict"},
+        ),
+        explicit[1],
+    )
+    assert merged[2] == explicit[2]
+    assert merged[3] == discovered[1]
 
 
 @pytest.mark.asyncio
@@ -52,7 +85,7 @@ async def test_runtime_memory_store_accepts_harness_scoped_paths() -> None:
 
 @pytest.mark.asyncio
 async def test_workspace_assets_use_kind_scoped_paths(tmp_path) -> None:
-    assets_root = tmp_path / ".linktools" / "assets"
+    assets_root = tmp_path / ".linktools"
     agent_path = assets_root / "agents" / "default"
     skill_path = assets_root / "skills" / "review" / "SKILL.md"
     mcp_path = assets_root / "mcp" / "local"
@@ -102,6 +135,12 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
         assert runtime.default_principal.tenant_id == "default"
         created = await runtime.create_session("remember")
         agent_created = await runtime.agent("default").create_session("remember-agent")
+        assert (
+            await runtime.session.history(
+                created.session_id,
+                principal=runtime.default_principal,
+            )
+        ).items == ()
 
     async with open_workspace_runtime(workspace, tenant_id="tenant-a", models=models) as runtime:
         assert runtime.tenant_id == "tenant-a"
@@ -117,8 +156,13 @@ async def test_workspace_session_survives_cold_restart(tmp_path) -> None:
             agent_created.session_id,
             principal=runtime.default_principal,
         )
+        history = await runtime.session.history(
+            created.session_id,
+            principal=runtime.default_principal,
+        )
 
     assert loaded is not None
     assert loaded.session_id == created.session_id
     assert agent_loaded is not None
     assert agent_loaded.session_id == agent_created.session_id
+    assert history.items == ()

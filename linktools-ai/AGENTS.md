@@ -76,7 +76,7 @@ Use `build_*` for pure composition in new APIs. `open_*`, `prepare_*`, and `init
 
 `AssetBackend` and the public storage protocols are the extension boundary for custom loading. Compose backends with `StorageOverlay`, wrap the overlay in `AssetStore`, call `initialize()`, then create an `AssetRepository` from a frozen `AssetTypeRegistry` snapshot.
 
-The default workspace loader reads `<workspace>/.linktools/assets` through a read-only `DirectoryAssetBackend`. `PrefixAssetPathAdapter` maps Agent, Skill, and MCP kinds to their nested physical directories; only the workspace-owned repository bootstraps `agent/default`. Do not hard-code that policy into generic Asset or Storage code.
+The default workspace loader reads `<workspace>/.linktools` through a read-only `DirectoryAssetBackend`. `PrefixAssetPathAdapter` maps Agent, Skill, and MCP kinds to their nested physical directories; only the workspace-owned repository bootstraps `agent/default`. Do not hard-code that policy into generic Asset or Storage code.
 
 Register custom logical representations with `AssetTypeBinding` and `AssetVariantBinding`. Codecs validate bytes at the repository boundary. Backends store bytes and metadata only; they do not import Spec, Capability, or Agent types.
 
