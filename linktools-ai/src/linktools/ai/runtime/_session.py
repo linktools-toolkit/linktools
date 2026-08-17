@@ -427,10 +427,9 @@ class DefaultSessionService:
                         next_status=SessionStatus.CLOSING,
                     )
                 except AIError as error:
-                    if error.code not in {
-                        ErrorCode.STORAGE_CONFLICT,
-                        ErrorCode.SESSION_CONFLICT,
-                    }:
+                    if error.code is ErrorCode.STORAGE_CONFLICT:
+                        raise
+                    if error.code is not ErrorCode.SESSION_CONFLICT:
                         raise
                     current = await self._conversation.sessions.get(
                         session_id,
@@ -439,12 +438,13 @@ class DefaultSessionService:
                     if current is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     if current.status is SessionStatus.OPEN:
-                        current = await self._conversation.sessions.transition_status(
-                            session_id,
-                            tenant_id=request.principal.tenant_id,
-                            expected=frozenset({SessionStatus.OPEN}),
-                            next_status=SessionStatus.CLOSING,
-                        )
+                        raise
+                    if current.status not in {
+                        SessionStatus.CLOSING,
+                        SessionStatus.CLEANUP_REQUIRED,
+                        SessionStatus.CLOSED,
+                    }:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             while True:
                 current = await self._conversation.sessions.get(
                     session_id,
@@ -797,16 +797,65 @@ class DefaultSessionService:
             current = await self._conversation.operations.get(operation.operation_id, tenant_id=tenant_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            self._validate_close_operation(
+            self._validate_close_operation_identity(
                 current,
+                operation,
                 tenant_id=tenant_id,
                 session_id=result_ref,
-                request_digest=operation.request_digest,
-                result_digest=result_digest,
             )
+            if current.status is OperationStatus.SUCCEEDED:
+                self._validate_succeeded_close_operation(
+                    current,
+                    tenant_id=tenant_id,
+                    session_id=result_ref,
+                    request_digest=operation.request_digest,
+                    result_digest=result_digest,
+                )
+                return
+            if current.status is OperationStatus.PENDING:
+                if (
+                    current.result_ref is not None
+                    or current.result_digest is not None
+                    or current.error_code is not None
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                raise
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     @staticmethod
-    def _validate_close_operation(
+    def _validate_close_operation_identity(
+        current: OperationLedgerRecord,
+        expected: OperationLedgerRecord,
+        *,
+        tenant_id: str,
+        session_id: str,
+    ) -> None:
+        if (
+            current.operation_id != expected.operation_id
+            or current.tenant_id != expected.tenant_id
+            or current.tenant_id != tenant_id
+            or current.resource_kind is not expected.resource_kind
+            or current.resource_kind is not ResourceKind.SESSION
+            or expected.resource_kind is not ResourceKind.SESSION
+            or current.resource_id != expected.resource_id
+            or current.resource_id != session_id
+            or expected.resource_id != session_id
+            or current.execution_id != expected.execution_id
+            or current.execution_id is not None
+            or expected.execution_id is not None
+            or current.operation_kind is not expected.operation_kind
+            or current.operation_kind is not OperationKind.SESSION_CLOSE
+            or expected.operation_kind is not OperationKind.SESSION_CLOSE
+            or current.request_digest != expected.request_digest
+            or current.compactable != expected.compactable
+            or current.compactable is not True
+            or current.sequence != expected.sequence
+            or current.created_at != expected.created_at
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @staticmethod
+    def _validate_succeeded_close_operation(
         operation: OperationLedgerRecord,
         *,
         tenant_id: str,
@@ -840,7 +889,13 @@ class DefaultSessionService:
         result_digest = canonical_sha256(
             {"session_id": session_id, "revision": session.revision}
         )
-        DefaultSessionService._validate_close_operation(
+        DefaultSessionService._validate_close_operation_identity(
+            operation,
+            operation,
+            tenant_id=session.tenant_id,
+            session_id=session_id,
+        )
+        DefaultSessionService._validate_succeeded_close_operation(
             operation,
             tenant_id=session.tenant_id,
             session_id=session_id,

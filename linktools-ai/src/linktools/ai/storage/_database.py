@@ -8,14 +8,24 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, NoReturn
 
 from linktools.core import environ
+
 from ..errors import AIError, ErrorCode
 from ._dialects import (
-    dialect_for_name,
     SqlAlchemyDialect,
+    dialect_for_name,
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy import CHAR, BigInteger, Column, Index, LargeBinary, MetaData, String, Table
+    from sqlalchemy import (
+        CHAR,
+        BigInteger,
+        Column,
+        Index,
+        LargeBinary,
+        MetaData,
+        String,
+        Table,
+    )
     from sqlalchemy.engine import Connection
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -78,10 +88,10 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     """Create the explicitly requested metadata without a global schema."""
 
     dialect_for_name(engine.dialect.name)
-    if not metadata.tables:
-        return
     if engine.dialect.name == "sqlite":
         await _configure_sqlite_engine(engine)
+    if not metadata.tables:
+        return
     async with _PROVISION_LOCK:
         async with engine.begin() as connection:
             await connection.run_sync(metadata.create_all)
@@ -233,7 +243,12 @@ def _validate_index_columns(columns: tuple[str, ...]) -> None:
 
 
 def _validate_connection_schema(connection: "Connection", metadata: "MetaData") -> None:
-    from sqlalchemy import CheckConstraint, ForeignKeyConstraint, UniqueConstraint, inspect
+    from sqlalchemy import (
+        CheckConstraint,
+        ForeignKeyConstraint,
+        UniqueConstraint,
+        inspect,
+    )
 
     inspector = inspect(connection)
     dialect_name = connection.dialect.name
@@ -554,7 +569,14 @@ def _type_length(value: object) -> int | None:
 
 
 def _type_charset(value: object) -> str | None:
-    from sqlalchemy.dialects.mysql import CHAR, LONGTEXT, MEDIUMTEXT, TEXT, TINYTEXT, VARCHAR
+    from sqlalchemy.dialects.mysql import (
+        CHAR,
+        LONGTEXT,
+        MEDIUMTEXT,
+        TEXT,
+        TINYTEXT,
+        VARCHAR,
+    )
 
     if not isinstance(value, (CHAR, LONGTEXT, MEDIUMTEXT, TEXT, TINYTEXT, VARCHAR)):
         return None
@@ -631,12 +653,27 @@ def _integer_compatible(dialect_name: str, expected: object, actual: object) -> 
 
 
 async def _configure_sqlite_engine(engine: "AsyncEngine") -> None:
-    def configure(connection: Any) -> None:
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
-        connection.exec_driver_sql("PRAGMA busy_timeout=5000")
+    if engine.dialect.name != "sqlite":
+        raise AIError(ErrorCode.STORAGE_CAPABILITY_MISSING)
+    from sqlalchemy import event
 
-    async with engine.connect() as connection:
-        await connection.run_sync(configure)
+    sync_engine = engine.sync_engine
+    if not event.contains(sync_engine, "checkout", _configure_sqlite_connection):
+        event.listen(sync_engine, "checkout", _configure_sqlite_connection)
+        _logger.debug("SQLite checkout PRAGMA listener registered")
+
+
+def _configure_sqlite_connection(
+    dbapi_connection: Any,
+    _connection_record: Any,
+    _connection_proxy: Any,
+) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
 
 
 __all__ = [
