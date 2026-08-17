@@ -392,7 +392,7 @@ class _ExecutionRepository(_Base):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if current.status is ExecutionStatus.CANCELLING and any(item.event_type is ExecutionEventType.CANCEL_REQUESTED for item in events):
                 return current
-            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
+            if current.status is ExecutionStatus.FINALIZING or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             updated = replace(current, status=ExecutionStatus.CANCELLING, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.requested_at)
             self._records[key] = updated

@@ -76,9 +76,11 @@ the Session continuation. It is not an execution audit log: active, failed,
 and cancelled turns are excluded until a successful conversation commit. A
 fork starts from the source continuation and advances independently.
 
-The history API is a linktools projection of supported text, tool, retry, and
-JSON-compatible parts; it is not a raw PydanticAI multimodal serialization
-API. String user content is returned exactly as supplied.
+The history API is a linktools projection of supported text, thinking, tool,
+retry, and JSON-compatible parts; it is not a raw PydanticAI multimodal
+serialization API. Thinking parts are emitted as `item_kind="thinking"` in
+their original response-part order and are not merged into assistant text.
+String user content is returned exactly as supplied.
 
 Conversation retention follows the RuntimeState route: `DURABLE` survives a
 Runtime reopen, `VOLATILE` is limited to the current RuntimeState lifetime,

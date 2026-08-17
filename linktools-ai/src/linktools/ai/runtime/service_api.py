@@ -134,7 +134,7 @@ class ExecutionHistoryItem:
     tool_call_id: "str | None" = None
 
     def __post_init__(self) -> None:
-        if self.sequence < 0 or self.item_kind not in {"system", "user", "assistant", "tool_call", "tool_result", "retry"}:
+        if self.sequence < 0 or self.item_kind not in {"system", "user", "assistant", "thinking", "tool_call", "tool_result", "retry"}:
             raise ValueError("execution history item is invalid")
 
 
@@ -151,6 +151,7 @@ class SessionHistoryItem:
             "system",
             "user",
             "assistant",
+            "thinking",
             "tool_call",
             "tool_result",
             "retry",

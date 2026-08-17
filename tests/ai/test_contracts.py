@@ -118,6 +118,7 @@ def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
         root_execution_id="execution",
         source_execution_id=None,
         base_execution_id=None,
+        conversation_step_run_id=None,
         idempotency=RecoveryIdempotencyInput("scope", "key", "request"),
     )
 

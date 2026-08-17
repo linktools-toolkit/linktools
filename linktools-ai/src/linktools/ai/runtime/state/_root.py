@@ -283,7 +283,7 @@ def _handoff_digest(plan: RuntimeStatePlan, object_store: "ObjectStore | None") 
             if object_store is not None and domain in object_domains and route.retention is RuntimeRetentionMode.DURABLE
             else "builtin" if route.retention is RuntimeRetentionMode.DURABLE else "transient" if route.retention is RuntimeRetentionMode.TRANSIENT else "memory",
         }
-    return canonical_sha256({"version": 4, **routes})
+    return canonical_sha256({"version": 5, **routes})
 
 
 __all__ = ["RuntimeState"]

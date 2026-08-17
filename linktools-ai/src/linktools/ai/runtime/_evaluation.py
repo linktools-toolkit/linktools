@@ -297,6 +297,7 @@ class DefaultEvaluationService:
             ExecutionStatus.PENDING_START: EvaluationStatus.PENDING,
             ExecutionStatus.START_UNKNOWN: EvaluationStatus.RUNNING,
             ExecutionStatus.STARTED: EvaluationStatus.RUNNING,
+            ExecutionStatus.FINALIZING: EvaluationStatus.RUNNING,
             ExecutionStatus.WAITING_APPROVAL: EvaluationStatus.RUNNING,
             ExecutionStatus.WAITING_EXTERNAL: EvaluationStatus.RUNNING,
             ExecutionStatus.CANCELLING: EvaluationStatus.RUNNING,

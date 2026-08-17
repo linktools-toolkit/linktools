@@ -122,6 +122,12 @@ class _ExecutionHandoffState:
     release_in_progress: bool = False
 
 
+@dataclass
+class _SessionLockEntry:
+    lock: asyncio.Lock
+    ref_count: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionStartIdentity:
     scope: str
@@ -190,7 +196,7 @@ class DefaultExecutionService:
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._terminal_verifier_is_default = terminal_verifier is None
         self._subagent_cancellation: _SubagentCancellation | None = None
-        self._session_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
         self._handoff_states: dict[tuple[str, str], _ExecutionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
@@ -329,21 +335,68 @@ class DefaultExecutionService:
             )
             return tuple(ExecutionView(child.execution_id, child.status) for child in children)
 
-    async def _start(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
+    async def _start(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        session_id: "str | None" = None,
+        source_execution_id: "str | None" = None,
+        base_execution_id: "str | None" = None,
+        conversation_step_run_id: "str | None" = None,
+        parent_execution_id: "str | None" = None,
+        root_execution_id: "str | None" = None,
+        lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
+        scope: str = "execution.run",
+    ) -> ExecutionHandle:
         if session_id is None:
-            return await self._start_unlocked(binding_digest, request, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind, scope=scope)
-        lock = await self._session_lock(request.principal.tenant_id, session_id)
-        async with lock:
-            return await self._start_unlocked(binding_digest, request, session_id=session_id, source_execution_id=source_execution_id, base_execution_id=base_execution_id, parent_execution_id=parent_execution_id, root_execution_id=root_execution_id, lineage_kind=lineage_kind, scope=scope)
+            return await self._start_unlocked(
+                binding_digest,
+                request,
+                session_id=session_id,
+                source_execution_id=source_execution_id,
+                base_execution_id=base_execution_id,
+                conversation_step_run_id=conversation_step_run_id,
+                parent_execution_id=parent_execution_id,
+                root_execution_id=root_execution_id,
+                lineage_kind=lineage_kind,
+                scope=scope,
+            )
+        async with self._session_guard(request.principal.tenant_id, session_id):
+            return await self._start_unlocked(
+                binding_digest,
+                request,
+                session_id=session_id,
+                source_execution_id=source_execution_id,
+                base_execution_id=base_execution_id,
+                conversation_step_run_id=conversation_step_run_id,
+                parent_execution_id=parent_execution_id,
+                root_execution_id=root_execution_id,
+                lineage_kind=lineage_kind,
+                scope=scope,
+            )
 
-    async def _start_unlocked(self, binding_digest: str, request: ExecutionRequest, *, session_id: "str | None" = None, source_execution_id: "str | None" = None, base_execution_id: "str | None" = None, parent_execution_id: "str | None" = None, root_execution_id: "str | None" = None, lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN, scope: str = "execution.run") -> ExecutionHandle:
+    async def _start_unlocked(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        *,
+        session_id: "str | None" = None,
+        source_execution_id: "str | None" = None,
+        base_execution_id: "str | None" = None,
+        conversation_step_run_id: "str | None" = None,
+        parent_execution_id: "str | None" = None,
+        root_execution_id: "str | None" = None,
+        lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
+        scope: str = "execution.run",
+    ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         if request.idempotency_key is None:
             raise AIError(ErrorCode.IDEMPOTENCY_KEY_INVALID)
-        conversation_run_id = None
+        conversation_run_id = conversation_step_run_id
         if session_id is not None and source_execution_id is None:
             session = await self._sessions.get(session_id, tenant_id=request.principal.tenant_id)
             if session is None:
@@ -396,6 +449,8 @@ class DefaultExecutionService:
             if existing.status is IdempotencyStatus.COMPLETED:
                 if started.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return ExecutionHandle(existing.resource_id)
+            if existing.status is IdempotencyStatus.STARTED and started.status is ExecutionStatus.FINALIZING:
                 return ExecutionHandle(existing.resource_id)
             if started.status is not ExecutionStatus.STARTED:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -462,7 +517,13 @@ class DefaultExecutionService:
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
                 )
-            elif reservation.execution.status is ExecutionStatus.STARTED and reservation.idempotency.status is IdempotencyStatus.STARTED:
+            elif reservation.idempotency.status is IdempotencyStatus.STARTED and reservation.execution.status in {
+                ExecutionStatus.STARTED,
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
                 await self._launch_started(
                     request,
                     reservation.execution,
@@ -485,14 +546,27 @@ class DefaultExecutionService:
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
 
-    async def _session_lock(self, tenant_id: str, session_id: str) -> asyncio.Lock:
+    @asynccontextmanager
+    async def _session_guard(self, tenant_id: str, session_id: str):
         key = tenant_id, session_id
         async with self._session_locks_guard:
-            lock = self._session_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._session_locks[key] = lock
-            return lock
+            entry = self._session_locks.get(key)
+            if entry is None:
+                entry = _SessionLockEntry(asyncio.Lock())
+                self._session_locks[key] = entry
+            entry.ref_count += 1
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            async with self._session_locks_guard:
+                entry.ref_count -= 1
+                if entry.ref_count == 0 and self._session_locks.get(key) is entry:
+                    self._session_locks.pop(key)
 
     async def _prepare_and_launch(
         self,
@@ -528,7 +602,13 @@ class DefaultExecutionService:
             if (
                 error.code is not ErrorCode.STORAGE_CONFLICT
                 or current is None
-                or current.status is not ExecutionStatus.STARTED
+                or current.status not in {
+                    ExecutionStatus.STARTED,
+                    ExecutionStatus.FINALIZING,
+                    ExecutionStatus.SUCCEEDED,
+                    ExecutionStatus.FAILED,
+                    ExecutionStatus.CANCELLED,
+                }
             ):
                 raise
             started = current
@@ -560,6 +640,7 @@ class DefaultExecutionService:
             ExecutionStatus.FAILED,
             ExecutionStatus.CANCELLED,
             ExecutionStatus.CANCELLING,
+            ExecutionStatus.FINALIZING,
         }:
             return
         if launch_record.status is ExecutionStatus.START_UNKNOWN:
@@ -690,7 +771,18 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
         )
-        return await self._start(binding_digest, retry_request, session_id=previous.session_id, parent_execution_id=previous.parent_execution_id, root_execution_id=previous.root_execution_id, scope="execution.retry", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.RETRY, base_execution_id=previous.base_execution_id)
+        return await self._start(
+            binding_digest,
+            retry_request,
+            session_id=previous.session_id,
+            parent_execution_id=previous.parent_execution_id,
+            root_execution_id=previous.root_execution_id,
+            scope="execution.retry",
+            source_execution_id=previous.execution_id,
+            lineage_kind=ExecutionLineageKind.RETRY,
+            base_execution_id=previous.base_execution_id,
+            conversation_step_run_id=previous.conversation_step_run_id,
+        )
 
     async def fork(self, binding_digest: str, execution_id: str, request: ForkExecutionRequest) -> ExecutionHandle:
         previous = await self._load_authorized(execution_id, request.principal, AuthorizationAction.EXECUTION_READ)
@@ -702,7 +794,17 @@ class DefaultExecutionService:
             idempotency_key=request.idempotency_key,
             memory_scope=previous.memory_scope,
         )
-        return await self._start(binding_digest, fork_request, session_id=previous.session_id, parent_execution_id=previous.parent_execution_id, root_execution_id=previous.root_execution_id, scope="execution.fork", source_execution_id=previous.execution_id, lineage_kind=ExecutionLineageKind.FORK, base_execution_id=previous.execution_id)
+        return await self._start(
+            binding_digest,
+            fork_request,
+            session_id=previous.session_id,
+            parent_execution_id=previous.parent_execution_id,
+            root_execution_id=previous.root_execution_id,
+            scope="execution.fork",
+            source_execution_id=previous.execution_id,
+            lineage_kind=ExecutionLineageKind.FORK,
+            base_execution_id=previous.execution_id,
+        )
 
     async def cancel(self, execution_id: str, request: CancelExecutionRequest) -> CancelExecutionResult:
         async with self._execution_consumer(execution_id, request.principal.tenant_id):
@@ -756,6 +858,21 @@ class DefaultExecutionService:
                 now,
             )
             operation = await self._state.operations.append(operation)
+        latest = await self._state.executions.get(
+            execution_id,
+            tenant_id=request.principal.tenant_id,
+        )
+        if latest is None:
+            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        execution = latest
+        if execution.status is ExecutionStatus.FINALIZING:
+            resolved = await self._resolve_cancel_race(
+                execution_id,
+                request.principal.tenant_id,
+                operation,
+            )
+            if resolved is not None:
+                return resolved
         if execution.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
             resolved = await self._resolve_cancel_race(execution_id, request.principal.tenant_id, operation)
             if resolved is not None:
@@ -927,7 +1044,12 @@ class DefaultExecutionService:
         operation: OperationLedgerRecord,
     ) -> "CancelExecutionResult | None":
         current = await self._state.executions.get(execution_id, tenant_id=tenant_id)
-        if current is None or current.status not in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
+        if current is None or current.status not in {
+            ExecutionStatus.FINALIZING,
+            ExecutionStatus.SUCCEEDED,
+            ExecutionStatus.FAILED,
+            ExecutionStatus.CANCELLED,
+        }:
             return None
         current_operation = await self._state.operations.get(operation.operation_id, tenant_id=tenant_id)
         if current_operation is None:
@@ -939,14 +1061,19 @@ class DefaultExecutionService:
                 raise _stable_operation_error(current_operation.error_code)
             if current_operation.status not in {OperationStatus.PENDING, OperationStatus.EFFECT_UNKNOWN}:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = await self._state.executions.get_result(execution_id, tenant_id=tenant_id)
-            result_digest = None if result is None or result.object_ref is None else result.object_ref.digest
+            if current.status is ExecutionStatus.FINALIZING:
+                result_ref = current.execution_id
+                result_digest = None
+            else:
+                result = await self._state.executions.get_result(execution_id, tenant_id=tenant_id)
+                result_ref = current.execution_id
+                result_digest = None if result is None or result.object_ref is None else result.object_ref.digest
             try:
                 current_operation = await self._state.operations.compare_and_swap(
                     operation.operation_id,
                     tenant_id=tenant_id,
                     expected_status=current_operation.status,
-                    next_record=_operation_result(current_operation, current.execution_id, result_digest),
+                    next_record=_operation_result(current_operation, result_ref, result_digest),
                 )
                 break
             except AIError as error:

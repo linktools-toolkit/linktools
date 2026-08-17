@@ -5,7 +5,7 @@
 from datetime import datetime, timezone
 
 import pytest
-from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ThinkingPart, UserPromptPart
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord, StepEvent
 
 from linktools.ai.adapter import StepExecutionHistoryReader
@@ -100,7 +100,10 @@ async def _materialize_attempt(state: RuntimeState, sequence: int, prompt: str) 
                     conversation_id=conversation_id,
                 ),
                 ModelResponse(
-                    parts=[TextPart(content="response")],
+                    parts=[
+                        ThinkingPart(content="plan"),
+                        TextPart(content="response"),
+                    ],
                     conversation_id=conversation_id,
                 ),
             ],
@@ -154,7 +157,7 @@ async def test_history_skips_missing_non_final_attempt() -> None:
         trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=200)
         transcript = await reader.transcript("execution", tenant_id="tenant", cursor=None, limit=200)
 
-        assert [item.content for item in history.items] == ["attempt-2", "response"]
+        assert [item.content for item in history.items] == ["attempt-2", "plan", "response"]
         assert [item.payload["segment_sequence"] for item in trace.items] == [2, 2]
         assert [item.text for item in transcript.items] == ["attempt-2", "response"]
     finally:
@@ -194,7 +197,7 @@ async def test_successful_history_preserves_user_prompt_and_projects_all_views()
         trace = await reader.trace("execution", tenant_id="tenant", cursor=None, limit=200)
         transcript = await reader.transcript("execution", tenant_id="tenant", cursor=None, limit=200)
 
-        assert [item.content for item in history.items] == [prompt, "response"]
+        assert [item.content for item in history.items] == [prompt, "plan", "response"]
         assert [item.payload["segment_sequence"] for item in trace.items] == [1, 1]
         assert [item.text for item in transcript.items] == [prompt, "response"]
     finally:

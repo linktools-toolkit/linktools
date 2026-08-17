@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     RetryPromptPart,
     SystemPromptPart,
+    ThinkingPart,
     TextContent,
     TextPart,
     ToolCallPart,
@@ -508,6 +509,8 @@ def _project_message(message: object) -> tuple[_ProjectedHistoryItem, ...]:
         for part in message.parts:
             if isinstance(part, TextPart):
                 values.append(_ProjectedHistoryItem("assistant", part.content))
+            elif isinstance(part, ThinkingPart):
+                values.append(_ProjectedHistoryItem("thinking", part.content))
             elif isinstance(part, ToolCallPart):
                 values.append(
                     _ProjectedHistoryItem(

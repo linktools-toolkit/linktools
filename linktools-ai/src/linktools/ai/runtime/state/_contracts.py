@@ -367,8 +367,8 @@ class RecoveryCheckpointState(StrEnum):
 class RecoveryHandoffPhase(StrEnum):
     NONE = "none"
     PREPARED = "prepared"
-    EXECUTION_COMMITTED = "execution_committed"
     CONVERSATION_RESOLVED = "conversation_resolved"
+    EXECUTION_COMMITTED = "execution_committed"
     COMPLETED = "completed"
 
 
@@ -386,6 +386,7 @@ class RecoveryExecutionInput:
     root_execution_id: str
     source_execution_id: "str | None"
     base_execution_id: "str | None"
+    conversation_step_run_id: "str | None"
     idempotency: "RecoveryIdempotencyInput"
 
 

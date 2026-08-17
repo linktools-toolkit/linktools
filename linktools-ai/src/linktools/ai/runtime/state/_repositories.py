@@ -810,7 +810,7 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                 if event is None or event["payload"] not in ({}, None):
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 return current
-            if current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
+            if current.status is ExecutionStatus.FINALIZING or current.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} or current.revision != commit.expected_revision or current.event_sequence != commit.expected_event_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             updated = replace(current, status=ExecutionStatus.CANCELLING, revision=current.revision + 1, event_sequence=current.event_sequence + 1, updated_at=commit.requested_at)
             values = self._record_values(updated)

@@ -25,7 +25,7 @@ from ._contracts import (
     RecoveryTerminalOutcome,
 )
 
-_RECOVERY_INPUT_VERSION = 3
+_RECOVERY_INPUT_VERSION = 4
 
 
 def recovery_input_to_json(value: RecoveryExecutionInput) -> dict[str, JsonValue]:
