@@ -170,6 +170,12 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 
 `RuntimeStatePlan` selects the runtime persistence routes. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
 
+Multiple Runtime instances may share a filesystem RuntimeState scope only when
+the filesystem provides consistent advisory locking, atomic rename, and
+post-lock visibility. They must use the same physical root, namespace, and
+tenant scope. If the shared filesystem cannot provide those guarantees, use
+the SQL route instead.
+
 Unselected domains use process-local stores and are intentionally absent after restart.
 
 The identity fields are intentionally independent:

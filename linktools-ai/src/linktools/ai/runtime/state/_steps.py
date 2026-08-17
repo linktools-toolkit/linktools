@@ -8,6 +8,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,12 +25,15 @@ from pydantic_ai_harness.step_persistence import (
     ToolEffectRecord,
 )
 
-from ...core import canonical_identity_digest, validate_persistence_namespace, validate_tenant_id
+from ...core import (
+    canonical_identity_digest,
+    validate_persistence_namespace,
+    validate_tenant_id,
+)
 from ...errors import AIError, ErrorCode
 from ...storage import (
     FilesystemMutationLock,
     FilesystemObjectStore,
-    FilesystemWriterLock,
     ObjectStore,
     SqlObjectStore,
     SqlStorageContext,
@@ -286,7 +290,6 @@ class FilesystemStepArchive(StagingStepStore):
             physical_root,
             runtime_domain=runtime_domain,
             object_store=object_store,
-            writer_lock=None,
         )
 
     @property
@@ -300,7 +303,6 @@ class FilesystemStepArchive(StagingStepStore):
         *,
         runtime_domain: RuntimeDomain,
         object_store: ObjectStore,
-        writer_lock: FilesystemWriterLock,
     ) -> "FilesystemStepArchive":
         archive = cls.__new__(cls)
         StagingStepStore.__init__(archive)
@@ -308,7 +310,6 @@ class FilesystemStepArchive(StagingStepStore):
             scope_root,
             runtime_domain=runtime_domain,
             object_store=object_store,
-            writer_lock=writer_lock,
         )
         return archive
 
@@ -318,7 +319,6 @@ class FilesystemStepArchive(StagingStepStore):
         *,
         runtime_domain: RuntimeDomain,
         object_store: ObjectStore | None,
-        writer_lock: FilesystemWriterLock | None,
     ) -> None:
         if runtime_domain not in _ARCHIVE_DOMAINS:
             raise ValueError("Step archive owner is invalid")
@@ -333,23 +333,21 @@ class FilesystemStepArchive(StagingStepStore):
             else FilesystemObjectStore(physical_root / "objects")
         )
         self._mutation_lock = FilesystemMutationLock(self._root / "mutation.lock")
-        self._lifetime_lock = writer_lock or FilesystemWriterLock(physical_root / "runtime.lock")
-        self._manage_writer_lock = writer_lock is None
         self._counters: dict[str, dict[str, int]] = {}
         self._ready = False
 
     async def initialize(self) -> None:
-        if self._manage_writer_lock:
-            await self._lifetime_lock.acquire()
+        self._ready = False
         try:
             async with self._mutation_lock:
                 self._root.mkdir(parents=True, exist_ok=True)
-                for run_path in self._root.glob("runs/*"):
-                    await self._load_run(run_path)
-            self._ready = True
+                await self._reload_all_runs_locked()
+                self._ready = True
+        except OSError as error:
+            self._ready = False
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         except BaseException:
-            if self._manage_writer_lock:
-                await self._lifetime_lock.release()
+            self._ready = False
             raise
 
         _logger.debug(
@@ -359,97 +357,226 @@ class FilesystemStepArchive(StagingStepStore):
         )
 
     async def close(self) -> None:
-        self._ready = False
-        if self._manage_writer_lock and self._lifetime_lock.acquired:
-            await self._lifetime_lock.release()
+        async with self._mutation_lock:
+            self._ready = False
+            await self._clear_facts()
 
     async def register_run(self, record: RunRecord) -> None:
-        await self._ensure_ready()
         async with self._mutation_lock:
-            previous = self._runs.get(record.run_id)
-            await super().register_run(record)
-            directory = self._run_dir(record.run_id)
             try:
+                self._require_ready_locked()
+                await self._reload_run_locked(record.run_id, required=False)
+                await super().register_run(record)
+                directory = self._run_dir(record.run_id)
                 directory.mkdir(parents=True, exist_ok=True)
-                counters = self._counters.setdefault(record.run_id, {"last_event_index": 0, "last_snapshot_index": 0, "last_effect_index": 0})
+                counters = self._counters.setdefault(
+                    record.run_id,
+                    {
+                        "last_event_index": 0,
+                        "last_snapshot_index": 0,
+                        "last_effect_index": 0,
+                    },
+                )
                 await asyncio.to_thread(write_json_atomic, directory / "run.json", _run_json(record, counters), fsync=True)
+                _logger.debug(
+                    "step archive run registered: domain=%s run=%s",
+                    self._runtime_domain.value,
+                    record.run_id,
+                )
             except BaseException as error:
-                if previous is None:
-                    self._runs.pop(record.run_id, None)
-                    self._counters.pop(record.run_id, None)
-                else:
-                    self._runs[record.run_id] = previous
+                await self._recover_run_locked(record.run_id)
                 _raise_filesystem_storage_error(error)
 
     async def append_event(self, event: StepEvent) -> None:
-        await self._ensure_ready()
         if self._runtime_domain is not RuntimeDomain.EXECUTION:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if event.run_id not in self._runs:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         async with self._mutation_lock:
-            before = len(self._events.get(event.run_id, ()))
-            previous_counter = self._counters[event.run_id]["last_event_index"]
-            await super().append_event(event)
-            if len(self._events.get(event.run_id, ())) == before:
-                return
-            counters = self._counters[event.run_id]
-            index = counters["last_event_index"] + 1
             try:
+                self._require_ready_locked()
+                await self._reload_run_locked(event.run_id, required=True)
+                before = len(self._events.get(event.run_id, ()))
+                await super().append_event(event)
+                if len(self._events.get(event.run_id, ())) == before:
+                    return
+                counters = self._counters[event.run_id]
+                index = counters["last_event_index"] + 1
                 await asyncio.to_thread(write_json_atomic, self._run_dir(event.run_id) / "events" / f"event-{index:020d}.json", _event_json(event), fsync=True)
                 counters["last_event_index"] = index
                 await asyncio.to_thread(write_json_atomic, self._run_dir(event.run_id) / "run.json", _run_json(self._runs[event.run_id], counters), fsync=True)
+                _logger.debug(
+                    "step archive event appended: domain=%s run=%s index=%s",
+                    self._runtime_domain.value,
+                    event.run_id,
+                    index,
+                )
             except BaseException as error:
-                self._events[event.run_id] = self._events[event.run_id][:before]
-                counters["last_event_index"] = previous_counter
+                await self._recover_run_locked(event.run_id)
                 _raise_filesystem_storage_error(error)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
-        await self._ensure_ready()
         if self._runtime_domain not in _ARCHIVE_DOMAINS:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if snapshot.run_id not in self._runs:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         async with self._mutation_lock:
-            before = len(self._snapshots.get(snapshot.run_id, ()))
-            previous_counter = self._counters[snapshot.run_id]["last_snapshot_index"]
-            await super().save_snapshot(snapshot)
-            if len(self._snapshots.get(snapshot.run_id, ())) == before:
-                return
-            counters = self._counters[snapshot.run_id]
-            index = counters["last_snapshot_index"] + 1
             try:
+                self._require_ready_locked()
+                await self._reload_run_locked(snapshot.run_id, required=True)
+                before = len(self._snapshots.get(snapshot.run_id, ()))
+                await super().save_snapshot(snapshot)
+                if len(self._snapshots.get(snapshot.run_id, ())) == before:
+                    return
+                counters = self._counters[snapshot.run_id]
+                index = counters["last_snapshot_index"] + 1
                 payload = await _snapshot_json(snapshot, self._object_store, self._media_prefix())
                 await asyncio.to_thread(write_json_atomic, self._run_dir(snapshot.run_id) / "snapshots" / f"snapshot-{index:020d}.json", payload, fsync=True)
                 counters["last_snapshot_index"] = index
                 await asyncio.to_thread(write_json_atomic, self._run_dir(snapshot.run_id) / "run.json", _run_json(self._runs[snapshot.run_id], counters), fsync=True)
+                _logger.debug(
+                    "step archive snapshot saved: domain=%s run=%s index=%s",
+                    self._runtime_domain.value,
+                    snapshot.run_id,
+                    index,
+                )
             except BaseException as error:
-                self._snapshots[snapshot.run_id] = self._snapshots[snapshot.run_id][:before]
-                counters["last_snapshot_index"] = previous_counter
+                await self._recover_run_locked(snapshot.run_id)
                 _raise_filesystem_storage_error(error)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
-        await self._ensure_ready()
         if self._runtime_domain is not RuntimeDomain.RECOVERY:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        if record.run_id not in self._runs:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         async with self._mutation_lock:
-            before = len(self._effects.get(record.run_id, ()))
-            previous_counter = self._counters[record.run_id]["last_effect_index"]
-            await super().record_tool_effect(record)
-            if len(self._effects.get(record.run_id, ())) == before:
-                return
-            counters = self._counters[record.run_id]
-            index = counters["last_effect_index"] + 1
             try:
+                self._require_ready_locked()
+                await self._reload_run_locked(record.run_id, required=True)
+                before = len(self._effects.get(record.run_id, ()))
+                await super().record_tool_effect(record)
+                if len(self._effects.get(record.run_id, ())) == before:
+                    return
+                counters = self._counters[record.run_id]
+                index = counters["last_effect_index"] + 1
                 await asyncio.to_thread(write_json_atomic, self._run_dir(record.run_id) / "effects" / f"effect-{index:020d}.json", _effect_json(record), fsync=True)
                 counters["last_effect_index"] = index
                 await asyncio.to_thread(write_json_atomic, self._run_dir(record.run_id) / "run.json", _run_json(self._runs[record.run_id], counters), fsync=True)
+                _logger.debug(
+                    "step archive tool effect recorded: domain=%s run=%s index=%s",
+                    self._runtime_domain.value,
+                    record.run_id,
+                    index,
+                )
             except BaseException as error:
-                self._effects[record.run_id] = self._effects[record.run_id][:before]
-                counters["last_effect_index"] = previous_counter
+                await self._recover_run_locked(record.run_id)
                 _raise_filesystem_storage_error(error)
+
+    async def get_run(self, *, run_id: str) -> RunRecord | None:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            record = self._runs.get(run_id)
+            return None if record is None else deepcopy(record)
+
+    async def list_runs(
+        self,
+        *,
+        parent_run_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> list[RunRecord]:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_all_runs_locked()
+            return sorted(
+                (
+                    deepcopy(item)
+                    for item in self._runs.values()
+                    if (parent_run_id is None or item.parent_run_id == parent_run_id)
+                    and (conversation_id is None or item.conversation_id == conversation_id)
+                ),
+                key=lambda item: (item.started_at, item.run_id),
+            )
+
+    async def list_events(self, *, run_id: str) -> list[StepEvent]:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            return [deepcopy(item) for item in self._events.get(run_id, ())]
+
+    async def latest_snapshot(
+        self,
+        *,
+        run_id: str,
+        include_interrupted: bool = False,
+    ) -> ContinuableSnapshot | None:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            values = self._snapshots.get(run_id, ())
+            if not values:
+                return None
+            snapshot = values[-1]
+            if not include_interrupted and snapshot.state != "complete":
+                return None
+            return deepcopy(snapshot)
+
+    async def get_tool_effect(
+        self,
+        *,
+        run_id: str,
+        tool_call_id: str,
+    ) -> ToolEffectRecord | None:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            values = [
+                item
+                for item in self._effects.get(run_id, ())
+                if item.tool_call_id == tool_call_id
+            ]
+            return None if not values else deepcopy(values[-1])
+
+    async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            latest: dict[str, ToolEffectRecord] = {}
+            for item in self._effects.get(run_id, ()):
+                latest[item.tool_call_id] = item
+            return [
+                deepcopy(item)
+                for item in latest.values()
+                if item.status == "started"
+            ]
+
+    async def _fact_projection(
+        self,
+        run_id: str,
+    ) -> tuple[
+        RunRecord | None,
+        tuple[StepEvent, ...],
+        tuple[ContinuableSnapshot, ...],
+        tuple[ToolEffectRecord, ...],
+    ]:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            return (
+                deepcopy(self._runs.get(run_id)),
+                tuple(deepcopy(item) for item in self._events.get(run_id, ())),
+                tuple(deepcopy(item) for item in self._snapshots.get(run_id, ())),
+                tuple(deepcopy(item) for item in self._effects.get(run_id, ())),
+            )
+
+    async def release_run(self, run_id: str) -> None:
+        async with self._mutation_lock:
+            self._require_ready_locked()
+            await self._reload_run_locked(run_id, required=False)
+            self._runs.pop(run_id, None)
+            self._events.pop(run_id, None)
+            self._snapshots.pop(run_id, None)
+            self._effects.pop(run_id, None)
+            self._counters.pop(run_id, None)
+            _logger.debug(
+                "step archive run released from cache: domain=%s run=%s",
+                self._runtime_domain.value,
+                run_id,
+            )
 
     async def _load_run(self, directory: Path) -> None:
         run_path = directory / "run.json"
@@ -506,7 +633,54 @@ class FilesystemStepArchive(StagingStepStore):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
             await super().record_tool_effect(effect)
         if original_counters != counters:
-            await asyncio.to_thread(write_json_atomic, run_path, _run_json(record, counters), fsync=True)
+            try:
+                await asyncio.to_thread(
+                    write_json_atomic,
+                    run_path,
+                    _run_json(record, counters),
+                    fsync=True,
+                )
+            except OSError as error:
+                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    async def _reload_run_locked(self, run_id: str, *, required: bool) -> None:
+        try:
+            directory = self._run_dir(run_id)
+            self._runs.pop(run_id, None)
+            self._events.pop(run_id, None)
+            self._snapshots.pop(run_id, None)
+            self._effects.pop(run_id, None)
+            self._counters.pop(run_id, None)
+            if not directory.exists():
+                if required:
+                    raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                return
+            await self._load_run(directory)
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    async def _reload_all_runs_locked(self) -> None:
+        try:
+            await self._clear_facts()
+            runs_root = self._root / "runs"
+            if not runs_root.exists():
+                return
+            for directory in sorted(runs_root.iterdir()):
+                if directory.is_dir():
+                    await self._load_run(directory)
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+
+    async def _recover_run_locked(self, run_id: str) -> None:
+        try:
+            await self._reload_run_locked(run_id, required=False)
+        except BaseException:
+            self._runs.pop(run_id, None)
+            self._events.pop(run_id, None)
+            self._snapshots.pop(run_id, None)
+            self._effects.pop(run_id, None)
+            self._counters.pop(run_id, None)
+            raise
 
     def _run_dir(self, run_id: str) -> Path:
         if not run_id or any(character in run_id for character in "/\\\x00"):
@@ -516,7 +690,7 @@ class FilesystemStepArchive(StagingStepStore):
     def _media_prefix(self) -> str:
         return f"v1/step/{self._runtime_domain.value}/{self._namespace_digest}/{self._tenant_scope_key}"
 
-    async def _ensure_ready(self) -> None:
+    def _require_ready_locked(self) -> None:
         if not self._ready:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
 

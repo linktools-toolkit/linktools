@@ -22,7 +22,6 @@ from ...core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
-    UsageMetrics,
     OperationLedgerInput,
     OperationLedgerRecord,
     OperationStatus,
@@ -31,6 +30,7 @@ from ...core import (
     ResourceRef,
     SessionStatus,
     StopReason,
+    UsageMetrics,
 )
 from ...storage import ObjectRef
 from ...task import (
@@ -458,10 +458,25 @@ class RuntimeRepository(Protocol):
 
 class SessionRepository(RuntimeRepository, Protocol):
     async def create(self, record: SessionRecord) -> SessionRecord: ...
+    async def create_with_operation(
+        self,
+        record: SessionRecord,
+        *,
+        operation: OperationLedgerInput,
+    ) -> "tuple[SessionRecord, bool]": ...
     async def list(self, *, tenant_id: str, owner_principal_id: str | None = None) -> tuple[SessionRecord, ...]: ...
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None: ...
     async def get(self, session_id: str, *, tenant_id: str) -> SessionRecord | None: ...
     async def compare_and_swap(self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord) -> SessionRecord: ...
+    async def compare_and_swap_with_operation(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: SessionRecord,
+        operation: OperationLedgerInput,
+    ) -> "tuple[SessionRecord, bool]": ...
     async def admit_execution(
         self,
         session_id: str,

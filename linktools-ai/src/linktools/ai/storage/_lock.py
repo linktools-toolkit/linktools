@@ -8,8 +8,8 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -25,18 +25,30 @@ _logger = environ.get_logger("ai.storage.lock")
 class KeyedAsyncLock:
     def __init__(self) -> None:
         self._locks: dict[str, asyncio.Lock] = {}
+        self._owners: dict[str, asyncio.Task[object]] = {}
         self._guard = asyncio.Lock()
 
     async def acquire(self, key: str) -> None:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("keyed lock requires an asyncio task")
         async with self._guard:
+            if self._owners.get(key) is task:
+                raise RuntimeError(f"recursive keyed lock acquisition: {key}")
             lock = self._locks.setdefault(key, asyncio.Lock())
         await lock.acquire()
+        self._owners[key] = task
 
     async def release(self, key: str) -> None:
+        task = asyncio.current_task()
         async with self._guard:
             lock = self._locks.get(key)
-            if lock is not None and lock.locked():
-                lock.release()
+            if lock is None or not lock.locked():
+                return
+            if task is None or self._owners.get(key) is not task:
+                raise RuntimeError(f"keyed lock owner mismatch: {key}")
+            self._owners.pop(key, None)
+            lock.release()
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,35 +239,69 @@ class FilesystemWriterLock:
         _logger.debug("runtime writer lock released: path=%s", self.path)
 
 
+_filesystem_mutation_locks = KeyedAsyncLock()
+
+
 class FilesystemMutationLock:
-    """Acquire a short-lived filesystem mutation lock without blocking cancellation."""
+    """Acquire a short-lived process and filesystem mutation lock."""
 
     def __init__(self, path: "str | Path", *, poll_interval: float = 0.01) -> None:
         if poll_interval <= 0:
             raise ValueError("poll_interval must be positive")
-        self.path = Path(path)
+        self.path = Path(path).expanduser().resolve(strict=False)
         self.poll_interval = poll_interval
         self._lock = FileLock(str(self.path), thread_local=False)
         self._acquired = False
+        self._key = str(self.path)
+
+    @property
+    def acquired(self) -> bool:
+        return self._acquired
 
     async def __aenter__(self) -> "FilesystemMutationLock":
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            while not self._try_acquire():
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        await _filesystem_mutation_locks.acquire(self._key)
+        try:
+            while not await asyncio.to_thread(self._try_acquire):
                 await asyncio.sleep(self.poll_interval)
+        except OSError as error:
+            if self._acquired:
+                await asyncio.to_thread(self._release)
+                self._acquired = False
+            await _filesystem_mutation_locks.release(self._key)
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         except BaseException:
             if self._acquired:
-                self._release()
+                await asyncio.to_thread(self._release)
                 self._acquired = False
+            await _filesystem_mutation_locks.release(self._key)
             raise
         _logger.debug("filesystem mutation lock acquired: path=%s", self.path)
         return self
+
+    @asynccontextmanager
+    async def local(self) -> AsyncIterator[None]:
+        await _filesystem_mutation_locks.acquire(self._key)
+        try:
+            yield
+        finally:
+            await _filesystem_mutation_locks.release(self._key)
 
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if not self._acquired:
             return
         self._acquired = False
-        self._release()
+        release_task = asyncio.create_task(asyncio.to_thread(self._release))
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(release_task)
+            raise
+        finally:
+            await _filesystem_mutation_locks.release(self._key)
         _logger.debug("filesystem mutation lock released: path=%s", self.path)
 
     def _try_acquire(self) -> bool:

@@ -286,7 +286,6 @@ def _build_steps(
                 filesystem_backends[domain].physical_root,
                 runtime_domain=domain,
                 object_store=objects.object_store(domain),
-                writer_lock=filesystem_backends[domain].writer_lock,
             )
         elif route.kind in {"sqlite", "sql"}:
             from ._steps import SqlStepArchive

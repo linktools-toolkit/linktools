@@ -124,12 +124,15 @@ class DefaultSessionService:
     async def create(self, binding_digest: str, request: CreateSessionRequest) -> SessionView:
         resource = ResourceRef(ResourceKind.SESSION, request.session_id, request.principal.tenant_id, request.principal.principal_id)
         await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, resource)
-        digest = canonical_sha256({"action": "session.create", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": request.session_id, "binding": binding_digest, "metadata": dict(request.metadata)})
-        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.session_id, OperationKind.SESSION_CREATE, digest)
-        if operation.result_ref:
-            current = await self._conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
-            if current is not None:
-                return await self._view(current, request.principal)
+        digest = canonical_sha256({
+            "action": "session.create",
+            "tenant_id": request.principal.tenant_id,
+            "principal_id": request.principal.principal_id,
+            "session_id": request.session_id,
+            "binding": binding_digest,
+            "cwd": request.cwd,
+            "metadata": dict(request.metadata),
+        })
         now = datetime.now(timezone.utc)
         record = SessionRecord(
             session_id=request.session_id,
@@ -147,16 +150,23 @@ class DefaultSessionService:
             active_execution_id=None,
             continuation=None,
         )
+        operation = self._session_terminal_operation(
+            request.idempotency_key,
+            request.principal.tenant_id,
+            request.session_id,
+            OperationKind.SESSION_CREATE,
+            digest,
+            record.revision,
+        )
         try:
-            await self._conversation.sessions.create(record)
+            record, _ = await self._conversation.sessions.create_with_operation(
+                record,
+                operation=operation,
+            )
         except AIError as error:
-            if error.code is not ErrorCode.SESSION_CONFLICT:
-                raise
-            current = await self._conversation.sessions.get(request.session_id, tenant_id=request.principal.tenant_id)
-            if current is None or current.owner_principal_id != request.principal.principal_id or current.binding_digest != binding_digest:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-            record = current
-        await self._complete_operation(operation, request.principal.tenant_id, record.session_id, canonical_sha256({"session_id": record.session_id, "revision": record.revision}))
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+            raise
         _logger.debug("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
         return await self._view(record, request.principal)
 
@@ -236,14 +246,17 @@ class DefaultSessionService:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             source = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
             await self._authorization.authorize(request.principal, AuthorizationAction.SESSION_CREATE, ResourceRef(ResourceKind.SESSION, request.new_session_id, request.principal.tenant_id, request.principal.principal_id))
-            digest = canonical_sha256({"action": "session.fork", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "source": session_id, "target": request.new_session_id, "binding": source.binding_digest})
-            operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, request.new_session_id, OperationKind.SESSION_FORK, digest)
-            if operation.result_ref:
-                current = await self._conversation.sessions.get(operation.result_ref, tenant_id=request.principal.tenant_id)
-                if current is not None:
-                    return await self._view(current, request.principal)
             if source.binding_digest != binding_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
+            digest = canonical_sha256({
+                "action": "session.fork",
+                "tenant_id": request.principal.tenant_id,
+                "principal_id": request.principal.principal_id,
+                "source": session_id,
+                "target": request.new_session_id,
+                "binding": source.binding_digest,
+                "cwd": request.cwd,
+            })
             now = datetime.now(timezone.utc)
             target = SessionRecord(
                 session_id=request.new_session_id,
@@ -261,24 +274,23 @@ class DefaultSessionService:
                 active_execution_id=None,
                 continuation=source.continuation,
             )
+            operation = self._session_terminal_operation(
+                request.idempotency_key,
+                request.principal.tenant_id,
+                request.new_session_id,
+                OperationKind.SESSION_FORK,
+                digest,
+                target.revision,
+            )
             try:
-                await self._conversation.sessions.create(target)
+                target, _ = await self._conversation.sessions.create_with_operation(
+                    target,
+                    operation=operation,
+                )
             except AIError as error:
-                if error.code is not ErrorCode.SESSION_CONFLICT:
-                    raise
-                existing_target = await self._conversation.sessions.get(request.new_session_id, tenant_id=request.principal.tenant_id)
-                if (
-                    existing_target is None
-                    or existing_target.tenant_id != target.tenant_id
-                    or existing_target.owner_principal_id != target.owner_principal_id
-                    or existing_target.binding_digest != target.binding_digest
-                    or existing_target.status is not SessionStatus.OPEN
-                    or existing_target.revision != 0
-                    or existing_target.resource_generation != 0
-                ):
+                if error.code is ErrorCode.STORAGE_CONFLICT:
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                target = existing_target
-            await self._complete_operation(operation, request.principal.tenant_id, target.session_id, canonical_sha256({"session_id": target.session_id, "revision": target.revision}))
+                raise
             _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
             return await self._view(target, request.principal)
 
@@ -294,32 +306,38 @@ class DefaultSessionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         if any(key.startswith("linktools.ai.") for key in current.metadata if key not in request.metadata):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
-        digest = canonical_sha256({"action": "session.update", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "expected_revision": request.expected_revision, "metadata": request.metadata, "cwd": request.cwd})
-        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_UPDATE, digest)
-        if operation.result_ref:
-            updated = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
-            if updated is not None:
-                return await self._view(updated, request.principal)
+        digest = canonical_sha256({
+            "action": "session.update",
+            "tenant_id": request.principal.tenant_id,
+            "principal_id": request.principal.principal_id,
+            "session_id": session_id,
+            "expected_revision": request.expected_revision,
+            "metadata": request.metadata,
+            "cwd": request.cwd,
+        })
         requested_cwd = request.cwd if request.cwd is not None else current.cwd
-        if (
-            operation.status is OperationStatus.PENDING
-            and current.revision == request.expected_revision + 1
-            and current.resource_generation == request.expected_revision + 1
-            and current.status is SessionStatus.OPEN
-            and current.metadata == request.metadata
-            and current.cwd == requested_cwd
-        ):
-            await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": current.revision}))
-            _logger.debug("session update reconciled: session=%s revision=%s", session_id, current.revision)
-            return await self._view(current, request.principal)
-        if current.status is SessionStatus.CLEANUP_REQUIRED:
-            raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
-        if current.revision != request.expected_revision or current.status is not SessionStatus.OPEN:
-            raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
         now = datetime.now(timezone.utc)
         next_record = replace(current, revision=current.revision + 1, resource_generation=current.resource_generation + 1, cwd=requested_cwd, metadata=request.metadata, updated_at=now)
-        updated = await self._conversation.sessions.compare_and_swap(session_id, tenant_id=request.principal.tenant_id, expected_revision=request.expected_revision, next_record=next_record)
-        await self._complete_operation(operation, request.principal.tenant_id, session_id, canonical_sha256({"session_id": session_id, "revision": updated.revision}))
+        operation = self._session_terminal_operation(
+            request.idempotency_key,
+            request.principal.tenant_id,
+            session_id,
+            OperationKind.SESSION_UPDATE,
+            digest,
+            request.expected_revision + 1,
+        )
+        try:
+            updated, _ = await self._conversation.sessions.compare_and_swap_with_operation(
+                session_id,
+                tenant_id=request.principal.tenant_id,
+                expected_revision=request.expected_revision,
+                next_record=next_record,
+                operation=operation,
+            )
+        except AIError as error:
+            if error.code is ErrorCode.STORAGE_CONFLICT:
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
+            raise
         _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
         return await self._view(updated, request.principal)
 
@@ -677,12 +695,53 @@ class DefaultSessionService:
         )
         return updated
 
+    def _session_terminal_operation(
+        self,
+        operation_id: str,
+        tenant_id: str,
+        session_id: str,
+        operation_kind: OperationKind,
+        request_digest: str,
+        revision: int,
+    ) -> OperationLedgerInput:
+        now = datetime.now(timezone.utc)
+        return OperationLedgerInput(
+            idempotency_key_digest(operation_id),
+            tenant_id,
+            ResourceKind.SESSION,
+            session_id,
+            None,
+            operation_kind,
+            OperationStatus.SUCCEEDED,
+            request_digest,
+            session_id,
+            canonical_sha256({"session_id": session_id, "revision": revision}),
+            None,
+            False,
+            now,
+            now,
+        )
+
     async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, operation_kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
         operation_id = idempotency_key_digest(operation_id)
         for _ in range(4):
             existing = await self._conversation.operations.get(operation_id, tenant_id=tenant_id)
             if existing is not None:
-                if existing.request_digest != request_digest:
+                if (
+                    existing.tenant_id != tenant_id
+                    or existing.resource_kind is not resource_kind
+                    or existing.resource_id != resource_id
+                    or existing.execution_id is not None
+                    or existing.operation_kind is not operation_kind
+                    or existing.request_digest != request_digest
+                    or existing.status not in {
+                        OperationStatus.PENDING,
+                        OperationStatus.RUNNING,
+                        OperationStatus.SUCCEEDED,
+                        OperationStatus.FAILED,
+                    }
+                    or not existing.compactable
+                ):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 return existing
             now = datetime.now(timezone.utc)

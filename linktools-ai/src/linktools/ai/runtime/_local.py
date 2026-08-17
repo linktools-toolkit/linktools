@@ -682,7 +682,10 @@ class LocalExecutionBackend:
         try:
             await self._ensure_session_admission(execution)
         except AIError as error:
-            if error.code not in {ErrorCode.SESSION_BUSY, ErrorCode.SESSION_CONFLICT}:
+            if error.code not in {
+                ErrorCode.SESSION_BUSY,
+                ErrorCode.SESSION_CONFLICT,
+            }:
                 raise
             await self._commit_terminal(
                 execution,
@@ -775,10 +778,7 @@ class LocalExecutionBackend:
             try:
                 await self._resolve_handoff_conversation(checkpoint, handoff)
             except AIError as error:
-                if error.code not in {
-                    ErrorCode.SESSION_BUSY,
-                    ErrorCode.SESSION_CONFLICT,
-                }:
+                if error.code is not ErrorCode.SESSION_CONFLICT:
                     raise
                 checkpoint = await self._rewrite_prepared_success_handoff(
                     checkpoint,
@@ -1484,6 +1484,13 @@ class LocalExecutionBackend:
                     ExecutionStatus.CANCELLED,
                 }:
                     await self._commit_failure(current, error, run_id=run_id)
+                persisted = await self._execution.executions.get(
+                    execution_id,
+                    tenant_id=original.tenant_id,
+                )
+                if persisted is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                operation_result = _execution_operation_result(persisted.status)
                 _logger.error(
                     "local execution failed: execution=%s",
                     execution_id,
@@ -1721,31 +1728,11 @@ class LocalExecutionBackend:
                 ExecutionStatus.CANCELLED,
             }:
                 return
-            try:
-                await self._commit_session_conversation(
-                    current,
-                    source_run_id=run_id,
-                    expected_cursor=expected_cursor,
-                )
-            except AIError as error:
-                if error.code is not ErrorCode.SESSION_BUSY:
-                    raise
-                latest = await self._execution.executions.get(
-                    current.execution_id,
-                    tenant_id=current.tenant_id,
-                )
-                if latest is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if latest.status is ExecutionStatus.FINALIZING:
-                    await self._commit_terminal(
-                        latest,
-                        ExecutionStatus.FAILED,
-                        None,
-                        ErrorCode.SESSION_BUSY.value,
-                        StopReason.ERROR,
-                        run_id=run_id,
-                    )
-                return
+            await self._commit_session_conversation(
+                current,
+                source_run_id=run_id,
+                expected_cursor=expected_cursor,
+            )
         await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,

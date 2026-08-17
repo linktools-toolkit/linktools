@@ -9,7 +9,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from linktools.ai.core import ExecutionLineageKind, ExecutionStatus, Principal
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.runtime import ExecutionRequest
@@ -125,8 +124,12 @@ async def test_local_business_failure_commits_failed_without_escaping() -> None:
     failures: list[Exception] = []
 
     async def commit_failure(execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
-        del execution, run_id
+        del run_id
         failures.append(error)
+        backend._execution.executions.record = replace(
+            execution,
+            status=ExecutionStatus.FAILED,
+        )
 
     backend._commit_failure = commit_failure
     await backend._run(

@@ -12,7 +12,12 @@ from ._ids import (
     step_run_id,
 )
 from ._json import JsonValue, canonical_json_bytes
-from ._operation import OperationLedgerInput, OperationLedgerRecord
+from ._operation import (
+    OperationLedgerInput,
+    OperationLedgerRecord,
+    operation_cas_immutable_matches,
+    operation_replay_matches,
+)
 from ._paging import CursorPayload, CursorSigner, HmacCursorSigner, Page
 from ._principal import (
     AuthorizationAction,
@@ -28,6 +33,7 @@ from ._redaction import (
     RedactionPolicy,
     StructuredRedactor,
 )
+from ._usage import UsageMetrics
 from ._validation import (
     validate_agent_id,
     validate_asset_kind,
@@ -69,7 +75,6 @@ from ._value import (
     ToolOperationStatus,
     canonical_string_tuple,
 )
-from ._usage import UsageMetrics
 
 __all__ = [
     "JsonValue",
@@ -91,6 +96,7 @@ __all__ = [
     "canonical_sha256", "canonical_identity_digest", "idempotency_key_digest", "principal_identity_payload", "step_conversation_id", "step_run_id",
     "canonical_json_bytes",
     "OperationLedgerInput", "OperationLedgerRecord",
+    "operation_cas_immutable_matches", "operation_replay_matches",
     "canonical_string_tuple",
     "deterministic_id",
     "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",

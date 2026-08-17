@@ -6,8 +6,8 @@ import asyncio
 import hashlib
 import json
 import re
-import threading
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
@@ -38,8 +38,8 @@ from ...core import (
 )
 from ...errors import AIError, ErrorCode
 from ...storage import (
+    FilesystemMutationLock,
     FilesystemObjectStore,
-    FilesystemWriterLock,
     ObjectRef,
     ObjectStore,
     namespace_digest,
@@ -78,7 +78,6 @@ from ._memory import (
     _MemoryRepository,
     _OperationRepository,
     _RecoveryCheckpointRepository,
-    _restore_runtime_snapshot,
     _SessionRepository,
     _TaskRepository,
     _TerminalCommitRepository,
@@ -113,33 +112,6 @@ def _filesystem_scope_root(
     )
 
 
-async def _release_lock_after_prepare_failure(
-    lock: FilesystemWriterLock,
-    *,
-    primary: BaseException,
-) -> None:
-    del primary
-    task = asyncio.create_task(
-        lock.release(),
-        name="linktools-filesystem-prepare-lock-release",
-    )
-    try:
-        await asyncio.shield(task)
-    except asyncio.CancelledError:
-        try:
-            await asyncio.shield(task)
-        except BaseException:
-            _logger.error(
-                "filesystem writer lock release failed after prepare cancellation",
-                exc_info=True,
-            )
-    except BaseException:
-        _logger.error(
-            "filesystem writer lock release failed after prepare failure",
-            exc_info=True,
-        )
-
-
 class _FilesystemDomainBackend:
     """Own one durable Runtime domain and its generation-1 files."""
 
@@ -156,7 +128,7 @@ class _FilesystemDomainBackend:
         self._manifest = self._root / "manifest.json"
         self._records = self._root / "records.json"
         self._object_store = FilesystemObjectStore(self._root / "objects")
-        self._writer_lock = FilesystemWriterLock(self._root / "runtime.lock")
+        self._mutation_lock = FilesystemMutationLock(self._root / "runtime.lock")
         self._hub = TransactionHub()
         self._binding = RuntimeTransactionBinding()
         parts = _build_in_memory_domains(
@@ -168,16 +140,21 @@ class _FilesystemDomainBackend:
         self._parts = parts
         self._state = parts.states[domain]
         self._components = parts.components
-        self._commit_lock = threading.Lock()
         self._released = False
         self._binding.commit_callback = self._commit_domain
+        self._binding.begin_callback = self._begin_domain
+        self._binding.end_callback = self._end_domain
         self._binding.rollback_callback = self._rollback_domains
         self._hub.configure(
             snapshot=self._binding.snapshot,
             restore=self._binding.restore,
+            begin=self._binding.begin,
             commit=self._binding.commit,
+            end=self._binding.end,
             rollback=self._binding.rollback,
         )
+        for component in self._components:
+            component.bind_read_guard(self._read_guard)
 
     @property
     def state(self) -> object:
@@ -192,10 +169,6 @@ class _FilesystemDomainBackend:
         return self._object_store
 
     @property
-    def writer_lock(self) -> FilesystemWriterLock:
-        return self._writer_lock
-
-    @property
     def components(self) -> tuple[RuntimeRepository, ...]:
         return self._components
 
@@ -207,31 +180,67 @@ class _FilesystemDomainBackend:
                 ErrorCode.STORAGE_UNAVAILABLE,
                 "failed to prepare filesystem runtime state",
             ) from error
-        await self._writer_lock.acquire()
-        try:
+        async with self._mutation_lock:
             await asyncio.to_thread(self._load)
             await self._validate_loaded_objects()
             if not self._manifest.is_file():
-                await asyncio.to_thread(self._write_manifest)
+                try:
+                    await asyncio.to_thread(self._write_manifest)
+                except OSError as error:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             _logger.info("filesystem domain prepared: namespace=%s domain=%s", self._namespace, self._domain.value)
-        except BaseException as primary:
-            await _release_lock_after_prepare_failure(
-                self._writer_lock,
-                primary=primary,
-            )
-            raise
 
     async def release(self) -> None:
         if self._released:
             return
-        await self._writer_lock.release()
         self._released = True
         _logger.debug("filesystem domain released: namespace=%s domain=%s", self._namespace, self._domain.value)
+
+    @asynccontextmanager
+    async def _read_guard(self):
+        if self._released:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        task = asyncio.current_task()
+        if (
+            task is self._hub.active_task
+            and self._hub.active_domain is self._domain
+            and self._hub.depth > 0
+        ):
+            yield
+            return
+        async with self._mutation_lock.local():
+            await asyncio.to_thread(self._load)
+            await self._validate_loaded_objects()
+            yield
+
+    async def _begin_domain(self, domain: RuntimeDomain) -> None:
+        if domain is not self._domain:
+            return
+        if self._released:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        await self._mutation_lock.__aenter__()
+        try:
+            await asyncio.to_thread(self._load)
+            await self._validate_loaded_objects()
+            _logger.debug(
+                "filesystem mutation started: namespace=%s domain=%s",
+                self._namespace,
+                domain.value,
+            )
+        except BaseException:
+            await self._mutation_lock.__aexit__(None, None, None)
+            raise
+
+    async def _end_domain(self, domain: RuntimeDomain) -> None:
+        if domain is self._domain and self._mutation_lock.acquired:
+            await self._mutation_lock.__aexit__(None, None, None)
+
 
     def _load(self) -> None:
         try:
             if not self._manifest.is_file():
-                if any(entry != self._writer_lock.path for entry in self._root.iterdir()):
+                allowed = {self._mutation_lock.path, self._manifest}
+                if any(entry not in allowed for entry in self._root.iterdir()):
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 self._load_payload(_empty_payload())
                 self._validate_payload()
@@ -396,29 +405,27 @@ class _FilesystemDomainBackend:
         write_json_atomic(self._records, self._domain_records(), fsync=True)
         _logger.debug("filesystem domain committed: namespace=%s domain=%s", self._namespace, domain.value)
 
-    def _commit_domain(self, domain: RuntimeDomain) -> None:
-        with self._commit_lock:
-            if self._released:
-                raise AIError(ErrorCode.STORAGE_CLOSED)
-            try:
-                self._flush_domain(domain)
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_RECOVERY_REQUIRED:
-                    raise
-                self._load()
-                raise
-            except BaseException as error:
-                self._load()
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-
-    def _rollback_domains(self, domains: frozenset[RuntimeDomain]) -> None:
-        if self._domain not in domains:
+    async def _commit_domain(self, domain: RuntimeDomain) -> None:
+        if domain is not self._domain:
             return
-        with self._commit_lock:
-            snapshot = self._hub.snapshot_value
-            if snapshot is not None:
-                _restore_runtime_snapshot(snapshot)
-            self._load()
+        if self._released or not self._mutation_lock.acquired:
+            raise AIError(ErrorCode.STORAGE_CLOSED)
+        try:
+            await asyncio.to_thread(self._flush_domain, domain)
+        except AIError:
+            raise
+        except OSError as error:
+            raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+        await self._end_domain(domain)
+
+    async def _rollback_domains(self, domains: frozenset[RuntimeDomain]) -> None:
+        if not self._mutation_lock.acquired:
+            return
+        try:
+            if self._domain in domains:
+                await asyncio.to_thread(self._load)
+        finally:
+            await self._end_domain(self._domain)
 
     def _domain_records(self) -> dict[str, JsonValue]:
         values = _empty_payload()

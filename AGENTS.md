@@ -1,88 +1,81 @@
 # AGENTS.md
 
-This file provides guidance to coding agents when working with code in this repository.
+Repository-wide guidance for coding agents. Read the affected package's `AGENTS.md` for package-specific architecture and rules.
 
 ## Monorepo Structure
 
-This is a Python monorepo for mobile security research tools, split into five independent sub-packages:
+| Package             | Description                                              | Commands       | Architecture                            |
+| ------------------- | -------------------------------------------------------- | -------------- | --------------------------------------- |
+| `linktools/`        | Core framework: CLI, environ, config, tool management    | base           | [AGENTS.md](linktools/AGENTS.md)        |
+| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools`            | `ct-*`         | [AGENTS.md](linktools-common/AGENTS.md) |
+| `linktools-mobile/` | Android and iOS device tools                             | `at-*`, `it-*` | [AGENTS.md](linktools-mobile/AGENTS.md) |
+| `linktools-cntr/`   | Docker/Podman container management                       | `ct-cntr`      | [AGENTS.md](linktools-cntr/AGENTS.md)   |
+| `linktools-ai/`     | AI agent runtime: session/execution/swarm on pydantic-ai | —              | [AGENTS.md](linktools-ai/AGENTS.md)     |
 
-| Package | Description | Command Prefix | Architecture doc |
-|---------|-------------|----------------|------------------|
-| `linktools/` | Core framework: CLI infrastructure, environ, config, tool management | (base) | [AGENTS.md](linktools/AGENTS.md) |
-| `linktools-common/` | Common tools: `ct-env`, `ct-grep`, `ct-tools` | `ct-` | [AGENTS.md](linktools-common/AGENTS.md) |
-| `linktools-mobile/` | Android (`at-*`) and iOS (`it-*`) device tools | `at-`, `it-` | [AGENTS.md](linktools-mobile/AGENTS.md) |
-| `linktools-cntr/` | Docker/Podman container management (`ct-cntr`) | `ct-cntr` | [AGENTS.md](linktools-cntr/AGENTS.md) |
-| `linktools-ai/` | AI agent runtime: session/execution/swarm on pydantic-ai | — | [AGENTS.md](linktools-ai/AGENTS.md) |
-
-Each sub-package lives under `{name}/src/linktools/` and extends the core framework through Python entry points. Each has its own `AGENTS.md` covering its architecture; this file covers the shared concerns below.
+Each package lives under `{name}/src/linktools/` and extends the core framework through entry points.
 
 ## Development Commands
 
-`manage.py` is the project-level build tool (not Django's). Its subcommands — `init`, `install`, `build`, `clean` — discover sub-packages by scanning `linktools-*` dirs and each take an optional package list (default: all). `VERSION` env var controls the version written to each sub-package's `.version` file at build time. Sub-package-specific build steps (Frida TypeScript, Android APK) live in each sub-package's `AGENTS.md`.
+`manage.py` provides `init`, `install`, `build`, and `clean`. Commands operate on all discovered packages by default or an optional package list. `VERSION` controls the `.version` written at build time.
 
-```bash
-python manage.py install --editable                              # all packages, editable
-python manage.py install --editable linktools linktools-mobile   # specific packages
-python manage.py install --editable --no-isolation linktools-mobile  # skip build isolation (faster if deps present)
-python manage.py build [linktools-mobile]                        # build to dist/ (all or one)
-python manage.py clean [linktools-mobile]                        # clean artifacts (all or one)
+```bash id="6djwhe"
+python manage.py install --editable
+python manage.py install --editable linktools linktools-mobile
+python manage.py install --editable --no-isolation linktools-mobile
+python manage.py build [linktools-mobile]
+python manage.py clean [linktools-mobile]
 ```
 
-After install, the unified entry point lists all installed commands; installed CLI scripts work too:
+After installation:
 
-```bash
-python3 -m linktools      # unified entry point
-at-frida --help           # or installed CLI scripts
+```bash id="93nfj6"
+python3 -m linktools
+at-frida --help
 ct-tools apktool -h
 ```
 
-## Config System
-
-Fields are `ConfigField`s resolved through a `ConfigSource` chain (highest priority first): `EnvironmentSource` → `RuntimeOverrideSource` → `PersistentSource` → `FileSource` → `DictSource` → `DefaultSource`. Within a field, multiple providers chain via `ChainProvider` (tried in order, first non-exception wins, else the field's `default`); `ConfigField.chain(...)` is the shorthand.
-
-```python
-from linktools.core import ConfigField, AliasProvider, PromptProvider, LazyProvider
-
-HOST = ConfigField.chain(
-    AliasProvider("ALT_KEY"),          # read from an alias env/config key first
-    PromptProvider(cached=True),       # then interactively prompt (and cache)
-    LazyProvider(lambda: "localhost"),  # then a computed fallback
-)                                       # name comes from the configs-dict key
-```
+Package-specific build steps, such as Frida TypeScript and Android APK builds, are documented in each package's `AGENTS.md`.
 
 ## Entry Points / Plugin Discovery
 
-Sub-packages register commands and capabilities via Python entry points declared in `pyproject.toml` under `[tool.linktools.scripts]`. The core framework discovers them at runtime — no manual registration needed after `pip install`.
+Packages register commands and capabilities through `[tool.linktools.scripts]` in `pyproject.toml`. Installed plugins are discovered automatically at runtime; no manual registration is required after installation.
+
+## Git Commit Messages
+
+Commit subjects must use `type(scope)`, such as `fix(ai)`, `refactor(core)`, `feat(mobile)`, `docs(common)`, or `test(cntr)`, where scope identifies the affected package or module.
+
+Keep subjects short and describe the actual change, e.g. `fix(ai): release tenant-scoped step history on abort`. Do not use process-oriented subjects such as "fix review gaps", "address review comments", "cleanup", or "final fixes".
 
 ## Release / CI
 
-On GitHub release: CI builds the Frida JS bundle, Android APK, and Python wheels, then publishes to PyPI. The built artifacts and `.version` files are committed back to the repo automatically.
+GitHub releases build the Frida JS bundle, Android APK, and Python wheels, publish to PyPI, and commit generated artifacts and `.version` files back to the repository.
 
-## Python Code Style (All Sub-packages)
+## Python Code Style
 
-- **Python ≥3.10 minimum** — no `from __future__ import annotations` (annotations are evaluated eagerly, so the quoting rule below is mandatory).
-- **File headers**: every `.py` starts with:
+* **Compatibility**: `linktools-ai` requires Python ≥3.10; all other packages support Python ≥3.6. Code must remain compatible with the affected package's minimum version.
+* **File headers**: every `.py` starts with:
+
   ```python
   #!/usr/bin/env python3
   # -*- coding: utf-8 -*-
   ```
-- **Public API is annotated**: every public method/function (not `_`-prefixed) has parameter and return annotations, inferred from body/call sites. Use `Any` only for genuinely untyped values.
-- **Quoting**: quote annotations containing `|` or `[...]` (`"float | None"`, `"list[str]"`); bare primitives (`str`, `int`, `bool`, `Any`, …) and bare class names stay unquoted — unless the name is imported under `TYPE_CHECKING`, in which case it must be quoted.
-- **`TYPE_CHECKING`**: annotation-only imports go under `if TYPE_CHECKING:`; runtime imports stay at module scope. Never move names in `__all__` or referenced by runtime-resolved annotations (SQLAlchemy `Mapped[...]`, Pydantic fields).
-- **Respect interface boundaries**: reach an object's data only through its public API, never by reflection (`getattr(x, "_field")`, `x.__dict__`, name-mangled attrs) or by reaching across layers into another module's privates. If the public surface doesn't expose what you need, add a public method (and implement it on each backend/protocol implementer) rather than tunneling past it. Privates (`_`-prefixed) are implementation details that can change without notice.
-- **Logging via `environ`**: use `environ.get_logger(...)` (or `environ.logger`) for loggers, never `logging.getLogger(...)`. Pass a relative name like `"ai.execution.service"` — the `linktools.` prefix is added automatically. Log at key decision/transition points so behavior is observable. Wrap only expensive debug logs (heavy formatting, large payload dumps, tight loops) in `if environ.debug:`; ordinary `logger.debug(...)` calls need no guard. `exc_info` is not required on every error log — set it (`exc_info=environ.debug`, or `exc_info=True` for failures where the traceback is essential to root-cause the bug) only at points where the stack trace is genuinely needed for triage. Direct `logging.*` is reserved for the core `_logging.py` manager and CLI entry points that configure the root logger.
+* **Public API is annotated**: every public function/method (not `_`-prefixed) has parameter and return annotations inferred from its body and call sites. Use `Any` only for genuinely untyped values.
+* **Quoting**: in Python 3.6-compatible packages, quote annotations containing `|` or `[...]` (`"float | None"`, `"list[str]"`). Bare primitives (`str`, `int`, `bool`, `Any`, …) and bare class names stay unquoted unless imported under `TYPE_CHECKING`.
+* **`TYPE_CHECKING`**: annotation-only imports go under `if TYPE_CHECKING:`; runtime imports stay at module scope. Never move names exported through `__all__` or required by runtime-resolved annotations such as SQLAlchemy `Mapped[...]` or Pydantic fields.
+* **Interface boundaries**: use public APIs only. Never access private state through reflection (`getattr(x, "_field")`, `x.__dict__`, name-mangled attributes) or another module's private members. If the public API lacks required data, add a public method and implement it across all affected backends/Protocol implementers.
+* **Logging**: use `environ.get_logger(...)` or `environ.logger`, never `logging.getLogger(...)`. Use relative names such as `"ai.execution.service"`; the `linktools.` prefix is added automatically. Log key decisions and transitions. Guard only expensive debug logging with `if environ.debug:`. Use `exc_info` only when the traceback aids diagnosis. Direct `logging.*` is reserved for the core `_logging.py` manager and CLI entry points configuring the root logger.
 
 ## Module & Class Structure
 
-- **High cohesion, low coupling**: each file, class, and package owns one concern — a file holds one primary abstraction (plus its private helpers), a package holds one subsystem. But don't over-fragment: small closely-related units belong together. Merge a tiny file into its sibling/parent rather than spinning up a new module just to hold a few lines (e.g. a single Protocol, one helper function, a constants-only module). The test is cohesion, not line count: things that change together and are used together live together.
-- **Private modules are `_`-prefixed and re-exported via `__init__.py`**: consumers import from the package, not the file (`from linktools.core import ConfigField`, not `from linktools.core._config import ...`). Exception: modules addressed by dotted path from outside — discovered via entry points or directory scanning — stay public, since the path is the contract (e.g. `capabilities/mobile.py`, files under `commands/`).
-- **No runtime circular dependencies**: applies at the module level and the package level. Module level: if A imports B (module scope), B must not import A at module scope — directly or transitively — or it will fail to load. Package level: it is just as forbidden for some files in package A to depend on package B while some files in B depend back on A, even if no single module pair is directly cyclic. `TYPE_CHECKING` references are exempt: when two objects legitimately hold each other (parent↔child, observer↔subject, coordinator↔worker), annotating each side with the other's name under `if TYPE_CHECKING:` is fine — it doesn't run at import time. Break *runtime* cycles by extracting the shared dependency into a lower layer, or by defining a Protocol/interface in a base module that both depend on (dependency inversion). When adding a runtime import, check it doesn't close a cycle.
+* **High cohesion, low coupling**: each file, class, and package owns one primary concern. Keep small, closely related units together; do not create modules solely for a single Protocol, helper, or constants. The test is cohesion, not line count.
+* **Behavior ownership**: behavior that belongs to a class should be a method, not a module-level function. Use an instance method when instance state is needed; otherwise prefer `classmethod` when the behavior belongs to the class or its subclasses. Use `staticmethod` only when the behavior belongs to the class namespace but requires neither instance nor class context.
+* **Private modules**: `_`-prefixed modules are re-exported through `__init__.py`; consumers import from the package (`from linktools.core import ConfigField`), not the private module. Modules addressed externally by dotted path, entry point, or directory scanning remain public, such as `capabilities/mobile.py` and files under `commands/`.
+* **No runtime circular dependencies**: applies at both module and package level. `TYPE_CHECKING`-only references are allowed. Break runtime cycles by extracting shared dependencies into a lower layer or defining a Protocol/interface in a base module. Check every new runtime import for cycles.
 
-## Comments — minimal
+## Comments — Minimal
 
-- Explain only what naming and structure cannot: intent, constraints, protocols, counter-intuitive behavior.
-- No external references (plan sections, review items, issue/PR links, process narrative).
-- No restating the code; no history, decision debates, or reviewer-facing prose; no boilerplate.
-- Prefer a rename or restructure over a comment.
-- If deleting the comment leaves the code clear, delete it.
-- Don't clean up unrelated old comments, but fix any a current edit makes stale or false.
+* Comment only intent, constraints, protocols, or counter-intuitive behavior that naming and structure cannot express.
+* No external plan/review references, issue/PR links, process narrative, history, decision debates, reviewer-facing prose, boilerplate, or code restatement.
+* Prefer clear naming or structure over comments.
+* Delete comments that add no information.
+* Do not clean up unrelated old comments, but fix comments made stale or false by the current change.

@@ -42,7 +42,7 @@ def build_runtime_sql_metadata(
     *,
     metadata: "MetaData | None" = None,
 ) -> "MetaData":
-    from sqlalchemy import Boolean, Column, DateTime, JSON, MetaData, Table, Text
+    from sqlalchemy import JSON, Boolean, Column, DateTime, MetaData, Table, Text
 
     if metadata is None:
         metadata = MetaData()
@@ -402,7 +402,14 @@ def build_runtime_sql_metadata(
             },
             ("namespace_digest", "tenant_id", "execution_id"),
             table_comment="Runtime recovery checkpoints",
-            nullable=frozenset({"terminal_handoff", "handoff_contract_digest", "pending_operation_id"}),
+            nullable=frozenset(
+                {
+                    "step_run_id",
+                    "terminal_handoff",
+                    "handoff_contract_digest",
+                    "pending_operation_id",
+                }
+            ),
         )
     if "ai_runtime_tool_operations" in tables:
         table(
@@ -487,7 +494,7 @@ def build_runtime_sql_metadata(
 
 
 def _build_step_tables(metadata: "MetaData", names: set[str]) -> None:
-    from sqlalchemy import Column, DateTime, JSON, Table, Text
+    from sqlalchemy import JSON, Column, DateTime, Table, Text
 
     common = {
         "namespace_digest": (sql_digest(), "Namespace SHA-256 digest"),

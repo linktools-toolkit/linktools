@@ -8,6 +8,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 from linktools.core import environ
 
@@ -19,6 +20,7 @@ from ...core import (
     ExternalCallStatus,
     IdempotencyStatus,
     JsonValue,
+    OperationKind,
     OperationStatus,
     Page,
     ResourceKind,
@@ -27,6 +29,8 @@ from ...core import (
     TaskStatus,
     ToolOperationStatus,
     canonical_sha256,
+    operation_cas_immutable_matches,
+    operation_replay_matches,
     validate_lease_owner,
     validate_observation_payload,
     validate_persistence_namespace,
@@ -77,6 +81,23 @@ from ._plan import RuntimeDomain
 from ._transaction import RuntimeTransactionCoordinator, TransactionHub
 
 _logger = environ.get_logger("ai.runtime.state.memory")
+_READ_METHODS = frozenset(
+    {
+        "get",
+        "get_graph",
+        "get_header",
+        "get_metadata",
+        "get_operation",
+        "get_result",
+        "list",
+        "list_by_execution",
+        "list_by_resource",
+        "list_by_session",
+        "list_children",
+        "list_nodes",
+        "list_pending",
+    }
+)
 
 
 class _Base:
@@ -85,7 +106,23 @@ class _Base:
         self._closed = False
         self._lock = coordinator
         self._on_change: Callable[[], None] | None = None
-        self._refresh_source: Callable[[], None] | None = None
+        self._read_guard: Callable[[], object] | None = None
+
+    def __getattribute__(self, name: str) -> object:
+        value = object.__getattribute__(self, name)
+        if name not in _READ_METHODS or not inspect.iscoroutinefunction(value):
+            return value
+        guard = object.__getattribute__(self, "_read_guard")
+        if guard is None:
+            return value
+
+        @wraps(value)
+        async def guarded(*args: object, **kwargs: object) -> object:
+            async with guard():
+                result = await value(*args, **kwargs)
+                return copy.deepcopy(result)
+
+        return guarded
 
     @property
     def namespace(self) -> str:
@@ -97,6 +134,9 @@ class _Base:
     async def close(self) -> None:
         self._closed = True
 
+    def bind_read_guard(self, guard: Callable[[], object]) -> None:
+        self._read_guard = guard
+
     def _mark_changed(self) -> None:
         self._lock.mark_changed()
         if self._on_change is not None:
@@ -105,8 +145,6 @@ class _Base:
     def _ensure_open(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        if self._refresh_source is not None:
-            self._refresh_source()
 
     def _check_tenant(self, tenant_id: str) -> None:
         validate_tenant_id(tenant_id)
@@ -118,11 +156,15 @@ class RuntimeTransactionBinding:
     def __init__(
         self,
         *,
+        begin_callback: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
         commit_callback: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
+        end_callback: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
         rollback_callback: Callable[[frozenset[RuntimeDomain]], Awaitable[None] | None] | None = None,
     ) -> None:
         self.components: tuple[RuntimeRepository, ...] = ()
+        self.begin_callback = begin_callback
         self.commit_callback = commit_callback
+        self.end_callback = end_callback
         self.rollback_callback = rollback_callback
 
     def snapshot(self) -> object:
@@ -134,6 +176,18 @@ class RuntimeTransactionBinding:
     async def commit(self, domain: RuntimeDomain) -> None:
         if self.commit_callback is not None:
             value = self.commit_callback(domain)
+            if inspect.isawaitable(value):
+                await value
+
+    async def begin(self, domain: RuntimeDomain) -> None:
+        if self.begin_callback is not None:
+            value = self.begin_callback(domain)
+            if inspect.isawaitable(value):
+                await value
+
+    async def end(self, domain: RuntimeDomain) -> None:
+        if self.end_callback is not None:
+            value = self.end_callback(domain)
             if inspect.isawaitable(value):
                 await value
 
@@ -151,6 +205,10 @@ class _SessionRepository(_Base):
     def __init__(self, namespace: str, coordinator: RuntimeTransactionCoordinator) -> None:
         super().__init__(namespace, coordinator)
         self._records: dict[tuple[str, str], SessionRecord] = {}
+        self._operations: _OperationRepository | None = None
+
+    def bind_operation_repository(self, operations: "_OperationRepository") -> None:
+        self._operations = operations
 
     async def create(self, record: SessionRecord) -> SessionRecord:
         self._ensure_open()
@@ -162,6 +220,35 @@ class _SessionRepository(_Base):
             self._records[key] = record
             self._mark_changed()
             return record
+
+    async def create_with_operation(
+        self,
+        record: SessionRecord,
+        *,
+        operation: OperationLedgerInput,
+    ) -> "tuple[SessionRecord, bool]":
+        self._ensure_open()
+        self._check_tenant(record.tenant_id)
+        self._validate_session_operation(record, operation)
+        async with self._lock:
+            current_operation = self._operation(operation)
+            current = self._records.get((record.tenant_id, record.session_id))
+            if current_operation is not None:
+                if not operation_replay_matches(current_operation, operation):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if (
+                    current is None
+                    or current.tenant_id != operation.tenant_id
+                    or current.session_id != operation.result_ref
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return current, True
+            if current is not None:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            self._append_operation(operation)
+            self._records[(record.tenant_id, record.session_id)] = record
+            self._mark_changed()
+            return record, False
 
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._ensure_open()
@@ -200,6 +287,97 @@ class _SessionRepository(_Base):
             self._records[key] = next_record
             self._mark_changed()
             return next_record
+
+    async def compare_and_swap_with_operation(
+        self,
+        session_id: str,
+        *,
+        tenant_id: str,
+        expected_revision: int,
+        next_record: SessionRecord,
+        operation: OperationLedgerInput,
+    ) -> "tuple[SessionRecord, bool]":
+        self._ensure_open()
+        self._check_tenant(tenant_id)
+        async with self._lock:
+            self._validate_session_operation(
+                next_record,
+                operation,
+                expected_revision + 1,
+            )
+            current_operation = self._operation(operation)
+            if current_operation is not None:
+                if not operation_replay_matches(current_operation, operation):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                current = self._records.get((tenant_id, session_id))
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if (
+                    current.session_id != operation.result_ref
+                    or current.tenant_id != operation.tenant_id
+                ):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return current, True
+            current = self._records.get((tenant_id, session_id))
+            if current is None:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if current.revision != expected_revision:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if current.status is SessionStatus.CLEANUP_REQUIRED:
+                raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+            if current.status is not SessionStatus.OPEN:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if (
+                next_record.revision != expected_revision + 1
+                or next_record.tenant_id != tenant_id
+                or next_record.session_id != session_id
+            ):
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if next_record.status is SessionStatus.CLOSED and current.active_execution_id is not None:
+                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+            committed = replace(next_record, active_execution_id=current.active_execution_id)
+            self._append_operation(operation)
+            self._records[(tenant_id, session_id)] = committed
+            self._mark_changed()
+            return committed, False
+
+    def _operation(self, operation: OperationLedgerInput) -> OperationLedgerRecord | None:
+        if self._operations is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._operations._records.get((operation.tenant_id, operation.operation_id))
+
+    def _append_operation(self, operation: OperationLedgerInput) -> OperationLedgerRecord:
+        if self._operations is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return self._operations._append_locked(operation, mark_changed=False)
+
+    def _validate_session_operation(
+        self,
+        record: SessionRecord,
+        operation: OperationLedgerInput,
+        revision: int | None = None,
+    ) -> None:
+        if (
+            operation.tenant_id != record.tenant_id
+            or operation.resource_kind is not ResourceKind.SESSION
+            or operation.resource_id != record.session_id
+            or operation.execution_id is not None
+            or operation.status is not OperationStatus.SUCCEEDED
+            or operation.operation_kind not in {
+                OperationKind.SESSION_CREATE,
+                OperationKind.SESSION_FORK,
+                OperationKind.SESSION_UPDATE,
+            }
+            or operation.error_code is not None
+            or operation.compactable
+            or operation.result_ref != record.session_id
+            or operation.result_digest
+            != canonical_sha256({
+                "session_id": record.session_id,
+                "revision": record.revision if revision is None else revision,
+            })
+        ):
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def admit_execution(
         self,
@@ -827,7 +1005,7 @@ class _MemoryRepository(_Base):
             if operation is not None:
                 existing = self._operation(operation)
                 if existing is not None:
-                    if _operation_immutable(existing) != _operation_input_immutable(operation):
+                    if not operation_replay_matches(existing, operation):
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     return self._records.get((record.tenant_id, record.memory_id)), True
             key = (record.tenant_id, record.memory_id)
@@ -889,7 +1067,7 @@ class _MemoryRepository(_Base):
             if operation is not None:
                 existing = self._operation(operation)
                 if existing is not None:
-                    if _operation_immutable(existing) != _operation_input_immutable(operation):
+                    if not operation_replay_matches(existing, operation):
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
                     return False, True
             key = (tenant_id, memory_id)
@@ -1113,7 +1291,7 @@ class _OperationRepository(_Base):
         key = (record.tenant_id, record.operation_id)
         current = self._records.get(key)
         if current is not None:
-            if _operation_immutable(current) != _operation_input_immutable(record):
+            if not operation_replay_matches(current, record):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return current
         counter_key = (record.tenant_id, record.resource_kind.value, record.resource_id)
@@ -1143,16 +1321,20 @@ class _OperationRepository(_Base):
             if (
                 current is None
                 or current.status is not expected_status
-                or next_record.operation_id != operation_id
-                or next_record.tenant_id != tenant_id
-                or next_record.resource_kind is not current.resource_kind
-                or next_record.resource_id != current.resource_id
-                or next_record.sequence != current.sequence
+                or not operation_cas_immutable_matches(current, next_record)
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._records[(tenant_id, operation_id)] = next_record
+            committed = replace(
+                current,
+                status=next_record.status,
+                result_ref=next_record.result_ref,
+                result_digest=next_record.result_digest,
+                error_code=next_record.error_code,
+                updated_at=next_record.updated_at,
+            )
+            self._records[(tenant_id, operation_id)] = committed
             self._mark_changed()
-            return next_record
+            return committed
 
     async def list_pending(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, limit: int) -> tuple[OperationLedgerRecord, ...]:
         self._ensure_open()
@@ -1915,6 +2097,8 @@ def _build_in_memory_domains(
         terminal.bind_terminal_repositories(execution_idempotency, events, operations[RuntimeDomain.EXECUTION])
     if memories is not None:
         memories.bind_operation_repository(operations[RuntimeDomain.MEMORY])
+    if sessions is not None:
+        sessions.bind_operation_repository(operations[RuntimeDomain.CONVERSATION])
 
     components: list[RuntimeRepository] = []
     for domain in RuntimeDomain:
@@ -1950,7 +2134,14 @@ def _build_in_memory_domains(
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
     binding.bind_components(tuple(components))
     if not hub.configured:
-        hub.configure(snapshot=binding.snapshot, restore=binding.restore, commit=binding.commit, rollback=binding.rollback)
+        hub.configure(
+            snapshot=binding.snapshot,
+            restore=binding.restore,
+            begin=binding.begin,
+            commit=binding.commit,
+            end=binding.end,
+            rollback=binding.rollback,
+        )
     _logger.debug('in-memory runtime domains composed: namespace=%s domains=%s', namespace, sorted(domain.value for domain in domains))
     return _DomainRepositoryParts(states, tuple(components))
 
@@ -2011,40 +2202,6 @@ def _validate_terminal_result(execution: ExecutionRecord, result: ResultRecord) 
         has_schema or result.object_ref is not None
     ):
         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-
-
-def _operation_immutable(record: OperationLedgerRecord) -> tuple[object, ...]:
-    return (
-        record.operation_id,
-        record.tenant_id,
-        record.resource_kind,
-        record.resource_id,
-        record.execution_id,
-        record.operation_kind,
-        record.status,
-        record.request_digest,
-        record.result_ref,
-        record.result_digest,
-        record.error_code,
-        record.compactable,
-    )
-
-
-def _operation_input_immutable(record: OperationLedgerInput) -> tuple[object, ...]:
-    return (
-        record.operation_id,
-        record.tenant_id,
-        record.resource_kind,
-        record.resource_id,
-        record.execution_id,
-        record.operation_kind,
-        record.status,
-        record.request_digest,
-        record.result_ref,
-        record.result_digest,
-        record.error_code,
-        record.compactable,
-    )
 
 
 __all__ = []

@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
-from ._plan import RuntimeDomain
-from ._contracts import RuntimeRepository
 from ...storage import SqlStorageContext
+from ._contracts import RuntimeRepository
+from ._plan import RuntimeDomain
 from ._transaction import TransactionHub
 
 if TYPE_CHECKING:
@@ -135,10 +135,10 @@ def _build_sql_domains(
     from ._repositories import (
         _SqlApprovalRepository,
         _SqlArtifactRepository,
+        _SqlEvaluationRepository,
         _SqlEventRepository,
         _SqlExecutionRepository,
         _SqlExternalCallRepository,
-        _SqlEvaluationRepository,
         _SqlIdempotencyRepository,
         _SqlMemoryRepository,
         _SqlOperationRepository,
@@ -153,15 +153,23 @@ def _build_sql_domains(
         for domain in domains
     }
     sql_components: list[RuntimeRepository] = []
-    sql_sessions = None
-    if RuntimeDomain.CONVERSATION in domains:
-        sql_sessions = _SqlSessionRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.CONVERSATION, transaction=sql_transactions[RuntimeDomain.CONVERSATION])
-        sql_components.append(sql_sessions)
     sql_operations = {
         domain: _SqlOperationRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=domain, transaction=sql_transactions[domain])
         for domain in sql_transactions
     }
     sql_components.extend(sql_operations.values())
+    sql_sessions = None
+    if RuntimeDomain.CONVERSATION in domains:
+        sql_sessions = _SqlSessionRepository(
+            context,
+            metadata,
+            namespace=namespace,
+            tenant_id=tenant_id,
+            owner_domain=RuntimeDomain.CONVERSATION,
+            transaction=sql_transactions[RuntimeDomain.CONVERSATION],
+            operation=sql_operations[RuntimeDomain.CONVERSATION],
+        )
+        sql_components.append(sql_sessions)
     sql_idempotency = {
         domain: _SqlIdempotencyRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=domain, transaction=sql_transactions[domain], runtime_domain=domain)
         for domain in (RuntimeDomain.EXECUTION, RuntimeDomain.EVALUATION)
@@ -184,7 +192,15 @@ def _build_sql_domains(
     sql_approval = _SqlApprovalRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
     sql_external = _SqlExternalCallRepository(context, metadata, namespace=namespace, tenant_id=tenant_id, owner_domain=RuntimeDomain.RECOVERY, transaction=sql_transactions[RuntimeDomain.RECOVERY]) if RuntimeDomain.RECOVERY in domains else None
     sql_components.extend(item for item in (sql_memory, sql_artifact, sql_task, sql_evaluation, sql_approval, sql_external, sql_checkpoint, sql_tool) if item is not None)
-    from ._contracts import ArtifactState, ConversationState, EvaluationState, ExecutionState, MemoryState, RecoveryState, TaskState
+    from ._contracts import (
+        ArtifactState,
+        ConversationState,
+        EvaluationState,
+        ExecutionState,
+        MemoryState,
+        RecoveryState,
+        TaskState,
+    )
     from ._memory import _DomainRepositoryParts
 
     states: dict[RuntimeDomain, object] = {}

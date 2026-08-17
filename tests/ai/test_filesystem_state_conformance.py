@@ -215,10 +215,7 @@ async def test_filesystem_missing_manifest_does_not_adopt_existing_records(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_filesystem_release_retries_after_writer_lock_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_filesystem_release_does_not_hold_lifetime_lock(tmp_path: Path) -> None:
     backend = _FilesystemDomainBackend(
         tmp_path / "route",
         namespace="n",
@@ -226,27 +223,21 @@ async def test_filesystem_release_retries_after_writer_lock_failure(
         domain=RuntimeDomain.CONVERSATION,
     )
     await backend.prepare()
-    release = backend.writer_lock.release
-    calls = 0
-
-    async def fail_once() -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise RuntimeError("release failed")
-        await release()
-
-    monkeypatch.setattr(backend.writer_lock, "release", fail_once)
-    with pytest.raises(RuntimeError, match="release failed"):
-        await backend.release()
-    assert backend._released is False
     await backend.release()
     assert backend._released is True
-    assert calls == 2
+
+    reopened = _FilesystemDomainBackend(
+        tmp_path / "route",
+        namespace="n",
+        tenant_id="t",
+        domain=RuntimeDomain.CONVERSATION,
+    )
+    await reopened.prepare()
+    await reopened.release()
 
 
 @pytest.mark.asyncio
-async def test_filesystem_prepare_preserves_primary_when_release_fails(
+async def test_filesystem_prepare_preserves_primary_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -263,10 +254,6 @@ async def test_filesystem_prepare_preserves_primary_when_release_fails(
 
     monkeypatch.setattr(backend, "_load", load)
 
-    async def release() -> None:
-        raise RuntimeError("release failed")
-
-    monkeypatch.setattr(backend.writer_lock, "release", release)
     with pytest.raises(RuntimeError) as error:
         await backend.prepare()
     assert error.value is primary

@@ -33,7 +33,9 @@ class TransactionHub:
         self._dirty = False
         self._snapshot: Callable[[], object] | None = None
         self._restore: Callable[[object], None] | None = None
+        self._begin: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None
         self._commit: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None
+        self._end: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None
         self._rollback: Callable[[frozenset[RuntimeDomain]], Awaitable[None] | None] | None = None
         self._snapshot_value: object | None = None
 
@@ -42,17 +44,31 @@ class TransactionHub:
         *,
         snapshot: Callable[[], object] | None = None,
         restore: Callable[[object], None] | None = None,
+        begin: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
         commit: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
+        end: Callable[[RuntimeDomain], Awaitable[None] | None] | None = None,
         rollback: Callable[[frozenset[RuntimeDomain]], Awaitable[None] | None] | None = None,
     ) -> None:
         self._snapshot = snapshot
         self._restore = restore
+        self._begin = begin
         self._commit = commit
+        self._end = end
         self._rollback = rollback
 
     @property
     def configured(self) -> bool:
-        return self._snapshot is not None or self._restore is not None or self._commit is not None or self._rollback is not None
+        return any(
+            callback is not None
+            for callback in (
+                self._snapshot,
+                self._restore,
+                self._begin,
+                self._commit,
+                self._end,
+                self._rollback,
+            )
+        )
 
     @property
     def active_task(self) -> asyncio.Task[object] | None:
@@ -85,7 +101,25 @@ class TransactionHub:
         self._domain = domain
         self._depth = 1
         self._dirty = False
-        self._snapshot_value = None if self._snapshot is None else self._snapshot()
+        try:
+            if self._begin is not None:
+                await _invoke(self._begin, domain)
+            self._snapshot_value = None if self._snapshot is None else self._snapshot()
+        except BaseException:
+            if self._rollback is not None:
+                try:
+                    await _invoke(self._rollback, frozenset({domain}))
+                except BaseException:
+                    _logger.error(
+                        "runtime transaction begin cleanup failed: domain=%s",
+                        domain.value,
+                        exc_info=environ.debug,
+                    )
+            self._owner = None
+            self._domain = None
+            self._depth = 0
+            self._lock.release()
+            raise
 
     async def exit(self, domain: RuntimeDomain, exc_type: object) -> None:
         if asyncio.current_task() is not self._owner or self._domain is not domain:
@@ -107,16 +141,18 @@ class TransactionHub:
                 except BaseException:
                     await self._rollback_transaction(frozenset({domain}), snapshot)
                     raise
+            elif self._end is not None:
+                await _invoke(self._end, domain)
         finally:
             self._owner = None
             self._domain = None
             self._lock.release()
 
     async def _rollback_transaction(self, domains: frozenset[RuntimeDomain], snapshot: object | None) -> None:
-        if self._rollback is not None:
-            await _invoke(self._rollback, domains)
         if snapshot is not None and self._restore is not None:
             self._restore(snapshot)
+        if self._rollback is not None:
+            await _invoke(self._rollback, domains)
 
     def mark_changed(self, domain: RuntimeDomain) -> None:
         task = asyncio.current_task()

@@ -289,7 +289,7 @@ CREATE TABLE `ai_runtime_recovery_checkpoints` (
   `namespace_digest` CHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Namespace SHA-256 digest',
   `tenant_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Tenant identifier',
   `execution_id` VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Execution identifier',
-  `step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Step run identifier',
+  `step_run_id` VARCHAR(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT 'Step run identifier',
   `agent_run_sequence` BIGINT NOT NULL COMMENT 'Agent run sequence number',
   `state` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'State data',
   `handoff_phase` VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL COMMENT 'Handoff phase',
