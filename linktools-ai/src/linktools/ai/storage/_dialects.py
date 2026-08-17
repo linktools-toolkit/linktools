@@ -547,19 +547,82 @@ def classify_sql_error(error: BaseException) -> SqlErrorKind:
     if not isinstance(error, DBAPIError):
         return SqlErrorKind.UNKNOWN
     original = error.orig
-    values = [str(original).lower()]
-    values.extend(str(value).lower() for value in original.args)
-    message = " ".join(values)
-    if any(token in message for token in ("40001", "40p01", "1205", "1213", "deadlock", "database is locked", "could not serialize access", "serialization failure")):
+    if _is_sqlite_busy(original):
+        return SqlErrorKind.RETRYABLE_TRANSACTION
+    if _read_sqlstate(original) in {"40001", "40P01"}:
+        return SqlErrorKind.RETRYABLE_TRANSACTION
+    if _read_mysql_errno(original) in {1205, 1213}:
+        return SqlErrorKind.RETRYABLE_TRANSACTION
+    if _retryable_message_fallback(original):
         return SqlErrorKind.RETRYABLE_TRANSACTION
     return SqlErrorKind.DATABASE
 
 
 def is_retryable_sql_transaction(error: BaseException) -> bool:
-    return classify_sql_error(error) in {
-        SqlErrorKind.INTEGRITY,
-        SqlErrorKind.RETRYABLE_TRANSACTION,
-    }
+    return classify_sql_error(error) is SqlErrorKind.RETRYABLE_TRANSACTION
+
+
+def _is_sqlite_busy(error: BaseException) -> bool:
+    try:
+        code = error.sqlite_errorcode
+    except AttributeError:
+        code = None
+    if isinstance(code, int) and (code & 0xFF) == 5:
+        return True
+    try:
+        name = error.sqlite_errorname
+    except AttributeError:
+        return False
+    return isinstance(name, str) and name.upper().startswith("SQLITE_BUSY")
+
+
+def _read_sqlstate(error: BaseException) -> "str | None":
+    try:
+        value = error.sqlstate
+    except AttributeError:
+        pass
+    else:
+        if value is not None:
+            return str(value).upper()
+    try:
+        value = error.pgcode
+    except AttributeError:
+        pass
+    else:
+        if value is not None:
+            return str(value).upper()
+    return None
+
+
+def _read_mysql_errno(error: BaseException) -> "int | None":
+    try:
+        value = error.errno
+    except AttributeError:
+        value = None
+    if value is None:
+        value = error.args[0] if error.args else None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _retryable_message_fallback(error: BaseException) -> bool:
+    values = [str(error).lower()]
+    values.extend(str(value).lower() for value in error.args)
+    message = " ".join(values)
+    return any(
+        marker in message
+        for marker in (
+            "database is locked",
+            "database is busy",
+            "could not serialize access",
+            "serialization failure",
+            "deadlock detected",
+            "deadlock found",
+            "lock wait timeout exceeded",
+        )
+    )
 
 
 def _classify_error(error: BaseException, unique_markers: "tuple[str, ...]") -> IntegrityViolationKind:

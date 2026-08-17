@@ -176,6 +176,12 @@ post-lock visibility. They must use the same physical root, namespace, and
 tenant scope. If the shared filesystem cannot provide those guarantees, use
 the SQL route instead.
 
+Runtime SQL concurrency uses optimistic conditional DML. RuntimeState
+correctness does not require or support explicit pessimistic row, table, or
+advisory locks. Known transient transaction conflicts use a fixed bounded
+retry; unique and other integrity conflicts remain semantic arbitration
+signals and are not generic retry conditions.
+
 Unselected domains use process-local stores and are intentionally absent after restart.
 
 The identity fields are intentionally independent:

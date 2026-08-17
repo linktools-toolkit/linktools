@@ -235,7 +235,7 @@ class _SessionRepository(_Base):
             current = self._records.get((record.tenant_id, record.session_id))
             if current_operation is not None:
                 if not operation_replay_matches(current_operation, operation):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if (
                     current is None
                     or current.tenant_id != operation.tenant_id
@@ -308,7 +308,7 @@ class _SessionRepository(_Base):
             current_operation = self._operation(operation)
             if current_operation is not None:
                 if not operation_replay_matches(current_operation, operation):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 current = self._records.get((tenant_id, session_id))
                 if current is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)

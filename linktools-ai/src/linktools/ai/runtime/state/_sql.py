@@ -10,10 +10,13 @@ from typing import TYPE_CHECKING
 from linktools.core import environ
 
 from ...errors import AIError, ErrorCode
-from ...storage import SqlStorageContext
+from ...storage import SqlStorageContext, is_retryable_sql_transaction
 from ._contracts import RuntimeRepository
 from ._plan import RuntimeDomain
-from ._transaction import TransactionHub
+from ._transaction import (
+    TransactionHub,
+    _SqlRetryableTransactionConflict,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,9 +45,16 @@ class _SqlRuntimeTransaction:
                 try:
                     await session.begin()
                 except BaseException as error:
-                    await self._close_failed(session)
+                    cleanup_failed = await self._rollback_close(session)
                     self._session = None
-                    await self._exit_hub(type(error))
+                    try:
+                        await self._exit_hub(type(error))
+                    except BaseException:
+                        cleanup_failed = True
+                    if cleanup_failed:
+                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                    if is_retryable_sql_transaction(error):
+                        raise _SqlRetryableTransactionConflict from error
                     raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             elif session is None:
                 raise RuntimeError("SQL session requested outside owner transaction")
@@ -57,6 +67,12 @@ class _SqlRuntimeTransaction:
                 await self._rollback_close_exit(error, session)
                 if isinstance(error, AIError):
                     raise
+                if is_retryable_sql_transaction(error):
+                    raise _SqlRetryableTransactionConflict from error
+                from sqlalchemy.exc import IntegrityError
+
+                if isinstance(error, IntegrityError):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             if not outer:
                 await self._exit_hub(None)
@@ -64,10 +80,16 @@ class _SqlRuntimeTransaction:
             try:
                 await session.commit()
             except BaseException as error:
-                await self._rollback_best_effort(session)
-                await self._close_failed(session)
+                cleanup_failed = await self._rollback_close(session)
                 self._session = None
-                await self._exit_hub(type(error))
+                try:
+                    await self._exit_hub(type(error))
+                except BaseException:
+                    cleanup_failed = True
+                if cleanup_failed:
+                    raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+                if is_retryable_sql_transaction(error):
+                    raise _SqlRetryableTransactionConflict from error
                 raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
             try:
                 await session.close()
@@ -107,21 +129,30 @@ class _SqlRuntimeTransaction:
         if failed:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
-    async def _exit_hub(self, error_type: object) -> None:
-        await self._hub.exit(self._owner_domain, error_type)
-
-    async def _rollback_best_effort(self, session: "AsyncSession") -> None:
+    async def _rollback_close(self, session: "AsyncSession") -> bool:
+        failed = False
         try:
             await session.rollback()
         except BaseException:
-            _logger.error("SQL transaction rollback failed: domain=%s", self._owner_domain.value, exc_info=environ.debug)
-
-    async def _close_failed(self, session: "AsyncSession") -> None:
+            failed = True
+            _logger.error(
+                "SQL transaction rollback failed: domain=%s",
+                self._owner_domain.value,
+                exc_info=environ.debug,
+            )
         try:
             await session.close()
         except BaseException:
-            _logger.error("SQL session close failed: domain=%s", self._owner_domain.value, exc_info=environ.debug)
+            failed = True
+            _logger.error(
+                "SQL session close failed: domain=%s",
+                self._owner_domain.value,
+                exc_info=environ.debug,
+            )
+        return failed
 
+    async def _exit_hub(self, error_type: object) -> None:
+        await self._hub.exit(self._owner_domain, error_type)
 
 def _build_sql_domains(
     context: SqlStorageContext,

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from linktools.core import environ
 
+from ...errors import AIError, ErrorCode
 from ._plan import RuntimeDomain
 
 if TYPE_CHECKING:
@@ -20,6 +21,11 @@ _logger = environ.get_logger("ai.runtime.state.transaction")
 
 
 Callback = Callable[[], Awaitable[None] | None]
+
+
+class _SqlRetryableTransactionConflict(AIError):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.STORAGE_CONFLICT)
 
 
 class TransactionHub:

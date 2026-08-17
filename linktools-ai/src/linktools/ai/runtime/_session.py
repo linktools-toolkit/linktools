@@ -158,15 +158,10 @@ class DefaultSessionService:
             digest,
             record.revision,
         )
-        try:
-            record, _ = await self._conversation.sessions.create_with_operation(
-                record,
-                operation=operation,
-            )
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_CONFLICT:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-            raise
+        record, _ = await self._conversation.sessions.create_with_operation(
+            record,
+            operation=operation,
+        )
         _logger.debug("session created: session=%s tenant=%s", record.session_id, request.principal.tenant_id)
         return await self._view(record, request.principal)
 
@@ -282,15 +277,10 @@ class DefaultSessionService:
                 digest,
                 target.revision,
             )
-            try:
-                target, _ = await self._conversation.sessions.create_with_operation(
-                    target,
-                    operation=operation,
-                )
-            except AIError as error:
-                if error.code is ErrorCode.STORAGE_CONFLICT:
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-                raise
+            target, _ = await self._conversation.sessions.create_with_operation(
+                target,
+                operation=operation,
+            )
             _logger.debug("session forked: source=%s target=%s", session_id, target.session_id)
             return await self._view(target, request.principal)
 
@@ -326,18 +316,13 @@ class DefaultSessionService:
             digest,
             request.expected_revision + 1,
         )
-        try:
-            updated, _ = await self._conversation.sessions.compare_and_swap_with_operation(
-                session_id,
-                tenant_id=request.principal.tenant_id,
-                expected_revision=request.expected_revision,
-                next_record=next_record,
-                operation=operation,
-            )
-        except AIError as error:
-            if error.code is ErrorCode.STORAGE_CONFLICT:
-                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT) from error
-            raise
+        updated, _ = await self._conversation.sessions.compare_and_swap_with_operation(
+            session_id,
+            tenant_id=request.principal.tenant_id,
+            expected_revision=request.expected_revision,
+            next_record=next_record,
+            operation=operation,
+        )
         _logger.debug("session updated: session=%s revision=%s", session_id, updated.revision)
         return await self._view(updated, request.principal)
 
@@ -348,15 +333,24 @@ class DefaultSessionService:
     async def _close(self, session_id: str, request: CloseSessionRequest) -> SessionView:
         await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_CLOSE)
         digest = canonical_sha256({"action": "session.close", "tenant_id": request.principal.tenant_id, "principal_id": request.principal.principal_id, "session_id": session_id, "force": request.force, "wait_timeout_seconds": request.wait_timeout_seconds})
-        operation = await self._begin_operation(request.idempotency_key, request.principal.tenant_id, ResourceKind.SESSION, session_id, OperationKind.SESSION_CLOSE, digest)
-        if operation.result_ref:
+        operation = await self._begin_close_operation(
+            request.idempotency_key,
+            request.principal.tenant_id,
+            session_id,
+            digest,
+        )
+        if operation.status is OperationStatus.SUCCEEDED:
             closed = await self._conversation.sessions.get(session_id, tenant_id=request.principal.tenant_id)
-            if closed is not None:
-                closed = await self._reconcile_terminal_admission(closed)
-                view = await self._view(closed, request.principal)
-                if closed.status is SessionStatus.CLOSED:
-                    await self._request_session_release(session_id, request.principal.tenant_id, closed.continuation)
-                return view
+            if closed is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            self._validate_close_replay(operation, closed, session_id)
+            view = await self._view(closed, request.principal)
+            await self._request_session_release(
+                session_id,
+                request.principal.tenant_id,
+                closed.continuation,
+            )
+            return view
         current = await self._conversation.sessions.get(
             session_id,
             tenant_id=request.principal.tenant_id,
@@ -365,7 +359,7 @@ class DefaultSessionService:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         current = await self._reconcile_terminal_admission(current)
         if current.status is SessionStatus.CLOSED:
-            await self._complete_operation(
+            await self._complete_close_operation(
                 operation,
                 request.principal.tenant_id,
                 session_id,
@@ -510,7 +504,7 @@ class DefaultSessionService:
                     current,
                 )
 
-        await self._complete_operation(
+        await self._complete_close_operation(
             operation,
             request.principal.tenant_id,
             session_id,
@@ -722,38 +716,77 @@ class DefaultSessionService:
             now,
         )
 
-    async def _begin_operation(self, operation_id: str, tenant_id: str, resource_kind: ResourceKind, resource_id: str, operation_kind: OperationKind, request_digest: str) -> OperationLedgerRecord:
+    async def _begin_close_operation(
+        self,
+        operation_id: str,
+        tenant_id: str,
+        session_id: str,
+        request_digest: str,
+    ) -> OperationLedgerRecord:
         operation_id = idempotency_key_digest(operation_id)
-        for _ in range(4):
-            existing = await self._conversation.operations.get(operation_id, tenant_id=tenant_id)
-            if existing is not None:
-                if (
-                    existing.tenant_id != tenant_id
-                    or existing.resource_kind is not resource_kind
-                    or existing.resource_id != resource_id
-                    or existing.execution_id is not None
-                    or existing.operation_kind is not operation_kind
-                    or existing.request_digest != request_digest
-                    or existing.status not in {
-                        OperationStatus.PENDING,
-                        OperationStatus.RUNNING,
-                        OperationStatus.SUCCEEDED,
-                        OperationStatus.FAILED,
-                    }
-                    or not existing.compactable
-                ):
-                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
-                return existing
-            now = datetime.now(timezone.utc)
-            record = OperationLedgerInput(operation_id, tenant_id, resource_kind, resource_id, None, operation_kind, OperationStatus.PENDING, request_digest, None, None, None, True, now, now)
-            try:
-                return await self._conversation.operations.append(record)
-            except AIError as error:
-                if error.code is not ErrorCode.STORAGE_CONFLICT:
-                    raise
-        raise AIError(ErrorCode.STORAGE_CONFLICT)
+        now = datetime.now(timezone.utc)
+        requested = OperationLedgerInput(
+            operation_id,
+            tenant_id,
+            ResourceKind.SESSION,
+            session_id,
+            None,
+            OperationKind.SESSION_CLOSE,
+            OperationStatus.PENDING,
+            request_digest,
+            None,
+            None,
+            None,
+            True,
+            now,
+            now,
+        )
+        try:
+            existing = await self._conversation.operations.append(requested)
+        except AIError as error:
+            if error.code is not ErrorCode.STORAGE_CONFLICT:
+                raise
+            existing = await self._conversation.operations.get(
+                operation_id,
+                tenant_id=tenant_id,
+            )
+            if existing is None:
+                raise
+        if (
+            existing.tenant_id != tenant_id
+            or existing.resource_kind is not ResourceKind.SESSION
+            or existing.resource_id != session_id
+            or existing.execution_id is not None
+            or existing.operation_kind is not OperationKind.SESSION_CLOSE
+            or existing.request_digest != request_digest
+            or not existing.compactable
+        ):
+            raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+        if existing.status is OperationStatus.PENDING:
+            if (
+                existing.result_ref is not None
+                or existing.result_digest is not None
+                or existing.error_code is not None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return existing
+        if existing.status is OperationStatus.SUCCEEDED:
+            if (
+                existing.result_ref != session_id
+                or existing.result_digest is None
+                or existing.error_code is not None
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return existing
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
-    async def _complete_operation(self, operation: OperationLedgerRecord, tenant_id: str, result_ref: str, result_digest: str) -> None:
+    async def _complete_close_operation(
+        self,
+        operation: OperationLedgerRecord,
+        tenant_id: str,
+        result_ref: str,
+        result_digest: str,
+    ) -> None:
         now = datetime.now(timezone.utc)
         completed = OperationLedgerRecord(operation.operation_id, tenant_id, operation.resource_kind, operation.resource_id, operation.execution_id, operation.operation_kind, OperationStatus.SUCCEEDED, operation.request_digest, result_ref, result_digest, None, operation.compactable, operation.sequence, operation.created_at, now)
         try:
@@ -762,8 +795,58 @@ class DefaultSessionService:
             if error.code is not ErrorCode.STORAGE_CONFLICT:
                 raise
             current = await self._conversation.operations.get(operation.operation_id, tenant_id=tenant_id)
-            if current is None or current.status is not OperationStatus.SUCCEEDED or current.result_digest != result_digest:
-                raise
+            if current is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+            self._validate_close_operation(
+                current,
+                tenant_id=tenant_id,
+                session_id=result_ref,
+                request_digest=operation.request_digest,
+                result_digest=result_digest,
+            )
+
+    @staticmethod
+    def _validate_close_operation(
+        operation: OperationLedgerRecord,
+        *,
+        tenant_id: str,
+        session_id: str,
+        request_digest: str,
+        result_digest: str,
+    ) -> None:
+        if (
+            operation.tenant_id != tenant_id
+            or operation.resource_kind is not ResourceKind.SESSION
+            or operation.resource_id != session_id
+            or operation.execution_id is not None
+            or operation.operation_kind is not OperationKind.SESSION_CLOSE
+            or operation.request_digest != request_digest
+            or operation.status is not OperationStatus.SUCCEEDED
+            or operation.result_ref != session_id
+            or operation.result_digest != result_digest
+            or operation.error_code is not None
+            or not operation.compactable
+        ):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+    @staticmethod
+    def _validate_close_replay(
+        operation: OperationLedgerRecord,
+        session: SessionRecord,
+        session_id: str,
+    ) -> None:
+        if session.status is not SessionStatus.CLOSED or session.active_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        result_digest = canonical_sha256(
+            {"session_id": session_id, "revision": session.revision}
+        )
+        DefaultSessionService._validate_close_operation(
+            operation,
+            tenant_id=session.tenant_id,
+            session_id=session_id,
+            request_digest=operation.request_digest,
+            result_digest=result_digest,
+        )
 
 
 __all__ = ["DefaultSessionService", "SessionApi", "SessionQueryApi"]

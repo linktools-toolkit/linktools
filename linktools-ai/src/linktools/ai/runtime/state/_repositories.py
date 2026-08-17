@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Private database-current Runtime repositories."""
 
-from collections.abc import AsyncIterator, Mapping, Sequence
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
 
@@ -33,7 +34,6 @@ from ...core import (
     UsageMetrics,
     canonical_identity_digest,
     canonical_sha256,
-    operation_cas_immutable_matches,
     operation_replay_matches,
     validate_lease_owner,
     validate_tenant_id,
@@ -98,6 +98,8 @@ if TYPE_CHECKING:
 
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
+_T = TypeVar("_T")
+_SQL_OPTIMISTIC_RETRY_LIMIT = 8
 
 
 class _SqlRepositoryBase:
@@ -163,6 +165,37 @@ class _SqlRepositoryBase:
         async with self._transaction.mutation():
             yield self._transaction.current_session()
 
+    async def _run_optimistic_mutation(
+        self,
+        callback: "Callable[[AsyncSession], Awaitable[_T]]",
+    ) -> _T:
+        from ._transaction import _SqlRetryableTransactionConflict
+
+        try:
+            self._transaction.current_session()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("optimistic mutation cannot be nested")
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            try:
+                async with self._mutation() as session:
+                    return await callback(session)
+            except _SqlRetryableTransactionConflict as error:
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    _logger.error(
+                        "SQL optimistic mutation exhausted retries: domain=%s",
+                        self._owner_domain.value,
+                    )
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                _logger.debug(
+                    "SQL optimistic mutation retry: domain=%s attempt=%s",
+                    self._owner_domain.value,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
+        raise AIError(ErrorCode.STORAGE_CONFLICT)
+
     async def _one(self, session: "AsyncSession", table: "Table", *where: object) -> Mapping[str, object] | None:
         from sqlalchemy import select
 
@@ -173,16 +206,12 @@ class _SqlRepositoryBase:
         session: "AsyncSession",
         table: "Table",
         resource_id: str,
-        *,
-        for_update: bool = False,
     ) -> Mapping[str, object] | None:
         from sqlalchemy import select
 
         statement = select(table).where(
             *self._where(table, session_id=resource_id),
         ).limit(1)
-        if for_update:
-            statement = statement.with_for_update()
         return (await session.execute(statement)).mappings().first()
 
     async def _insert(self, session: "AsyncSession", table: "Table", values: Mapping[str, object]) -> bool:
@@ -204,6 +233,11 @@ class _SqlRepositoryBase:
 
 
 class _OperationInsertConflict(AIError):
+    def __init__(self) -> None:
+        super().__init__(ErrorCode.STORAGE_CONFLICT)
+
+
+class _SqlConditionalConflict(AIError):
     def __init__(self) -> None:
         super().__init__(ErrorCode.STORAGE_CONFLICT)
 
@@ -260,10 +294,19 @@ class _SqlSessionRepository(_SqlRepositoryBase):
 
     async def create(self, record: SessionRecord) -> SessionRecord:
         self._check_tenant(record.tenant_id)
-        async with self._mutation() as session:
-            if await self._insert(session, self._table("ai_runtime_sessions"), self._record_values(record)):
-                return record
-            raise AIError(ErrorCode.SESSION_CONFLICT)
+        async def mutate(session: "AsyncSession") -> None:
+            if not await self._insert(
+                session,
+                self._table("ai_runtime_sessions"),
+                self._record_values(record),
+            ):
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+
+        await self._run_optimistic_mutation(mutate)
+        committed = await self._fresh_session(record.session_id)
+        if committed is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed
 
     async def create_with_operation(
         self,
@@ -272,53 +315,41 @@ class _SqlSessionRepository(_SqlRepositoryBase):
         operation: OperationLedgerInput,
     ) -> tuple[SessionRecord, bool]:
         try:
-            return await self._create_with_operation(record, operation=operation)
+            await self._run_optimistic_mutation(
+                lambda session: self._create_with_operation(
+                    session,
+                    record,
+                    operation=operation,
+                )
+            )
         except _OperationInsertConflict:
             return await self._replay_after_operation_conflict(
                 record.session_id,
                 operation,
             )
+        committed = await self._fresh_session(record.session_id)
+        if committed is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed, False
 
     async def _create_with_operation(
         self,
+        session: "AsyncSession",
         record: SessionRecord,
         *,
         operation: OperationLedgerInput,
-    ) -> tuple[SessionRecord, bool]:
+    ) -> None:
         self._check_tenant(record.tenant_id)
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_sessions")
-            _validate_session_operation(
-                operation,
-                record.session_id,
-                record.tenant_id,
-                record.revision,
-            )
-            current_operation = await self._operations._get_with_session(
-                session,
-                operation.operation_id,
-            )
-            current = await self._current_row(session, table, record.session_id)
-            if current_operation is not None:
-                if not operation_replay_matches(current_operation, operation):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                if current is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if (
-                    str(current["session_id"]) != operation.result_ref
-                    or self._tenant_id != operation.tenant_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return self._from_row(current), True
-            if current is not None:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            await self._operations._append_with_session(session, operation)
-            if not await self._insert(session, table, self._record_values(record)):
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            committed = await self._current_row(session, table, record.session_id)
-            if committed is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return self._from_row(committed), False
+        table = self._table("ai_runtime_sessions")
+        _validate_session_operation(
+            operation,
+            record.session_id,
+            record.tenant_id,
+            record.revision,
+        )
+        await self._operations._append_new_with_session(session, operation)
+        if not await self._insert(session, table, self._record_values(record)):
+            raise AIError(ErrorCode.SESSION_CONFLICT)
 
     async def _replay_after_operation_conflict(
         self,
@@ -333,14 +364,32 @@ class _SqlSessionRepository(_SqlRepositoryBase):
             if current_operation is None:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             if not operation_replay_matches(current_operation, operation):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
             table = self._table("ai_runtime_sessions")
             current = await self._current_row(session, table, session_id)
             if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if str(current["session_id"]) != operation.result_ref:
+            if (
+                str(current["session_id"]) != operation.result_ref
+                or current_operation.result_ref != session_id
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return self._from_row(current), True
+
+    async def _fresh_session(self, session_id: str) -> SessionRecord | None:
+        async with self._context.sessions() as session:
+            row = await self._current_row(
+                session,
+                self._table("ai_runtime_sessions"),
+                session_id,
+            )
+        return None if row is None else self._from_row(row)
+
+    async def _fresh_operation(
+        self,
+        operation_id: str,
+    ) -> OperationLedgerRecord | None:
+        return await self._operations.get(operation_id, tenant_id=self._tenant_id)
 
     async def get_header(self, session_id: str, *, tenant_id: str) -> ResourceRef | None:
         self._check_tenant(tenant_id)
@@ -388,22 +437,16 @@ class _SqlSessionRepository(_SqlRepositoryBase):
     async def compare_and_swap(self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord) -> SessionRecord:
         self._check_tenant(tenant_id)
         self._check_tenant(next_record.tenant_id)
+        if (
+            next_record.revision != expected_revision + 1
+            or next_record.tenant_id != tenant_id
+            or next_record.session_id != session_id
+        ):
+            raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
+        async def mutate(session: "AsyncSession") -> None:
             table = self._table("ai_runtime_sessions")
-            row = await self._current_row(session, table, session_id, for_update=True)
-            if row is None or int(row["revision"]) != expected_revision:
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            current = self._from_row(row)
-            if (
-                next_record.revision != expected_revision + 1
-                or next_record.tenant_id != tenant_id
-                or next_record.session_id != session_id
-            ):
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            if next_record.status is SessionStatus.CLOSED and current.active_execution_id is not None:
-                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
             values = self._record_values(next_record)
             for name in (
                 "namespace_digest",
@@ -418,12 +461,25 @@ class _SqlSessionRepository(_SqlRepositoryBase):
                 clauses.append(table.c.active_execution_id.is_(None))
             result = await session.execute(update(table).where(*clauses).values(**values))
             if result.rowcount != 1:
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+                raise _SqlConditionalConflict()
             self._transaction.mark_changed()
-            committed = await self._current_row(session, table, session_id)
-            if committed is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._from_row(committed)
+
+        try:
+            await self._run_optimistic_mutation(mutate)
+        except _SqlConditionalConflict:
+            current = await self._fresh_session(session_id)
+            if current is None or current.revision != expected_revision:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if (
+                next_record.status is SessionStatus.CLOSED
+                and current.active_execution_id is not None
+            ):
+                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+            raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+        committed = await self._fresh_session(session_id)
+        if committed is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed
 
     async def compare_and_swap_with_operation(
         self,
@@ -435,114 +491,101 @@ class _SqlSessionRepository(_SqlRepositoryBase):
         operation: OperationLedgerInput,
     ) -> tuple[SessionRecord, bool]:
         try:
-            return await self._compare_and_swap_with_operation(
-                session_id,
-                tenant_id=tenant_id,
-                expected_revision=expected_revision,
-                next_record=next_record,
-                operation=operation,
+            await self._run_optimistic_mutation(
+                lambda session: self._compare_and_swap_with_operation(
+                    session,
+                    session_id,
+                    tenant_id=tenant_id,
+                    expected_revision=expected_revision,
+                    next_record=next_record,
+                    operation=operation,
+                )
             )
         except _OperationInsertConflict:
             return await self._replay_after_operation_conflict(
                 session_id,
                 operation,
             )
+        except _SqlConditionalConflict:
+            current_operation = await self._fresh_operation(operation.operation_id)
+            if current_operation is not None:
+                if not operation_replay_matches(current_operation, operation):
+                    raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
+                current = await self._fresh_session(session_id)
+                if current is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                if current_operation.result_ref != session_id:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                return current, True
+            current = await self._fresh_session(session_id)
+            if current is None:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if current.status is SessionStatus.CLEANUP_REQUIRED:
+                raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
+            if current.status is not SessionStatus.OPEN:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            if current.revision != expected_revision:
+                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        committed = await self._fresh_session(session_id)
+        if committed is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return committed, False
 
     async def _compare_and_swap_with_operation(
         self,
+        session: "AsyncSession",
         session_id: str,
         *,
         tenant_id: str,
         expected_revision: int,
         next_record: SessionRecord,
         operation: OperationLedgerInput,
-    ) -> tuple[SessionRecord, bool]:
+    ) -> None:
         self._check_tenant(tenant_id)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_sessions")
-            _validate_session_operation(
-                operation,
-                session_id,
-                tenant_id,
-                expected_revision + 1,
-            )
-            current_operation = await self._operations._get_with_session(
-                session,
-                operation.operation_id,
-            )
-            if current_operation is not None:
-                if not operation_replay_matches(current_operation, operation):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                current_row = await self._current_row(
-                    session,
-                    table,
-                    session_id,
-                    for_update=True,
-                )
-                if current_row is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if (
-                    str(current_row["session_id"]) != operation.result_ref
-                    or self._tenant_id != operation.tenant_id
-                ):
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                return self._from_row(current_row), True
-            current_row = await self._current_row(
-                session,
+        table = self._table("ai_runtime_sessions")
+        _validate_session_operation(
+            operation,
+            session_id,
+            tenant_id,
+            expected_revision + 1,
+        )
+        if (
+            next_record.revision != expected_revision + 1
+            or next_record.tenant_id != tenant_id
+            or next_record.session_id != session_id
+        ):
+            raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
+        await self._operations._append_new_with_session(session, operation)
+        values = self._record_values(next_record)
+        for name in (
+            "namespace_digest",
+            "tenant_id",
+            "session_id",
+            "created_at",
+            "active_execution_id",
+        ):
+            values.pop(name, None)
+        clauses = list(
+            self._where(
                 table,
-                session_id,
-                for_update=True,
+                session_id=session_id,
+                revision=expected_revision,
+                status=SessionStatus.OPEN.value,
             )
-            if current_row is None:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            current = self._from_row(current_row)
-            if current.revision != expected_revision:
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            if current.status is SessionStatus.CLEANUP_REQUIRED:
-                raise AIError(ErrorCode.SESSION_CLEANUP_REQUIRED)
-            if current.status is not SessionStatus.OPEN:
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            if (
-                next_record.revision != expected_revision + 1
-                or next_record.tenant_id != tenant_id
-                or next_record.session_id != session_id
-            ):
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            if next_record.status is SessionStatus.CLOSED and current.active_execution_id is not None:
-                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
-            await self._operations._append_with_session(session, operation)
-            values = self._record_values(next_record)
-            for name in (
-                "namespace_digest",
-                "tenant_id",
-                "session_id",
-                "created_at",
-                "active_execution_id",
-            ):
-                values.pop(name, None)
-            clauses = list(
-                self._where(
-                    table,
-                    session_id=session_id,
-                    revision=expected_revision,
-                )
-            )
-            if next_record.status is SessionStatus.CLOSED:
-                clauses.append(table.c.active_execution_id.is_(None))
-            result = await session.execute(
-                update(table)
-                .where(*clauses)
-                .values(**values)
-            )
-            if result.rowcount != 1:
-                raise AIError(ErrorCode.SESSION_REVISION_CONFLICT)
-            self._transaction.mark_changed()
-            committed_row = await self._current_row(session, table, session_id)
-            if committed_row is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            return self._from_row(committed_row), False
+        )
+        if next_record.status is SessionStatus.CLOSED:
+            clauses.append(table.c.active_execution_id.is_(None))
+        result = await session.execute(
+            update(table)
+            .where(*clauses)
+            .values(**values)
+        )
+        if result.rowcount != 1:
+            raise _SqlConditionalConflict()
+        self._transaction.mark_changed()
 
     async def admit_execution(
         self,
@@ -557,7 +600,7 @@ class _SqlSessionRepository(_SqlRepositoryBase):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
+        async def mutate(session: "AsyncSession") -> None:
             table = self._table("ai_runtime_sessions")
             result = await session.execute(
                 update(table)
@@ -575,21 +618,25 @@ class _SqlSessionRepository(_SqlRepositoryBase):
                     updated_at=table.c.updated_at,
                 )
             )
-            if result.rowcount == 1:
-                row = await self._current_row(session, table, session_id)
-                if row is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                self._transaction.mark_changed()
-                return self._from_row(row)
-            row = await self._current_row(session, table, session_id)
-            current = None if row is None else self._from_row(row)
+            if result.rowcount != 1:
+                raise _SqlConditionalConflict()
+            self._transaction.mark_changed()
+
+        try:
+            await self._run_optimistic_mutation(mutate)
+        except _SqlConditionalConflict:
+            current = await self._fresh_session(session_id)
             return _classify_admission_failure(current, execution_id, expected)
+        current = await self._fresh_session(session_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current
 
     async def release_execution(self, session_id: str, *, tenant_id: str, execution_id: str) -> SessionRecord:
         self._check_tenant(tenant_id)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
+        async def mutate(session: "AsyncSession") -> int:
             table = self._table("ai_runtime_sessions")
             result = await session.execute(
                 update(table)
@@ -606,20 +653,19 @@ class _SqlSessionRepository(_SqlRepositoryBase):
                     updated_at=table.c.updated_at,
                 )
             )
-            row = await self._current_row(session, table, session_id)
-            if row is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current = self._from_row(row)
             if result.rowcount == 1:
                 self._transaction.mark_changed()
-                return current
-            if current.status is SessionStatus.CLOSED and current.active_execution_id is not None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.active_execution_id != execution_id:
-                return current
-            if current.active_execution_id is None:
-                return current
-            raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return result.rowcount
+
+        await self._run_optimistic_mutation(mutate)
+        current = await self._fresh_session(session_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.status is SessionStatus.CLOSED and current.active_execution_id is not None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if current.active_execution_id not in {None, execution_id}:
+            return current
+        return current
 
     async def transition_status(
         self,
@@ -636,7 +682,7 @@ class _SqlSessionRepository(_SqlRepositoryBase):
         from sqlalchemy import update
 
         updated_at = datetime.now(timezone.utc)
-        async with self._mutation() as session:
+        async def mutate(session: "AsyncSession") -> None:
             table = self._table("ai_runtime_sessions")
             clauses = list(self._where(table, session_id=session_id))
             clauses.append(table.c.status.in_(tuple(status.value for status in expected)))
@@ -652,23 +698,26 @@ class _SqlSessionRepository(_SqlRepositoryBase):
                     closed_at=closed_at,
                 )
             )
-            row = await self._current_row(session, table, session_id)
-            if row is None:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
             if result.rowcount != 1:
-                current = self._from_row(row)
-                if (
-                    current.status not in expected
-                ):
-                    raise AIError(ErrorCode.SESSION_CONFLICT)
-                if (
-                    (require_no_active or next_status is SessionStatus.CLOSED)
-                    and current.active_execution_id is not None
-                ):
-                    raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
-                raise AIError(ErrorCode.SESSION_CONFLICT)
+                raise _SqlConditionalConflict()
             self._transaction.mark_changed()
-            return self._from_row(row)
+
+        try:
+            await self._run_optimistic_mutation(mutate)
+        except _SqlConditionalConflict:
+            current = await self._fresh_session(session_id)
+            if current is None or current.status not in expected:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if (
+                (require_no_active or next_status is SessionStatus.CLOSED)
+                and current.active_execution_id is not None
+            ):
+                raise AIError(ErrorCode.SESSION_ACTIVE_EXECUTIONS)
+            raise AIError(ErrorCode.SESSION_CONFLICT)
+        current = await self._fresh_session(session_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current
 
     async def advance_continuation(
         self,
@@ -682,24 +731,8 @@ class _SqlSessionRepository(_SqlRepositoryBase):
         self._check_tenant(tenant_id)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
+        async def mutate(session: "AsyncSession") -> None:
             table = self._table("ai_runtime_sessions")
-            row = await self._current_row(session, table, session_id)
-            if row is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            current = self._from_row(row)
-            if current.status is SessionStatus.CLOSED:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            if current.active_execution_id != execution_id or current.continuation != expected:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if current.status not in {
-                SessionStatus.OPEN,
-                SessionStatus.CLOSING,
-                SessionStatus.CLEANUP_REQUIRED,
-            }:
-                raise AIError(ErrorCode.SESSION_CONFLICT)
-            if current.continuation == next_cursor:
-                return current
             result = await session.execute(
                 update(table)
                 .where(
@@ -722,22 +755,34 @@ class _SqlSessionRepository(_SqlRepositoryBase):
                 )
             )
             if result.rowcount != 1:
-                latest = await self._current_row(session, table, session_id)
-                if latest is None:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                current = self._from_row(latest)
-                if current.continuation == next_cursor:
-                    return current
-                if current.status is SessionStatus.CLOSED:
-                    raise AIError(ErrorCode.SESSION_CONFLICT)
-                if current.active_execution_id != execution_id or current.continuation != expected:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
+                raise _SqlConditionalConflict()
             self._transaction.mark_changed()
-            updated_row = await self._current_row(session, table, session_id)
-            if updated_row is None:
+
+        try:
+            await self._run_optimistic_mutation(mutate)
+        except _SqlConditionalConflict:
+            current = await self._fresh_session(session_id)
+            if current is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return self._from_row(updated_row)
+            if current.continuation == next_cursor:
+                return current
+            if current.status is SessionStatus.CLOSED:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            if current.active_execution_id != execution_id:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.continuation != expected:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if current.status not in {
+                SessionStatus.OPEN,
+                SessionStatus.CLOSING,
+                SessionStatus.CLEANUP_REQUIRED,
+            }:
+                raise AIError(ErrorCode.SESSION_CONFLICT)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        updated = await self._fresh_session(session_id)
+        if updated is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return updated
 
 
 def _validate_session_transition(
@@ -1446,7 +1491,19 @@ class _SqlExecutionRepository(_SqlRepositoryBase):
                 operation = await self._operations.get(commit.operation.operation_id, tenant_id=commit.execution.tenant_id)
                 if operation is None or operation.execution_id not in {None, commit.execution.execution_id}:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await self._operations.compare_and_swap(commit.operation.operation_id, tenant_id=commit.execution.tenant_id, expected_status=commit.operation.expected_status, next_record=replace(operation, status=commit.operation.next_status, result_ref=commit.operation.result_ref, result_digest=commit.operation.result_digest, error_code=commit.operation.error_code, updated_at=commit.execution.updated_at))
+                await self._operations._compare_and_swap_with_session(
+                    session,
+                    commit.operation.operation_id,
+                    expected_status=commit.operation.expected_status,
+                    next_record=replace(
+                        operation,
+                        status=commit.operation.next_status,
+                        result_ref=commit.operation.result_ref,
+                        result_digest=commit.operation.result_digest,
+                        error_code=commit.operation.error_code,
+                        updated_at=commit.execution.updated_at,
+                    ),
+                )
             return ExecutionTerminalCommitResult(commit.execution, commit.result)
 
     async def get_result(self, execution_id: str, *, tenant_id: str) -> ResultRecord | None:
@@ -1573,18 +1630,15 @@ class _SqlOperationRepository(_SqlRepositoryBase):
         )
         return None if row is None else self._from_row(row)
 
-    async def _append_with_session(
+    async def _append_new_with_session(
         self,
         session: "AsyncSession",
         record: OperationLedgerInput,
     ) -> OperationLedgerRecord:
         self._check_tenant(record.tenant_id)
+        if not record.operation_id:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         table = self._table("ai_runtime_operations")
-        current = await self._get_with_session(session, record.operation_id)
-        if current is not None:
-            if not operation_replay_matches(current, record):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return current
         counter = self._table("ai_runtime_operation_counters")
         sequence = await self._context.dialect.upsert_increment(
             session,
@@ -1657,8 +1711,9 @@ class _SqlOperationRepository(_SqlRepositoryBase):
     async def append(self, record: OperationLedgerInput) -> OperationLedgerRecord:
         self._check_tenant(record.tenant_id)
         try:
-            async with self._mutation() as session:
-                return await self._append_with_session(session, record)
+            return await self._run_optimistic_mutation(
+                lambda session: self._append_new_with_session(session, record)
+            )
         except _OperationInsertConflict:
             async with self._context.sessions() as session:
                 current = await self._get_with_session(session, record.operation_id)
@@ -1672,46 +1727,77 @@ class _SqlOperationRepository(_SqlRepositoryBase):
             return await self._get_with_session(session, operation_id)
 
     async def compare_and_swap(self, operation_id: str, *, tenant_id: str, expected_status: OperationStatus, next_record: OperationLedgerRecord) -> OperationLedgerRecord:
-        from sqlalchemy import update
-
         self._check_tenant(tenant_id)
         self._check_tenant(next_record.tenant_id)
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_operations")
-            current = await self._get_with_session(session, operation_id)
-            if current is None or current.status is not expected_status:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if not operation_cas_immutable_matches(current, next_record):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            result = await session.execute(
-                update(table)
-                .where(
-                    *self._where(
-                        table,
-                        runtime_domain=self._owner_domain.value,
-                        operation_digest=_operation_identity_digest(
-                            self._owner_domain,
-                            operation_id,
-                        ),
-                        operation_id=operation_id,
-                        status=expected_status.value,
-                    )
-                )
-                .values(
-                    status=next_record.status.value,
-                    result_ref=next_record.result_ref,
-                    result_digest=next_record.result_digest,
-                    error_code=next_record.error_code,
-                    updated_at=next_record.updated_at,
-                )
+        if not operation_id or next_record.operation_id != operation_id:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+        async def mutate(session: "AsyncSession") -> None:
+            await self._compare_and_swap_with_session(
+                session,
+                operation_id,
+                expected_status=expected_status,
+                next_record=next_record,
             )
-            if result.rowcount != 1:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            self._transaction.mark_changed()
-            committed = await self._get_with_session(session, operation_id)
-            if committed is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+        try:
+            await self._run_optimistic_mutation(mutate)
+        except _SqlConditionalConflict:
+            await self.get(operation_id, tenant_id=tenant_id)
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        committed = await self.get(operation_id, tenant_id=tenant_id)
+        if committed is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return committed
+
+    async def _compare_and_swap_with_session(
+        self,
+        session: "AsyncSession",
+        operation_id: str,
+        *,
+        expected_status: OperationStatus,
+        next_record: OperationLedgerRecord,
+    ) -> None:
+        from sqlalchemy import update
+
+        table = self._table("ai_runtime_operations")
+        clauses = list(
+            self._where(
+                table,
+                runtime_domain=self._owner_domain.value,
+                operation_digest=_operation_identity_digest(
+                    self._owner_domain,
+                    operation_id,
+                ),
+                operation_id=operation_id,
+                status=expected_status.value,
+                resource_kind=next_record.resource_kind.value,
+                resource_id=next_record.resource_id,
+                operation_kind=next_record.operation_kind.value,
+                request_digest=next_record.request_digest,
+                compactable=next_record.compactable,
+                sequence=next_record.sequence,
+                created_at=next_record.created_at,
+            )
+        )
+        if next_record.execution_id is None:
+            clauses.append(table.c.execution_id.is_(None))
+        else:
+            clauses.append(table.c.execution_id == next_record.execution_id)
+        result = await session.execute(
+            update(table)
+            .where(*clauses)
+            .values(
+                status=next_record.status.value,
+                result_ref=next_record.result_ref,
+                result_digest=next_record.result_digest,
+                error_code=next_record.error_code,
+                updated_at=next_record.updated_at,
+            )
+        )
+        if result.rowcount != 1:
+            raise _SqlConditionalConflict()
+        self._transaction.mark_changed()
 
     async def list_pending(self, resource_kind: ResourceKind, resource_id: str, *, tenant_id: str, limit: int) -> tuple[OperationLedgerRecord, ...]:
         self._check_tenant(tenant_id)
@@ -1812,86 +1898,103 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
 
     async def put_with_operation(self, record: MemoryRecord, *, expected_revision: int | None, operation: OperationLedgerInput | None) -> tuple[MemoryRecord | None, bool]:
         try:
-            return await self._put_with_operation(
-                record,
-                expected_revision=expected_revision,
-                operation=operation,
+            await self._run_optimistic_mutation(
+                lambda session: self._put_with_operation(
+                    session,
+                    record,
+                    expected_revision=expected_revision,
+                    operation=operation,
+                )
             )
         except _OperationInsertConflict:
             if operation is None:
                 raise
-            async with self._context.sessions() as session:
-                current_operation = await self._operations._get_with_session(
-                    session,
-                    operation.operation_id,
-                )
-                if current_operation is None or not operation_replay_matches(
-                    current_operation,
-                    operation,
-                ):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                current = await self._one(
-                    session,
-                    self._table("ai_runtime_memories"),
-                    *self._where(
-                        self._table("ai_runtime_memories"),
-                        memory_id=record.memory_id,
-                    ),
-                )
-            return (None if current is None else _memory(current, self._tenant_id)), True
+            current_operation = await self._operations.get(
+                operation.operation_id,
+                tenant_id=operation.tenant_id,
+            )
+            if current_operation is None or not operation_replay_matches(
+                current_operation,
+                operation,
+            ):
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
+            current = await self.get(
+                record.memory_id,
+                tenant_id=record.tenant_id,
+            )
+            return current, True
+        except _SqlConditionalConflict:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        current = await self.get(record.memory_id, tenant_id=record.tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return current, False
 
     async def _put_with_operation(
         self,
+        session: "AsyncSession",
         record: MemoryRecord,
         *,
         expected_revision: int | None,
         operation: OperationLedgerInput | None,
-    ) -> tuple[MemoryRecord | None, bool]:
+    ) -> None:
         self._check_tenant(record.tenant_id)
         if operation is not None:
             self._check_tenant(operation.tenant_id)
         from sqlalchemy import update
 
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_memories")
-            if operation is not None:
-                existing_operation = await self._operations._get_with_session(
-                    session,
-                    operation.operation_id,
+        table = self._table("ai_runtime_memories")
+        if expected_revision is not None and expected_revision < 0:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        if operation is not None:
+            await self._operations._append_new_with_session(session, operation)
+        revision = 0 if expected_revision in (None, 0) else expected_revision + 1
+        values = self._values({"memory_id": record.memory_id}) | {
+            "memory_scope_digest": record.memory_scope_digest,
+            "content_store_id": record.content_ref.store_id,
+            "content_key": record.content_ref.key,
+            "content_digest": record.content_digest,
+            "content_size": record.content_ref.size,
+            "metadata": dict(record.metadata),
+            "revision": revision,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+        if expected_revision in (None, 0):
+            inserted = await self._insert(session, table, values)
+            if inserted:
+                return
+            if expected_revision is None:
+                raise _SqlConditionalConflict()
+            revision = 1
+        result = await session.execute(
+            update(table)
+            .where(
+                *self._where(
+                    table,
+                    memory_id=record.memory_id,
+                    revision=0 if expected_revision in (None, 0) else expected_revision,
                 )
-                if existing_operation is not None:
-                    if not operation_replay_matches(existing_operation, operation):
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    current = await self._one(session, table, *self._where(table, memory_id=record.memory_id))
-                    return (None if current is None else _memory(current, self._tenant_id)), True
-            current = await self._one(session, table, *self._where(table, memory_id=record.memory_id))
-            if current is None and expected_revision not in (None, 0):
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if current is not None and int(current["revision"]) != expected_revision:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            revision = 0 if current is None else int(current["revision"]) + 1
-            values = self._values({"memory_id": record.memory_id}) | {
-                "memory_scope_digest": record.memory_scope_digest,
-                "content_store_id": record.content_ref.store_id,
-                "content_key": record.content_ref.key,
-                "content_digest": record.content_digest,
-                "content_size": record.content_ref.size,
-                "metadata": dict(record.metadata),
-                "revision": revision,
-                "created_at": record.created_at,
-                "updated_at": record.updated_at,
-            }
-            if current is None:
-                if not await self._insert(session, table, values):
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-            else:
-                result = await session.execute(update(table).where(*self._where(table, memory_id=record.memory_id, revision=int(current["revision"]))).values(**{key: value for key, value in values.items() if key not in {"namespace_digest", "tenant_id", "memory_id", "created_at"}}))
-                if result.rowcount != 1:
-                    raise AIError(ErrorCode.STORAGE_CONFLICT)
-                self._transaction.mark_changed()
-            if operation is not None:
-                await self._operations._append_with_session(session, operation)
-        return replace(record, revision=revision), False
+            )
+            .values(
+                **{
+                    key: value
+                    for key, value in values.items()
+                    if key
+                    not in {
+                        "namespace_digest",
+                        "tenant_id",
+                        "memory_id",
+                        "created_at",
+                        "revision",
+                    }
+                },
+                revision=revision,
+            )
+        )
+        if result.rowcount != 1:
+            raise _SqlConditionalConflict()
+        self._transaction.mark_changed()
 
     async def list(
         self,
@@ -1923,60 +2026,57 @@ class _SqlMemoryRepository(_SqlRepositoryBase):
 
     async def delete_with_operation(self, memory_id: str, *, tenant_id: str, expected_revision: int | None, operation: OperationLedgerInput | None) -> tuple[bool, bool]:
         try:
-            return await self._delete_with_operation(
-                memory_id,
-                tenant_id=tenant_id,
-                expected_revision=expected_revision,
-                operation=operation,
+            deleted = await self._run_optimistic_mutation(
+                lambda session: self._delete_with_operation(
+                    session,
+                    memory_id,
+                    tenant_id=tenant_id,
+                    expected_revision=expected_revision,
+                    operation=operation,
+                )
             )
         except _OperationInsertConflict:
             if operation is None:
                 raise
-            async with self._context.sessions() as session:
-                current_operation = await self._operations._get_with_session(
-                    session,
-                    operation.operation_id,
-                )
+            current_operation = await self._operations.get(
+                operation.operation_id,
+                tenant_id=operation.tenant_id,
+            )
             if current_operation is None or not operation_replay_matches(
                 current_operation,
                 operation,
             ):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             return False, True
+        except _SqlConditionalConflict:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return bool(deleted), False
 
     async def _delete_with_operation(
         self,
+        session: "AsyncSession",
         memory_id: str,
         *,
         tenant_id: str,
         expected_revision: int | None,
         operation: OperationLedgerInput | None,
-    ) -> tuple[bool, bool]:
+    ) -> bool:
         self._check_tenant(tenant_id)
         if operation is not None:
             self._check_tenant(operation.tenant_id)
+            await self._operations._append_new_with_session(session, operation)
         from sqlalchemy import delete
 
-        async with self._mutation() as session:
-            table = self._table("ai_runtime_memories")
-            if operation is not None:
-                existing_operation = await self._operations._get_with_session(
-                    session,
-                    operation.operation_id,
-                )
-                if existing_operation is not None:
-                    if not operation_replay_matches(existing_operation, operation):
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    return False, True
-            clauses = list(self._where(table, memory_id=memory_id))
-            if expected_revision is not None:
-                clauses.append(table.c.revision == expected_revision)
-            result = await session.execute(delete(table).where(*clauses))
-            if result.rowcount:
-                self._transaction.mark_changed()
-            if operation is not None:
-                await self._operations._append_with_session(session, operation)
-            return bool(result.rowcount), False
+        table = self._table("ai_runtime_memories")
+        clauses = list(self._where(table, memory_id=memory_id))
+        if expected_revision is not None:
+            clauses.append(table.c.revision == expected_revision)
+        result = await session.execute(delete(table).where(*clauses))
+        if result.rowcount:
+            self._transaction.mark_changed()
+        elif operation is not None:
+            raise _SqlConditionalConflict()
+        return bool(result.rowcount)
 
 
 class _SqlArtifactRepository(_SqlRepositoryBase):

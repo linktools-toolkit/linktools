@@ -40,6 +40,7 @@ from ...storage import (
     build_object_sql_metadata,
     create_sql_storage_context,
     dialect_for_name,
+    is_retryable_sql_transaction,
     read_object,
     write_json_atomic,
 )
@@ -384,7 +385,15 @@ class FilesystemStepArchive(StagingStepStore):
                     record.run_id,
                 )
             except BaseException as error:
-                await self._recover_run_locked(record.run_id)
+                unpublished = await self._cleanup_unpublished_run_locked(record.run_id)
+                if unpublished:
+                    self._runs.pop(record.run_id, None)
+                    self._events.pop(record.run_id, None)
+                    self._snapshots.pop(record.run_id, None)
+                    self._effects.pop(record.run_id, None)
+                    self._counters.pop(record.run_id, None)
+                else:
+                    await self._recover_run_locked(record.run_id)
                 _raise_filesystem_storage_error(error)
 
     async def append_event(self, event: StepEvent) -> None:
@@ -581,6 +590,9 @@ class FilesystemStepArchive(StagingStepStore):
     async def _load_run(self, directory: Path) -> None:
         run_path = directory / "run.json"
         if not run_path.is_file():
+            if not any(directory.iterdir()):
+                directory.rmdir()
+                return
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         value = await _read_json(run_path)
         try:
@@ -655,6 +667,11 @@ class FilesystemStepArchive(StagingStepStore):
                 if required:
                     raise AIError(ErrorCode.STORAGE_NOT_FOUND)
                 return
+            if not (directory / "run.json").is_file():
+                if await self._cleanup_unpublished_run_locked(run_id):
+                    if required:
+                        raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+                    return
             await self._load_run(directory)
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
@@ -681,6 +698,25 @@ class FilesystemStepArchive(StagingStepStore):
             self._effects.pop(run_id, None)
             self._counters.pop(run_id, None)
             raise
+
+    async def _cleanup_unpublished_run_locked(self, run_id: str) -> bool:
+        directory = self._run_dir(run_id)
+        if not directory.is_dir() or (directory / "run.json").exists():
+            return False
+        if any(directory.iterdir()):
+            return False
+        directory.rmdir()
+        self._runs.pop(run_id, None)
+        self._events.pop(run_id, None)
+        self._snapshots.pop(run_id, None)
+        self._effects.pop(run_id, None)
+        self._counters.pop(run_id, None)
+        _logger.info(
+            "removed unpublished empty step run: domain=%s run=%s",
+            self._runtime_domain.value,
+            run_id,
+        )
+        return True
 
     def _run_dir(self, run_id: str) -> Path:
         if not run_id or any(character in run_id for character in "/\\\x00"):
@@ -1397,41 +1433,48 @@ class SqlStepArchive(StepStore):
 
         table = self._metadata.tables["ai_step_runs"]
         key = _namespace_digest(self.namespace)
-        existing, _ = await self._stable_run(record.run_id)
-        if existing is not None:
-            if _run_from_sql(existing) != record:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            return
-        try:
-            async with self._begin() as connection:
-                await connection.execute(
-                    insert(table).values(
-                        namespace_digest=key,
-                        tenant_id=self.tenant_id,
-                        runtime_domain=self._runtime_domain.value,
-                        run_id=record.run_id,
-                        identity_digest=_step_identity_digest(
-                            self._runtime_domain.value,
-                            record.run_id,
-                        ),
-                        conversation_id=record.conversation_id,
-                        parent_run_id=record.parent_run_id,
-                        agent_name=record.agent_name,
-                        metadata=dict(record.metadata),
-                        last_event_index=0,
-                        last_snapshot_index=0,
-                        last_effect_index=0,
-                        started_at=record.started_at,
+        for attempt in range(_SQL_OPTIMISTIC_RETRY_LIMIT):
+            try:
+                async with self._begin() as connection:
+                    await connection.execute(
+                        insert(table).values(
+                            namespace_digest=key,
+                            tenant_id=self.tenant_id,
+                            runtime_domain=self._runtime_domain.value,
+                            run_id=record.run_id,
+                            identity_digest=_step_identity_digest(
+                                self._runtime_domain.value,
+                                record.run_id,
+                            ),
+                            conversation_id=record.conversation_id,
+                            parent_run_id=record.parent_run_id,
+                            agent_name=record.agent_name,
+                            metadata=dict(record.metadata),
+                            last_event_index=0,
+                            last_snapshot_index=0,
+                            last_effect_index=0,
+                            started_at=record.started_at,
+                        )
                     )
-                )
-            return
-        except IntegrityError as error:
-            if self._context.dialect.classify_integrity_error(error).value != "unique_conflict":
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            current, _ = await self._stable_run(record.run_id)
-            if current is not None and _run_from_sql(current) == record:
                 return
-            raise AIError(ErrorCode.STORAGE_CONFLICT) from None
+            except IntegrityError as error:
+                if self._context.dialect.classify_integrity_error(error).value != "unique_conflict":
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+                current, _ = await self._stable_run(record.run_id)
+                if current is not None and _run_from_sql(current) == record:
+                    return
+                raise AIError(ErrorCode.STORAGE_CONFLICT) from None
+            except BaseException as error:
+                if not is_retryable_sql_transaction(error):
+                    raise
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                _logger.debug(
+                    "SQL step transaction retry: operation=register_run run=%s attempt=%s",
+                    record.run_id,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
 
     async def _candidate_rows(
         self,
@@ -1590,6 +1633,17 @@ class SqlStepArchive(StepStore):
                 if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await asyncio.sleep(0)
+            except BaseException as error:
+                if not is_retryable_sql_transaction(error):
+                    raise
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                _logger.debug(
+                    "SQL step transaction retry: operation=append_event run=%s attempt=%s",
+                    event.run_id,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
@@ -1678,6 +1732,17 @@ class SqlStepArchive(StepStore):
                 if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
                 await asyncio.sleep(0)
+            except BaseException as error:
+                if not is_retryable_sql_transaction(error):
+                    raise
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                _logger.debug(
+                    "SQL step transaction retry: operation=save_snapshot run=%s attempt=%s",
+                    snapshot.run_id,
+                    attempt + 1,
+                )
+                await asyncio.sleep(0)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
@@ -1753,6 +1818,17 @@ class SqlStepArchive(StepStore):
             except _StepRetry:
                 if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await asyncio.sleep(0)
+            except BaseException as error:
+                if not is_retryable_sql_transaction(error):
+                    raise
+                if attempt + 1 == _SQL_OPTIMISTIC_RETRY_LIMIT:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+                _logger.debug(
+                    "SQL step transaction retry: operation=record_tool_effect run=%s attempt=%s",
+                    record.run_id,
+                    attempt + 1,
+                )
                 await asyncio.sleep(0)
         raise AIError(ErrorCode.STORAGE_CONFLICT)
 

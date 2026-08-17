@@ -10,22 +10,22 @@ from linktools.ai.asset import (
     AssetKey,
     AssetRoot,
     AssetStore,
-    InMemoryAssetBackend,
     DirectoryAssetBackend,
+    InMemoryAssetBackend,
     SqlAssetBackend,
-    build_asset_sql_metadata,
     StrictConfigReader,
+    build_asset_sql_metadata,
 )
 from linktools.ai.migrate import provision_asset_database
 from linktools.ai.storage import (
     MySQLDialect,
     PostgreSQLDialect,
-    SQLiteDialect,
     SqlErrorKind,
-    StorageLayer,
+    SQLiteDialect,
     StorageChange,
-    StorageOverlay,
+    StorageLayer,
     StorageOperation,
+    StorageOverlay,
     build_object_sql_metadata,
     classify_sql_error,
     is_retryable_sql_transaction,
@@ -72,13 +72,42 @@ def test_sql_error_classification_is_owned_by_storage() -> None:
     locked = OperationalError("update", {}, RuntimeError("database is locked"))
     unavailable = OperationalError("select", {}, RuntimeError("connection refused"))
     assert classify_sql_error(integrity) is SqlErrorKind.INTEGRITY
-    assert is_retryable_sql_transaction(integrity)
+    assert not is_retryable_sql_transaction(integrity)
     assert classify_sql_error(locked) is SqlErrorKind.RETRYABLE_TRANSACTION
     assert is_retryable_sql_transaction(locked)
     assert classify_sql_error(unavailable) is SqlErrorKind.DATABASE
     assert not is_retryable_sql_transaction(unavailable)
     assert classify_sql_error(RuntimeError("application failure")) is SqlErrorKind.UNKNOWN
     assert not is_retryable_sql_transaction(RuntimeError("application failure"))
+
+
+def test_sql_error_classification_reads_structured_driver_codes() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    class SQLiteBusySnapshot(Exception):
+        sqlite_errorcode = 517
+
+    class PostgreSQLSerializationFailure(Exception):
+        sqlstate = "40001"
+
+    class MySQLDeadlock(Exception):
+        errno = 1213
+
+    for original in (
+        SQLiteBusySnapshot("busy snapshot"),
+        PostgreSQLSerializationFailure("serialization failure"),
+        MySQLDeadlock("deadlock"),
+    ):
+        error = OperationalError("update", {}, original)
+        assert classify_sql_error(error) is SqlErrorKind.RETRYABLE_TRANSACTION
+        assert is_retryable_sql_transaction(error)
+
+    class SQLiteLocked(Exception):
+        sqlite_errorcode = 6
+
+    assert not is_retryable_sql_transaction(
+        OperationalError("update", {}, SQLiteLocked("locked"))
+    )
 
 
 def test_asset_path_adapter_and_config_are_available() -> None:
