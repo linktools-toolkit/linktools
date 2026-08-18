@@ -139,11 +139,17 @@ class LocalTaskGraphLauncher:
             if existing is not None and not existing.closed:
                 self._close_run(existing)
             run = _GraphRun()
-            self._graphs[key] = run
             run.task = asyncio.create_task(
                 self._run_graph(request, run),
                 name=f"task-graph-{key[0]}-{key[1]}",
             )
+            self._graphs[key] = run
+            if existing is not None:
+                _logger.info(
+                    "task graph scheduler re-armed: tenant=%s graph=%s",
+                    key[0],
+                    key[1],
+                )
         _logger.info(
             "task graph scheduler armed: tenant=%s graph=%s nodes=%s",
             key[0],
@@ -163,6 +169,8 @@ class LocalTaskGraphLauncher:
         view = await self._repository.get_graph(graph_id, tenant_id=request.principal.tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        if run is not None:
+            self._remove_run(key, run)
         _logger.info("task graph scheduler disarmed: tenant=%s graph=%s", key[0], graph_id)
         return view
 
@@ -176,8 +184,9 @@ class LocalTaskGraphLauncher:
         tasks = tuple(run.task for run in runs if run.task is not None)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        for run in runs:
-            self._cleanup_run(run)
+        self._graphs.clear()
+        self._wait_observations.clear()
+        _logger.info("local task graph launcher closed: graphs=%s", len(runs))
 
     def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
         key = tenant_id, graph_id
@@ -442,11 +451,15 @@ class LocalTaskGraphLauncher:
         asyncio.get_running_loop().call_soon(self._cleanup_run, run)
 
     def _cleanup_run(self, run: _GraphRun) -> None:
-        if not run.closed or run.waiters:
+        if not run.closed or run.waiters or run.failure is not None:
             return
         for key, current in tuple(self._graphs.items()):
             if current is run:
-                self._graphs.pop(key, None)
+                self._remove_run(key, run)
+
+    def _remove_run(self, key: tuple[str, str], run: _GraphRun) -> None:
+        if self._graphs.get(key) is run:
+            self._graphs.pop(key, None)
 
 
 def _runnable(node: _TaskNodeState, now: datetime) -> bool:

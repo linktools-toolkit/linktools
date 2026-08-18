@@ -15,6 +15,7 @@ from linktools.ai.agent._capabilities import (
 from linktools.ai.core import Principal, TaskStatus
 from linktools.ai.errors import AIError, ErrorCode
 from linktools.ai.task._graph import (
+    CancelGraphRequest,
     TaskGraph,
     TaskGraphRequest,
     TaskGraphView,
@@ -361,9 +362,14 @@ class _TaskRepository:
     def __init__(self, status: TaskStatus = TaskStatus.RUNNING) -> None:
         self.status = status
         self.failure: BaseException | None = None
+        self.reconcile_gate: asyncio.Event | None = None
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         del graph_id, tenant_id
+        if self.reconcile_gate is not None:
+            gate = self.reconcile_gate
+            self.reconcile_gate = None
+            await gate.wait()
         if self.failure is not None:
             raise self.failure
         return TaskGraphView("graph", self.status, ())
@@ -429,6 +435,7 @@ async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() 
     launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
     await launcher.start(_task_request())
     await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert launcher.owns_graph("graph", tenant_id="tenant") is True
     with pytest.raises(AIError) as raised:
         await asyncio.wait_for(
@@ -436,7 +443,88 @@ async def test_local_scheduler_failure_wakes_waiter_with_infrastructure_error() 
             timeout=1,
         )
     assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    with pytest.raises(AIError) as late_raised:
+        await asyncio.wait_for(
+            launcher.wait_graph_activity("graph", tenant_id="tenant"),
+            timeout=1,
+        )
+    assert late_raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert repository.status is TaskStatus.RUNNING
+    assert launcher._graphs
+    await launcher.shutdown()
+
+
+async def test_local_scheduler_failure_wakes_existing_waiter() -> None:
+    repository = _TaskRepository()
+    gate = asyncio.Event()
+    repository.reconcile_gate = gate
+    launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
+    await launcher.start(_task_request())
     await asyncio.sleep(0)
+    waiter = asyncio.create_task(
+        launcher.wait_graph_activity("graph", tenant_id="tenant")
+    )
+    await asyncio.sleep(0)
+
+    repository.failure = RuntimeError("scheduler failure")
+    gate.set()
+
+    with pytest.raises(AIError) as raised:
+        await asyncio.wait_for(waiter, timeout=1)
+    assert raised.value.code is ErrorCode.STORAGE_UNAVAILABLE
+    assert launcher._graphs
+    await launcher.shutdown()
+
+
+async def test_local_scheduler_rearms_after_retained_failure() -> None:
+    repository = _TaskRepository()
+    repository.failure = RuntimeError("scheduler failure")
+    launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
+    request = _task_request()
+    await launcher.start(request)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    failed_run = launcher._graphs[("tenant", "graph")]
+
+    repository.failure = None
+    await launcher.start(request)
+    replacement = launcher._graphs[("tenant", "graph")]
+
+    assert replacement is not failed_run
+    assert replacement.failure is None
+    assert replacement.task is not None
+    await launcher.shutdown()
+    assert not launcher._graphs
+
+
+async def test_launcher_shutdown_clears_retained_failure() -> None:
+    repository = _TaskRepository()
+    repository.failure = RuntimeError("scheduler failure")
+    launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
+    await launcher.start(_task_request())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert launcher._graphs
+
+    await launcher.shutdown()
+
+    assert not launcher._graphs
+
+
+async def test_launcher_cancel_clears_retained_failure() -> None:
+    repository = _TaskRepository()
+    repository.failure = RuntimeError("scheduler failure")
+    launcher = LocalTaskGraphLauncher(repository, _TaskRunner(), owner="launcher")
+    await launcher.start(_task_request())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert launcher._graphs
+
+    await launcher.cancel(
+        "graph",
+        CancelGraphRequest(Principal("user", "tenant"), "cancel-request"),
+    )
+
     assert not launcher._graphs
     await launcher.shutdown()
 
