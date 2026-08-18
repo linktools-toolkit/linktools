@@ -115,6 +115,7 @@ from ._object import (
     build_object_sql_metadata,
     read_object,
 )
+from ._payload import PayloadPolicy, StoredPayload, payload_fits_inline
 from ._revision import LayerMetadataView, RevisionSource, StorageRevisionSource
 
 __all__ = [
@@ -146,6 +147,9 @@ __all__ = [
     "ObjectRef",
     "ObjectStat",
     "ObjectStore",
+    "PayloadPolicy",
+    "StoredPayload",
+    "payload_fits_inline",
     "PostgreSQLDialect",
     "PreloadResult",
     "ProcessLeaseCoordinator",

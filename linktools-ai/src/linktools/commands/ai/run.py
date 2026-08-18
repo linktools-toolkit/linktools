@@ -14,7 +14,7 @@ from linktools.cli.argparse import ConfigAction
 from linktools.core import ConfigField, environ
 from pydantic_ai.exceptions import ModelAPIError, UserError
 
-from ...ai.core import ExecutionEventType, ExecutionStatus
+from ...ai.core import ExecutionDeltaType, ExecutionEventType, ExecutionStatus
 from ...ai.errors import AIError
 from ...ai.model import ModelRegistry
 from ...ai.runtime import Runtime
@@ -90,19 +90,33 @@ async def _emit_result(
     if as_json:
         result = await runtime.run(prompt, session_id=session_id, memory_scope=memory_scope)
         payload = _result_payload(result)
+        if result.status is not ExecutionStatus.SUCCEEDED:
+            error_code, safe_details = await _terminal_failure_details(runtime, result.execution_id)
+            payload["error_code"] = error_code
+            payload["safe_error_details"] = safe_details
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
         if result.status is not ExecutionStatus.SUCCEEDED:
-            raise CommandError(f"execution {result.execution_id} finished with status {result.status.value}")
+            raise CommandError(
+                "execution failed: "
+                f"execution_id={result.execution_id} status={result.status.value} "
+                f"error_code={payload['error_code']} "
+                f"safe_error_details={payload['safe_error_details']}"
+            )
         return 0
 
     succeeded = False
+    execution_id = "unknown"
+    terminal_status = "UNKNOWN"
+    terminal_error_code: object = None
+    terminal_safe_details: object = {}
     async for event in runtime.stream(prompt, session_id=session_id, memory_scope=memory_scope):
-        if event.event_type is ExecutionEventType.ASSISTANT_TEXT_DELTA:
+        execution_id = event.execution_id
+        if event.event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
             text = event.payload.get("text") if isinstance(event.payload, dict) else None
             if isinstance(text, str):
                 sys.stdout.write(text)
                 sys.stdout.flush()
-        elif event.event_type is ExecutionEventType.ASSISTANT_THINKING_DELTA:
+        elif event.event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
             _write_stderr("[thinking] " + _payload_text(event.payload))
         elif event.event_type is ExecutionEventType.TOOL_CALL_STARTED:
             _write_stderr("[tool] " + _payload_text(event.payload))
@@ -110,11 +124,46 @@ async def _emit_result(
             _write_stderr("[tool] finished " + _payload_text(event.payload))
         elif event.event_type is ExecutionEventType.EXECUTION_SUCCEEDED:
             succeeded = True
+            terminal_status = ExecutionStatus.SUCCEEDED.value
+        elif event.event_type in {
+            ExecutionEventType.EXECUTION_FAILED,
+            ExecutionEventType.EXECUTION_CANCELLED,
+        }:
+            terminal_status = event.event_type.value.removeprefix("EXECUTION_")
+            if isinstance(event.payload, dict):
+                terminal_error_code = event.payload.get("error_code")
+                terminal_safe_details = event.payload.get("safe_error_details", {})
     sys.stdout.write("\n")
     sys.stdout.flush()
     if not succeeded:
-        raise CommandError("execution did not succeed")
+        raise CommandError(
+            "execution failed: "
+            f"execution_id={execution_id} status={terminal_status} "
+            f"error_code={terminal_error_code} safe_error_details={terminal_safe_details}"
+        )
     return 0
+
+
+async def _terminal_failure_details(
+    runtime: Runtime,
+    execution_id: str,
+) -> tuple[object, object]:
+    page = await runtime.event.list(
+        execution_id,
+        principal=runtime.default_principal,
+        after_sequence=0,
+        limit=100,
+    )
+    for event in reversed(page.items):
+        if event.event_type not in {
+            ExecutionEventType.EXECUTION_FAILED,
+            ExecutionEventType.EXECUTION_CANCELLED,
+        }:
+            continue
+        if not isinstance(event.payload, dict):
+            return None, {}
+        return event.payload.get("error_code"), event.payload.get("safe_error_details", {})
+    return None, {}
 
 
 def _result_payload(result: object) -> dict[str, object]:

@@ -460,8 +460,8 @@ class FilesystemAssetBackend:
         if self._revision != base + 1:
             raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
         plan = self._journal.stage(
-            desired,
-            previous,
+            {path: value for path, value in desired.items() if previous.get(path) != value},
+            previous.keys() - desired.keys(),
             base_generation=base,
             target_generation=self._revision,
         )

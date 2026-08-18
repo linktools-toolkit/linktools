@@ -42,6 +42,12 @@ def validate_lease_owner(value: str) -> str:
     return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
 
 
+def validate_lease_seconds(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 3600:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+    return value
+
+
 def validate_principal_id(value: str) -> str:
     return _text(value, 256, ErrorCode.REQUEST_FIELD_INVALID)
 
@@ -123,7 +129,7 @@ def _text(value: str, maximum: int, code: ErrorCode) -> str:
 
 __all__ = [
     "validate_agent_id", "validate_asset_kind", "validate_asset_namespace", "validate_capability_provider", "validate_enum",
-    "validate_external_payload", "validate_idempotency_key", "validate_lease_owner",
+    "validate_external_payload", "validate_idempotency_key", "validate_lease_owner", "validate_lease_seconds",
     "validate_memory_scope", "validate_persistence_namespace", "validate_observation_payload", "validate_page_limit",
     "validate_principal_id", "validate_principal_kind", "validate_resource_id", "validate_shell_timeout",
     "validate_user_prompt",

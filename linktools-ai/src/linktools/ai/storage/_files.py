@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -96,8 +96,8 @@ class FilesystemJournal:
 
     def stage(
         self,
-        desired: Mapping[str, bytes],
-        previous: Mapping[str, bytes],
+        writes: Mapping[str, bytes],
+        deletes: Collection[str],
         *,
         base_generation: int,
         target_generation: int,
@@ -112,10 +112,8 @@ class FilesystemJournal:
                 sync_directory(self._root)
             stage = self._transaction / "stage"
             stage.mkdir(parents=True)
-            writes: list[dict[str, str]] = []
-            for relative, content in desired.items():
-                if previous.get(relative) == content:
-                    continue
+            write_entries: list[dict[str, str]] = []
+            for relative, content in writes.items():
                 path = validate_root_path(
                     stage,
                     _safe_relative(relative, self._error_code),
@@ -123,7 +121,7 @@ class FilesystemJournal:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(content)
                 _sync_file(path)
-                writes.append(
+                write_entries.append(
                     {
                         "path": relative,
                         "sha256": _sha256(content),
@@ -134,8 +132,8 @@ class FilesystemJournal:
                 "journal_version": 1,
                 "base_generation": base_generation,
                 "target_generation": target_generation,
-                "writes": writes,
-                "deletes": sorted(previous.keys() - desired.keys()),
+                "writes": write_entries,
+                "deletes": sorted(deletes),
             }
             self.validate(plan, base_generation=base_generation)
             _write_journal_json(self._transaction / "plan.json", plan)

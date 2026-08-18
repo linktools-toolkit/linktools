@@ -219,9 +219,7 @@ class FilesystemObjectStore:
                     )
                     if current.digest != expected_digest or current.size != expected_size:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
-                    actual_size, actual_digest = await asyncio_to_thread(lambda: _hash_file(destination))
-                    if actual_size != current.size or actual_digest != current.digest:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    _logger.debug("filesystem object duplicate accepted by metadata: key=%s", key)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(name, destination)

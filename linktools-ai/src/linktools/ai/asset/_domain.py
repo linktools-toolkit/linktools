@@ -16,6 +16,7 @@ from ..storage import (
     StorageEntryStatus,
     StorageRevision,
     StorageWriter,
+    StoredPayload,
     normalize_storage_metadata,
 )
 
@@ -68,6 +69,7 @@ class AssetInfo:
     root_digest: str
     modified_at: datetime
     metadata: Mapping[str, JsonValue] = field(default_factory=dict)
+    content: "StoredPayload | None" = None
 
     def __post_init__(self) -> None:
         if (
@@ -86,6 +88,10 @@ class AssetInfo:
             self.size != 0 or self.etag != hashlib.sha256(b"").hexdigest()
         ):
             raise ValueError("non-normal asset metadata must not contain file content")
+        if self.content is not None and (
+            self.content.digest != self.etag or self.content.size != self.size
+        ):
+            raise ValueError("asset content descriptor does not match metadata")
 
 
 @runtime_checkable

@@ -10,6 +10,7 @@ from ..core import (
     ApprovalDecision,
     ApprovalStatus,
     EvaluationStatus,
+    ExecutionDeltaType,
     ExecutionEventType,
     ExecutionStatus,
     JsonValue,
@@ -426,6 +427,14 @@ class ExecutionEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ExecutionStreamEvent:
+    execution_id: str
+    durable_sequence: int | None
+    event_type: "ExecutionEventType | ExecutionDeltaType"
+    payload: JsonValue
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactView:
     artifact_id: str
     execution_id: str
@@ -553,8 +562,22 @@ class ExternalService(Protocol):
 
 
 class EventService(Protocol):
-    async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> 'Page[ExecutionEvent]': ...
-    def stream(self, execution_id: str, *, principal: Principal, after_sequence: int = 0) -> 'AsyncIterator[ExecutionEvent]': ...
+    async def list(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+        limit: int = 100,
+    ) -> 'Page[ExecutionEvent]': ...
+
+    def stream(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> 'AsyncIterator[ExecutionStreamEvent]': ...
 
 
 class ArtifactService(Protocol):
@@ -575,7 +598,8 @@ __all__ = [
     "CancelExecutionResult",
     "CancelGraphRequest", "CloseSessionRequest", "CompareEvaluationRequest",
     "CreateSessionRequest", "EvaluationComparison", "EvaluationHandle", "EvaluationService",
-    "EvaluationView", "EventService", "ExecutionEvent", "ExecutionHandle",
+    "EvaluationView", "EventService", "ExecutionEvent",
+    "ExecutionStreamEvent", "ExecutionHandle",
     "ExecutionRequest", "ExecutionResult", "ExecutionService", "ExecutionView",
     "ExecutionHistoryItem", "ExecutionHistoryReader", "SessionHistoryItem", "SessionHistoryReader",
     "ForkExecutionRequest", "ForkSessionRequest", "ListSessionRequest", "LoadedSession", "Page",

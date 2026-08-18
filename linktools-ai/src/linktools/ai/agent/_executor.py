@@ -31,7 +31,7 @@ from pydantic_ai_harness.memory import SearchableMemoryStore
 from pydantic_ai_harness.step_persistence import StepStore
 
 from ..capability import CapabilityMaterializationContext
-from ..core import ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
+from ..core import ExecutionDeltaType, ExecutionEventType, JsonValue, UsageMetrics, canonical_sha256
 from ..errors import AIError, ErrorCode
 from ..spec import AgentUsageLimits
 from ._builder import build_pydantic_agent
@@ -43,7 +43,24 @@ from ._capabilities import (
 )
 from ._definition import AgentDefinition
 
-EventSink = Callable[[ExecutionEventType, JsonValue], Awaitable[None]]
+@dataclass(frozen=True, slots=True)
+class LiveDelta:
+    """An ephemeral model presentation update."""
+
+    kind: ExecutionDeltaType
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class DurableBoundary:
+    """A semantic boundary that is safe to persist in the execution audit."""
+
+    kind: ExecutionEventType
+    payload: JsonValue
+
+
+AgentEmission = LiveDelta | DurableBoundary
+EventSink = Callable[[AgentEmission], Awaitable[None]]
 
 
 class UsageSink(Protocol):
@@ -191,9 +208,9 @@ class AgentExecutor:
                 if isinstance(event, AgentRunResultEvent):
                     final_result = event.result
                     continue
-                mapped = _map_event(event)
-                if mapped is not None:
-                    await event_sink(mapped[0], mapped[1])
+                emission = _map_event(event)
+                if emission is not None:
+                    await event_sink(emission)
         if final_result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         run = await step_store.get_run(run_id=step_run_id)
@@ -237,45 +254,61 @@ def _function_tool_allowed(name: str, allow_tools: "tuple[str, ...]") -> bool:
     return selector in allow_tools or f"{selector}__*" in allow_tools
 
 
-def _map_event(
-    event: object,
-) -> "tuple[ExecutionEventType, JsonValue] | None":
+def _map_event(event: object) -> "AgentEmission | None":
     if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart) and event.part.content:
-        return ExecutionEventType.ASSISTANT_TEXT_DELTA, {"text": event.part.content}
+        return LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.part.content)
     if isinstance(event, PartStartEvent) and isinstance(event.part, ThinkingPart) and event.part.content:
-        return ExecutionEventType.ASSISTANT_THINKING_DELTA, {"text": event.part.content}
+        return LiveDelta(ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.part.content)
     if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta) and event.delta.content_delta:
-        return ExecutionEventType.ASSISTANT_TEXT_DELTA, {"text": event.delta.content_delta}
+        return LiveDelta(ExecutionDeltaType.ASSISTANT_TEXT_DELTA, event.delta.content_delta)
     if isinstance(event, PartDeltaEvent) and isinstance(event.delta, ThinkingPartDelta) and event.delta.content_delta:
-        return ExecutionEventType.ASSISTANT_THINKING_DELTA, {"text": event.delta.content_delta}
+        return LiveDelta(ExecutionDeltaType.ASSISTANT_THINKING_DELTA, event.delta.content_delta)
     if isinstance(event, PartEndEvent) and isinstance(event.part, TextPart):
         text = event.part.content
-        return ExecutionEventType.ASSISTANT_TEXT_END, {"text_digest": canonical_sha256(text), "characters": len(text)}
+        return DurableBoundary(
+            ExecutionEventType.ASSISTANT_PART_COMPLETED,
+            {"part_type": "text", "digest": canonical_sha256(text), "characters": len(text)},
+        )
+    if isinstance(event, PartEndEvent) and isinstance(event.part, ThinkingPart):
+        text = event.part.content
+        return DurableBoundary(
+            ExecutionEventType.ASSISTANT_PART_COMPLETED,
+            {"part_type": "thinking", "digest": canonical_sha256(text), "characters": len(text)},
+        )
     if isinstance(event, FunctionToolCallEvent):
         part = event.part
-        return ExecutionEventType.TOOL_CALL_STARTED, {
-            "call_id": part.tool_call_id,
-            "tool_name": part.tool_name,
-            "arguments_digest": canonical_sha256(part.args_as_dict()),
-        }
+        return DurableBoundary(
+            ExecutionEventType.TOOL_CALL_STARTED,
+            {
+                "call_id": part.tool_call_id,
+                "tool_name": part.tool_name,
+                "arguments_digest": canonical_sha256(part.args_as_dict()),
+            },
+        )
     if isinstance(event, FunctionToolResultEvent):
         part = event.part
         if isinstance(part, ToolReturnPart):
             success = part.outcome == "success"
-            return ExecutionEventType.TOOL_CALL_FINISHED, {
-                "call_id": part.tool_call_id,
-                "tool_name": part.tool_name,
-                "result_digest": canonical_sha256(str(part.content)) if success else None,
-                "status": "SUCCEEDED" if success else "FAILED",
-            }
+            return DurableBoundary(
+                ExecutionEventType.TOOL_CALL_FINISHED,
+                {
+                    "call_id": part.tool_call_id,
+                    "tool_name": part.tool_name,
+                    "result_digest": canonical_sha256(str(part.content)) if success else None,
+                    "status": "SUCCEEDED" if success else "FAILED",
+                },
+            )
         if isinstance(part, RetryPromptPart):
-            return ExecutionEventType.TOOL_CALL_FINISHED, {
-                "call_id": part.tool_call_id,
-                "tool_name": part.tool_name or "unknown",
-                "result_digest": None,
-                "status": "FAILED",
-                "safe_error_code": ErrorCode.OUTPUT_VALIDATION_FAILED.value,
-            }
+            return DurableBoundary(
+                ExecutionEventType.TOOL_CALL_FINISHED,
+                {
+                    "call_id": part.tool_call_id,
+                    "tool_name": part.tool_name or "unknown",
+                    "result_digest": None,
+                    "status": "FAILED",
+                    "safe_error_code": ErrorCode.OUTPUT_VALIDATION_FAILED.value,
+                },
+            )
     return None
 
 
@@ -331,4 +364,12 @@ def _usage_details(value: RunUsage) -> dict[str, int]:
     }
 
 
-__all__ = ["AgentExecutionResult", "AgentExecutor", "EventSink", "UsageSink"]
+__all__ = [
+    "AgentExecutionResult",
+    "AgentEmission",
+    "AgentExecutor",
+    "DurableBoundary",
+    "EventSink",
+    "LiveDelta",
+    "UsageSink",
+]

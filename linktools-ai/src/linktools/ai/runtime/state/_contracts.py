@@ -32,7 +32,7 @@ from ...core import (
     StopReason,
     UsageMetrics,
 )
-from ...storage import ObjectRef
+from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
     TaskGraphView,
@@ -179,7 +179,7 @@ class ResultRecord:
     output_schema_id: "str | None"
     output_schema_revision: "int | None"
     output_schema_fingerprint: "str | None"
-    object_ref: "ObjectRef | None"
+    output: "StoredPayload | None"
     stop_reason: StopReason
     usage: UsageMetrics
     created_at: datetime
@@ -188,8 +188,10 @@ class ResultRecord:
         output_fields = (self.output_schema_id, self.output_schema_revision, self.output_schema_fingerprint)
         if any(value is None for value in output_fields) and any(value is not None for value in output_fields):
             raise ValueError("result output schema fields must be all null or all present")
-        if self.object_ref is not None and any(value is None for value in output_fields):
+        if self.output is not None and any(value is None for value in output_fields):
             raise ValueError("result object requires output schema")
+        if self.output is None and any(value is not None for value in output_fields):
+            raise ValueError("result schema requires output")
         if self.created_at.tzinfo is None:
             raise ValueError("result requires an aware timestamp")
 
@@ -199,8 +201,7 @@ class MemoryRecord:
     memory_id: str
     tenant_id: str
     memory_scope_digest: str
-    content_ref: ObjectRef
-    content_digest: str
+    content: StoredPayload
     metadata: Mapping[str, JsonValue]
     revision: int
     created_at: datetime
@@ -261,8 +262,8 @@ class ExecutionTerminalCommit:
             self.result.output_schema_revision,
             self.result.output_schema_fingerprint,
         )
-        has_output = all(value is not None for value in output_fields) and self.result.object_ref is not None
-        partial_output = any(value is not None for value in output_fields) or self.result.object_ref is not None
+        has_output = all(value is not None for value in output_fields) and self.result.output is not None
+        partial_output = any(value is not None for value in output_fields) or self.result.output is not None
         if status is ExecutionStatus.SUCCEEDED and not has_output:
             raise ValueError("successful terminal result requires output")
         if status is not ExecutionStatus.SUCCEEDED and partial_output:
@@ -416,7 +417,8 @@ class RecoveryTerminalOutcome:
     output_schema_id: "str | None"
     output_schema_revision: "int | None"
     output_schema_fingerprint: "str | None"
-    recovery_object_ref: "ObjectRef | None"
+    output: "StoredPayload | None"
+    object_source_domain: "RuntimeDomain | None"
     usage: UsageMetrics
     terminal_event_type: ExecutionEventType
     terminal_event_payload: Mapping[str, JsonValue]
@@ -424,12 +426,20 @@ class RecoveryTerminalOutcome:
 
     def __post_init__(self) -> None:
         output_fields = (self.output_schema_id, self.output_schema_revision, self.output_schema_fingerprint)
-        has_output = all(value is not None for value in output_fields) and self.recovery_object_ref is not None
-        partial_output = any(value is not None for value in output_fields) or self.recovery_object_ref is not None
+        has_output = all(value is not None for value in output_fields) and self.output is not None
+        partial_output = any(value is not None for value in output_fields) or self.output is not None
         if self.terminal_status is ExecutionStatus.SUCCEEDED and not has_output:
             raise ValueError("successful recovery outcome requires output")
         if self.terminal_status is not ExecutionStatus.SUCCEEDED and partial_output:
             raise ValueError("failed recovery outcome cannot contain output")
+        if self.output is None and self.object_source_domain is not None:
+            raise ValueError("recovery object source requires output")
+        if self.output is not None and self.output.kind == "inline" and self.object_source_domain is not None:
+            raise ValueError("inline recovery output cannot have an object source")
+        if self.output is not None and self.output.kind == "object" and self.object_source_domain is None:
+            raise ValueError("object recovery output requires an object source")
+        if self.object_source_domain not in {None, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}:
+            raise ValueError("recovery object source domain is invalid")
         if self.result_created_at.tzinfo is None:
             raise ValueError("recovery outcome requires an aware timestamp")
 
@@ -564,6 +574,25 @@ class IdempotencyRepository(RuntimeRepository, Protocol):
 
 
 class EventRepository(RuntimeRepository, Protocol):
+    async def append_next(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+    ) -> "ExecutionEventRecord": ...
+
+    async def append_expected(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_sequence: int,
+        event_type: ExecutionEventType,
+        payload: JsonValue,
+    ) -> "ExecutionEventRecord": ...
+
     async def append(
         self,
         execution_id: str,

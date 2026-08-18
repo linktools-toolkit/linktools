@@ -12,6 +12,7 @@ from ...errors import AIError, ErrorCode
 from ...storage import (
     FilesystemObjectStore,
     InMemoryObjectStore,
+    ObjectRef,
     ObjectStore,
     SqlObjectStore,
     SqlStorageContext,
@@ -76,6 +77,13 @@ class _RuntimeObjectRouter:
             return self._stores[domain]
         except KeyError as error:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY) from error
+
+    def resolve_object(self, domain: RuntimeDomain, reference: ObjectRef) -> ObjectStore:
+        """Resolve an object by its durable runtime domain, never by store id."""
+        store = self.object_store(domain)
+        if reference.store_id != store.store_id:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        return store
 
     def working_object_store(self, domain: RuntimeDomain, *, owner_scope: str) -> ObjectStore:
         store = self.object_store(domain)

@@ -39,7 +39,7 @@ from .service_api import (
     EvaluationHandle,
     EvaluationService,
     EventService,
-    ExecutionEvent,
+    ExecutionStreamEvent,
     ExecutionHandle,
     ExecutionRequest,
     ExecutionResult,
@@ -268,7 +268,7 @@ class Runtime:
         session_id: "str | None" = None,
         idempotency_key: "str | None" = None,
         memory_scope: "str | None" = None,
-    ) -> AsyncIterator[ExecutionEvent]:
+    ) -> AsyncIterator[ExecutionStreamEvent]:
         return self._stream_for_agent(
             None,
             user_prompt,
@@ -287,7 +287,7 @@ class Runtime:
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
-    ) -> AsyncIterator[ExecutionEvent]:
+    ) -> AsyncIterator[ExecutionStreamEvent]:
         principal = self._resolve_principal(principal)
         return self._stream(
             agent_id,
@@ -307,7 +307,7 @@ class Runtime:
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
-    ) -> AsyncIterator[ExecutionEvent]:
+    ) -> AsyncIterator[ExecutionStreamEvent]:
         handle = await self._start_for_agent(
             agent_id,
             user_prompt,

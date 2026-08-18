@@ -284,10 +284,10 @@ class StateStepArchive(StepStore):
         await self._append(snapshot.run_id, "snapshot", snapshot, snapshot.state)
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
-        values = [_decode_step(value.data) for value in await self._facts(run_id, "snapshot")]
+        values = await self._facts(run_id, "snapshot", latest=True)
         if not values:
             return None
-        latest = values[-1]
+        latest = _decode_step(values[0].data)
         return latest if include_interrupted or latest.state == "complete" else None
 
     async def record_tool_effect(self, record: ToolEffectRecord) -> None:
@@ -333,7 +333,9 @@ class StateStepArchive(StepStore):
             if owner_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if subject is not None:
-                existing = await transaction.list_facts(FactQuery(stream, subject_digest=subject))
+                existing = await transaction.list_facts(
+                    FactQuery(stream, subject_digest=subject, latest=True)
+                )
                 if any(fact.data == data and fact.state == kind for fact in existing):
                     return
             if await transaction.guard_record(
@@ -352,13 +354,17 @@ class StateStepArchive(StepStore):
         family: str,
         *,
         subject: bytes | None = None,
+        latest: bool = False,
         latest_per_subject: bool = False,
     ) -> tuple[StoredFact, ...]:
+        if latest and latest_per_subject:
+            raise ValueError("latest and latest_per_subject cannot both be set")
         return await self._store.read(
             lambda transaction: transaction.list_facts(
                 FactQuery(
                     self._stream(run_id, family),
                     subject_digest=subject,
+                    latest=latest,
                     latest_per_subject=latest_per_subject,
                 )
             )
@@ -392,11 +398,17 @@ class RuntimeStepStore(StepStore):
         }
         self._initialized = False
         self._preflight = False
+        self._materialized_runs: dict[RuntimeDomain, set[str]] = {
+            domain: set() for domain in self._archives
+        }
+        self._materialization_lock = asyncio.Lock()
 
     async def initialize(self) -> None:
         await self._staging.initialize()
         for archive in self._archives.values():
             await archive.initialize()
+        for values in self._materialized_runs.values():
+            values.clear()
         self._initialized = True
 
     async def register_run(self, record: RunRecord) -> None:
@@ -421,7 +433,6 @@ class RuntimeStepStore(StepStore):
         await self._staging.append_event(event)
         archive = self._archives.get(RuntimeDomain.EXECUTION)
         if archive is not None:
-            await _materialize_run(self._staging, archive, event.run_id)
             await archive.append_event(event)
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
@@ -433,7 +444,6 @@ class RuntimeStepStore(StepStore):
         await self._staging.save_snapshot(snapshot)
         archive = self._archives.get(RuntimeDomain.EXECUTION)
         if archive is not None:
-            await _materialize_run(self._staging, archive, snapshot.run_id)
             await archive.save_snapshot(snapshot)
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
@@ -445,7 +455,7 @@ class RuntimeStepStore(StepStore):
         await self._staging.record_tool_effect(record)
         archive = self._archives.get(RuntimeDomain.RECOVERY)
         if archive is not None:
-            await _materialize_run(self._staging, archive, record.run_id)
+            await self._ensure_run_materialized(RuntimeDomain.RECOVERY, record.run_id)
             await archive.record_tool_effect(record)
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
@@ -472,7 +482,8 @@ class RuntimeStepStore(StepStore):
         if require_complete and snapshot.state != "complete":
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if archive is not None:
-            await _materialize_snapshot(archive, run, snapshot)
+            await self._ensure_run_materialized(RuntimeDomain.RECOVERY, step_run_id)
+            await archive.save_snapshot(snapshot)
 
     async def materialize_conversation(self, *, step_run_id: str) -> None:
         run = await self._staging.get_run(run_id=step_run_id)
@@ -510,6 +521,21 @@ class RuntimeStepStore(StepStore):
         if archive is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         await archive.release_run(step_run_id)
+        self._materialized_runs.setdefault(runtime_domain, set()).discard(step_run_id)
+
+    async def _ensure_run_materialized(self, domain: RuntimeDomain, run_id: str) -> None:
+        archive = self._archives.get(domain)
+        if archive is None:
+            return
+        async with self._materialization_lock:
+            materialized = self._materialized_runs.setdefault(domain, set())
+            if run_id in materialized:
+                return
+            run = await self._staging.get_run(run_id=run_id)
+            if run is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            await archive.register_run(run)
+            materialized.add(run_id)
 
     async def preflight_close(self) -> None:
         self._preflight = True
@@ -559,10 +585,6 @@ def _encode_step(value: object) -> dict[str, object]:
 def _step_subject(value: object) -> bytes | None:
     if isinstance(value, ToolEffectRecord):
         return subject_digest(["tool_call", value.tool_call_id])
-    if isinstance(value, StepEvent):
-        return subject_digest(["event_identity", _encode_step(value)])
-    if isinstance(value, ContinuableSnapshot):
-        return subject_digest(["snapshot_identity", _encode_step(value)])
     return None
 
 

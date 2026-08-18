@@ -55,11 +55,16 @@ class ExecutionEventType(StrEnum):
     EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED"
     EXECUTION_FAILED = "EXECUTION_FAILED"
     EXECUTION_CANCELLED = "EXECUTION_CANCELLED"
-    ASSISTANT_TEXT_DELTA = "ASSISTANT_TEXT_DELTA"
-    ASSISTANT_TEXT_END = "ASSISTANT_TEXT_END"
-    ASSISTANT_THINKING_DELTA = "ASSISTANT_THINKING_DELTA"
+    ASSISTANT_PART_COMPLETED = "ASSISTANT_PART_COMPLETED"
     TOOL_CALL_STARTED = "TOOL_CALL_STARTED"
     TOOL_CALL_FINISHED = "TOOL_CALL_FINISHED"
+
+
+class ExecutionDeltaType(StrEnum):
+    """Process-local presentation updates that never enter durable state."""
+
+    ASSISTANT_TEXT_DELTA = "ASSISTANT_TEXT_DELTA"
+    ASSISTANT_THINKING_DELTA = "ASSISTANT_THINKING_DELTA"
 
 
 class ExecutionLineageKind(StrEnum):
@@ -209,7 +214,8 @@ class Principal:
 
 __all__ = [
     "ApprovalDecision", "ApprovalStatus", "EvaluationStatus",
-    "ExecutionEventType", "ExecutionLineageKind", "ExecutionStatus", "ExternalCallStatus",
+    "ExecutionDeltaType", "ExecutionEventType", "ExecutionLineageKind",
+    "ExecutionStatus", "ExternalCallStatus",
     "IdempotencyStatus", "OperationKind", "OperationStatus", "Page", "Principal",
     "PrincipalKind", "ResourceKind", "SessionStatus", "StopReason", "TaskStatus",
     "ToolOperationStatus",

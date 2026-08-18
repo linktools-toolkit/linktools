@@ -6,7 +6,7 @@ from ._agent import AgentHandle
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
 from ._evaluation import DefaultEvaluationService
-from ._event import DefaultEventService
+from ._event import DefaultEventService, ExecutionDelta, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._factory import build_local_runtime
 from ._local import LocalExecutionBackend
@@ -39,6 +39,7 @@ from .service_api import (
     EvaluationView,
     EventService,
     ExecutionEvent,
+    ExecutionStreamEvent,
     ExecutionHandle,
     ExecutionHistoryItem,
     ExecutionHistoryReader,
@@ -84,6 +85,8 @@ __all__ = [
     "DefaultArtifactService",
     "DefaultEvaluationService",
     "DefaultEventService",
+    "ExecutionDelta",
+    "LiveExecutionEventBroker",
     "DefaultExecutionService",
     "build_local_runtime",
     "DefaultSessionService",
@@ -126,6 +129,7 @@ __all__ = [
     "EvaluationView",
     "EventService",
     "ExecutionEvent",
+    "ExecutionStreamEvent",
     "ExecutionHandle",
     "ExecutionRequest",
     "ExecutionResult",

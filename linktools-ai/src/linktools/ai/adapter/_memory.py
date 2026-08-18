@@ -37,7 +37,7 @@ from ..runtime import (
     read_runtime_object,
 )
 from ..runtime.state import MemoryRecord, MemoryState
-from ..storage import ObjectStore
+from ..storage import ObjectStore, PayloadPolicy, StoredPayload, payload_fits_inline
 
 _logger = environ.get_logger("ai.adapter.memory")
 _MEMORY_PATH_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,200}")
@@ -51,7 +51,18 @@ def _memory_working_scope_digest(execution_id: str, memory_scope: str) -> str:
 class RuntimeMemoryStore(SearchableMemoryStore):
     """Map Harness memory paths to the bound Runtime memory repositories."""
 
-    def __init__(self, state: MemoryState, *, object_store: ObjectStore, namespace: str, tenant_id: str, execution_id: str, memory_scope: str, transient: bool = False) -> None:
+    def __init__(
+        self,
+        state: MemoryState,
+        *,
+        object_store: ObjectStore,
+        namespace: str,
+        tenant_id: str,
+        execution_id: str,
+        memory_scope: str,
+        transient: bool = False,
+        payload_policy: "PayloadPolicy | None" = None,
+    ) -> None:
         try:
             validate_tenant_id(tenant_id)
             validate_memory_scope(memory_scope)
@@ -63,6 +74,7 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         self._tenant_id = tenant_id
         self._execution_id = execution_id
         self._transient = transient
+        self._payload_policy = payload_policy or PayloadPolicy()
         logical_scope_digest = canonical_sha256(memory_scope)
         self._memory_scope_digest = (
             _memory_working_scope_digest(execution_id, memory_scope)
@@ -111,20 +123,23 @@ class RuntimeMemoryStore(SearchableMemoryStore):
                 return replay
             current = await self._record(logical_path)
             _check_version(current, expected_version)
-            blob = await put_runtime_object(
-                self._object_store,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.MEMORY,
-                self._tenant_id,
-                content.encode("utf-8"),
-            )
+            inline = StoredPayload.inline_text(content)
+            stored_content = inline
+            if not payload_fits_inline(inline, self._payload_policy):
+                blob = await put_runtime_object(
+                    self._object_store,
+                    RuntimeObjectKeyFactory(self._namespace),
+                    RuntimeDomain.MEMORY,
+                    self._tenant_id,
+                    content.encode("utf-8"),
+                )
+                stored_content = StoredPayload.object(blob)
             now = datetime.now(timezone.utc)
             next_record = MemoryRecord(
                 _memory_id(self._memory_scope_digest, logical_path),
                 self._tenant_id,
                 self._memory_scope_digest,
-                blob,
-                hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                stored_content,
                 {"path": logical_path, **({} if operation is None else {"operation_id": operation.id})},
                 0 if current is None else current.revision + 1,
                 now if current is None else current.created_at,
@@ -305,10 +320,15 @@ class RuntimeMemoryStore(SearchableMemoryStore):
         )
 
     async def _content(self, record: MemoryRecord) -> str:
-        content = (await read_runtime_object(self._object_store, record.content_ref)).decode("utf-8")
-        if hashlib.sha256(content.encode("utf-8")).hexdigest() != record.content_digest:
+        if record.content.kind == "inline":
+            content = record.content.decode()
+            if not isinstance(content, str):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            return content
+        reference = record.content.ref
+        if reference is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        return content
+        return (await read_runtime_object(self._object_store, reference)).decode("utf-8")
 
     async def _replay(self, operation: MemoryOperation | None) -> MemoryMutation | None:
         return None if operation is None else await self.get_operation(operation)

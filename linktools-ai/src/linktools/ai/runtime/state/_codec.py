@@ -13,6 +13,7 @@ from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_
 
 from ...core import JsonValue, canonical_json_bytes
 from ...errors import AIError, ErrorCode
+from ...storage import ObjectRef, StoredPayload
 from ._store import (
     StoredAlias,
     StoredFact,
@@ -76,6 +77,8 @@ _DOMAIN_TYPES = {
         ResourceRef,
         ResultRecord,
         SessionRecord,
+        ObjectRef,
+        StoredPayload,
         TaskGraph,
         TaskGraphLimits,
         TaskGraphView,

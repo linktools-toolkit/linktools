@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     _acp = None
     _acp_schema = None
 
-from .core import ExecutionEventType, JsonValue, Principal, validate_memory_scope
+from .core import ExecutionDeltaType, ExecutionEventType, JsonValue, Principal, validate_memory_scope
 from .errors import AIError
 from .runtime import CancelExecutionRequest, ListSessionRequest, Runtime
 from .workspace import Workspace, open_workspace_runtime
@@ -167,12 +167,16 @@ def _require_acp() -> "tuple[ModuleType, ModuleType]":
     return _acp, _acp_schema
 
 
-def _acp_update(schema: ModuleType, event_type: ExecutionEventType, payload: JsonValue) -> "JsonValue | None":
+def _acp_update(
+    schema: ModuleType,
+    event_type: "ExecutionEventType | ExecutionDeltaType",
+    payload: JsonValue,
+) -> "JsonValue | None":
     if not isinstance(payload, dict):
         return None
-    if event_type is ExecutionEventType.ASSISTANT_TEXT_DELTA:
+    if event_type is ExecutionDeltaType.ASSISTANT_TEXT_DELTA:
         return schema.AgentMessageChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_message_chunk")
-    if event_type is ExecutionEventType.ASSISTANT_THINKING_DELTA:
+    if event_type is ExecutionDeltaType.ASSISTANT_THINKING_DELTA:
         return schema.AgentThoughtChunk(content=schema.TextContentBlock(type="text", text=str(payload.get("text", ""))), sessionUpdate="agent_thought_chunk")
     if event_type is ExecutionEventType.TOOL_CALL_STARTED:
         return schema.ToolCallStart(toolCallId=str(payload.get("call_id", "")), title=str(payload.get("tool_name", "tool")), kind="execute", status="in_progress", sessionUpdate="tool_call")

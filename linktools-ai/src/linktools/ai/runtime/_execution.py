@@ -23,7 +23,6 @@ from ..core import (
     ExecutionLineageKind,
     ExecutionStatus,
     IdempotencyStatus,
-    JsonValue,
     OperationKind,
     OperationStatus,
     Page,
@@ -700,7 +699,10 @@ class DefaultExecutionService:
                             now,
                         ),
                         terminal_event_type=ExecutionEventType.EXECUTION_FAILED,
-                        terminal_event_payload={"error_code": error.code.value},
+                        terminal_event_payload={
+                            "error_code": error.code.value,
+                            "safe_error_details": dict(error.safe_details),
+                        },
                         idempotency=IdempotencyTerminalUpdate(
                             idempotency.scope,
                             idempotency.idempotency_key_digest,
@@ -827,7 +829,14 @@ class DefaultExecutionService:
         if result is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if execution.status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
-            if result.object_ref is not None or any(value is not None for value in (result.output_schema_id, result.output_schema_revision, result.output_schema_fingerprint)):
+            if result.output is not None or any(
+                value is not None
+                for value in (
+                    result.output_schema_id,
+                    result.output_schema_revision,
+                    result.output_schema_fingerprint,
+                )
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             return ExecutionResult(
                 execution.execution_id,
@@ -838,20 +847,28 @@ class DefaultExecutionService:
                 result.output_schema_fingerprint,
                 result.usage,
             )
-        if result.object_ref is None:
+        if result.output is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
-            payload = await read_object(
-                self._object_store,
-                result.object_ref.key,
-                expected_digest=result.object_ref.digest,
-                expected_size=result.object_ref.size,
-            )
-            if result.output_schema_id == "text":
-                output: JsonValue = payload.decode("utf-8")
-            else:
-                decoded = json.loads(payload.decode("utf-8"))
+            if result.output.kind == "inline":
+                decoded = result.output.decode()
+                if not isinstance(decoded, (str, dict, list, int, float, bool, type(None))):
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 output = decoded
+            else:
+                reference = result.output.ref
+                if reference is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                payload = await read_object(
+                    self._object_store,
+                    reference.key,
+                    expected_digest=reference.digest,
+                    expected_size=reference.size,
+                )
+                if result.output.encoding == "utf-8":
+                    output = payload.decode("utf-8")
+                else:
+                    output = json.loads(payload.decode("utf-8"))
             return ExecutionResult(
                 execution.execution_id,
                 execution.status,
@@ -1220,7 +1237,7 @@ class DefaultExecutionService:
             else:
                 result = await self._state.executions.get_result(execution_id, tenant_id=tenant_id)
                 result_ref = current.execution_id
-                result_digest = None if result is None or result.object_ref is None else result.object_ref.digest
+                result_digest = None if result is None or result.output is None else result.output.digest
             try:
                 current_operation = await self._state.operations.compare_and_swap(
                     operation.operation_id,

@@ -17,7 +17,7 @@ from ..task import LocalTaskGraphLauncher
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
 from ._evaluation import DefaultEvaluationService
-from ._event import DefaultEventService
+from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
 from ._local import LocalExecutionBackend
 from ._planner import DefaultTaskService, RuntimeTaskNodeRunner
@@ -85,6 +85,7 @@ async def build_local_runtime(
 
     backend: LocalExecutionBackend | None = None
     task_launcher: LocalTaskGraphLauncher | None = None
+    live_broker = LiveExecutionEventBroker()
     try:
         backend = LocalExecutionBackend(
             state.conversation,
@@ -113,6 +114,11 @@ async def build_local_runtime(
             conversation_durable=state.plan.route(RuntimeDomain.CONVERSATION).retention is RuntimeRetentionMode.DURABLE,
             handoff_contract_digest=state.handoff_contract_digest,
             subagent_dispatcher=dispatcher,
+            live_broker=live_broker,
+            execution_objects_durable=(
+                state.plan.route(RuntimeDomain.EXECUTION).retention
+                is RuntimeRetentionMode.DURABLE
+            ),
         )
         execution.bind_backend(backend)
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
@@ -154,6 +160,7 @@ async def build_local_runtime(
             state.execution.events,
             authorization,
             backend.worker_failure,
+            live_broker,
         )
         artifact = DefaultArtifactService(
             state.artifact,

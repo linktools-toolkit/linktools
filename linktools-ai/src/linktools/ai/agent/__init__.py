@@ -17,7 +17,14 @@ from ._capabilities import (
 from ._compiler import AgentCompiler
 from ._catalog import AgentDefinitionCatalog
 from ._definition import AgentDefinition
-from ._executor import AgentExecutionResult, AgentExecutor, EventSink, UsageSink
+from ._executor import (
+    AgentExecutionResult,
+    AgentExecutor,
+    DurableBoundary,
+    EventSink,
+    LiveDelta,
+    UsageSink,
+)
 from ._output import (
     ASSISTANT_TEXT_OUTPUT_SCHEMA_ID,
     ASSISTANT_TEXT_OUTPUT_SCHEMA_REVISION,
@@ -36,8 +43,10 @@ __all__ = [
     "AgentDefinition",
     "AgentExecutionResult",
     "AgentExecutor",
+    "DurableBoundary",
     "AssistantTextOutput",
     "EventSink",
+    "LiveDelta",
     "UsageSink",
     "OutputSchemaManifest",
     "OutputSchemaManifestEntry",

@@ -30,6 +30,8 @@ from ...core import (
     ToolOperationStatus,
     canonical_json_bytes,
     operation_replay_matches,
+    validate_lease_owner,
+    validate_lease_seconds,
 )
 from ...errors import AIError, ErrorCode
 from ...storage import ObjectRef
@@ -77,7 +79,6 @@ from ._store import (
     sequence_key,
     sortable_identity,
     stream_digest,
-    subject_digest,
 )
 
 _logger = environ.get_logger("ai.runtime.state.repositories")
@@ -1058,7 +1059,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     next_value.event_sequence,
                     key,
                     event_type.value,
-                    subject_digest(current.execution_id),
+                    None,
                     None,
                     payload,
                 )
@@ -1098,7 +1099,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                     next_execution.event_sequence,
                     key,
                     commit.terminal_event_type.value,
-                    subject_digest(current.execution_id),
+                    None,
                     None,
                     commit.terminal_event_payload,
                 )
@@ -1165,6 +1166,39 @@ class EventRepositoryImpl(_RepositoryBase):
     def __init__(self, store: StateStore, *, namespace: str, tenant_id: str) -> None:
         super().__init__(store, namespace=namespace, tenant_id=tenant_id, domain=RuntimeDomain.EXECUTION)
 
+    async def append_next(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        event_type: ExecutionEventType,
+        payload: object,
+    ) -> ExecutionEventRecord:
+        return await self._append_impl(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_sequence=None,
+            event_type=event_type,
+            payload=payload,
+        )
+
+    async def append_expected(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_sequence: int,
+        event_type: ExecutionEventType,
+        payload: object,
+    ) -> ExecutionEventRecord:
+        return await self._append_impl(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_sequence=expected_sequence,
+            event_type=event_type,
+            payload=payload,
+        )
+
     async def append(
         self,
         execution_id: str,
@@ -1174,7 +1208,26 @@ class EventRepositoryImpl(_RepositoryBase):
         event_type: ExecutionEventType,
         payload: object,
     ) -> ExecutionEventRecord:
+        return await self.append_expected(
+            execution_id,
+            tenant_id=tenant_id,
+            expected_sequence=expected_sequence,
+            event_type=event_type,
+            payload=payload,
+        )
+
+    async def _append_impl(
+        self,
+        execution_id: str,
+        *,
+        tenant_id: str,
+        expected_sequence: int | None,
+        event_type: ExecutionEventType,
+        payload: object,
+    ) -> ExecutionEventRecord:
         _require_repository_tenant(tenant_id, self._tenant_id)
+        if not isinstance(event_type, ExecutionEventType):
+            raise TypeError("event repository accepts durable ExecutionEventType only")
         key = self._key("execution", execution_id)
         stream = stream_digest(self._namespace, self._tenant_id, self._domain.value, "execution", execution_id)
 
@@ -1183,11 +1236,12 @@ class EventRepositoryImpl(_RepositoryBase):
             if current is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             execution = decode_domain(_domain_payload(current), ExecutionRecord)
-            if execution.event_sequence != expected_sequence:
+            if expected_sequence is not None and execution.event_sequence != expected_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
+            sequence = execution.event_sequence + 1
             next_execution = replace(
                 execution,
-                event_sequence=expected_sequence + 1,
+                event_sequence=sequence,
                 revision=execution.revision + 1,
                 updated_at=await transaction.now(),
             )
@@ -1196,10 +1250,10 @@ class EventRepositoryImpl(_RepositoryBase):
             data = payload if isinstance(payload, dict) else {"value": payload}
             await transaction.insert_fact(
                 StoredFact(
-                    stream, expected_sequence + 1, key, event_type.value, subject_digest(execution_id), None, data
+                    stream, sequence, key, event_type.value, None, None, data
                 )
             )
-            return ExecutionEventRecord(execution_id, tenant_id, expected_sequence + 1, event_type, payload)
+            return ExecutionEventRecord(execution_id, tenant_id, sequence, event_type, payload)
 
         return await self._store.mutate(mutate)
 
@@ -1734,17 +1788,40 @@ class TaskRepositoryImpl(_RepositoryBase):
     async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_owner(owner)
+        validate_lease_seconds(lease_seconds)
 
         async def mutate(transaction: StateTransaction) -> TaskLease:
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
             record = await transaction.get_record(self._node_key(graph_id, node_id))
-            if record is None:
+            if graph_record is None or record is None:
                 raise AIError(ErrorCode.TASK_NOT_READY)
+            graph = await self._decode(graph_record, TaskGraphView)
             node = await self._decode(record, TaskNodeView)
+            node_records = await transaction.list_records(
+                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+            )
+            nodes = {
+                value.node_id: value
+                for value in await self._decode_many(node_records)
+            }
+            if graph.graph_id != graph_id or any(
+                dependency not in nodes for dependency in node.dependencies
+            ):
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             now = await transaction.now()
             expired = node.lease_expires_at is not None and node.lease_expires_at <= now
             if node.status is TaskStatus.RUNNING and node.owner not in {None, owner} and not expired:
                 raise AIError(ErrorCode.TASK_OWNER_CONFLICT)
-            if node.status is not TaskStatus.READY and not (node.status is TaskStatus.RUNNING and expired):
+            dependencies_succeeded = all(
+                nodes[dependency].status is TaskStatus.SUCCEEDED
+                for dependency in node.dependencies
+            )
+            if node.status not in {TaskStatus.PENDING, TaskStatus.READY} and not (
+                node.status is TaskStatus.RUNNING and expired
+            ):
+                raise AIError(ErrorCode.TASK_NOT_READY)
+            if node.status in {TaskStatus.PENDING, TaskStatus.READY} and not dependencies_succeeded:
                 raise AIError(ErrorCode.TASK_NOT_READY)
             fence = node.fence + 1
             expires = now + timedelta(seconds=lease_seconds)
@@ -1757,6 +1834,7 @@ class TaskRepositoryImpl(_RepositoryBase):
     async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_seconds(lease_seconds)
 
         async def mutate(transaction: StateTransaction) -> TaskLease:
             graph_record = await transaction.get_record(self._graph_key(lease.graph_id))
@@ -1962,6 +2040,8 @@ class ToolRepositoryImpl(_RepositoryBase):
     ) -> ToolOperationRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_owner(owner)
+        validate_lease_seconds(lease_seconds)
 
         async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
             record = await transaction.get_record(self._tool_key(tool_operation_id))
@@ -1974,7 +2054,7 @@ class ToolRepositoryImpl(_RepositoryBase):
                 ToolOperationStatus.EFFECT_UNKNOWN,
                 ToolOperationStatus.CANCELLED,
             }:
-                return current
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             now = await transaction.now()
             expired = current.lease_expires_at is not None and current.lease_expires_at <= now
             if current.status is ToolOperationStatus.CLAIMED and expired and not current.replay_safe:
@@ -2006,6 +2086,8 @@ class ToolRepositoryImpl(_RepositoryBase):
     ) -> ToolOperationRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_owner(owner)
+        validate_lease_seconds(lease_seconds)
 
         async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
             record = await transaction.get_record(self._tool_key(tool_operation_id))
@@ -2089,6 +2171,7 @@ class ToolRepositoryImpl(_RepositoryBase):
     ) -> ToolOperationRecord:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        validate_lease_owner(owner)
 
         async def mutate(transaction: StateTransaction) -> ToolOperationRecord:
             record = await transaction.get_record(self._tool_key(tool_operation_id))
@@ -2097,13 +2180,23 @@ class ToolRepositoryImpl(_RepositoryBase):
             current = await self._decode(record, ToolOperationRecord)
             now = await transaction.now()
             if current.status is ToolOperationStatus.COMPLETED:
-                if terminal_status is ToolOperationStatus.COMPLETED and current.result_object_ref == requested_result:
+                if (
+                    terminal_status is ToolOperationStatus.COMPLETED
+                    and current.owner == owner
+                    and current.fence == fence
+                    and current.result_object_ref == requested_result
+                ):
                     return current
                 if terminal_status is ToolOperationStatus.COMPLETED:
                     raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             if current.status is ToolOperationStatus.FAILED:
-                if terminal_status is ToolOperationStatus.FAILED and current.error_code == requested_error:
+                if (
+                    terminal_status is ToolOperationStatus.FAILED
+                    and current.owner == owner
+                    and current.fence == fence
+                    and current.error_code == requested_error
+                ):
                     return current
                 raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             if current.status in {

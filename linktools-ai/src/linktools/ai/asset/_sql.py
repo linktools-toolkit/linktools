@@ -4,6 +4,7 @@
 
 import hashlib
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -15,7 +16,9 @@ from ..storage import (
     MetadataChange,
     MetadataLoad,
     MetadataLoadMode,
+    ObjectRef,
     ObjectStore,
+    PayloadPolicy,
     SqlObjectStore,
     StorageBatchResult,
     StorageChange,
@@ -26,10 +29,12 @@ from ..storage import (
     StoragePutResult,
     StorageResetResult,
     StorageRevision,
+    StoredPayload,
     VersionSummary,
     create_sql_storage_context,
     dialect_for_name,
     build_object_sql_metadata,
+    payload_fits_inline,
     sql_audit_columns,
     sql_audit_indexes,
     sql_id_column,
@@ -166,7 +171,14 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
 
 
 class SqlAssetBackend:
-    def __init__(self, engine: "AsyncEngine", *, namespace: str, object_store: ObjectStore | None = None) -> None:
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        *,
+        namespace: str,
+        object_store: ObjectStore | None = None,
+        payload_policy: "PayloadPolicy | None" = None,
+    ) -> None:
         validate_asset_namespace(namespace)
         dialect_for_name(engine.dialect.name)
         self._namespace = namespace
@@ -180,6 +192,7 @@ class SqlAssetBackend:
         self._context = create_sql_storage_context(engine)
         self._metadata = build_asset_sql_metadata()
         self._object_store = object_store or SqlObjectStore.from_context(self._context)
+        self._payload_policy = payload_policy or PayloadPolicy()
         if object_store is None:
             build_object_sql_metadata(metadata=self._metadata)
         self._ready = False
@@ -378,24 +391,29 @@ class SqlAssetBackend:
                 True,
                 tuple(_unchanged(change, current[change.key], current_revision) for change in changes),
             )
-        prepared = [
-            (
-                change,
-                _next_info(change, current[change.key], next_revision, self._root),
-            )
-            for change in changes
-        ]
-        for change, info in prepared:
+        prepared: list[tuple[StorageChange[AssetKey, bytes], AssetInfo]] = []
+        for change in changes:
+            info = _next_info(change, current[change.key], next_revision, self._root)
             if change.operation is StorageOperation.PUT:
-                await _put_asset_object(
-                    self._object_store,
-                    _asset_object_key(
-                        self._namespace_digest,
-                        change.key,
-                        info.revision.value,
-                    ),
-                    bytes(change.value or b""),
-                )
+                content = bytes(change.value or b"")
+                inline = StoredPayload.inline_bytes(content)
+                if payload_fits_inline(inline, self._payload_policy):
+                    info = replace(info, content=inline)
+                else:
+                    object_key = _asset_object_key(self._namespace_digest, info.etag)
+                    await _put_asset_object(self._object_store, object_key, content)
+                    info = replace(
+                        info,
+                        content=StoredPayload.object(
+                            ObjectRef(
+                                self._object_store.store_id,
+                                object_key,
+                                info.etag,
+                                info.size,
+                            )
+                        ),
+                    )
+            prepared.append((change, info))
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
         heads = self._metadata.tables["ai_asset_heads"]
@@ -586,10 +604,12 @@ class SqlAssetBackend:
         parsed_history = [(row, self._audit_info(row, head_revision)) for row in history_rows]
         checked_objects: set[str] = set()
         for _, info in (*parsed_entries, *parsed_history):
-            object_key = _asset_object_key(self._namespace_digest, info.key, info.revision.value)
+            object_key = _asset_object_key(self._namespace_digest, info.etag)
             if info.status is not StorageEntryStatus.NORMAL or object_key in checked_objects:
                 continue
             checked_objects.add(object_key)
+            if info.content is not None and info.content.kind == "inline":
+                continue
             stat = await self._object_store.stat(object_key)
             if stat is None or stat.digest != info.etag or stat.size != info.size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -662,6 +682,7 @@ def _info_data(info: AssetInfo) -> dict[str, JsonValue]:
             "root_digest": info.root_digest,
             "modified_at": info.modified_at.isoformat(),
             "metadata": dict(info.metadata),
+            "content": None if info.content is None else info.content.to_json(),
         },
     }
 
@@ -679,6 +700,7 @@ def _info_from_data(data: Mapping[str, object]) -> AssetInfo:
         str(value["root_digest"]),
         datetime.fromisoformat(str(value["modified_at"])),
         dict(value.get("metadata", {})),
+        None if value.get("content") is None else StoredPayload.from_json(value["content"]),
     )
 
 
@@ -756,8 +778,20 @@ async def _put_asset_object(store: ObjectStore, key: str, value: bytes) -> None:
 
 
 async def _read_asset_object(store: ObjectStore, namespace_digest: bytes, key: AssetKey, info: AssetInfo) -> bytes:
+    if info.content is not None and info.content.kind == "inline":
+        value = info.content.decode()
+        if not isinstance(value, bytes):
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        return value
+    if info.content is not None and info.content.ref is not None:
+        return await _read_object_bytes(
+            store,
+            info.content.ref.key,
+            info.etag,
+            info.size,
+        )
     return await _read_object_bytes(
-        store, _asset_object_key(namespace_digest, key, info.revision.value), info.etag, info.size
+        store, _asset_object_key(namespace_digest, info.etag), info.etag, info.size
     )
 
 
@@ -767,14 +801,14 @@ async def _read_object_bytes(store: ObjectStore, key: str, digest: str, size: in
     return await read_object(store, key, expected_digest=digest, expected_size=size)
 
 
-def _asset_object_key(namespace_digest: bytes, key: AssetKey, revision: int) -> str:
+def _asset_object_key(namespace_digest: bytes, digest: str) -> str:
     return (
         "asset/"
         + hashlib.sha256(
             canonical_json_bytes(
                 {
-                    "key_digest": _asset_key_digest(namespace_digest, key).hex(),
-                    "revision": revision,
+                    "namespace_digest": namespace_digest.hex(),
+                    "content_digest": digest,
                 }
             )
         ).hexdigest()

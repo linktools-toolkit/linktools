@@ -51,8 +51,8 @@ _logger = environ.get_logger("ai.runtime.state.filesystem")
 class _FactStreamInfo:
     stream_digest: bytes
     owner_key_digest: bytes
-    sequences: set[int]
-    subjects: dict[bytes | None, int]
+    last_sequence: int
+    subjects: dict[bytes, int]
 
 
 @dataclass(slots=True)
@@ -94,6 +94,17 @@ class _CowMap(MutableMapping[KeyT, MapValueT]):
     def __len__(self) -> int:
         return sum(1 for _ in self)
 
+    def changes(self) -> Mapping[KeyT, MapValueT]:
+        return self._changes
+
+    def deleted(self) -> frozenset[KeyT]:
+        return frozenset(self._deleted)
+
+    def apply_to(self, target: MutableMapping[KeyT, MapValueT]) -> None:
+        for key in self._deleted:
+            target.pop(key, None)
+        target.update(self._changes)
+
 
 class FilesystemStateStore:
     """A domain-local StateStore with crash-safe granular commits."""
@@ -125,7 +136,6 @@ class FilesystemStateStore:
             "records",
             "aliases",
             "facts",
-            "fact_owners",
             "sequences",
             "operations/by-key",
             "operations/streams",
@@ -135,7 +145,7 @@ class FilesystemStateStore:
         manifest = self._root / "manifest.json"
         expected = {
             "format": "linktools-ai-state",
-            "layout_version": 2,
+            "layout_version": 3,
             "namespace_digest": _digest(self._namespace),
             "tenant_digest": _digest(self._tenant_id),
             "runtime_domain": self._runtime_domain,
@@ -287,86 +297,19 @@ class FilesystemStateStore:
                 _require_layout_path(path, self._root, f"facts/{stream.hex()[:2]}/{stream.hex()}/meta.json")
                 if len(stream) != 32 or len(owner) != 32 or stream in streams:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                stream_sequences: set[int] = set()
-                for item in path.parent.joinpath("items").glob("*.json"):
-                    if not item.stem.isdigit():
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    sequence = int(item.stem)
-                    _require_layout_path(
-                        item,
-                        self._root,
-                        f"facts/{stream.hex()[:2]}/{stream.hex()}/items/{sequence:020d}.json",
-                    )
-                    stream_sequences.add(sequence)
-                subjects: dict[bytes | None, int] = {}
+                last_sequence = int(raw["last_sequence"])
+                if last_sequence < 1:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                subjects: dict[bytes, int] = {}
                 for ref in path.parent.joinpath("subjects").glob("*.ref"):
-                    subject = None if ref.stem == "none" else bytes.fromhex(ref.stem)
+                    if ref.stem == "none":
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    subject = bytes.fromhex(ref.stem)
                     sequence = int(_read_json(ref)["sequence"])
-                    if subject in subjects or sequence not in stream_sequences:
+                    if len(subject) != 32 or subject in subjects or not 1 <= sequence <= last_sequence:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                     subjects[subject] = sequence
-                streams[stream] = _FactStreamInfo(stream, owner, stream_sequences, subjects)
-            for path in facts_root.glob("*/*/items/*.json"):
-                stream = bytes.fromhex(path.parent.parent.name)
-                sequence = int(path.stem)
-                info = streams.get(stream)
-                if info is None or sequence not in info.sequences:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for path in facts_root.glob("*/*/subjects/*.ref"):
-                stream = bytes.fromhex(path.parent.parent.name)
-                if stream not in streams:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            owner_references: set[tuple[bytes, bytes]] = set()
-            for path in (self._root / "fact_owners").glob("*/*/*.ref"):
-                owner = bytes.fromhex(path.parent.name)
-                stream = bytes.fromhex(path.stem)
-                _require_layout_path(
-                    path,
-                    self._root,
-                    f"fact_owners/{owner.hex()[:2]}/{owner.hex()}/{stream.hex()}.ref",
-                )
-                info = streams.get(stream)
-                if len(owner) != 32 or len(stream) != 32 or info is None or info.owner_key_digest != owner:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if _read_json(path).get("stream") != stream.hex():
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                owner_references.add((owner, stream))
-            if owner_references != {
-                (info.owner_key_digest, info.stream_digest) for info in streams.values()
-            }:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_fact_files = {
-                _fact_meta_path(self._root, info.stream_digest)
-                for info in streams.values()
-            }
-            expected_fact_files.update(
-                _fact_item_path(self._root, info.stream_digest, sequence).relative_to(self._root).as_posix()
-                for info in streams.values()
-                for sequence in info.sequences
-            )
-            expected_fact_files.update(
-                _fact_subject_path(self._root, info.stream_digest, subject)
-                for info in streams.values()
-                for subject in info.subjects
-            )
-            actual_fact_files = {
-                path.relative_to(self._root).as_posix()
-                for path in facts_root.rglob("*")
-                if path.is_file()
-            }
-            if actual_fact_files != expected_fact_files:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_owner_files = {
-                _fact_owner_path(self._root, info.owner_key_digest, info.stream_digest)
-                for info in streams.values()
-            }
-            actual_owner_files = {
-                path.relative_to(self._root).as_posix()
-                for path in (self._root / "fact_owners").rglob("*")
-                if path.is_file()
-            }
-            if actual_owner_files != expected_owner_files:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                streams[stream] = _FactStreamInfo(stream, owner, last_sequence, subjects)
             references: dict[tuple[bytes, int], bytes] = {}
             for path in (self._root / "operations/streams").glob("*/*/*.ref"):
                 stream = bytes.fromhex(path.parent.name)
@@ -398,35 +341,52 @@ class FilesystemStateStore:
         for info in index.fact_streams.values():
             if info.owner_key_digest not in index.records:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if info.sequences and sorted(info.sequences) != list(range(1, max(info.sequences) + 1)):
+            if info.last_sequence < 1:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if decode_items:
-                latest: dict[bytes | None, int] = {}
-                for sequence in info.sequences:
+                latest: dict[bytes, int] = {}
+                for sequence in range(1, info.last_sequence + 1):
                     fact = decode_fact(_read_json(_fact_item_path(self._root, info.stream_digest, sequence)))
-                    if fact.stream_digest != info.stream_digest or fact.owner_key_digest != info.owner_key_digest:
+                    if (
+                        fact.stream_digest != info.stream_digest
+                        or fact.sequence != sequence
+                        or fact.owner_key_digest != info.owner_key_digest
+                    ):
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    latest[fact.subject_digest] = sequence
+                    if fact.subject_digest is not None:
+                        latest[fact.subject_digest] = sequence
                 if latest != info.subjects:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if decode_items:
+            expected_fact_files = {
+                _fact_meta_path(self._root, info.stream_digest)
+                for info in index.fact_streams.values()
+            }
+            expected_fact_files.update(
+                _fact_item_path(self._root, info.stream_digest, sequence).relative_to(self._root).as_posix()
+                for info in index.fact_streams.values()
+                for sequence in range(1, info.last_sequence + 1)
+            )
+            expected_fact_files.update(
+                _fact_subject_path(self._root, info.stream_digest, subject)
+                for info in index.fact_streams.values()
+                for subject in info.subjects
+            )
+            actual_fact_files = {
+                path.relative_to(self._root).as_posix()
+                for path in (self._root / "facts").rglob("*")
+                if path.is_file()
+            }
+            if actual_fact_files != expected_fact_files:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def _commit(self, transaction: "_FilesystemTransaction") -> None:
-        touched = set(transaction.writes) | transaction.deletes
-        previous: dict[str, bytes] = {}
-        for relative in touched:
-            path = self._root / relative
-            if path.is_file():
-                previous[relative] = path.read_bytes()
-        desired = dict(transaction.writes)
-        changed = any(previous.get(path) != value for path, value in desired.items()) or any(
-            path in previous for path in transaction.deletes
-        )
-        if not changed:
+        if not transaction.writes and not transaction.deletes:
             return
         base = self._generation()
         plan = self._journal.stage(
-            desired,
-            previous,
+            transaction.writes,
+            transaction.deletes,
             base_generation=base,
             target_generation=base + 1,
         )
@@ -434,22 +394,15 @@ class FilesystemStateStore:
         _write_text(self._root / "generation", str(base + 1))
         sync_directory(self._root)
         self._journal.complete()
-        self._index = _FilesystemIndex(
-            dict(transaction.records),
-            dict(transaction.aliases),
-            dict(transaction.sequences),
-            {
-                stream: _FactStreamInfo(
-                    info.stream_digest,
-                    info.owner_key_digest,
-                    set(info.sequences),
-                    dict(info.subjects),
-                )
-                for stream, info in transaction.fact_streams.items()
-                if info.sequences
-            },
-            dict(transaction.operations),
-        )
+        index = self._index
+        if index is None:
+            raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
+        transaction.records.apply_to(index.records)
+        transaction.aliases.apply_to(index.aliases)
+        transaction.sequences.apply_to(index.sequences)
+        transaction.fact_streams.apply_to(index.fact_streams)
+        transaction.operations.apply_to(index.operations)
+        self._index = index
         self._index_generation = base + 1
         _logger.debug("filesystem StateStore mutation committed: generation=%s", base + 1)
 
@@ -642,15 +595,17 @@ class _FilesystemTransaction:
             raise RuntimeError("fact owner must be guarded in the current transaction")
         info = self._own_fact_stream(fact.stream_digest)
         if info is None:
-            info = _FactStreamInfo(fact.stream_digest, fact.owner_key_digest, set(), {})
+            info = _FactStreamInfo(fact.stream_digest, fact.owner_key_digest, 0, {})
             self.fact_streams[fact.stream_digest] = info
             self._owned_fact_streams.add(fact.stream_digest)
         if info.owner_key_digest != fact.owner_key_digest:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         key = (fact.stream_digest, fact.sequence)
-        if fact.sequence in info.sequences and key not in self._deleted_facts:
+        if fact.sequence <= info.last_sequence and key not in self._deleted_facts:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        info.sequences.add(fact.sequence)
+        if fact.sequence != info.last_sequence + 1:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        info.last_sequence = fact.sequence
         self._deleted_facts.discard(key)
         self._facts[key] = fact
         self._write(_fact_item_path(self._root, fact.stream_digest, fact.sequence), encode_fact(fact))
@@ -662,18 +617,12 @@ class _FilesystemTransaction:
             return ()
         if query.latest:
             if query.subject_digest is None:
-                candidates = info.sequences
+                latest = info.last_sequence
             else:
                 latest = info.subjects.get(query.subject_digest)
-                candidates = () if latest is None else (latest,)
-            candidates = tuple(
-                sequence
-                for sequence in candidates
-                if query.after_sequence is None or sequence > query.after_sequence
-            )
-            if not candidates:
+            if latest is None or query.after_sequence is not None and latest <= query.after_sequence:
                 return ()
-            value = self._get_fact(info, max(candidates))
+            value = self._get_fact(info, latest)
             return () if value is None else (value,)
         if query.latest_per_subject:
             values = [
@@ -686,11 +635,12 @@ class _FilesystemTransaction:
             if query.limit is not None:
                 values = values[: query.limit]
             return tuple(values)
-        sequences = sorted(
-            sequence
-            for sequence in info.sequences
-            if query.after_sequence is None or sequence > query.after_sequence
+        start = 1 if query.after_sequence is None else query.after_sequence + 1
+        end = info.last_sequence + 1 if query.limit is None else min(
+            info.last_sequence + 1,
+            start + query.limit,
         )
+        sequences = range(start, end)
         values = [self._get_fact(info, sequence) for sequence in sequences]
         values = [value for value in values if value is not None]
         if query.subject_digest is not None:
@@ -706,11 +656,12 @@ class _FilesystemTransaction:
             info = self._own_fact_stream(stream)
             if info is None:
                 continue
-            for sequence in tuple(info.sequences):
+            for sequence in range(1, info.last_sequence + 1):
                 self._deleted_facts.add((info.stream_digest, sequence))
                 self._delete(_fact_item_path(self._root, info.stream_digest, sequence))
-            info.sequences.clear()
+            info.last_sequence = 0
             self._sync_fact_stream(info)
+            del self.fact_streams[stream]
 
     async def insert_operation(self, value: StoredOperation) -> None:
         if value.key_digest in self.operations or any(
@@ -771,7 +722,7 @@ class _FilesystemTransaction:
         owned = _FactStreamInfo(
             info.stream_digest,
             info.owner_key_digest,
-            set(info.sequences),
+            info.last_sequence,
             dict(info.subjects),
         )
         self.fact_streams[stream] = owned
@@ -785,36 +736,29 @@ class _FilesystemTransaction:
         subject: bytes | None = None,
         sequence: int | None = None,
     ) -> None:
-        old_subjects = set(info.subjects)
-        if not info.sequences:
+        if info.last_sequence == 0:
             self._delete(_fact_meta_path(self._root, info.stream_digest))
-            for subject in old_subjects:
+            for subject in tuple(info.subjects):
                 self._delete(_fact_subject_path(self._root, info.stream_digest, subject))
-            self._delete(_fact_owner_path(self._root, info.owner_key_digest, info.stream_digest))
             info.subjects.clear()
             return
-        if subject is None and sequence is None:
-            raise ValueError("fact stream update requires a subject and sequence")
-        if sequence is not None and (
-            subject not in info.subjects or info.subjects[subject] < sequence
-        ):
+        if sequence is None:
+            raise ValueError("fact stream update requires a sequence")
+        if subject is not None and info.subjects.get(subject, 0) < sequence:
             info.subjects[subject] = sequence
         self._write(
             _fact_meta_path(self._root, info.stream_digest),
-            {"stream": info.stream_digest.hex(), "owner_key": info.owner_key_digest.hex()},
+            {
+                "stream": info.stream_digest.hex(),
+                "owner_key": info.owner_key_digest.hex(),
+                "last_sequence": info.last_sequence,
+            },
         )
-        for subject in old_subjects | set(info.subjects):
-            if subject in info.subjects:
-                self._write(
-                    _fact_subject_path(self._root, info.stream_digest, subject),
-                    {"sequence": info.subjects[subject]},
-                )
-            else:
-                self._delete(_fact_subject_path(self._root, info.stream_digest, subject))
-        self._write(
-            _fact_owner_path(self._root, info.owner_key_digest, info.stream_digest),
-            {"stream": info.stream_digest.hex()},
-        )
+        if subject is not None:
+            self._write(
+                _fact_subject_path(self._root, info.stream_digest, subject),
+                {"sequence": info.subjects[subject]},
+            )
 
     def _write(self, relative: str | Path, value: Mapping[str, object] | bytes) -> None:
         relative = _relative_path(self._root, relative)
@@ -870,14 +814,8 @@ def _fact_item_path(root: Path, stream: bytes, sequence: int) -> Path:
     return root / _fact_directory(stream) / "items" / f"{sequence:020d}.json"
 
 
-def _fact_subject_path(root: Path, stream: bytes, subject: bytes | None) -> str:
-    value = "none" if subject is None else subject.hex()
-    return f"{_fact_directory(stream)}/subjects/{value}.ref"
-
-
-def _fact_owner_path(root: Path, owner: bytes, stream: bytes) -> str:
-    value = owner.hex()
-    return f"fact_owners/{value[:2]}/{value}/{stream.hex()}.ref"
+def _fact_subject_path(root: Path, stream: bytes, subject: bytes) -> str:
+    return f"{_fact_directory(stream)}/subjects/{subject.hex()}.ref"
 
 
 def _operation_path(root: Path, value: StoredOperation) -> str:

@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from linktools.core import environ
 from pydantic import ValidationError
@@ -20,6 +20,8 @@ from ..agent import (
     AgentDefinition,
     AgentDefinitionCatalog,
     AgentExecutor,
+    DurableBoundary,
+    LiveDelta,
     SubagentDelegate,
     select_platform_tool_names,
 )
@@ -42,8 +44,9 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, StorageMetrics
+from ..storage import ObjectStore, PayloadPolicy, StorageMetrics, StoredPayload, payload_fits_inline
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
+from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .service_api import ExecutionRequest
 from .state import ConversationState, ExecutionState, RecoveryState
@@ -65,10 +68,6 @@ from .state._contracts import (
     ResultRecord,
 )
 from .state._plan import RuntimeDomain
-
-if TYPE_CHECKING:
-    from ..storage import ObjectRef
-
 
 class _SubagentDispatcher(Protocol):
     def delegate_for(
@@ -129,6 +128,9 @@ class LocalExecutionBackend:
         conversation_durable: bool = False,
         handoff_contract_digest: "str | None" = None,
         subagent_dispatcher: "_SubagentDispatcher | None" = None,
+        live_broker: "LiveExecutionEventBroker | None" = None,
+        payload_policy: "PayloadPolicy | None" = None,
+        execution_objects_durable: bool = True,
     ) -> None:
         self._conversation = conversation
         self._execution = execution_state
@@ -147,6 +149,9 @@ class LocalExecutionBackend:
         self._conversation_durable = conversation_durable
         self._handoff_contract_digest = handoff_contract_digest
         self._subagent_dispatcher = subagent_dispatcher
+        self._live_broker = live_broker or LiveExecutionEventBroker()
+        self._payload_policy = payload_policy or PayloadPolicy()
+        self._execution_objects_durable = execution_objects_durable
         self._step_reads = dict(step_reads)
         if frozenset(self._step_reads) != frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}):
             raise ValueError("step_reads must contain exactly the three Step owner domains")
@@ -459,6 +464,7 @@ class LocalExecutionBackend:
         self._tasks.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
         if error is None:
+            self._live_broker.complete(execution_id)
             return
         if isinstance(error, AIError):
             failure = _WorkerFailure(error.code, dict(error.safe_details))
@@ -476,6 +482,7 @@ class LocalExecutionBackend:
             failure.code.value,
             exc_info=environ.debug,
         )
+        self._live_broker.complete(execution_id)
 
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None:
         if tenant_id != self._tenant_id:
@@ -484,6 +491,10 @@ class LocalExecutionBackend:
         if failure is None:
             return None
         return AIError(failure.code, safe_details=dict(failure.safe_details))
+
+    @property
+    def live_broker(self) -> LiveExecutionEventBroker:
+        return self._live_broker
 
     async def cancel(self, execution: ExecutionRecord) -> CancelEffectOutcome:
         current = await self._execution.executions.get(
@@ -697,6 +708,20 @@ class LocalExecutionBackend:
             return False
         return True
 
+    async def _validate_handoff_output(self, outcome: RecoveryTerminalOutcome) -> None:
+        output = outcome.output
+        if output is None:
+            return
+        if output.kind == "inline":
+            output.decode()
+            return
+        source = outcome.object_source_domain
+        reference = output.ref
+        if source is None or reference is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        store = self._recovery_objects if source is RuntimeDomain.RECOVERY else self._execution_objects
+        await read_runtime_object(store, reference)
+
     async def _reconcile_handoff(self, checkpoint: RecoveryCheckpoint) -> None:
         handoff = checkpoint.terminal_handoff
         if handoff is None:
@@ -704,7 +729,7 @@ class LocalExecutionBackend:
         outcome = handoff.outcome
         if outcome.terminal_status in {ExecutionStatus.FAILED, ExecutionStatus.CANCELLED} and (
             handoff.conversation is not None
-            or outcome.recovery_object_ref is not None
+            or outcome.output is not None
             or any(value is not None for value in (outcome.output_schema_id, outcome.output_schema_revision, outcome.output_schema_fingerprint))
         ):
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -735,12 +760,9 @@ class LocalExecutionBackend:
                 )
                 if snapshot is None or snapshot.state != "complete":
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                if outcome.recovery_object_ref is None:
+                if outcome.output is None:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                await read_runtime_object(
-                    self._recovery_objects,
-                    outcome.recovery_object_ref,
-                )
+                await self._validate_handoff_output(outcome)
                 if execution.status is ExecutionStatus.CANCELLING:
                     checkpoint = await self._rewrite_prepared_success_handoff(
                         checkpoint,
@@ -766,7 +788,7 @@ class LocalExecutionBackend:
                 }
                 if execution.status not in allowed_statuses:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            elif outcome.recovery_object_ref is not None or any(
+            elif outcome.output is not None or any(
                 value is not None
                 for value in (
                     outcome.output_schema_id,
@@ -1095,7 +1117,8 @@ class LocalExecutionBackend:
                 output_schema_id=None,
                 output_schema_revision=None,
                 output_schema_fingerprint=None,
-                recovery_object_ref=None,
+                output=None,
+                object_source_domain=None,
                 usage=outcome.usage,
                 terminal_event_type=(
                     ExecutionEventType.EXECUTION_CANCELLED
@@ -1168,19 +1191,23 @@ class LocalExecutionBackend:
             return
         execution_ref = None
         if outcome.terminal_status is ExecutionStatus.SUCCEEDED:
-            if outcome.recovery_object_ref is None:
+            if outcome.output is None:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            payload = await read_runtime_object(
-                self._recovery_objects,
-                outcome.recovery_object_ref,
-            )
-            execution_ref = await put_runtime_object(
-                self._execution_objects,
-                RuntimeObjectKeyFactory(self._namespace),
-                RuntimeDomain.EXECUTION,
-                current.tenant_id,
-                payload,
-            )
+            execution_ref = outcome.output
+            if outcome.output.kind == "object" and outcome.object_source_domain is RuntimeDomain.RECOVERY:
+                reference = outcome.output.ref
+                if reference is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                payload = await read_runtime_object(self._recovery_objects, reference)
+                execution_ref = StoredPayload.object(
+                    await put_runtime_object(
+                        self._execution_objects,
+                        RuntimeObjectKeyFactory(self._namespace),
+                        RuntimeDomain.EXECUTION,
+                        current.tenant_id,
+                        payload,
+                    )
+                )
             if current.session_id is not None and current.status is not ExecutionStatus.FINALIZING:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         elif current.status not in {
@@ -1243,6 +1270,7 @@ class LocalExecutionBackend:
                     identity,
                 )
             )
+            self._live_broker.notify_durable(current.execution_id)
         except AIError as error:
             if error.code not in {
                 ErrorCode.STORAGE_CONFLICT,
@@ -1292,15 +1320,15 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if handoff.outcome.terminal_status is ExecutionStatus.SUCCEEDED:
             if (
-                result.object_ref is None
+                result.output is None
                 or result.output_schema_id != handoff.outcome.output_schema_id
                 or result.output_schema_revision != handoff.outcome.output_schema_revision
                 or result.output_schema_fingerprint != handoff.outcome.output_schema_fingerprint
-                or handoff.outcome.recovery_object_ref is None
-                or result.object_ref.digest != handoff.outcome.recovery_object_ref.digest
+                or handoff.outcome.output is None
+                or result.output.digest != handoff.outcome.output.digest
             ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-        elif result.object_ref is not None or any(
+        elif result.output is not None or any(
             value is not None
             for value in (
                 result.output_schema_id,
@@ -1335,12 +1363,18 @@ class LocalExecutionBackend:
                 execution_id,
                 tenant_id=self._tenant_id,
             )
-            if current is None or current.status is not ExecutionStatus.FINALIZING:
+            if current is None or current.status not in {
+                ExecutionStatus.FINALIZING,
+                ExecutionStatus.SUCCEEDED,
+                ExecutionStatus.FAILED,
+                ExecutionStatus.CANCELLED,
+            }:
                 task.cancel()
             else:
                 _logger.info(
-                    "close waiting for execution finalization: execution=%s",
+                    "close draining terminal execution worker: execution=%s status=%s",
                     execution_id,
+                    current.status.value,
                 )
             cancel_tasks.append(task)
         if cancel_tasks:
@@ -1420,8 +1454,18 @@ class LocalExecutionBackend:
                     recovery_run_id=recovery_history_run_id,
                 )
 
-            async def sink(event_type: ExecutionEventType, payload: JsonValue) -> None:
-                await self._append_event(current, event_type, payload)
+            async def sink(emission: "LiveDelta | DurableBoundary") -> None:
+                if isinstance(emission, LiveDelta):
+                    self._live_broker.publish(
+                        ExecutionDelta(
+                            current.execution_id,
+                            emission.kind,
+                            emission.content,
+                        )
+                    )
+                    return
+                self._live_broker.mark_boundary(current.execution_id)
+                await self._append_event(current, emission.kind, emission.payload)
 
             memory = None
             platform_tool_names = select_platform_tool_names(
@@ -1643,30 +1687,13 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
     async def _append_event(self, execution: ExecutionRecord, event_type: ExecutionEventType, payload: JsonValue) -> None:
-        current = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
-        if current is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        try:
-            await self._execution.events.append(
-                execution.execution_id,
-                tenant_id=execution.tenant_id,
-                expected_sequence=current.event_sequence,
-                event_type=event_type,
-                payload=payload,
-            )
-        except AIError as error:
-            if error.code is not ErrorCode.STORAGE_CONFLICT:
-                raise
-            latest = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
-            if latest is None:
-                raise
-            await self._execution.events.append(
-                execution.execution_id,
-                tenant_id=execution.tenant_id,
-                expected_sequence=latest.event_sequence,
-                event_type=event_type,
-                payload=payload,
-            )
+        await self._execution.events.append_next(
+            execution.execution_id,
+            tenant_id=execution.tenant_id,
+            event_type=event_type,
+            payload=payload,
+        )
+        self._live_broker.notify_durable(execution.execution_id)
 
     def _step_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         return self._step_reads[runtime_domain]
@@ -1680,13 +1707,17 @@ class LocalExecutionBackend:
         run_id: str,
     ) -> None:
         payload = canonical_json_bytes(output)
-        object_ref = await put_runtime_object(
-            self._execution_objects,
-            RuntimeObjectKeyFactory(self._namespace),
-            RuntimeDomain.EXECUTION,
-            execution.tenant_id,
-            payload,
-        )
+        inline = StoredPayload.inline_json(output)
+        output_payload = inline
+        if not payload_fits_inline(inline, self._payload_policy):
+            object_ref = await put_runtime_object(
+                self._execution_objects,
+                RuntimeObjectKeyFactory(self._namespace),
+                RuntimeDomain.EXECUTION,
+                execution.tenant_id,
+                payload,
+            )
+            output_payload = StoredPayload.object(object_ref)
         current = await self._execution.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
         if current is None:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
@@ -1701,11 +1732,11 @@ class LocalExecutionBackend:
             await self._commit_terminal(
                 current,
                 ExecutionStatus.SUCCEEDED,
-                object_ref,
+                output_payload,
                 None,
                 StopReason.END_TURN,
                 definition=definition,
-                output_digest=object_ref.digest,
+                output_digest=output_payload.digest,
                 run_id=run_id,
                 usage=usage,
             )
@@ -1736,11 +1767,11 @@ class LocalExecutionBackend:
         await self._commit_terminal(
             current,
             ExecutionStatus.SUCCEEDED,
-            object_ref,
+            output_payload,
             None,
             StopReason.END_TURN,
             definition=definition,
-            output_digest=object_ref.digest,
+            output_digest=output_payload.digest,
             run_id=run_id,
             usage=usage,
         )
@@ -1883,13 +1914,22 @@ class LocalExecutionBackend:
 
     async def _commit_failure(self, execution: ExecutionRecord, error: Exception, *, run_id: str | None = None) -> None:
         code = ErrorCode.OUTPUT_VALIDATION_FAILED if isinstance(error, ValidationError) else error.code if isinstance(error, AIError) else ErrorCode.EXECUTION_FAILED
-        await self._commit_terminal(execution, ExecutionStatus.FAILED, None, code.value, StopReason.ERROR, run_id=run_id)
+        details = error.safe_details if isinstance(error, AIError) else {}
+        await self._commit_terminal(
+            execution,
+            ExecutionStatus.FAILED,
+            None,
+            code.value,
+            StopReason.ERROR,
+            run_id=run_id,
+            safe_error_details=details,
+        )
 
     async def _commit_terminal(
         self,
         execution: ExecutionRecord,
         status: ExecutionStatus,
-        object_ref: "ObjectRef | None",
+        output: "StoredPayload | None",
         error_code: str | None,
         stop_reason: StopReason,
         *,
@@ -1897,6 +1937,7 @@ class LocalExecutionBackend:
         output_digest: str | None = None,
         run_id: str | None = None,
         usage: UsageMetrics | None = None,
+        safe_error_details: Mapping[str, JsonValue] | None = None,
     ) -> None:
         current = await self._execution.executions.get(
             execution.execution_id,
@@ -1934,19 +1975,26 @@ class LocalExecutionBackend:
                         step_run_id=run_id,
                         require_complete=status is ExecutionStatus.SUCCEEDED,
                     )
-                recovery_ref = None
-                if object_ref is not None:
-                    content = await read_runtime_object(
-                        self._execution_objects,
-                        object_ref,
-                    )
-                    recovery_ref = await put_runtime_object(
-                        self._recovery_objects,
-                        RuntimeObjectKeyFactory(self._namespace),
-                        RuntimeDomain.RECOVERY,
-                        current.tenant_id,
-                        content,
-                    )
+                handoff_output = output
+                source_domain = None
+                if output is not None and output.kind == "object":
+                    if self._execution_objects_durable:
+                        source_domain = RuntimeDomain.EXECUTION
+                    else:
+                        reference = output.ref
+                        if reference is None:
+                            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        content = await read_runtime_object(self._execution_objects, reference)
+                        handoff_output = StoredPayload.object(
+                            await put_runtime_object(
+                                self._recovery_objects,
+                                RuntimeObjectKeyFactory(self._namespace),
+                                RuntimeDomain.RECOVERY,
+                                current.tenant_id,
+                                content,
+                            )
+                        )
+                        source_domain = RuntimeDomain.RECOVERY
                 conversation = None
                 if status is ExecutionStatus.SUCCEEDED and current.session_id is not None and run_id is not None:
                     conversation = RecoveryConversationIntent(
@@ -1965,18 +2013,22 @@ class LocalExecutionBackend:
                     RecoveryTerminalOutcome(
                         terminal_status=status,
                         error_code=error_code,
-                        safe_error_details={},
+                        safe_error_details=safe_error_details or {},
                         stop_reason=stop_reason,
                         output_schema_id=schema_id if status is ExecutionStatus.SUCCEEDED else None,
                         output_schema_revision=schema_revision if status is ExecutionStatus.SUCCEEDED else None,
                         output_schema_fingerprint=schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
-                        recovery_object_ref=recovery_ref,
+                        output=handoff_output,
+                        object_source_domain=source_domain,
                         usage=captured_usage,
                         terminal_event_type=terminal_event_type,
                         terminal_event_payload=(
                             {"run_id": run_id}
                             if status is ExecutionStatus.SUCCEEDED and run_id is not None
-                            else {"error_code": error_code}
+                            else {
+                                "error_code": error_code,
+                                "safe_error_details": safe_error_details or {},
+                            }
                         ),
                         result_created_at=now,
                     ),
@@ -2022,7 +2074,13 @@ class LocalExecutionBackend:
             status,
             run_id if status is ExecutionStatus.SUCCEEDED else None,
         )
-        terminal = _terminal_record(current, status, now, error_code=error_code)
+        terminal = _terminal_record(
+            current,
+            status,
+            now,
+            error_code=error_code,
+            safe_error_details=safe_error_details,
+        )
         identity = await _terminal_idempotency(
             self._execution,
             current,
@@ -2041,7 +2099,7 @@ class LocalExecutionBackend:
                     schema_id if status is ExecutionStatus.SUCCEEDED else None,
                     schema_revision if status is ExecutionStatus.SUCCEEDED else None,
                     schema_fingerprint if status is ExecutionStatus.SUCCEEDED else None,
-                    object_ref if status is ExecutionStatus.SUCCEEDED else None,
+                    output if status is ExecutionStatus.SUCCEEDED else None,
                     stop_reason,
                     captured_usage,
                     now,
@@ -2056,11 +2114,15 @@ class LocalExecutionBackend:
                 (
                     {"run_id": run_id}
                     if status is ExecutionStatus.SUCCEEDED and run_id is not None
-                    else {"error_code": error_code}
+                    else {
+                        "error_code": error_code,
+                        "safe_error_details": safe_error_details or {},
+                    }
                 ),
                 identity,
             )
         )
+        self._live_broker.notify_durable(current.execution_id)
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
             current.execution_id,
