@@ -5,9 +5,10 @@
 import asyncio
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol
+from weakref import WeakKeyDictionary
 
 from linktools.core import environ
 
@@ -70,10 +71,42 @@ class _TaskRepository(Protocol):
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView: ...
     async def get_graph(self, graph_id: str, *, tenant_id: str) -> "TaskGraphView | None": ...
     async def list_nodes(self, graph_id: str, *, tenant_id: str) -> "tuple[_TaskNodeState, ...]": ...
-    async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> _TaskLease: ...
+    async def claim(
+        self,
+        graph_id: str,
+        node_id: str,
+        *,
+        tenant_id: str,
+        owner: str,
+        lease_seconds: int,
+    ) -> _TaskLease: ...
     async def renew(self, lease: _TaskLease, *, tenant_id: str, lease_seconds: int) -> _TaskLease: ...
-    async def complete(self, lease: _TaskLease, *, tenant_id: str, execution_id: "str | None", result_digest: str) -> _TaskTerminal: ...
-    async def fail(self, lease: _TaskLease, *, tenant_id: str, error_code: str, error_digest: str) -> _TaskTerminal: ...
+    async def complete(
+        self,
+        lease: _TaskLease,
+        *,
+        tenant_id: str,
+        execution_id: "str | None",
+        result_digest: str,
+    ) -> _TaskTerminal: ...
+    async def fail(
+        self,
+        lease: _TaskLease,
+        *,
+        tenant_id: str,
+        error_code: str,
+        error_digest: str,
+    ) -> _TaskTerminal: ...
+
+
+@dataclass
+class _GraphRun:
+    task: "asyncio.Task[None] | None" = None
+    activity: asyncio.Event = field(default_factory=asyncio.Event)
+    activity_generation: int = 0
+    failure: "AIError | None" = None
+    closed: bool = False
+    waiters: int = 0
 
 
 @dataclass
@@ -93,29 +126,40 @@ class LocalTaskGraphLauncher:
         self._repository = repository
         self._runner = runner
         self._owner = owner
-        self._graphs: dict[tuple[str, str], asyncio.Task[None]] = {}
-        self._activity: dict[tuple[str, str], asyncio.Event] = {}
-        self._failures: dict[tuple[str, str], AIError] = {}
+        self._graphs: dict[tuple[str, str], _GraphRun] = {}
+        self._wait_observations: WeakKeyDictionary[asyncio.Task[Any], dict[tuple[str, str], int]] = WeakKeyDictionary()
         self._accepting = True
 
     async def start(self, request: TaskGraphRequest) -> TaskGraphHandle:
         if not self._accepting:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
         key = request.principal.tenant_id, request.graph.graph_id
-        self._activity.setdefault(key, asyncio.Event())
-        self._failures.pop(key, None)
         existing = self._graphs.get(key)
-        if existing is None or existing.done():
-            self._graphs[key] = asyncio.create_task(self._run_graph(request), name=f"task-graph-{key[0]}-{key[1]}")
-        _logger.info("task graph scheduler armed: tenant=%s graph=%s nodes=%s", key[0], key[1], len(request.graph.nodes))
+        if existing is None or existing.closed or existing.task is None or existing.task.done():
+            if existing is not None and not existing.closed:
+                self._close_run(existing)
+            run = _GraphRun()
+            self._graphs[key] = run
+            run.task = asyncio.create_task(
+                self._run_graph(request, run),
+                name=f"task-graph-{key[0]}-{key[1]}",
+            )
+        _logger.info(
+            "task graph scheduler armed: tenant=%s graph=%s nodes=%s",
+            key[0],
+            key[1],
+            len(request.graph.nodes),
+        )
         return TaskGraphHandle(request.graph.graph_id, f"local:{request.principal.tenant_id}:{request.graph.graph_id}")
 
     async def cancel(self, graph_id: str, request: CancelGraphRequest) -> TaskGraphView:
         key = request.principal.tenant_id, graph_id
-        task = self._graphs.get(key)
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        run = self._graphs.get(key)
+        if run is not None:
+            self._close_run(run)
+            if run.task is not None and not run.task.done():
+                run.task.cancel()
+                await asyncio.gather(run.task, return_exceptions=True)
         view = await self._repository.get_graph(graph_id, tenant_id=request.principal.tenant_id)
         if view is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
@@ -124,39 +168,70 @@ class LocalTaskGraphLauncher:
 
     async def shutdown(self) -> None:
         self._accepting = False
-        tasks = tuple(self._graphs.values())
-        for task in tasks:
-            task.cancel()
+        runs = tuple(self._graphs.values())
+        for run in runs:
+            self._close_run(run)
+            if run.task is not None and not run.task.done():
+                run.task.cancel()
+        tasks = tuple(run.task for run in runs if run.task is not None)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        self._graphs.clear()
-        self._activity.clear()
-        self._failures.clear()
+        for run in runs:
+            self._cleanup_run(run)
 
     def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool:
         key = tenant_id, graph_id
-        task = self._graphs.get(key)
-        return (task is not None and not task.done()) or key in self._failures
+        run = self._graphs.get(key)
+        if run is None:
+            return False
+        if run.closed:
+            if run.failure is None:
+                self._schedule_cleanup(run)
+                return False
+            self._remember_observation(key, run)
+            return True
+        owned = run.task is not None and not run.task.done()
+        if owned:
+            self._remember_observation(key, run)
+        return owned
 
     async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None:
         key = tenant_id, graph_id
-        failure = self._failures.get(key)
-        if failure is not None:
-            raise AIError(failure.code, safe_details=dict(failure.safe_details))
-        event = self._activity.setdefault(key, asyncio.Event())
-        await event.wait()
-        event.clear()
-        failure = self._failures.get(key)
-        if failure is not None:
-            raise AIError(failure.code, safe_details=dict(failure.safe_details))
+        run = self._graphs.get(key)
+        if run is None:
+            return
+        run.waiters += 1
+        event = run.activity
+        task = asyncio.current_task()
+        observations = self._wait_observations.get(task) if task is not None else None
+        observed_generation = (
+            observations.pop(key, run.activity_generation)
+            if observations is not None
+            else run.activity_generation
+        )
+        if observations is not None and not observations:
+            self._wait_observations.pop(task, None)
+        try:
+            if run.failure is not None:
+                raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
+            if not run.closed and run.activity_generation == observed_generation:
+                await event.wait()
+            if run.failure is not None:
+                raise AIError(run.failure.code, safe_details=dict(run.failure.safe_details))
+        finally:
+            run.waiters -= 1
+            self._cleanup_run(run)
 
-    async def _run_graph(self, request: TaskGraphRequest) -> None:
+    async def _run_graph(self, request: TaskGraphRequest, run: _GraphRun) -> None:
         key = request.principal.tenant_id, request.graph.graph_id
         inflight: dict[str, _InflightNode] = {}
         try:
             while True:
                 _reap_inflight(inflight)
-                view = await self._repository.reconcile_graph(request.graph.graph_id, tenant_id=request.principal.tenant_id)
+                view = await self._repository.reconcile_graph(
+                    request.graph.graph_id,
+                    tenant_id=request.principal.tenant_id,
+                )
                 if view.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
                     await _cancel_inflight(inflight)
                     return
@@ -165,7 +240,11 @@ class LocalTaskGraphLauncher:
                 persisted = {
                     node.node_id
                     for node in nodes
-                    if node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at > now
+                    if (
+                        node.status is TaskStatus.RUNNING
+                        and node.lease_expires_at is not None
+                        and node.lease_expires_at > now
+                    )
                 }
                 used = persisted | set(inflight)
                 capacity = max(0, request.limits.max_concurrency - len(used))
@@ -177,27 +256,32 @@ class LocalTaskGraphLauncher:
                     stored = _node_by_id(nodes, node.node_id)
                     if stored is None or not _runnable(stored, now):
                         continue
-                    task = asyncio.create_task(self._run_node(request, node, inflight), name=f"task-node-{node.node_id}")
+                    task = asyncio.create_task(
+                        self._run_node(request, node, inflight, run),
+                        name=f"task-node-{node.node_id}",
+                    )
                     inflight[node.node_id] = _InflightNode(task)
                     capacity -= 1
                 if inflight:
-                    await asyncio.wait(tuple(state.task for state in inflight.values()), return_when=asyncio.FIRST_COMPLETED)
+                    await asyncio.wait(
+                        tuple(state.task for state in inflight.values()),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
                 else:
-                    await self._wait_for_activity(key, nodes, now)
+                    await self._wait_for_activity(run, nodes, now)
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            failure = error if isinstance(error, AIError) else AIError(ErrorCode.STORAGE_UNAVAILABLE)
-            self._failures[key] = failure
-            self._activity.setdefault(key, asyncio.Event()).set()
+            run.failure = error if isinstance(error, AIError) else AIError(ErrorCode.STORAGE_UNAVAILABLE)
             _logger.exception("local task graph scheduler failed: tenant=%s graph=%s", key[0], key[1])
         finally:
+            self._close_run(run)
             await _cancel_inflight(inflight)
-            self._graphs.pop(key, None)
+            self._schedule_cleanup(run)
 
     async def _wait_for_activity(
         self,
-        key: tuple[str, str],
+        run: _GraphRun,
         nodes: "tuple[_TaskNodeState, ...]",
         now: datetime,
     ) -> None:
@@ -205,15 +289,19 @@ class LocalTaskGraphLauncher:
         for node in nodes:
             if node.status is TaskStatus.RUNNING and node.lease_expires_at is not None:
                 timeout = min(timeout, max(0.0, (node.lease_expires_at - now).total_seconds()))
-        event = self._activity.setdefault(key, asyncio.Event())
+        event = run.activity
         try:
             await asyncio.wait_for(event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             return
-        finally:
-            event.clear()
 
-    async def _run_node(self, request: TaskGraphRequest, node: TaskNode, inflight: dict[str, _InflightNode]) -> None:
+    async def _run_node(
+        self,
+        request: TaskGraphRequest,
+        node: TaskNode,
+        inflight: dict[str, _InflightNode],
+        run: _GraphRun,
+    ) -> None:
         state = inflight[node.node_id]
         runner_task: asyncio.Task[TaskNodeRunResult] | None = None
         heartbeat_task: asyncio.Task[None] | None = None
@@ -246,7 +334,12 @@ class LocalTaskGraphLauncher:
                 if lease is None:
                     raise AIError(ErrorCode.TASK_FENCE_STALE)
                 try:
-                    await self._repository.complete(lease, tenant_id=request.principal.tenant_id, execution_id=result.execution_id, result_digest=result.result_digest)
+                    await self._repository.complete(
+                        lease,
+                        tenant_id=request.principal.tenant_id,
+                        execution_id=result.execution_id,
+                        result_digest=result.result_digest,
+                    )
                 except AIError as error:
                     if error.code is not ErrorCode.TASK_FENCE_STALE:
                         raise
@@ -255,20 +348,41 @@ class LocalTaskGraphLauncher:
             lease = state.lease
             if lease is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
-            await self._repository.complete(lease, tenant_id=request.principal.tenant_id, execution_id=result.execution_id, result_digest=result.result_digest)
+            await self._repository.complete(
+                lease,
+                tenant_id=request.principal.tenant_id,
+                execution_id=result.execution_id,
+                result_digest=result.result_digest,
+            )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             lease = state.lease
             if lease is not None:
                 code = error.code.value if isinstance(error, AIError) else ErrorCode.TASK_NODE_FAILED.value
-                digest = canonical_sha256({"graph_id": request.graph.graph_id, "node_id": node.node_id, "error_code": code})
+                digest = canonical_sha256(
+                    {
+                        "graph_id": request.graph.graph_id,
+                        "node_id": node.node_id,
+                        "error_code": code,
+                    }
+                )
                 try:
-                    await self._repository.fail(lease, tenant_id=request.principal.tenant_id, error_code=code, error_digest=digest)
+                    await self._repository.fail(
+                        lease,
+                        tenant_id=request.principal.tenant_id,
+                        error_code=code,
+                        error_digest=digest,
+                    )
                 except AIError as terminal_error:
                     if terminal_error.code is not ErrorCode.TASK_FENCE_STALE:
                         raise
-                _logger.error("local task node failed: graph=%s task=%s code=%s", request.graph.graph_id, node.node_id, code)
+                _logger.error(
+                    "local task node failed: graph=%s task=%s code=%s",
+                    request.graph.graph_id,
+                    node.node_id,
+                    code,
+                )
         finally:
             for task in (runner_task, heartbeat_task):
                 if task is not None and not task.done():
@@ -276,15 +390,23 @@ class LocalTaskGraphLauncher:
             pending = tuple(task for task in (runner_task, heartbeat_task) if task is not None)
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
-            key = request.principal.tenant_id, request.graph.graph_id
-            self._activity.setdefault(key, asyncio.Event()).set()
+            if not run.closed:
+                self._signal(run)
 
-    async def _dependency_results(self, request: TaskGraphRequest, node: TaskNode) -> "Mapping[str, TaskDependencyResult]":
+    async def _dependency_results(
+        self,
+        request: TaskGraphRequest,
+        node: TaskNode,
+    ) -> "Mapping[str, TaskDependencyResult]":
         nodes = await self._repository.list_nodes(request.graph.graph_id, tenant_id=request.principal.tenant_id)
         results: dict[str, TaskDependencyResult] = {}
         for dependency in node.dependencies:
             dependency_node = _node_by_id(nodes, dependency)
-            if dependency_node is None or dependency_node.status is not TaskStatus.SUCCEEDED or dependency_node.result_digest is None:
+            if (
+                dependency_node is None
+                or dependency_node.status is not TaskStatus.SUCCEEDED
+                or dependency_node.result_digest is None
+            ):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             results[dependency] = TaskDependencyResult(dependency_node.result_digest, dependency_node.execution_id)
         return results
@@ -296,9 +418,43 @@ class LocalTaskGraphLauncher:
                 continue
             state.lease = await self._repository.renew(state.lease, tenant_id=tenant_id, lease_seconds=_LEASE_SECONDS)
 
+    def _close_run(self, run: _GraphRun) -> None:
+        if run.closed:
+            return
+        run.closed = True
+        run.activity.set()
+
+    def _signal(self, run: _GraphRun) -> None:
+        if run.closed:
+            return
+        event = run.activity
+        run.activity = asyncio.Event()
+        run.activity_generation += 1
+        event.set()
+
+    def _remember_observation(self, key: tuple[str, str], run: _GraphRun) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            observations = self._wait_observations.setdefault(task, {})
+            observations[key] = run.activity_generation
+
+    def _schedule_cleanup(self, run: _GraphRun) -> None:
+        asyncio.get_running_loop().call_soon(self._cleanup_run, run)
+
+    def _cleanup_run(self, run: _GraphRun) -> None:
+        if not run.closed or run.waiters:
+            return
+        for key, current in tuple(self._graphs.items()):
+            if current is run:
+                self._graphs.pop(key, None)
+
 
 def _runnable(node: _TaskNodeState, now: datetime) -> bool:
-    return node.status is TaskStatus.READY or node.status is TaskStatus.RUNNING and node.lease_expires_at is not None and node.lease_expires_at <= now
+    return node.status is TaskStatus.READY or (
+        node.status is TaskStatus.RUNNING
+        and node.lease_expires_at is not None
+        and node.lease_expires_at <= now
+    )
 
 
 def _task_error(task: asyncio.Task[object]) -> BaseException | None:
