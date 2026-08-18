@@ -8,10 +8,11 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 from uuid import uuid4
 
 from filelock import FileLock, Timeout
@@ -20,6 +21,7 @@ from linktools.core import environ
 from ..errors import AIError, ErrorCode
 
 _logger = environ.get_logger("ai.storage.lock")
+ValueT = TypeVar("ValueT")
 
 
 class KeyedAsyncLock:
@@ -221,12 +223,22 @@ class FilesystemWriterLock:
     async def acquire(self) -> None:
         if self._lock is not None:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         lock = FileLock(str(self.path), thread_local=False)
+        acquire_task = asyncio.create_task(asyncio.to_thread(self._acquire, lock))
         try:
-            await asyncio.to_thread(lock.acquire, timeout=0)
+            acquired = await asyncio.shield(acquire_task)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(acquire_task)
+            except BaseException:
+                pass
+            else:
+                await _await_thread(lock.release)
+            raise
         except Timeout as error:
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
+        if not acquired:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
         self._lock = lock
         _logger.debug("runtime writer lock acquired: path=%s", self.path)
 
@@ -234,9 +246,22 @@ class FilesystemWriterLock:
         lock = self._lock
         if lock is None:
             return
-        await asyncio.to_thread(lock.release)
-        self._lock = None
+        release_task = asyncio.create_task(asyncio.to_thread(lock.release))
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await asyncio.shield(release_task)
+            if self._lock is lock:
+                self._lock = None
+            raise
+        if self._lock is lock:
+            self._lock = None
         _logger.debug("runtime writer lock released: path=%s", self.path)
+
+    def _acquire(self, lock: FileLock) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        lock.acquire(timeout=0)
+        return True
 
 
 _filesystem_mutation_locks = KeyedAsyncLock()
@@ -260,7 +285,7 @@ class FilesystemMutationLock:
 
     async def __aenter__(self) -> "FilesystemMutationLock":
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(self.path.parent.mkdir, parents=True, exist_ok=True)
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         await _filesystem_mutation_locks.acquire(self._key)
@@ -293,15 +318,20 @@ class FilesystemMutationLock:
     async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
         if not self._acquired:
             return
-        self._acquired = False
         release_task = asyncio.create_task(asyncio.to_thread(self._release))
+        released = False
         try:
             await asyncio.shield(release_task)
         except asyncio.CancelledError:
             await asyncio.shield(release_task)
+            released = True
             raise
+        else:
+            released = True
         finally:
-            await _filesystem_mutation_locks.release(self._key)
+            if released:
+                self._acquired = False
+                await _filesystem_mutation_locks.release(self._key)
         _logger.debug("filesystem mutation lock released: path=%s", self.path)
 
     def _try_acquire(self) -> bool:
@@ -361,6 +391,15 @@ def _write_record(path: Path, record: 'dict[str, str | int | float]') -> None:
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     temporary.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     os.replace(temporary, path)
+
+
+async def _await_thread(fn: Callable[[], ValueT]) -> ValueT:
+    task = asyncio.create_task(asyncio.to_thread(fn))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.shield(task)
+        raise
 
 
 __all__ = [

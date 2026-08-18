@@ -2,15 +2,16 @@
 # -*- coding: utf-8 -*-
 """Immutable, content-addressed ObjectStore implementations."""
 
+import asyncio
 import hashlib
 import json
 import os
 import shutil
 import tempfile
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Protocol, TypeVar
 
 from linktools.core import environ
 
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.storage.object")
 _CHUNK_SIZE = 1024 * 1024
+ValueT = TypeVar("ValueT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,107 +207,90 @@ class FilesystemObjectStore:
     ) -> ObjectStat:
         _validate_put(key, expected_size, expected_digest)
         temporary_root = self._root / ".tmp"
-        temporary_root.mkdir(parents=True, exist_ok=True)
-        descriptor, name = tempfile.mkstemp(prefix="object-", dir=temporary_root)
+        await _await_thread(lambda: temporary_root.mkdir(parents=True, exist_ok=True))
+        name = await _await_thread(lambda: _create_temp_file(temporary_root))
         try:
-            size, digest = await _spool_file(chunks, descriptor, name, expected_size)
+            size, digest = await _spool_file(chunks, name, expected_size)
             if digest != expected_digest or size != expected_size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             destination, metadata = self._paths(key)
             async with FilesystemMutationLock(self._root / "object.lock"):
-                if destination.exists() or metadata.exists():
-                    current = await asyncio_to_thread(
-                        lambda: _read_filesystem_metadata(metadata, destination, key)
+                duplicate = await _await_thread(
+                    lambda: _publish_filesystem_object(
+                        name,
+                        destination,
+                        metadata,
+                        key,
+                        expected_size,
+                        expected_digest,
                     )
-                    if current.digest != expected_digest or current.size != expected_size:
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                )
+                if duplicate:
                     _logger.debug("filesystem object duplicate accepted by metadata: key=%s", key)
                 else:
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(name, destination)
-                    await asyncio_to_thread(
-                        lambda: write_json_atomic(
-                            metadata,
-                            {"key": key, "digest": expected_digest, "size": expected_size},
-                            fsync=True,
-                        )
-                    )
-                    sync_directory(destination.parent)
-                    name = ""
+                    name = None
             return ObjectStat(key, expected_digest, expected_size)
         finally:
-            if name:
-                Path(name).unlink(missing_ok=True)
+            if name is not None:
+                await _await_thread(lambda: name.unlink(missing_ok=True))
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)
         destination, metadata = self._paths(key)
-        if not destination.exists() and not metadata.exists():
-            return None
-        return await asyncio_to_thread(lambda: _read_filesystem_metadata(metadata, destination, key))
+        return await _await_thread(lambda: _stat_filesystem_object(metadata, destination, key))
 
     async def validate_integrity(self) -> None:
-        expected_files: set[Path] = set()
-        for metadata in self._root.glob("objects/*/*.json"):
-            try:
-                value = json.loads(await asyncio_to_thread(lambda: metadata.read_text(encoding="utf-8")))
-                key = value["key"]
-                expected_digest = value["digest"]
-                expected_size = int(value["size"])
-                _validate_key(str(key))
-                destination, expected_metadata = self._paths(str(key))
-                if metadata != expected_metadata:
-                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                stat = await self.stat(str(key))
-            except (OSError, TypeError, ValueError, KeyError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if stat is None or stat.digest != expected_digest or stat.size != expected_size:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            actual_size, actual_digest = await asyncio_to_thread(lambda: _hash_file(destination))
-            if actual_size != expected_size or actual_digest != expected_digest:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            expected_files.update({metadata, destination})
-        actual_files = {path for path in (self._root / "objects").rglob("*") if path.is_file()}
-        if actual_files != expected_files:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await _await_thread(lambda: _validate_filesystem_objects(self._root, self._store_id))
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
         destination, metadata = self._paths(key)
-        expected = await asyncio_to_thread(
+        expected = await _await_thread(
             lambda: _read_filesystem_metadata(metadata, destination, key)
         )
         digest = hashlib.sha256()
         size = 0
-        with destination.open("rb") as handle:
-            while chunk := handle.read(_CHUNK_SIZE):
+        handle = await _await_thread(lambda: destination.open("rb"))
+        try:
+            while True:
+                chunk = await _await_thread(lambda: handle.read(_CHUNK_SIZE))
+                if not chunk:
+                    break
                 digest.update(chunk)
                 size += len(chunk)
                 yield chunk
-        if expected.size != size or expected.digest != digest.hexdigest():
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if expected.size != size or expected.digest != digest.hexdigest():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        finally:
+            await _await_thread(handle.close)
 
     def open(self, key: str) -> AsyncIterator[bytes]:
         return self._open(key)
 
 
 class SqlObjectStore:
-    def __init__(self, engine: "AsyncEngine", *, store_id: str = "builtin") -> None:
+    def __init__(
+        self,
+        engine: "AsyncEngine",
+        *,
+        store_id: str = "builtin",
+        context: "SqlStorageContext | None" = None,
+    ) -> None:
         from sqlalchemy.ext.asyncio import AsyncEngine
 
         _validate_store_id(store_id)
         if not isinstance(engine, AsyncEngine):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+        if context is not None and context.engine is not engine:
+            raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         dialect_for_name(engine.dialect.name)
         self._store_id = store_id
-        self._context = create_sql_storage_context(engine)
+        self._context = context or create_sql_storage_context(engine)
         self._metadata = build_object_sql_metadata()
 
     @classmethod
     def from_context(cls, context: "SqlStorageContext", *, store_id: str = "builtin") -> "SqlObjectStore":
-        store = cls(context.engine, store_id=store_id)
-        store._context = context
-        return store
+        return cls(context.engine, store_id=store_id, context=context)
 
     @property
     def store_id(self) -> str:
@@ -317,10 +302,12 @@ class SqlObjectStore:
         from sqlalchemy.exc import IntegrityError
 
         _validate_put(key, expected_size, expected_digest)
-        temporary_root = Path(tempfile.mkdtemp(prefix="linktools-object-"))
+        temporary_root = await _await_thread(
+            lambda: Path(tempfile.mkdtemp(prefix="linktools-object-"))
+        )
         temporary = temporary_root / "payload"
         try:
-            size, digest = await _spool_file(chunks, -1, str(temporary), expected_size)
+            size, digest = await _spool_file(chunks, temporary, expected_size)
             if size != expected_size or digest != expected_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             try:
@@ -331,7 +318,7 @@ class SqlObjectStore:
                     raise AIError(ErrorCode.STORAGE_CONFLICT)
             return ObjectStat(key, digest, size)
         finally:
-            shutil.rmtree(temporary_root, ignore_errors=True)
+            await _await_thread(lambda: shutil.rmtree(temporary_root, ignore_errors=True))
 
     async def _insert(self, key: str, path: Path, size: int, digest: str) -> None:
         from sqlalchemy import insert
@@ -340,26 +327,32 @@ class SqlObjectStore:
         chunks = self._metadata.tables["ai_object_chunks"]
         key_digest = _key_digest(self.store_id, key)
         async def execute(session) -> None:
-                await session.execute(
-                    insert(table).values(
-                        key_digest=key_digest.hex(),
-                        store_id=self.store_id,
-                        object_key=key,
-                        content_digest=digest,
-                        size=size,
+            await session.execute(
+                insert(table).values(
+                    key_digest=key_digest.hex(),
+                    store_id=self.store_id,
+                    object_key=key,
+                    content_digest=digest,
+                    size=size,
+                )
+            )
+            index = 0
+            offset = 0
+            while True:
+                rows, offset = await _await_thread(
+                    lambda offset=offset, index=index: _read_payload_batch(
+                        path,
+                        offset,
+                        index,
+                        64,
                     )
                 )
-                rows = []
-                with path.open("rb") as handle:
-                    index = 0
-                    while chunk := handle.read(_CHUNK_SIZE):
-                        rows.append({"key_digest": key_digest.hex(), "chunk_index": index, "content": chunk})
-                        index += 1
-                        if len(rows) == 64:
-                            await session.execute(insert(chunks), rows)
-                            rows.clear()
-                if rows:
-                    await session.execute(insert(chunks), rows)
+                if not rows:
+                    break
+                for row in rows:
+                    row["key_digest"] = key_digest.hex()
+                await session.execute(insert(chunks), rows)
+                index += len(rows)
         await self._context.run_mutation(execute, domain="storage.object")
 
     async def stat(self, key: str) -> ObjectStat | None:
@@ -585,10 +578,10 @@ async def _spool_memory(chunks: AsyncIterator[bytes], expected_size: int) -> tup
     return bytes(data), digest.hexdigest()
 
 
-async def _spool_file(chunks: AsyncIterator[bytes], descriptor: int, name: str, expected_size: int) -> tuple[int, str]:
+async def _spool_file(chunks: AsyncIterator[bytes], path: Path, expected_size: int) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0
-    handle = os.fdopen(descriptor, "wb") if descriptor >= 0 else Path(name).open("wb")
+    handle = await _await_thread(lambda: path.open("wb"))
     try:
         async for chunk in chunks:
             if not isinstance(chunk, bytes) or not chunk:
@@ -597,18 +590,107 @@ async def _spool_file(chunks: AsyncIterator[bytes], descriptor: int, name: str, 
             if size > expected_size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             digest.update(chunk)
-            handle.write(chunk)
-        handle.flush()
-        os.fsync(handle.fileno())
+            await _await_thread(lambda chunk=chunk: handle.write(chunk))
+        await _await_thread(lambda: _flush_file(handle))
     finally:
-        handle.close()
+        await _await_thread(handle.close)
     return size, digest.hexdigest()
 
 
-async def asyncio_to_thread(fn):
-    import asyncio
+def _create_temp_file(root: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(prefix="object-", dir=root)
+    os.close(descriptor)
+    return Path(name)
 
-    return await asyncio.to_thread(fn)
+
+def _flush_file(handle: BinaryIO) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
+def _stat_filesystem_object(metadata: Path, destination: Path, key: str) -> ObjectStat | None:
+    if not metadata.is_file() and not destination.is_file():
+        return None
+    return _read_filesystem_metadata(metadata, destination, key)
+
+
+def _publish_filesystem_object(
+    temporary: Path,
+    destination: Path,
+    metadata: Path,
+    key: str,
+    size: int,
+    digest: str,
+) -> bool:
+    if destination.exists() or metadata.exists():
+        current = _read_filesystem_metadata(metadata, destination, key)
+        if current.digest != digest or current.size != size:
+            raise AIError(ErrorCode.STORAGE_CONFLICT)
+        return True
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(temporary, destination)
+    write_json_atomic(
+        metadata,
+        {"key": key, "digest": digest, "size": size},
+        fsync=True,
+    )
+    sync_directory(destination.parent)
+    return False
+
+
+def _validate_filesystem_objects(root: Path, store_id: str) -> None:
+    expected_files: set[Path] = set()
+    for metadata in (root / "objects").glob("*/*.json"):
+        try:
+            value = json.loads(metadata.read_text(encoding="utf-8"))
+            key = value["key"]
+            expected_digest = value["digest"]
+            expected_size = int(value["size"])
+            _validate_key(str(key))
+            digest = _key_digest(store_id, str(key)).hex()
+            destination = metadata.with_name(f"{digest}.bin")
+            expected_metadata = metadata.with_name(f"{digest}.json")
+            if metadata != expected_metadata:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            stat = _read_filesystem_metadata(metadata, destination, str(key))
+        except (OSError, TypeError, ValueError, KeyError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if stat.digest != expected_digest or stat.size != expected_size:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        actual_size, actual_digest = _hash_file(destination)
+        if actual_size != expected_size or actual_digest != expected_digest:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        expected_files.update({metadata, destination})
+    actual_files = {path for path in (root / "objects").rglob("*") if path.is_file()}
+    if actual_files != expected_files:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+
+
+def _read_payload_batch(
+    path: Path,
+    offset: int,
+    index: int,
+    limit: int,
+) -> tuple[list[dict[str, object]], int]:
+    rows: list[dict[str, object]] = []
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        while len(rows) < limit:
+            chunk = handle.read(_CHUNK_SIZE)
+            if not chunk:
+                break
+            rows.append({"chunk_index": index + len(rows), "content": chunk})
+            offset += len(chunk)
+    return rows, offset
+
+
+async def _await_thread(fn: Callable[[], ValueT]) -> ValueT:
+    task = asyncio.create_task(asyncio.to_thread(fn))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.shield(task)
+        raise
 
 
 def _key_digest(store_id: str, key: str) -> bytes:

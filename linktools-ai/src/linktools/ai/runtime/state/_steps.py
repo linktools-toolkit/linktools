@@ -45,13 +45,6 @@ _logger = environ.get_logger("ai.runtime.state.steps")
 
 
 @runtime_checkable
-class _StepTransactionBatch(Protocol):
-    async def reserve_sequence(self, key: bytes, count: int) -> int: ...
-
-    async def insert_facts(self, facts: Sequence[StoredFact]) -> None: ...
-
-
-@runtime_checkable
 class _StepArchiveBatch(Protocol):
     async def sync_projection(
         self,
@@ -827,18 +820,12 @@ async def _reserve_sequences(
 ) -> tuple[int, ...]:
     if count < 1:
         raise ValueError("sequence reservation count must be positive")
-    if isinstance(transaction, _StepTransactionBatch):
-        final = await transaction.reserve_sequence(key, count)
-        return tuple(range(final - count + 1, final + 1))
-    return tuple(await transaction.next_sequence(key) for _ in range(count))
+    final = await transaction.reserve_sequence(key, count)
+    return tuple(range(final - count + 1, final + 1))
 
 
 async def _insert_facts(transaction: StateTransaction, facts: tuple[StoredFact, ...]) -> None:
-    if isinstance(transaction, _StepTransactionBatch):
-        await transaction.insert_facts(facts)
-        return
-    for fact in facts:
-        await transaction.insert_fact(fact)
+    await transaction.insert_facts(facts)
 
 
 async def _materialize_snapshot(target: StepStore, run: RunRecord, snapshot: ContinuableSnapshot) -> None:

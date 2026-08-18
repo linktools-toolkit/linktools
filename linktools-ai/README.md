@@ -170,11 +170,17 @@ The SQL schema must already exist. `AssetStore.initialize()` initializes its ove
 
 `RuntimeStatePlan` selects the runtime persistence routes. Filesystem persistence is the workspace default and writes below `<project>/.linktools/runtime`.
 
-Multiple Runtime instances may share a filesystem RuntimeState scope only when
-the filesystem provides consistent advisory locking, atomic rename, and
-post-lock visibility. They must use the same physical root, namespace, and
-tenant scope. If the shared filesystem cannot provide those guarantees, use
-the SQL route instead.
+Filesystem RuntimeState is an embedded single-writer backend. For one
+resolved RuntimeDomain, namespace, and tenant StateStore root, only one active
+Runtime/process may own the filesystem StateStore. A second owner fails
+initialization with `STORAGE_CONFLICT`. Applications requiring concurrent
+Runtime/process access to the same persistent state must use SQLite or another
+SQL route.
+
+Filesystem data layout is unchanged. Sequential reopen is supported, and a
+process crash releases the advisory lock automatically. The `state.lock` file
+may remain on disk; ownership is determined by advisory-lock state, not by the
+file's existence.
 
 Runtime SQL concurrency uses optimistic conditional DML. RuntimeState
 correctness does not require or support explicit pessimistic row, table, or

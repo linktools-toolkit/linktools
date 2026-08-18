@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Domain-independent SQL context, metadata primitives, and validation."""
 
+import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -46,14 +47,20 @@ class SqlStorageContext:
     dialect: SqlAlchemyDialect
     owns_engine: bool = False
     _closed: bool = field(default=False, init=False, repr=False)
+    _initialize_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _sqlite_configured: bool = field(default=False, init=False, repr=False)
+    _validated_metadata: "MetaData | None" = field(default=None, init=False, repr=False)
 
     async def initialize(self, *, metadata: "MetaData | None" = None) -> None:
-        if self._closed:
-            raise AIError(ErrorCode.STORAGE_CLOSED)
-        if self.engine.dialect.name == "sqlite":
-            await _configure_sqlite_engine(self.engine)
-        if metadata is not None:
-            await validate_sql(self.engine, metadata)
+        async with self._initialize_lock:
+            if self._closed:
+                raise AIError(ErrorCode.STORAGE_CLOSED)
+            if self.engine.dialect.name == "sqlite" and not self._sqlite_configured:
+                await _configure_sqlite_engine(self.engine)
+                self._sqlite_configured = True
+            if metadata is not None and metadata is not self._validated_metadata:
+                await _validate_sql_schema(self.engine, metadata)
+                self._validated_metadata = metadata
         _logger.debug(
             "SQL context initialized: dialect=%s owns_engine=%s metadata=%s",
             self.dialect.name,
@@ -183,9 +190,13 @@ async def validate_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
     dialect_for_name(engine.dialect.name)
     if engine.dialect.name == "sqlite":
         await _configure_sqlite_engine(engine)
+    await _validate_sql_schema(engine, metadata)
+    _logger.debug("SQL metadata validated: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))
+
+
+async def _validate_sql_schema(engine: "AsyncEngine", metadata: "MetaData") -> None:
     async with engine.connect() as connection:
         await connection.run_sync(_validate_connection_schema, metadata)
-    _logger.debug("SQL metadata validated: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))
 
 
 def sql_integer_id() -> "BigInteger":

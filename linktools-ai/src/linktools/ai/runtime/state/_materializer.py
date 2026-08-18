@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Materialize Runtime repositories and their owned StateStore resources."""
 
+import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -33,11 +34,21 @@ from ._contracts import (
 )
 from ._filesystem import FilesystemStateStore
 from ._memory import MemoryStateStore
-from ._plan import RuntimeDomain, RuntimeRetentionMode, RuntimeStatePlan
+from ._plan import (
+    RuntimeDomain,
+    RuntimeRetentionMode,
+    RuntimeStatePlan,
+    RuntimeStateRoute,
+)
 from ._repositories import build_repository_bundle
 from ._retention import RuntimeRetentionController
 from ._sql import SqlStateStore
-from ._steps import InMemoryStepArchive, RuntimeStepStore, StagingStepStore, StateStepArchive
+from ._steps import (
+    InMemoryStepArchive,
+    RuntimeStepStore,
+    StagingStepStore,
+    StateStepArchive,
+)
 
 _logger = environ.get_logger("ai.runtime.state.materializer")
 _OBJECT_DOMAINS = frozenset(
@@ -115,8 +126,22 @@ async def materialize_runtime_state(
     sql_contexts: dict[RuntimeDomain, SqlStorageContext] = {}
     cleanups: list[Callable[[], Awaitable[None]]] = []
     try:
+        sql_groups: dict[tuple[str, object], list[RuntimeDomain]] = {}
+        sql_routes: dict[tuple[str, object], RuntimeStateRoute] = {}
         for domain in RuntimeDomain:
             route = plan.route(domain)
+            if route.kind in {"sqlite", "sql"}:
+                if route.kind == "sqlite":
+                    if route.path is None:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    key = ("sqlite", route.path)
+                else:
+                    if route.engine is None:
+                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                    key = ("sql", id(route.engine))
+                sql_groups.setdefault(key, []).append(domain)
+                sql_routes[key] = route
+                continue
             if route.kind == "memory":
                 store: object = MemoryStateStore()
                 await store.initialize()
@@ -132,36 +157,48 @@ async def materialize_runtime_state(
                 )
                 await store.initialize()
                 cleanups.append(store.close)
-            elif route.kind in {"sqlite", "sql"}:
-                if route.kind == "sqlite":
-                    if route.path is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    route.path.parent.mkdir(parents=True, exist_ok=True)
-                    from sqlalchemy.ext.asyncio import create_async_engine
-
-                    engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
-                    context = create_sql_storage_context(engine, owns_engine=True)
-                else:
-                    if route.engine is None:
-                        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
-                    context = create_sql_storage_context(route.engine)
-                from sqlalchemy import MetaData
-
-                from ._schema import build_runtime_sql_metadata
-
-                metadata = MetaData()
-                build_runtime_sql_metadata(frozenset({domain}), metadata=metadata)
-                if object_store is None and domain in _OBJECT_DOMAINS:
-                    build_object_sql_metadata(metadata=metadata)
-                await context.initialize(metadata=metadata)
-                store = SqlStateStore(context.engine, metadata=metadata, context=context)
-                await store.initialize()
-                sql_contexts[domain] = context
-                cleanups.append(store.close)
-                cleanups.append(context.close)
             else:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             stores[domain] = store
+
+        for key, domains in sql_groups.items():
+            route = sql_routes[key]
+            if key[0] == "sqlite":
+                if route.path is None:
+                    raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                await asyncio.to_thread(route.path.parent.mkdir, parents=True, exist_ok=True)
+                from sqlalchemy.ext.asyncio import create_async_engine
+
+                engine = create_async_engine(f"sqlite+aiosqlite:///{route.path}")
+                context = create_sql_storage_context(engine, owns_engine=True)
+            else:
+                if route.engine is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                context = create_sql_storage_context(route.engine)
+            group_stores: list[SqlStateStore] = []
+            try:
+                from sqlalchemy import MetaData
+
+                metadata = MetaData()
+                from ._schema import build_runtime_sql_metadata
+
+                build_runtime_sql_metadata(frozenset(domains), metadata=metadata)
+                if object_store is None and set(domains) & _OBJECT_DOMAINS:
+                    build_object_sql_metadata(metadata=metadata)
+                await context.initialize(metadata=metadata)
+                for domain in domains:
+                    store = SqlStateStore(context.engine, metadata=metadata, context=context)
+                    await store.initialize()
+                    group_stores.append(store)
+                    stores[domain] = store
+                    sql_contexts[domain] = context
+            except BaseException:
+                for store in reversed(group_stores):
+                    await store.close()
+                await context.close()
+                raise
+            cleanups.extend(store.close for store in group_stores)
+            cleanups.append(context.close)
 
         bundles = {
             domain: build_repository_bundle(stores[domain], namespace=namespace, tenant_id=tenant_id, domain=domain)

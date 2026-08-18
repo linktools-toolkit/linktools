@@ -86,6 +86,26 @@ def sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _directory_chain(path: Path, root: Path) -> tuple[Path, ...]:
+    root = root.resolve()
+    current = path.resolve()
+    try:
+        current.relative_to(root)
+    except ValueError as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    values: list[Path] = []
+    while True:
+        values.append(current)
+        if current == root:
+            return tuple(values)
+        current = current.parent
+
+
+def _sync_directories(paths: Collection[Path]) -> None:
+    for path in sorted(set(paths), key=lambda value: len(value.parts), reverse=True):
+        sync_directory(path)
+
+
 class FilesystemJournal:
     """Shared crash-safe journal for granular filesystem stores."""
 
@@ -140,6 +160,7 @@ class FilesystemJournal:
             sync_directory(self._transaction)
             _write_journal_text(self._transaction / "commit", "1")
             sync_directory(self._transaction)
+            sync_directory(self._root)
             return plan
         except AIError:
             raise
@@ -190,6 +211,7 @@ class FilesystemJournal:
             deleted_paths.add(relative)
 
     def publish(self, plan: Mapping[str, object]) -> None:
+        affected: set[Path] = set()
         try:
             self.validate(plan)
             stage = self._transaction / "stage"
@@ -203,23 +225,23 @@ class FilesystemJournal:
                 relative = _safe_relative(str(item["path"]), self._error_code)
                 source = validate_root_path(stage, relative)
                 destination = validate_root_path(self._root, relative)
+                affected.update(_directory_chain(destination.parent, self._root))
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if source.is_file():
                     os.replace(source, destination)
-                    sync_directory(destination.parent)
                 elif not destination.is_file() or _sha256(destination.read_bytes()) != str(item["sha256"]):
                     raise AIError(self._error_code)
             for value in deletes:
                 relative = _safe_relative(str(value), self._error_code)
                 path = validate_root_path(self._root, relative)
-                existed = path.exists()
+                affected.update(_directory_chain(path.parent, self._root))
                 path.unlink(missing_ok=True)
-                if existed:
-                    sync_directory(path.parent)
         except AIError:
             raise
         except (OSError, TypeError, ValueError) as error:
             raise AIError(self._error_code) from error
+        finally:
+            _sync_directories(affected)
 
     def complete(self) -> None:
         try:
