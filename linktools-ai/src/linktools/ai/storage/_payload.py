@@ -33,7 +33,7 @@ class StoredPayload:
     encoding: str | None
     digest: str
     size: int
-    value: object = None
+    value: JsonValue = None
     ref: "ObjectRef | None" = None
 
     def __post_init__(self) -> None:

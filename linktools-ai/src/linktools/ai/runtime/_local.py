@@ -1259,7 +1259,7 @@ class LocalExecutionBackend:
             outcome.result_created_at,
         )
         try:
-            await self._execution.executions.commit_terminal(
+            committed = await self._execution.executions.commit_terminal(
                 ExecutionTerminalCommit(
                     current.revision,
                     current.event_sequence,
@@ -1270,7 +1270,10 @@ class LocalExecutionBackend:
                     identity,
                 )
             )
-            self._live_broker.notify_durable(current.execution_id)
+            self._live_broker.publish_durable(
+                current.execution_id,
+                committed.execution.event_sequence,
+            )
         except AIError as error:
             if error.code not in {
                 ErrorCode.STORAGE_CONFLICT,
@@ -1464,7 +1467,6 @@ class LocalExecutionBackend:
                         )
                     )
                     return
-                self._live_broker.mark_boundary(current.execution_id)
                 await self._append_event(current, emission.kind, emission.payload)
 
             memory = None
@@ -1687,13 +1689,13 @@ class LocalExecutionBackend:
             raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE) from error
 
     async def _append_event(self, execution: ExecutionRecord, event_type: ExecutionEventType, payload: JsonValue) -> None:
-        await self._execution.events.append_next(
+        committed = await self._execution.events.append_next(
             execution.execution_id,
             tenant_id=execution.tenant_id,
             event_type=event_type,
             payload=payload,
         )
-        self._live_broker.notify_durable(execution.execution_id)
+        self._live_broker.publish_durable(execution.execution_id, committed.sequence)
 
     def _step_store(self, runtime_domain: RuntimeDomain) -> StepStore:
         return self._step_reads[runtime_domain]
@@ -2088,7 +2090,7 @@ class LocalExecutionBackend:
             output_digest,
             error_code,
         )
-        await self._execution.executions.commit_terminal(
+        committed = await self._execution.executions.commit_terminal(
             ExecutionTerminalCommit(
                 current.revision,
                 current.event_sequence,
@@ -2122,7 +2124,10 @@ class LocalExecutionBackend:
                 identity,
             )
         )
-        self._live_broker.notify_durable(current.execution_id)
+        self._live_broker.publish_durable(
+            current.execution_id,
+            committed.execution.event_sequence,
+        )
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
             current.execution_id,

@@ -508,8 +508,18 @@ class RuntimeStepStore(StepStore):
         self, *, candidate_step_run_ids: tuple[str, ...], required_step_run_id: str | None
     ) -> None:
         for run_id in dict.fromkeys(candidate_step_run_ids):
+            if required_step_run_id != run_id:
+                continue
             snapshot = await self._staging.latest_snapshot(run_id=run_id, include_interrupted=True)
-            if required_step_run_id == run_id and (snapshot is None or snapshot.state != "complete"):
+            if snapshot is None:
+                for archive in self._archives.values():
+                    snapshot = await archive.latest_snapshot(
+                        run_id=run_id,
+                        include_interrupted=True,
+                    )
+                    if snapshot is not None:
+                        break
+            if snapshot is None or snapshot.state != "complete":
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def release_staging_many(self, *, candidate_step_run_ids: tuple[str, ...]) -> None:

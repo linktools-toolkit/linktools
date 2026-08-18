@@ -328,6 +328,8 @@ def _decode_domain(value: object, target: object) -> object:
         return None
     if origin in (list,):
         item_type = arguments[0] if arguments else Any
+        if not isinstance(value, list):
+            raise TypeError("list value is invalid")
         return [_decode_domain(item, item_type) for item in value]
     if origin in (tuple,):
         if arguments and arguments[-1] is Ellipsis:
@@ -354,6 +356,10 @@ def _decode_domain(value: object, target: object) -> object:
             _decode_domain(pair[0], key_type): _decode_domain(pair[1], item_type)
             for pair in pairs
         }
+    if target is type(None):
+        if value is not None:
+            raise TypeError("none value is not null")
+        return None
     if isinstance(target, type) and issubclass(target, Enum):
         raw = value.get("value") if isinstance(value, Mapping) and "$enum" in value else value
         return target(raw)

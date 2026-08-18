@@ -1832,6 +1832,7 @@ class TaskRepositoryImpl(_RepositoryBase):
         return await self._store.mutate(mutate)
 
     async def renew(self, lease: TaskLease, *, tenant_id: str, lease_seconds: int) -> TaskLease:
+        _validate_task_lease_scope(lease, tenant_id)
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
         validate_lease_seconds(lease_seconds)
@@ -1897,6 +1898,7 @@ class TaskRepositoryImpl(_RepositoryBase):
         error_code: str | None,
         error_digest: str | None,
     ) -> TaskTerminalRecord:
+        _validate_task_lease_scope(lease, tenant_id)
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
 
@@ -2541,6 +2543,11 @@ def _require_live_task_lease(node: TaskNodeView, lease: TaskLease, now: datetime
         or node.lease_expires_at <= now
     ):
         raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+
+def _validate_task_lease_scope(lease: TaskLease, tenant_id: str) -> None:
+    if lease.tenant_id != tenant_id:
+        raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
 
 def _require_live_tool_lease(

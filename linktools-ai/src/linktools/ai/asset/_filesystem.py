@@ -95,15 +95,22 @@ class FilesystemAssetBackend:
 
     async def initialize(self) -> None:
         try:
-            async with self._process_lock, FilesystemMutationLock(self._lock_path):
-                self._directory.mkdir(parents=True, exist_ok=True)
-                self._validate_or_write_manifest()
-                self._entries_path.mkdir(parents=True, exist_ok=True)
-                self._history_path.mkdir(parents=True, exist_ok=True)
-                if not self._generation_path.exists():
-                    _write_text(self._generation_path, "0")
-                await self._recover()
-                await self._load_state()
+            async with self._process_lock:
+                if not self._directory.exists():
+                    self._set_empty_state()
+                else:
+                    if not self._directory.is_dir():
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                    if not any(self._directory.iterdir()):
+                        self._set_empty_state()
+                    else:
+                        self._validate_existing_root()
+                        if (self._directory / ".txn").exists() and not self._writable:
+                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+                        if (self._directory / ".txn").exists():
+                            async with FilesystemMutationLock(self._lock_path):
+                                await self._recover()
+                        await self._load_state()
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         self._ready = True
@@ -205,9 +212,8 @@ class FilesystemAssetBackend:
         expected_revision: StorageRevision | None = None,
     ) -> StorageBatchResult[AssetInfo, AssetKey]:
         await self._ensure_ready()
-        async with self._process_lock, FilesystemMutationLock(self._lock_path):
-            await self._recover()
-            await self._load_state()
+        async with self._process_lock:
+            await self._reload()
             self._require_writable()
             if expected_revision is not None and expected_revision != StorageRevision(str(self._revision)):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -215,54 +221,111 @@ class FilesystemAssetBackend:
             prepared = {
                 change.key: bytes(change.value or b"") for change in changes if change.operation is StorageOperation.PUT
             }
-            for value in prepared.values():
-                await self._put_content(value)
             previous = {change.key: self._entries.get(change.key) for change in changes}
             for change in changes:
                 _check_entry_revision(previous[change.key], change.expected_revision)
             mutates = tuple(
                 _mutates(change.operation, previous[change.key], prepared.get(change.key, b"")) for change in changes
             )
-            next_revision = self._revision + (1 if any(mutates) else 0)
-            before = self._snapshot()
-            results: list[
-                StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
-            ] = []
-            for change, mutates_change in zip(changes, mutates, strict=True):
-                current = previous[change.key]
-                if not mutates_change:
+            if not any(mutates):
+                results = tuple(
+                    _result(
+                        change.operation,
+                        change.key,
+                        previous[change.key],
+                        StorageRevision(str(self._revision)),
+                        changed=False,
+                    )
+                    for change in changes
+                )
+                return StorageBatchResult(StorageRevision(str(self._revision)), True, results)
+            async with FilesystemMutationLock(self._lock_path):
+                self._provision()
+                await self._recover()
+                await self._load_state()
+                self._require_writable()
+                if (
+                    expected_revision is not None
+                    and expected_revision != StorageRevision(str(self._revision))
+                ):
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                previous = {change.key: self._entries.get(change.key) for change in changes}
+                for change in changes:
+                    _check_entry_revision(previous[change.key], change.expected_revision)
+                mutates = tuple(
+                    _mutates(change.operation, previous[change.key], prepared.get(change.key, b""))
+                    for change in changes
+                )
+                if not any(mutates):
+                    results = tuple(
+                        _result(
+                            change.operation,
+                            change.key,
+                            previous[change.key],
+                            StorageRevision(str(self._revision)),
+                            changed=False,
+                        )
+                        for change in changes
+                    )
+                    return StorageBatchResult(StorageRevision(str(self._revision)), True, results)
+                put_changes = (
+                    (change, prepared[change.key])
+                    for change in changes
+                    if change.operation is StorageOperation.PUT
+                )
+                for change, value in put_changes:
+                    if _mutates(change.operation, previous[change.key], value):
+                        await self._put_content(value)
+                next_revision = self._revision + 1
+                before = self._snapshot()
+                results: list[
+                    StoragePutResult[AssetInfo] | StorageDeleteResult[AssetKey] | StorageResetResult[AssetKey]
+                ] = []
+                for change, mutates_change in zip(changes, mutates, strict=True):
+                    current = previous[change.key]
+                    if not mutates_change:
+                        results.append(
+                            _result(
+                                change.operation,
+                                change.key,
+                                current,
+                                StorageRevision(str(next_revision)),
+                                changed=False,
+                            )
+                        )
+                        continue
+                    info = _next_info(
+                        self._root,
+                        change.key,
+                        prepared.get(change.key, b""),
+                        current,
+                        change.operation,
+                        next_revision,
+                        change.metadata,
+                    )
+                    self._record(info)
                     results.append(
                         _result(
-                            change.operation, change.key, current, StorageRevision(str(next_revision)), changed=False
+                            change.operation,
+                            change.key,
+                            info,
+                            StorageRevision(str(next_revision)),
+                            changed=True,
                         )
                     )
-                    continue
-                info = _next_info(
-                    self._root,
-                    change.key,
-                    prepared.get(change.key, b""),
-                    current,
-                    change.operation,
-                    next_revision,
-                    change.metadata,
+                self._revision = next_revision
+                try:
+                    await self._write_state()
+                except BaseException as error:
+                    self._restore(before)
+                    _raise_filesystem_error(error)
+                _logger.debug(
+                    "filesystem Asset batch committed: root=%s revision=%s changes=%s",
+                    self._directory,
+                    self._revision,
+                    len(changes),
                 )
-                self._record(info)
-                results.append(
-                    _result(change.operation, change.key, info, StorageRevision(str(next_revision)), changed=True)
-                )
-            self._revision = next_revision
-            try:
-                await self._write_state()
-            except BaseException as error:
-                self._restore(before)
-                _raise_filesystem_error(error)
-            _logger.debug(
-                "filesystem Asset batch committed: root=%s revision=%s changes=%s",
-                self._directory,
-                self._revision,
-                len(changes),
-            )
-            return StorageBatchResult(StorageRevision(str(self._revision)), True, tuple(results))
+                return StorageBatchResult(StorageRevision(str(self._revision)), True, tuple(results))
 
     async def list_versions(self, key: AssetKey) -> tuple[VersionSummary, ...]:
         await self._ensure_ready()
@@ -293,42 +356,56 @@ class FilesystemAssetBackend:
         metadata: Mapping[str, JsonValue] | None,
     ) -> object:
         await self._ensure_ready()
-        async with self._process_lock, FilesystemMutationLock(self._lock_path):
-            await self._recover()
-            await self._load_state()
+        async with self._process_lock:
+            await self._reload()
             self._require_writable()
             current = self._entries.get(key)
             _check_entry_revision(current, expected_revision)
             content = value or b""
             if not _mutates(operation, current, content):
                 return _result(operation, key, current, StorageRevision(str(self._revision)), changed=False)
-            if operation is StorageOperation.PUT:
-                await self._put_content(content)
-            before = self._snapshot()
-            next_revision = self._revision + 1
-            info = _next_info(
-                self._root,
-                key,
-                content,
-                current,
-                operation,
-                next_revision,
-                metadata,
-            )
-            self._record(info)
-            self._revision = next_revision
-            try:
-                await self._write_state()
-            except BaseException as error:
-                self._restore(before)
-                _raise_filesystem_error(error)
-            _logger.debug(
-                "filesystem Asset mutation committed: root=%s key=%s revision=%s",
-                self._directory,
-                key.id,
-                self._revision,
-            )
-            return _result(operation, key, info, StorageRevision(str(self._revision)), changed=True)
+            async with FilesystemMutationLock(self._lock_path):
+                self._provision()
+                await self._recover()
+                await self._load_state()
+                current = self._entries.get(key)
+                _check_entry_revision(current, expected_revision)
+                content = value or b""
+                if not _mutates(operation, current, content):
+                    return _result(
+                        operation,
+                        key,
+                        current,
+                        StorageRevision(str(self._revision)),
+                        changed=False,
+                    )
+                if operation is StorageOperation.PUT:
+                    await self._put_content(content)
+                before = self._snapshot()
+                next_revision = self._revision + 1
+                info = _next_info(
+                    self._root,
+                    key,
+                    content,
+                    current,
+                    operation,
+                    next_revision,
+                    metadata,
+                )
+                self._record(info)
+                self._revision = next_revision
+                try:
+                    await self._write_state()
+                except BaseException as error:
+                    self._restore(before)
+                    _raise_filesystem_error(error)
+                _logger.debug(
+                    "filesystem Asset mutation committed: root=%s key=%s revision=%s",
+                    self._directory,
+                    key.id,
+                    self._revision,
+                )
+                return _result(operation, key, info, StorageRevision(str(self._revision)), changed=True)
 
     async def _put_content(self, value: bytes) -> None:
         digest = _etag(value)
@@ -341,9 +418,15 @@ class FilesystemAssetBackend:
         return await read_object(self._object_store, object_key, expected_digest=info.etag, expected_size=info.size)
 
     async def _reload(self) -> None:
-        async with FilesystemMutationLock(self._lock_path):
-            await self._recover()
-            await self._load_state()
+        if not self._directory.exists() or not any(self._directory.iterdir()):
+            self._set_empty_state()
+            return
+        if (self._directory / ".txn").exists():
+            if not self._writable:
+                raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+            async with FilesystemMutationLock(self._lock_path):
+                await self._recover()
+        await self._load_state()
 
     async def validate_integrity(self) -> None:
         await self._ensure_ready()
@@ -355,6 +438,9 @@ class FilesystemAssetBackend:
         )
 
     async def _load_state(self) -> None:
+        if not self._directory.exists() or not any(self._directory.iterdir()):
+            self._set_empty_state()
+            return
         if not self._head_path.is_file():
             if any(self._entries_path.rglob("*.json")) or any(self._history_path.rglob("*.json")):
                 raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
@@ -488,21 +574,42 @@ class FilesystemAssetBackend:
             "metadata": dict(info.metadata),
         }
 
-    def _validate_or_write_manifest(self) -> None:
-        expected = {
+    def _set_empty_state(self) -> None:
+        self._revision = 0
+        self._entries.clear()
+        self._versions.clear()
+
+    def _expected_manifest(self) -> dict[str, object]:
+        return {
             "format": "linktools-ai-asset",
             "generation": _GENERATION,
             "root_id": self._root.root_id,
             "root_digest": self._root.digest,
         }
+
+    def _validate_existing_root(self) -> None:
         if not self._manifest_path.is_file():
-            if self._head_path.exists() or self._entries_path.exists() or self._history_path.exists():
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
-            try:
-                write_json_atomic(self._manifest_path, expected, fsync=True)
-            except OSError as error:
-                raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._validate_manifest()
+        if not self._generation_path.is_file():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _read_generation(self._generation_path)
+
+    def _provision(self) -> None:
+        self._directory.mkdir(parents=True, exist_ok=True)
+        if not self._directory.is_dir():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if self._manifest_path.exists():
+            self._validate_existing_root()
             return
+        unexpected = [path for path in self._directory.iterdir() if path.name != "asset.lock"]
+        if unexpected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        write_json_atomic(self._manifest_path, self._expected_manifest(), fsync=True)
+        _write_text(self._generation_path, "0")
+        sync_directory(self._directory)
+
+    def _validate_manifest(self) -> None:
         try:
             value = json.loads(self._manifest_path.read_text(encoding="utf-8"))
         except OSError as error:
@@ -511,7 +618,7 @@ class FilesystemAssetBackend:
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED) from error
         if (
             not isinstance(value, dict)
-            or value.get("format") != expected["format"]
+            or value.get("format") != "linktools-ai-asset"
             or value.get("generation") != _GENERATION
         ):
             raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)

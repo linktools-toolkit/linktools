@@ -38,8 +38,9 @@ from linktools.ai.runtime.state._contracts import (
     RecoveryHandoffPhase,
     RecoveryIdempotencyInput,
 )
+from linktools.ai.runtime.state._codec import decode_domain, encode_domain
 from linktools.ai.spec import AgentCapabilityRef, AgentSpec
-from linktools.ai.storage import InMemoryObjectStore
+from linktools.ai.storage import InMemoryObjectStore, StoredPayload
 from linktools.ai.task import TaskGraph, TaskGraphLimits, TaskLease, TaskNode
 from linktools.ai.temporal import (
     ActivityType,
@@ -151,6 +152,17 @@ def test_recovery_checkpoint_enforces_attempt_sequence_invariants() -> None:
     with pytest.raises(ValueError):
         checkpoint(RecoveryCheckpointState.ACTIVE, 0, None)
     assert checkpoint(RecoveryCheckpointState.COMPLETED, 0, None).agent_run_sequence == 0
+
+
+def test_domain_codec_preserves_mapping_payloads_in_nullable_json_values() -> None:
+    payload = StoredPayload.inline_json({"text": "你好！"})
+
+    assert decode_domain(encode_domain(payload), StoredPayload) == payload
+
+
+def test_domain_codec_rejects_mapping_as_a_list() -> None:
+    with pytest.raises(TypeError):
+        decode_domain({"value": "not-a-list"}, list[str])
 
 
 def test_subagent_tool_schema_accepts_json_payload() -> None:

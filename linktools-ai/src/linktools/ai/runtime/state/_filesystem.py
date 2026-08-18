@@ -131,41 +131,26 @@ class FilesystemStateStore:
     async def initialize(self) -> None:
         if self._closed:
             raise AIError(ErrorCode.STORAGE_CLOSED)
-        self._root.mkdir(parents=True, exist_ok=True)
-        for name in (
-            "records",
-            "aliases",
-            "facts",
-            "sequences",
-            "operations/by-key",
-            "operations/streams",
-            ".txn/stage",
-        ):
-            (self._root / name).mkdir(parents=True, exist_ok=True)
-        manifest = self._root / "manifest.json"
-        expected = {
-            "format": "linktools-ai-state",
-            "layout_version": 3,
-            "namespace_digest": _digest(self._namespace),
-            "tenant_digest": _digest(self._tenant_id),
-            "runtime_domain": self._runtime_domain,
-        }
-        if manifest.exists():
-            try:
-                actual = json.loads(manifest.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as error:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
-            if actual != expected:
-                raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        if not self._root.exists():
+            self._set_empty_index()
         else:
-            _write_json(manifest, expected)
-        generation = self._root / "generation"
-        if not generation.exists():
-            _write_text(generation, "0")
-        sync_directory(self._root)
-        await self._recover()
-        self._index = self._load_index()
-        self._index_generation = self._generation()
+            if not self._root.is_dir():
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            if not any(self._root.iterdir()):
+                self._set_empty_index()
+                self._initialized = True
+                _logger.info(
+                    "filesystem StateStore initialized: domain=%s root=%s",
+                    self._runtime_domain,
+                    self._root,
+                )
+                return
+            self._validate_existing_root()
+            if (self._root / ".txn").exists():
+                async with self._lock:
+                    await self._recover()
+            self._index = self._load_index()
+            self._index_generation = self._generation()
         self._validate_index(self._index, decode_items=False)
         self._initialized = True
         _logger.info(
@@ -189,7 +174,8 @@ class FilesystemStateStore:
         for _ in range(3):
             before = self._generation()
             if (self._root / ".txn" / "commit").exists():
-                await self._recover()
+                async with self._lock:
+                    await self._recover()
                 continue
             index = self._refresh_index()
             transaction = _FilesystemTransaction(self._root, index)
@@ -197,6 +183,8 @@ class FilesystemStateStore:
             after = self._generation()
             if before == after and not (self._root / ".txn" / "commit").exists():
                 return result
+        if not self._lock.path.exists():
+            return await fn(_FilesystemTransaction(self._root, self._refresh_index()))
         await self._lock.__aenter__()
         try:
             await self._recover()
@@ -209,19 +197,17 @@ class FilesystemStateStore:
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
-        await self._lock.__aenter__()
-        token = None
+        if self._lock.path.exists() or (self._root / ".txn").exists():
+            return await self._mutate_locked(fn)
+        transaction = _FilesystemTransaction(self._root, self._refresh_index())
+        token = bind_state_transaction(self, transaction)
         try:
-            await self._recover()
-            transaction = _FilesystemTransaction(self._root, self._refresh_index())
-            token = bind_state_transaction(self, transaction)
             result = await fn(transaction)
-            await self._commit(transaction)
-            return result
         finally:
-            if token is not None:
-                reset_state_transaction(token)
-            await self._lock.__aexit__(None, None, None)
+            reset_state_transaction(token)
+        if not transaction.has_changes:
+            return result
+        return await self._mutate_locked(fn)
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -235,6 +221,10 @@ class FilesystemStateStore:
             raise AIError(ErrorCode.STORAGE_DEPENDENCY_NOT_READY)
 
     def _generation(self) -> int:
+        if not self._root.exists():
+            return 0
+        if self._root.is_dir() and not any(self._root.iterdir()):
+            return 0
         try:
             return int((self._root / "generation").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -246,6 +236,69 @@ class FilesystemStateStore:
             self._index = self._load_index()
             self._index_generation = generation
         return self._index
+
+    async def _mutate_locked(self, fn: StateCallback[ValueT]) -> ValueT:
+        await self._lock.__aenter__()
+        token = None
+        try:
+            self._provision()
+            await self._recover()
+            self._index = self._load_index()
+            self._index_generation = self._generation()
+            transaction = _FilesystemTransaction(self._root, self._index)
+            token = bind_state_transaction(self, transaction)
+            result = await fn(transaction)
+            await self._commit(transaction)
+            return result
+        finally:
+            if token is not None:
+                reset_state_transaction(token)
+            await self._lock.__aexit__(None, None, None)
+
+    def _set_empty_index(self) -> None:
+        self._index = _FilesystemIndex({}, {}, {}, {}, {})
+        self._index_generation = 0
+
+    def _expected_manifest(self) -> dict[str, str | int]:
+        return {
+            "format": "linktools-ai-state",
+            "layout_version": 3,
+            "namespace_digest": _digest(self._namespace),
+            "tenant_digest": _digest(self._tenant_id),
+            "runtime_domain": self._runtime_domain,
+        }
+
+    def _validate_existing_root(self) -> None:
+        if not self._root.is_dir():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        manifest = self._root / "manifest.json"
+        if not manifest.is_file():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        try:
+            actual = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+        if actual != self._expected_manifest():
+            raise AIError(ErrorCode.STORAGE_VERSION_UNSUPPORTED)
+        generation = self._root / "generation"
+        if not generation.is_file():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        self._generation()
+
+    def _provision(self) -> None:
+        self._root.mkdir(parents=True, exist_ok=True)
+        if not self._root.is_dir():
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        manifest = self._root / "manifest.json"
+        if manifest.exists():
+            self._validate_existing_root()
+            return
+        unexpected = [path for path in self._root.iterdir() if path.name != "state.lock"]
+        if unexpected:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        _write_json(manifest, self._expected_manifest())
+        _write_text(self._root / "generation", "0")
+        sync_directory(self._root)
 
     def _load_index(self) -> _FilesystemIndex:
         try:
@@ -427,6 +480,23 @@ class _FilesystemTransaction:
         self.guarded_record_keys: set[bytes] = set()
         self.writes: dict[str, bytes] = {}
         self.deletes: set[str] = set()
+
+    @property
+    def has_changes(self) -> bool:
+        return bool(
+            self.records.changes()
+            or self.records.deleted()
+            or self.aliases.changes()
+            or self.aliases.deleted()
+            or self.sequences.changes()
+            or self.sequences.deleted()
+            or self.fact_streams.changes()
+            or self.fact_streams.deleted()
+            or self.operations.changes()
+            or self.operations.deleted()
+            or self.writes
+            or self.deletes
+        )
 
     async def now(self) -> datetime:
         return datetime.now(timezone.utc)
