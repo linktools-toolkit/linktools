@@ -9,6 +9,7 @@ from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import TypeVar
 
 from linktools.core import environ
@@ -474,6 +475,10 @@ class FilesystemStateStore:
     async def _commit(self, transaction: "_FilesystemTransaction") -> None:
         if not transaction.writes and not transaction.deletes:
             return
+        started = monotonic()
+        files_written = len(transaction.writes)
+        files_deleted = len(transaction.deletes)
+        bytes_written = sum(len(value) for value in transaction.writes.values())
         base = self._generation()
         plan = self._journal.stage(
             transaction.writes,
@@ -495,7 +500,17 @@ class FilesystemStateStore:
         transaction.operations.apply_to(index.operations)
         self._index = index
         self._index_generation = base + 1
-        _logger.debug("filesystem StateStore mutation committed: generation=%s", base + 1)
+        _logger.debug(
+            "filesystem mutation committed: domain=%s generation=%s duration_ms=%.3f "
+            "files_written=%s files_deleted=%s bytes_written=%s fsync_count=%s",
+            self._runtime_domain,
+            base + 1,
+            (monotonic() - started) * 1000,
+            files_written,
+            files_deleted,
+            bytes_written,
+            1,
+        )
 
     async def _recover(self) -> None:
         self._journal.recover(

@@ -38,6 +38,7 @@ from ._builder import build_pydantic_agent
 from ._capabilities import (
     AgentRunScope,
     SubagentDelegate,
+    ToolOperationBridge,
     compose_platform_capabilities,
     tool_name_allowed,
 )
@@ -101,6 +102,7 @@ class AgentExecutor:
         subagent_delegate: "SubagentDelegate | None" = None,
         event_sink: EventSink,
         usage_sink: "UsageSink | None" = None,
+        tool_operations: "ToolOperationBridge | None" = None,
     ) -> AgentExecutionResult:
         run_usage = RunUsage()
         usage_limits = _to_usage_limits(definition.spec.usage_limits)
@@ -123,6 +125,7 @@ class AgentExecutor:
                 event_sink=event_sink,
                 run_usage=run_usage,
                 usage_limits=usage_limits,
+                tool_operations=tool_operations,
             )
             return result
         except UsageLimitExceeded as error:
@@ -158,6 +161,7 @@ class AgentExecutor:
         event_sink: EventSink,
         run_usage: RunUsage,
         usage_limits: UsageLimits,
+        tool_operations: "ToolOperationBridge | None",
     ) -> AgentExecutionResult:
         if not self._execution_root.is_dir():
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -180,6 +184,7 @@ class AgentExecutor:
             platform_tool_names=platform_tool_names,
             parent_step_run_id=parent_step_run_id,
             subagent_delegate=subagent_delegate,
+            tool_operations=tool_operations,
         )
         platform = await compose_platform_capabilities(
             scope,

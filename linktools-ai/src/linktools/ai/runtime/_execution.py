@@ -110,6 +110,12 @@ class _LaunchGate(Protocol):
     async def __call__(self, execution_id: str) -> None: ...
 
 
+class _LocalExecutionWaiter(Protocol):
+    def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool: ...
+
+    async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None: ...
+
+
 async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
     del execution_id, tenant_id
 
@@ -168,6 +174,7 @@ class ExecutionBackend(Protocol):
     async def launch(self, request: ExecutionRequest, execution: ExecutionRecord) -> None: ...
     async def cancel(self, execution: ExecutionRecord) -> "CancelEffectOutcome": ...
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None: ...
+    def worker_installed(self, execution_id: str) -> bool: ...
 
 
 class CancelEffectOutcome(StrEnum):
@@ -190,6 +197,7 @@ class DefaultExecutionService:
         history_reader: ExecutionHistoryReader,
         release_terminal: _ExecutionReleaseCallback | None = None,
         terminal_verifier: "_ExecutionTerminalVerifier | None" = None,
+        local_waiter: "_LocalExecutionWaiter | None" = None,
     ) -> None:
         self._state = state
         self._object_store = object_store
@@ -201,6 +209,7 @@ class DefaultExecutionService:
         self._release_terminal = release_terminal or _no_release_terminal
         self._terminal_verifier = terminal_verifier or _missing_terminal_verifier
         self._terminal_verifier_is_default = terminal_verifier is None
+        self._local_waiter = local_waiter
         self._subagent_cancellation: _SubagentCancellation | None = None
         self._session_locks: dict[tuple[str, str], _SessionLockEntry] = {}
         self._session_locks_guard = asyncio.Lock()
@@ -226,6 +235,11 @@ class DefaultExecutionService:
         if self._subagent_cancellation is not None:
             raise RuntimeError("subagent cancellation is already bound")
         self._subagent_cancellation = cancellation
+
+    def bind_local_waiter(self, waiter: _LocalExecutionWaiter) -> None:
+        if self._local_waiter is not None:
+            raise RuntimeError("local execution waiter is already bound")
+        self._local_waiter = waiter
 
     async def _acquire_dependency_hold(self, execution_id: str, *, tenant_id: str, hold_id: str) -> None:
         if not hold_id:
@@ -826,6 +840,18 @@ class DefaultExecutionService:
         except asyncio.CancelledError:
             raise
         except BaseException as error:
+            worker_installed = False
+            try:
+                worker_installed = self._backend.worker_installed(launch_record.execution_id)
+            except AttributeError:
+                pass
+            if worker_installed:
+                _logger.warning(
+                    "execution launch raised after worker installation: execution=%s",
+                    execution.execution_id,
+                    exc_info=environ.debug,
+                )
+                return
             current = await self._state.executions.get(execution.execution_id, tenant_id=execution.tenant_id)
             if current is not None and current.status is ExecutionStatus.STARTED:
                 identity = await self._state.idempotency.get(
@@ -934,15 +960,29 @@ class DefaultExecutionService:
         if timeout_seconds is not None and timeout_seconds < 0:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
-        async def poll() -> ExecutionResult:
+        async def wait_once() -> ExecutionResult:
             while True:
                 view = await self.inspect(execution_id, principal=principal)
                 if view.status in {ExecutionStatus.SUCCEEDED, ExecutionStatus.FAILED, ExecutionStatus.CANCELLED}:
                     return await self.result(execution_id, principal=principal)
-                await asyncio.sleep(0.05)
+                if self._backend is not None:
+                    failure = self._backend.worker_failure(
+                        execution_id,
+                        tenant_id=principal.tenant_id,
+                    )
+                    if failure is not None:
+                        raise failure
+                waiter = self._local_waiter
+                if waiter is not None and waiter.owns_execution(
+                    execution_id,
+                    tenant_id=principal.tenant_id,
+                ):
+                    await waiter.wait_terminal(execution_id, tenant_id=principal.tenant_id)
+                else:
+                    await asyncio.sleep(1.0)
 
         try:
-            return await asyncio.wait_for(poll(), timeout_seconds)
+            return await asyncio.wait_for(wait_once(), timeout_seconds)
         except asyncio.TimeoutError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE, "execution wait timed out") from error
 

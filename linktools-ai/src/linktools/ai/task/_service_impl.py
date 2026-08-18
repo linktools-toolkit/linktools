@@ -43,6 +43,12 @@ class _TaskReleaseCallback(Protocol):
     async def __call__(self, graph_id: str, *, tenant_id: str) -> None: ...
 
 
+class _LocalTaskWaiter(Protocol):
+    def owns_graph(self, graph_id: str, *, tenant_id: str) -> bool: ...
+
+    async def wait_graph_activity(self, graph_id: str, *, tenant_id: str) -> None: ...
+
+
 async def _no_release_terminal(graph_id: str, *, tenant_id: str) -> None:
     del graph_id, tenant_id
 
@@ -91,11 +97,13 @@ class DefaultTaskService(TaskApi):
         launcher: TaskGraphLauncher | None = None,
         *,
         release_terminal: _TaskReleaseCallback | None = None,
+        local_waiter: "_LocalTaskWaiter | None" = None,
     ) -> None:
         self._persistence = persistence
         self._authorization = authorization
         self._launcher = launcher
         self._release_terminal = release_terminal or _no_release_terminal
+        self._local_waiter = local_waiter
         self._handoff_states: dict[tuple[str, str], _TaskHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
@@ -185,18 +193,32 @@ class DefaultTaskService(TaskApi):
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
 
         async with self._graph_consumer(graph_id, principal.tenant_id):
+            header = await self._persistence.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
+            if header is None:
+                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+            await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
+
             async def poll() -> TaskGraphResult:
                 while True:
-                    header = await self._persistence.tasks.get_header(graph_id, tenant_id=principal.tenant_id)
-                    if header is None:
-                        raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-                    await self._authorization.authorize(principal, AuthorizationAction.TASK_READ, header)
-                    view = await self._persistence.tasks.reconcile_graph(graph_id, tenant_id=principal.tenant_id)
+                    view = await self._persistence.tasks.reconcile_graph(
+                        graph_id,
+                        tenant_id=principal.tenant_id,
+                    )
                     if _terminal(view.status):
                         result = await self._result(view, principal.tenant_id)
                         await self._request_graph_release(graph_id, principal.tenant_id)
                         return result
-                    await asyncio.sleep(0.05)
+                    waiter = self._local_waiter
+                    if waiter is not None and waiter.owns_graph(
+                        graph_id,
+                        tenant_id=principal.tenant_id,
+                    ):
+                        await waiter.wait_graph_activity(
+                            graph_id,
+                            tenant_id=principal.tenant_id,
+                        )
+                    else:
+                        await asyncio.sleep(1.0)
 
             try:
                 return await asyncio.wait_for(poll(), timeout_seconds)

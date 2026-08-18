@@ -3,6 +3,7 @@
 """Local ExecutionBackend backed by AgentExecutor and durable persistence."""
 
 import asyncio
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -13,7 +14,12 @@ from typing import Protocol
 from linktools.core import environ
 from pydantic import ValidationError
 from pydantic_ai_harness.memory import SearchableMemoryStore
-from pydantic_ai_harness.step_persistence import StepStore, continue_run, fork_run
+from pydantic_ai_harness.step_persistence import (
+    StepStore,
+    ToolEffectRecord,
+    continue_run,
+    fork_run,
+)
 
 from ..agent import (
     MEMORY_TOOL_NAMES,
@@ -37,6 +43,7 @@ from ..core import (
     ResourceRef,
     SessionStatus,
     StopReason,
+    ToolOperationStatus,
     UsageMetrics,
     canonical_json_bytes,
     step_conversation_id,
@@ -54,6 +61,7 @@ from ..storage import (
 from ._event import ExecutionDelta, LiveExecutionEventBroker
 from ._execution import CancelEffectOutcome, ExecutionStartIdentity
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
+from ._tool import RuntimeToolOperationBridge, _ToolOperationRuntimeRepository
 from .service_api import ExecutionRequest
 from .state import ConversationState, ExecutionState, RecoveryState
 from .state._contracts import (
@@ -138,6 +146,7 @@ class LocalExecutionBackend:
         live_broker: "LiveExecutionEventBroker | None" = None,
         payload_policy: "PayloadPolicy | None" = None,
         execution_objects_durable: bool = True,
+        tool_operations: "_ToolOperationRuntimeRepository | None" = None,
     ) -> None:
         self._conversation = conversation
         self._execution = execution_state
@@ -158,6 +167,7 @@ class LocalExecutionBackend:
         self._subagent_dispatcher = subagent_dispatcher
         self._live_broker = live_broker or LiveExecutionEventBroker()
         self._payload_policy = payload_policy or PayloadPolicy()
+        self._tool_operations = tool_operations
         self._execution_objects_durable = execution_objects_durable
         self._step_reads = dict(step_reads)
         if frozenset(self._step_reads) != frozenset({RuntimeDomain.CONVERSATION, RuntimeDomain.EXECUTION, RuntimeDomain.RECOVERY}):
@@ -166,6 +176,7 @@ class LocalExecutionBackend:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._worker_failures: dict[str, _WorkerFailure] = {}
         self._captured_usage: dict[str, UsageMetrics] = {}
+        self._terminal_events: dict[str, asyncio.Event] = {}
         self._accepting = True
 
     async def _validate_start(self, request: ExecutionRequest, execution: ExecutionRecord) -> None:
@@ -470,8 +481,13 @@ class LocalExecutionBackend:
             return
         self._tasks.pop(execution_id, None)
         self._captured_usage.pop(execution_id, None)
+        try:
+            live_broker = self._live_broker
+        except AttributeError:
+            live_broker = None
         if error is None:
-            self._live_broker.complete(execution_id)
+            if live_broker is not None:
+                live_broker.complete(execution_id)
             return
         if isinstance(error, AIError):
             failure = _WorkerFailure(error.code, dict(error.safe_details))
@@ -489,7 +505,12 @@ class LocalExecutionBackend:
             failure.code.value,
             exc_info=environ.debug,
         )
-        self._live_broker.complete(execution_id)
+        try:
+            self._terminal_events.setdefault(execution_id, asyncio.Event()).set()
+        except AttributeError:
+            pass
+        if live_broker is not None:
+            live_broker.complete(execution_id)
 
     def worker_failure(self, execution_id: str, *, tenant_id: str) -> AIError | None:
         if tenant_id != self._tenant_id:
@@ -498,6 +519,19 @@ class LocalExecutionBackend:
         if failure is None:
             return None
         return AIError(failure.code, safe_details=dict(failure.safe_details))
+
+    def worker_installed(self, execution_id: str) -> bool:
+        task = self._tasks.get(execution_id)
+        return task is not None and not task.done()
+
+    def owns_execution(self, execution_id: str, *, tenant_id: str) -> bool:
+        return tenant_id == self._tenant_id and self.worker_installed(execution_id)
+
+    async def wait_terminal(self, execution_id: str, *, tenant_id: str) -> None:
+        if tenant_id != self._tenant_id:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        event = self._terminal_events.setdefault(execution_id, asyncio.Event())
+        await event.wait()
 
     @property
     def live_broker(self) -> LiveExecutionEventBroker:
@@ -1281,6 +1315,7 @@ class LocalExecutionBackend:
                 current.execution_id,
                 committed.execution.event_sequence,
             )
+            self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
         except AIError as error:
             if error.code not in {
                 ErrorCode.STORAGE_CONFLICT,
@@ -1396,7 +1431,53 @@ class LocalExecutionBackend:
             self._task_done(execution_id, task)
         self._tasks.clear()
         self._captured_usage.clear()
+        self._terminal_events.clear()
         self._worker_failures.clear()
+
+    async def _reconcile_unresolved_tool_effects(
+        self,
+        step_run_id: str,
+        effects: list[ToolEffectRecord],
+        *,
+        tenant_id: str,
+    ) -> None:
+        for effect in effects:
+            while True:
+                if self._tool_operations is None:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+                operation = await self._tool_operations.get_by_call(
+                    step_run_id,
+                    effect.tool_call_id,
+                    tenant_id=tenant_id,
+                )
+                if operation is None:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                if operation.status in {
+                    ToolOperationStatus.COMPLETED,
+                    ToolOperationStatus.FAILED,
+                }:
+                    break
+                if operation.status in {
+                    ToolOperationStatus.EFFECT_UNKNOWN,
+                    ToolOperationStatus.CANCELLED,
+                }:
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                if operation.status is ToolOperationStatus.CLAIMED:
+                    expires = operation.lease_expires_at
+                    if expires is None:
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                    remaining = (expires - datetime.now(timezone.utc)).total_seconds()
+                    if remaining > 0:
+                        await asyncio.sleep(min(1.0, remaining))
+                        continue
+                    if not operation.replay_safe:
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                break
+        _logger.info(
+            "recovery tool effects reconciled: run=%s count=%s",
+            step_run_id,
+            len(effects),
+        )
 
     async def _run(self, request: ExecutionRequest, original: ExecutionRecord) -> None:
         execution_id = original.execution_id
@@ -1427,6 +1508,7 @@ class LocalExecutionBackend:
                 tenant_id=current.tenant_id,
                 execution_id=execution_id,
             )
+            tool_owner = f"tool:{execution_id}:{uuid.uuid4().hex}"
             if self._recovery_enabled:
                 checkpoint = await self._recovery.checkpoints.get(
                     execution_id,
@@ -1461,15 +1543,13 @@ class LocalExecutionBackend:
                             )
                             recovery_history_run_id = None
                         else:
-                            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                            raise AIError(ErrorCode.EXECUTION_HISTORY_UNAVAILABLE)
                     elif unresolved:
-                        _logger.error(
-                            "recovery attempt has unresolved tool effects: execution=%s run=%s count=%s",
-                            execution_id,
+                        await self._reconcile_unresolved_tool_effects(
                             recovery_history_run_id,
-                            len(unresolved),
+                            unresolved,
+                            tenant_id=current.tenant_id,
                         )
-                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 else:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 checkpoint = await self._activate_recovery_attempt(
@@ -1477,6 +1557,21 @@ class LocalExecutionBackend:
                     run_id,
                     current.agent_run_sequence,
                 )
+            try:
+                tool_repository = self._tool_operations
+            except AttributeError:
+                tool_repository = None
+            tool_operations = RuntimeToolOperationBridge(
+                tool_repository,
+                self._recovery_objects,
+                namespace=self._namespace,
+                tenant_id=current.tenant_id,
+                execution_id=execution_id,
+                binding_fingerprint=current.binding_digest,
+                owner=tool_owner,
+                payload_policy=self._payload_policy,
+                recovery_step_run_id=recovery_history_run_id,
+            ) if tool_repository is not None else None
             if recovery_history_run_id is None:
                 history = await self._history(current)
             else:
@@ -1544,6 +1639,7 @@ class LocalExecutionBackend:
                     ),
                     event_sink=sink,
                     usage_sink=lambda usage: self._capture_usage(execution_id, usage),
+                    tool_operations=tool_operations,
                 )
             except Exception as error:
                 if _is_infrastructure_error(error):
@@ -2159,6 +2255,7 @@ class LocalExecutionBackend:
             current.execution_id,
             committed.execution.event_sequence,
         )
+        self._terminal_events.setdefault(current.execution_id, asyncio.Event()).set()
         _logger.info(
             "execution terminal committed: execution=%s status=%s",
             current.execution_id,

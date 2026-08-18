@@ -9,7 +9,7 @@ from binascii import Error as Base64Error
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -23,6 +23,7 @@ from ..core import (
     OperationStatus,
     Page,
     Principal,
+    PrincipalKind,
     ResourceKind,
     ResourceRef,
     SessionStatus,
@@ -68,6 +69,13 @@ class _LaunchGate(Protocol):
 
 
 class _GatedExecutionService(Protocol):
+    async def run_for_session(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+    ) -> ExecutionHandle: ...
+
     async def _run_for_session_with_launch_gate(
         self,
         binding_digest: str,
@@ -124,6 +132,7 @@ class DefaultSessionService:
         *,
         history_reader: SessionHistoryReader,
         release_terminal: _SessionReleaseCallback | None = None,
+        gated_execution: "_GatedExecutionService | None" = None,
     ) -> None:
         self._conversation = conversation
         self._executions = executions
@@ -132,6 +141,7 @@ class DefaultSessionService:
         self._cursor_signer = cursor_signer
         self._history_reader = history_reader
         self._release_terminal = release_terminal or _no_release_terminal
+        self._gated_execution = gated_execution
         self._handoff_states: dict[tuple[str, str], _SessionHandoffState] = {}
         self._handoff_condition = asyncio.Condition()
 
@@ -287,19 +297,26 @@ class DefaultSessionService:
                 idempotency_key=request.idempotency_key,
                 memory_scope=request.memory_scope,
             )
+            if self._gated_execution is None:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
             if launch_gate is None:
-                return await self._execution.run_for_session(
+                try:
+                    return await self._gated_execution.run_for_session(
+                        binding_digest,
+                        session_id,
+                        execution_request,
+                    )
+                except AttributeError as error:
+                    raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+            try:
+                return await self._gated_execution._run_for_session_with_launch_gate(
                     binding_digest,
                     session_id,
                     execution_request,
+                    launch_gate,
                 )
-            gated = cast(_GatedExecutionService, self._execution)
-            return await gated._run_for_session_with_launch_gate(
-                binding_digest,
-                session_id,
-                execution_request,
-                launch_gate,
-            )
+            except AttributeError as error:
+                raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:
         async with self._session_consumer(session_id, request.principal.tenant_id):
@@ -714,17 +731,26 @@ class DefaultSessionService:
             self._handoff_condition.notify_all()
 
     async def _wait_for_no_active(self, session_id: str, tenant_id: str) -> None:
-        while True:
-            record = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
-            if record is None:
-                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            execution = await self._active_admitted_execution(record)
-            if execution is None:
-                if record.active_execution_id is not None:
-                    await self._reconcile_terminal_admission(record)
-                    continue
-                return
-            await asyncio.sleep(0.05)
+        record = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
+        if record is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        execution = await self._active_admitted_execution(record)
+        if execution is None:
+            if record.active_execution_id is not None:
+                await self._reconcile_terminal_admission(record)
+            return
+        await self._execution.wait(
+            execution.execution_id,
+            principal=Principal(
+                record.owner_principal_id,
+                tenant_id,
+                PrincipalKind.LOCAL_TRUSTED.value,
+            ),
+        )
+        current = await self._conversation.sessions.get(session_id, tenant_id=tenant_id)
+        if current is None:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        await self._reconcile_terminal_admission(current)
 
     async def _authorized(self, session_id: str, principal: Principal, action: AuthorizationAction) -> SessionRecord:
         header = await self._conversation.sessions.get_header(session_id, tenant_id=principal.tenant_id)

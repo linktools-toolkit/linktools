@@ -11,6 +11,8 @@ from ._capabilities import (
     WORKSPACE_FILESYSTEM_TOOL_NAMES,
     WORKSPACE_SHELL_TOOL_NAMES,
     SubagentDelegate,
+    ToolOperationBridge,
+    ToolOperationDecision,
     select_platform_tool_names,
     tool_name_allowed,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "SKILL_TOOL_NAMES",
     "SUBAGENT_TOOL_NAMES",
     "SubagentDelegate",
+    "ToolOperationBridge",
+    "ToolOperationDecision",
     "WORKSPACE_FILESYSTEM_TOOL_NAMES",
     "WORKSPACE_SHELL_TOOL_NAMES",
     "select_platform_tool_names",

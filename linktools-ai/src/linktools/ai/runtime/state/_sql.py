@@ -112,7 +112,7 @@ class SqlStateStore:
                 self._active_depth = 0
 
         try:
-            return await self._context.run_mutation(execute)
+            return await self._context.run_mutation(execute, domain="runtime.state")
         except AIError:
             raise
         except BaseException as error:

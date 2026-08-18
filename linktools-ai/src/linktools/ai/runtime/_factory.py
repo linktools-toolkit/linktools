@@ -16,6 +16,7 @@ from ..storage import ObjectStore
 from ..task import LocalTaskGraphLauncher
 from ._approval import DefaultApprovalService
 from ._artifact import DefaultArtifactService
+from ._coordinator import _LocalRuntimeCoordinator
 from ._evaluation import DefaultEvaluationService
 from ._event import DefaultEventService, LiveExecutionEventBroker
 from ._execution import DefaultExecutionService
@@ -119,8 +120,10 @@ async def build_local_runtime(
                 state.plan.route(RuntimeDomain.EXECUTION).retention
                 is RuntimeRetentionMode.DURABLE
             ),
+            tool_operations=state.recovery.tools,
         )
         execution.bind_backend(backend)
+        execution.bind_local_waiter(backend)
         execution.bind_terminal_verifier(backend.verify_terminal_projection)
         execution.bind_subagent_cancellation(dispatcher)
         session = DefaultSessionService(
@@ -131,6 +134,7 @@ async def build_local_runtime(
             _cursor_signer("session", grant_key),
             history_reader=session_history_reader,
             release_terminal=state.retention.release_session,
+            gated_execution=execution,
         )
         task_runner = RuntimeTaskNodeRunner(execution, catalog)
         task_launcher = LocalTaskGraphLauncher(
@@ -143,6 +147,7 @@ async def build_local_runtime(
             authorization,
             task_launcher,
             release_terminal=state.retention.release_task_graph,
+            local_waiter=task_launcher,
         )
         evaluation = DefaultEvaluationService(
             state.evaluation,
@@ -168,6 +173,7 @@ async def build_local_runtime(
             grant_key=grant_key,
             cursor_signer=_cursor_signer("artifact", grant_key),
         )
+        local_coordinator = _LocalRuntimeCoordinator(execution, session, event, backend)
         coordinator = _RuntimeCloseCoordinator(
             (task_launcher.shutdown, backend.close, state.close)
         )
@@ -182,6 +188,7 @@ async def build_local_runtime(
             artifact,
             tenant_id=tenant_id,
             close_callback=coordinator.close,
+            local_coordinator=local_coordinator,
         )
         await _validate_recovery_definitions(catalog, state, tenant_id=tenant_id)
         if RuntimeDomain.RECOVERY in state.plan.durable_domains:

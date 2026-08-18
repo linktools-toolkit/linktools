@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Execution-scoped Pydantic AI infrastructure capabilities."""
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,82 @@ WORKSPACE_FILESYSTEM_TOOL_NAMES = (
 WORKSPACE_SHELL_TOOL_NAMES = ("check_command", "run_command", "start_command", "stop_command")
 
 
-class _RetryAwareStepPersistence(StepPersistence[None]):
+@dataclass(frozen=True, slots=True)
+class ToolOperationDecision:
+    operation_id: str
+    owner: str
+    fence: int
+    replay_safe: bool
+    cached_result: object = None
+    has_cached_result: bool = False
+    cached_error: "BaseException | None" = None
+
+
+class ToolOperationBridge(Protocol):
+    async def begin(
+        self,
+        ctx: "RunContext[None]",
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> ToolOperationDecision: ...
+
+    async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision: ...
+
+    async def complete(self, decision: ToolOperationDecision, result: Any) -> None: ...
+
+    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
+
+    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None: ...
+
+
+class _MissingToolOperationBridge:
+    async def begin(
+        self,
+        ctx: "RunContext[None]",
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> ToolOperationDecision:
+        del ctx, call, tool_def, args
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def renew(self, decision: ToolOperationDecision) -> ToolOperationDecision:
+        del decision
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def complete(self, decision: ToolOperationDecision, result: Any) -> None:
+        del decision, result
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def fail(self, decision: ToolOperationDecision, error: BaseException) -> None:
+        del decision, error
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+    async def unknown(self, decision: ToolOperationDecision, error: BaseException) -> None:
+        del decision, error
+        raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
+
+
+class _RuntimeStepPersistence(StepPersistence[None]):
+    def __init__(self, *, tool_operations: ToolOperationBridge, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._tool_operations = tool_operations
+        self._decisions: dict[tuple[str, str], ToolOperationDecision] = {}
+        self._preserve_started_calls: set[tuple[str, str]] = set()
+
+    async def before_tool_execute(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
+        decision = await self._tool_operations.begin(ctx, call, tool_def, args)
+        self._decisions[self._decision_key(ctx, call)] = decision
+        return await super().before_tool_execute(ctx, call=call, tool_def=tool_def, args=args)
+
     async def wrap_tool_execute(
         self,
         ctx: "RunContext[None]",
@@ -50,9 +126,47 @@ class _RetryAwareStepPersistence(StepPersistence[None]):
         args: dict[str, Any],
         handler: WrapToolExecuteHandler,
     ) -> Any:
+        key = self._decision_key(ctx, call)
+        decision = self._decisions[key]
+        if decision.cached_error is not None:
+            raise decision.cached_error
+        if decision.has_cached_result:
+            return decision.cached_result
+        handler_task = asyncio.create_task(
+            super().wrap_tool_execute(
+                ctx,
+                call=call,
+                tool_def=tool_def,
+                args=args,
+                handler=handler,
+            ),
+            name=f"tool-handler-{call.tool_call_id}",
+        )
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat(decision, handler_task, key),
+            name=f"tool-heartbeat-{call.tool_call_id}",
+        )
         try:
-            return await super().wrap_tool_execute(ctx, call=call, tool_def=tool_def, args=args, handler=handler)
+            done, _ = await asyncio.wait(
+                (handler_task, heartbeat_task),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat_task in done:
+                heartbeat_error = heartbeat_task.exception()
+                if heartbeat_error is not None:
+                    handler_task.cancel()
+                    await asyncio.gather(handler_task, return_exceptions=True)
+                    decision = self._decisions.get(key, decision)
+                    if decision.replay_safe:
+                        self._preserve_started_calls.add(key)
+                        raise heartbeat_error
+                    await self._mark_unknown(key, decision, heartbeat_error)
+                    raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN) from heartbeat_error
+            result = await handler_task
+            return result
         except (ModelRetry, ToolRetryError) as error:
+            decision = self._decisions.get(key, decision)
+            await self._tool_operations.fail(decision, error)
             _logger.debug(
                 "tool effect marked failed: run=%s tool=%s call=%s",
                 self.run_id or ctx.run_id,
@@ -61,6 +175,102 @@ class _RetryAwareStepPersistence(StepPersistence[None]):
             )
             await super().on_tool_execute_error(ctx, call=call, tool_def=tool_def, args=args, error=error)
             raise
+        except asyncio.CancelledError as error:
+            decision = self._decisions.get(key, decision)
+            await self._mark_unknown(key, decision, error)
+            raise
+        except Exception as error:
+            decision = self._decisions.get(key, decision)
+            if decision.replay_safe:
+                await self._tool_operations.fail(decision, error)
+            else:
+                await self._mark_unknown(key, decision, error)
+            raise
+        finally:
+            if not heartbeat_task.done():
+                heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+    async def after_tool_execute(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        result: Any,
+    ) -> Any:
+        key = self._decision_key(ctx, call)
+        decision = self._decisions[key]
+        decision = self._decisions.get(key, decision)
+        try:
+            await self._tool_operations.complete(decision, result)
+        except BaseException:
+            self._preserve_started_calls.add(key)
+            raise
+        return await super().after_tool_execute(
+            ctx,
+            call=call,
+            tool_def=tool_def,
+            args=args,
+            result=result,
+        )
+
+    async def on_tool_execute_error(
+        self,
+        ctx: "RunContext[None]",
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        error: Exception,
+    ) -> Any:
+        key = self._decision_key(ctx, call)
+        decision = self._decisions.get(key)
+        if decision is None:
+            raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY) from error
+        if key not in self._preserve_started_calls:
+            await self._tool_operations.fail(decision, error)
+        else:
+            _logger.warning(
+                "tool effect remains started after nonterminal outcome: run=%s tool=%s call=%s",
+                self.run_id or ctx.run_id,
+                tool_def.name,
+                call.tool_call_id,
+            )
+            raise error
+        return await super().on_tool_execute_error(
+            ctx,
+            call=call,
+            tool_def=tool_def,
+            args=args,
+            error=error,
+        )
+
+    async def _heartbeat(
+        self,
+        decision: ToolOperationDecision,
+        handler_task: "asyncio.Task[Any]",
+        key: tuple[str, str],
+    ) -> None:
+        while not handler_task.done():
+            await asyncio.sleep(15)
+            if handler_task.done():
+                return
+            renewed = await self._tool_operations.renew(decision)
+            self._decisions[key] = renewed
+            decision = renewed
+    async def _mark_unknown(
+        self,
+        key: tuple[str, str],
+        decision: ToolOperationDecision,
+        error: BaseException,
+    ) -> None:
+        self._preserve_started_calls.add(key)
+        await self._tool_operations.unknown(decision, error)
+
+    def _decision_key(self, ctx: "RunContext[None]", call: ToolCallPart) -> tuple[str, str]:
+        return self._effective_run_id(ctx), call.tool_call_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +287,7 @@ class AgentRunScope:
     context_target_tokens: "int | None" = None
     parent_step_run_id: "str | None" = None
     subagent_delegate: "SubagentDelegate | None" = None
+    tool_operations: "ToolOperationBridge | None" = None
 
 
 class SubagentDelegate(Protocol):
@@ -92,7 +303,8 @@ async def compose_platform_capabilities(
     del model_factory, parent_model
     _validate_compaction_target(scope.context_target_tokens)
     capabilities: list[PydanticAgentCapability[None]] = [
-        _RetryAwareStepPersistence(
+        _RuntimeStepPersistence(
+            tool_operations=scope.tool_operations or _MissingToolOperationBridge(),
             store=scope.step_store,
             agent_name=scope.agent_name,
             run_id=scope.step_run_id,
@@ -225,6 +437,8 @@ __all__ = [
     "WORKSPACE_SHELL_TOOL_NAMES",
     "AgentRunScope",
     "SubagentDelegate",
+    "ToolOperationBridge",
+    "ToolOperationDecision",
     "compose_platform_capabilities",
     "select_platform_tool_names",
     "tool_name_allowed",

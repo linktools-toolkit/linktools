@@ -42,6 +42,13 @@ class _DurableMarker:
     sequence: int
 
 
+@dataclass(slots=True)
+class _PreparedStreamLease:
+    execution_id: str
+    state: str = "PREPARED"
+    subscription: "_LiveSubscription | None" = None
+
+
 _OrderedItem = ExecutionDelta | _DurableMarker
 
 
@@ -152,7 +159,7 @@ class LiveExecutionEventBroker:
         self._activity: dict[str, asyncio.Event] = {}
         self._completed: set[str] = set()
         self._durable_sequences: dict[str, int] = {}
-        self._prepared: dict[str, _LiveSubscription] = {}
+        self._prepared: dict[str, _PreparedStreamLease] = {}
         self._local_producers: dict[str, str] = {}
 
     def publish(self, delta: ExecutionDelta) -> None:
@@ -228,9 +235,7 @@ class LiveExecutionEventBroker:
         self._signal(execution_id)
 
     def subscribe(self, execution_id: str) -> _LiveSubscription:
-        subscription = self._prepared.pop(execution_id, None)
-        if subscription is None:
-            subscription = _LiveSubscription(self, execution_id, self._max_bytes)
+        subscription = _LiveSubscription(self, execution_id, self._max_bytes)
         self._subscriptions.setdefault(execution_id, set()).add(subscription)
         for item in self._buffers.get(execution_id, ()):
             if isinstance(item, ExecutionDelta):
@@ -248,13 +253,51 @@ class LiveExecutionEventBroker:
             subscription.finish()
         return subscription
 
-    def prepare_local_producer(self, execution_id: str) -> None:
-        if execution_id in self._prepared:
-            return
-        subscription = _LiveSubscription(self, execution_id, self._max_bytes)
-        self._prepared[execution_id] = subscription
-        self._local_producers[execution_id] = "active"
+    def prepare_local_producer(self, execution_id: str) -> _PreparedStreamLease:
+        current = self._prepared.get(execution_id)
+        if current is not None and current.state == "PREPARED":
+            return current
+        lease = _PreparedStreamLease(execution_id)
+        self._prepared[execution_id] = lease
+        self._local_producers[execution_id] = "prepared"
         _logger.debug("local event stream prepared: execution=%s", execution_id)
+        return lease
+
+    def claim_local_producer(self, lease: _PreparedStreamLease) -> _LiveSubscription:
+        current = self._prepared.get(lease.execution_id)
+        if current is not lease or lease.state != "PREPARED":
+            raise RuntimeError("prepared event stream lease is not claimable")
+        subscription = _LiveSubscription(self, lease.execution_id, self._max_bytes)
+        lease.state = "CLAIMED"
+        lease.subscription = subscription
+        self._prepared.pop(lease.execution_id, None)
+        self._local_producers[lease.execution_id] = "active"
+        self._subscriptions.setdefault(lease.execution_id, set()).add(subscription)
+        self._fill_subscription(subscription, lease.execution_id)
+        if lease.execution_id in self._completed:
+            subscription.finish()
+        return subscription
+
+    def abort_local_producer(self, lease: _PreparedStreamLease, *, worker_installed: bool) -> None:
+        if lease.state != "PREPARED":
+            return
+        current = self._prepared.get(lease.execution_id)
+        if current is not lease:
+            lease.state = "ABANDONED"
+            return
+        lease.state = "ABANDONED"
+        self._prepared.pop(lease.execution_id, None)
+        if worker_installed:
+            if self._local_producers.get(lease.execution_id) == "prepared":
+                self._local_producers[lease.execution_id] = "active"
+        else:
+            self._release_execution(lease.execution_id)
+        self._signal(lease.execution_id)
+        _logger.debug(
+            "local event stream lease abandoned: execution=%s worker_installed=%s",
+            lease.execution_id,
+            worker_installed,
+        )
 
     def is_local_producer(self, execution_id: str) -> bool:
         return execution_id in self._local_producers
@@ -269,8 +312,8 @@ class LiveExecutionEventBroker:
         if execution_id in self._local_producers:
             self._local_producers[execution_id] = "completed"
         prepared = self._prepared.get(execution_id)
-        if prepared is not None:
-            prepared.finish()
+        if prepared is not None and prepared.subscription is not None:
+            prepared.subscription.finish()
         subscriptions = tuple(self._subscriptions.get(execution_id, ()))
         for subscription in subscriptions:
             subscription.finish()
@@ -289,6 +332,20 @@ class LiveExecutionEventBroker:
                 self._subscriptions.pop(execution_id, None)
                 if execution_id in self._completed:
                     self._release_execution(execution_id)
+
+    def _fill_subscription(self, subscription: _LiveSubscription, execution_id: str) -> None:
+        for item in self._buffers.get(execution_id, ()):
+            if isinstance(item, ExecutionDelta):
+                subscription.put_nowait(
+                    ExecutionDelta(
+                        item.execution_id,
+                        item.delta_type,
+                        item.content,
+                        item.stream_truncated or execution_id in self._truncated,
+                    )
+                )
+            else:
+                subscription.put_marker(item)
 
     def _drop_oldest_delta(self, buffer: deque[_OrderedItem], execution_id: str) -> bool:
         for index, value in enumerate(buffer):
@@ -373,8 +430,11 @@ class DefaultEventService:
     def live_broker(self) -> LiveExecutionEventBroker:
         return self._live
 
-    async def _prepare_local_stream(self, execution_id: str) -> None:
-        self._live.prepare_local_producer(execution_id)
+    async def _prepare_local_stream(self, execution_id: str) -> _PreparedStreamLease:
+        return self._live.prepare_local_producer(execution_id)
+
+    async def _claim_local_stream(self, lease: _PreparedStreamLease) -> _LiveSubscription:
+        return self._live.claim_local_producer(lease)
 
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
@@ -403,17 +463,66 @@ class DefaultEventService:
         principal: Principal,
         after_sequence: int = 0,
     ) -> AsyncIterator[ExecutionStreamEvent]:
+        async for event in self._stream_with_live(
+            execution_id,
+            principal=principal,
+            after_sequence=after_sequence,
+        ):
+            yield event
+
+    async def _stream_prepared(
+        self,
+        lease: _PreparedStreamLease,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
+        await self._authorize_stream(lease.execution_id, principal)
+        live = self._live.claim_local_producer(lease)
+        async for event in self._stream_with_live(
+            lease.execution_id,
+            principal=principal,
+            after_sequence=after_sequence,
+            live=live,
+            authorized=True,
+        ):
+            yield event
+
+    async def _stream_claimed(
+        self,
+        lease: _PreparedStreamLease,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
+        if lease.state != "CLAIMED" or lease.subscription is None:
+            raise RuntimeError("claimed event stream lease is not active")
+        async for event in self._stream_with_live(
+            lease.execution_id,
+            principal=principal,
+            after_sequence=after_sequence,
+            live=lease.subscription,
+            authorized=True,
+        ):
+            yield event
+
+    async def _stream_with_live(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int,
+        live: "_LiveSubscription | None" = None,
+        authorized: bool = False,
+    ) -> AsyncIterator[ExecutionStreamEvent]:
         cursor = after_sequence
-        live = self._live.subscribe(execution_id)
+        live = self._live.subscribe(execution_id) if live is None else live
         local_producer = self._live.is_local_producer(execution_id)
         live_task: asyncio.Task[_OrderedItem] | None = None
         activity_task: asyncio.Task[None] | None = None
         try:
-            header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
-            if header is None:
-                raise AIError(ErrorCode.AUTHORIZATION_DENIED)
-            await self._authorization.authorize(principal, AuthorizationAction.EVENT_READ, header)
-            await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
+            if not authorized:
+                await self._authorize_stream(execution_id, principal)
 
             while True:
                 page = await self._read_durable(
@@ -584,6 +693,13 @@ class DefaultEventService:
                 return_exceptions=True,
             )
             await live.close()
+
+    async def _authorize_stream(self, execution_id: str, principal: Principal) -> None:
+        header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
+        if header is None:
+            raise AIError(ErrorCode.AUTHORIZATION_DENIED)
+        await self._authorization.authorize(principal, AuthorizationAction.EVENT_READ, header)
+        await self._authorization.authorize(principal, AuthorizationAction.EXECUTION_READ, header)
 
     async def _read_durable(
         self,

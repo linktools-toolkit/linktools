@@ -5,7 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import Protocol, cast
+from typing import Protocol
 
 from linktools.core import environ
 
@@ -57,27 +57,23 @@ _logger = environ.get_logger("ai.runtime")
 _AGENT_TASK_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
 
 
-class _GatedExecutionService(Protocol):
-    async def _run_with_launch_gate(
-        self,
-        binding_digest: str,
-        request: ExecutionRequest,
-        gate: Callable[[str], Awaitable[None]],
-    ) -> ExecutionHandle: ...
+class _LocalRuntimeCoordinatorPort(Protocol):
+    async def run(self, binding_digest: str, request: ExecutionRequest) -> ExecutionHandle: ...
 
-
-class _GatedSessionService(Protocol):
-    async def _resume_with_launch_gate(
+    async def resume(
         self,
         binding_digest: str,
         session_id: str,
         request: ResumeSessionRequest,
-        gate: Callable[[str], Awaitable[None]],
     ) -> ExecutionHandle: ...
 
-
-class _PreparedEventService(Protocol):
-    async def _prepare_local_stream(self, execution_id: str) -> None: ...
+    def stream(
+        self,
+        execution_id: str,
+        *,
+        principal: Principal,
+        after_sequence: int = 0,
+    ) -> AsyncIterator[ExecutionStreamEvent]: ...
 
 
 class Runtime:
@@ -96,6 +92,7 @@ class Runtime:
         *,
         tenant_id: str = "default",
         close_callback: "Callable[[], Awaitable[None]] | None" = None,
+        local_coordinator: "_LocalRuntimeCoordinatorPort | None" = None,
     ) -> None:
         if any(value is None for value in (catalog, execution, session, task, evaluation, approval, event, artifact)):
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -114,6 +111,7 @@ class Runtime:
             kind=PrincipalKind.LOCAL_TRUSTED.value,
         )
         self._close_callback = close_callback
+        self._local_coordinator = local_coordinator
         self._closed = False
         self._close_lock = asyncio.Lock()
         self._close_task: "asyncio.Task[None] | None" = None
@@ -168,6 +166,7 @@ class Runtime:
         idempotency_key: "str | None",
         memory_scope: "str | None",
         launch_gate: "Callable[[str], Awaitable[None]] | None" = None,
+        local_stream: bool = False,
     ) -> ExecutionHandle:
         self._ensure_open()
         principal = self._resolve_principal(principal)
@@ -182,11 +181,12 @@ class Runtime:
             definition = await self._compile_and_register(
                 "default" if agent_id is None else agent_id
             )
-            if launch_gate is None:
+            if local_stream and self._local_coordinator is not None:
+                handle = await self._local_coordinator.run(definition.digest, request)
+            elif launch_gate is None:
                 handle = await self.execution.run(definition.digest, request)
             else:
-                gated = cast(_GatedExecutionService, self.execution)
-                handle = await gated._run_with_launch_gate(definition.digest, request, launch_gate)
+                handle = await self.execution.run(definition.digest, request)
         else:
             if not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -204,16 +204,16 @@ class Runtime:
                 request.idempotency_key or "",
                 request.memory_scope,
             )
-            if launch_gate is None:
-                handle = await self.session.resume(definition.digest, session_id, resume_request)
-            else:
-                gated = cast(_GatedSessionService, self.session)
-                handle = await gated._resume_with_launch_gate(
+            if local_stream and self._local_coordinator is not None:
+                handle = await self._local_coordinator.resume(
                     definition.digest,
                     session_id,
                     resume_request,
-                    launch_gate,
                 )
+            elif launch_gate is None:
+                handle = await self.session.resume(definition.digest, session_id, resume_request)
+            else:
+                handle = await self.session.resume(definition.digest, session_id, resume_request)
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s",
             handle.execution_id,
@@ -343,17 +343,28 @@ class Runtime:
         idempotency_key: "str | None",
         memory_scope: "str | None",
     ) -> AsyncIterator[ExecutionStreamEvent]:
-        prepared_events = cast(_PreparedEventService, self.event)
-        handle = await self._start_for_agent(
-            agent_id,
-            user_prompt,
-            principal=principal,
-            session_id=session_id,
-            idempotency_key=idempotency_key,
-            memory_scope=memory_scope,
-            launch_gate=prepared_events._prepare_local_stream,
-        )
-        async for event in self.event.stream(handle.execution_id, principal=principal):
+        if self._local_coordinator is None:
+            handle = await self._start_for_agent(
+                agent_id,
+                user_prompt,
+                principal=principal,
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+            )
+            stream = self.event.stream(handle.execution_id, principal=principal)
+        else:
+            handle = await self._start_for_agent(
+                agent_id,
+                user_prompt,
+                principal=principal,
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+                memory_scope=memory_scope,
+                local_stream=True,
+            )
+            stream = self._local_coordinator.stream(handle.execution_id, principal=principal)
+        async for event in stream:
             yield event
 
     async def create_session(

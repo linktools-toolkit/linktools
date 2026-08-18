@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """Domain-independent SQL context, metadata primitives, and validation."""
 
-import asyncio
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 from linktools.core import environ
@@ -34,7 +34,6 @@ if TYPE_CHECKING:
 
 
 _logger = environ.get_logger("ai.storage.database")
-_PROVISION_LOCK = asyncio.Lock()
 ValueT = TypeVar("ValueT")
 
 
@@ -74,9 +73,11 @@ class SqlStorageContext:
         callback: Callable[["AsyncSession"], Awaitable[ValueT]],
         *,
         retry_limit: int = 8,
+        domain: str = "sql",
     ) -> ValueT:
         if retry_limit < 1:
             raise ValueError("retry_limit must be positive")
+        started = monotonic()
         for attempt in range(retry_limit):
             session = self.sessions()
             transaction = session.begin()
@@ -95,7 +96,8 @@ class SqlStorageContext:
                     await transaction.__aexit__(*sys.exc_info())
                     if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
                         _logger.warning(
-                            "retrying SQL mutation after aborted body: dialect=%s attempt=%s",
+                            "retrying SQL mutation after aborted body: domain=%s dialect=%s attempt=%s",
+                            domain,
                             self.dialect.name,
                             attempt + 1,
                         )
@@ -111,15 +113,30 @@ class SqlStorageContext:
                     )
                     if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
                         _logger.warning(
-                            "retrying SQL mutation after aborted commit: dialect=%s attempt=%s",
+                            "retrying SQL mutation after aborted commit: domain=%s dialect=%s attempt=%s",
+                            domain,
                             self.dialect.name,
                             attempt + 1,
                         )
                         continue
                     if disposition is SqlTransactionDisposition.COMMIT_UNKNOWN:
+                        _logger.error(
+                            "SQL mutation commit outcome unknown: domain=%s dialect=%s "
+                            "attempt=%s duration_ms=%.3f outcome=unknown",
+                            domain,
+                            self.dialect.name,
+                            attempt + 1,
+                            (monotonic() - started) * 1000,
+                        )
                         raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
                     raise
-                _logger.debug("SQL mutation committed: dialect=%s attempt=%s", self.dialect.name, attempt + 1)
+                _logger.debug(
+                    "SQL mutation committed: domain=%s dialect=%s attempt=%s duration_ms=%.3f outcome=committed",
+                    domain,
+                    self.dialect.name,
+                    attempt + 1,
+                    (monotonic() - started) * 1000,
+                )
                 return result
             finally:
                 if not entered:
@@ -154,9 +171,8 @@ async def provision_sql(engine: "AsyncEngine", metadata: "MetaData") -> None:
         await _configure_sqlite_engine(engine)
     if not metadata.tables:
         return
-    async with _PROVISION_LOCK:
-        async with engine.begin() as connection:
-            await connection.run_sync(metadata.create_all)
+    async with engine.begin() as connection:
+        await connection.run_sync(metadata.create_all)
     await validate_sql(engine, metadata)
     _logger.info("SQL metadata provisioned: dialect=%s tables=%s", engine.dialect.name, len(metadata.tables))
 
@@ -249,7 +265,7 @@ def sql_audit_columns(
     updated_comment: str = "Update timestamp",
     created_comment: str = "Creation timestamp",
 ) -> "tuple[Column, Column]":
-    from sqlalchemy import Column, DefaultClause, TIMESTAMP
+    from sqlalchemy import TIMESTAMP, Column, DefaultClause
     from sqlalchemy.dialects import mysql
     from sqlalchemy.ext.compiler import compiles
     from sqlalchemy.sql.elements import ClauseElement

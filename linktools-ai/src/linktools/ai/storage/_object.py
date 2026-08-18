@@ -360,7 +360,7 @@ class SqlObjectStore:
                             rows.clear()
                 if rows:
                     await session.execute(insert(chunks), rows)
-        await self._context.run_mutation(execute)
+        await self._context.run_mutation(execute, domain="storage.object")
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)

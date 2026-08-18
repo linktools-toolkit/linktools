@@ -5,30 +5,25 @@
 import base64
 import types
 from collections.abc import Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import MISSING, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 from operator import attrgetter
 from typing import Any, Literal, TypeVar, Union, get_args, get_origin, get_type_hints
 
-from ...core import JsonValue, canonical_json_bytes
-from ...errors import AIError, ErrorCode
-from ...storage import ObjectRef, StoredPayload
-from ._store import (
-    StoredAlias,
-    StoredFact,
-    StoredOperation,
-    StoredRecord,
-    validate_record_identity,
-)
+from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, ToolEffectRecord
 
 from ...core import (
+    JsonValue,
     OperationLedgerInput,
     OperationLedgerRecord,
     Principal,
     ResourceRef,
     UsageMetrics,
+    canonical_json_bytes,
 )
+from ...errors import AIError, ErrorCode
+from ...storage import ObjectRef, StoredPayload
 from ...task import (
     TaskGraph,
     TaskGraphLimits,
@@ -38,7 +33,6 @@ from ...task import (
     TaskNodeView,
     TaskTerminalRecord,
 )
-from pydantic_ai_harness.step_persistence import RunRecord, StepEvent, ToolEffectRecord
 from .._tool import ToolOperationRecord
 from ._contracts import (
     ApprovalRecord,
@@ -53,6 +47,13 @@ from ._contracts import (
     RecoveryCheckpoint,
     ResultRecord,
     SessionRecord,
+)
+from ._store import (
+    StoredAlias,
+    StoredFact,
+    StoredOperation,
+    StoredRecord,
+    validate_record_identity,
 )
 
 CURRENT_DATA_VERSION = 1
@@ -400,6 +401,12 @@ def _decode_dataclass(value: object, target: type) -> object:
         if not field.init:
             continue
         if field.name not in raw_fields:
+            if field.default is not MISSING:
+                kwargs[field.name] = field.default
+                continue
+            if field.default_factory is not MISSING:
+                kwargs[field.name] = field.default_factory()
+                continue
             raise KeyError(field.name)
         kwargs[field.name] = _decode_domain(raw_fields[field.name], hints.get(field.name, Any))
     return target(**kwargs)

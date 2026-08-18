@@ -5,8 +5,10 @@
 import asyncio
 import base64
 from collections.abc import Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 from typing import Protocol, runtime_checkable
 
 from linktools.core import environ
@@ -68,6 +70,39 @@ class _StepArchiveBatch(Protocol):
 class _ProjectionOffset:
     events: int = 0
     snapshots: int = 0
+
+
+@dataclass
+class _ProjectionLockEntry:
+    lock: asyncio.Lock
+    references: int = 0
+
+
+class _PerRunProjectionLocks:
+    def __init__(self) -> None:
+        self._entries: dict[str, _ProjectionLockEntry] = {}
+        self._guard = asyncio.Lock()
+
+    @asynccontextmanager
+    async def hold(self, run_id: str):
+        async with self._guard:
+            entry = self._entries.get(run_id)
+            if entry is None:
+                entry = _ProjectionLockEntry(asyncio.Lock())
+                self._entries[run_id] = entry
+            entry.references += 1
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            async with self._guard:
+                entry.references -= 1
+                if entry.references == 0 and self._entries.get(run_id) is entry:
+                    self._entries.pop(run_id, None)
 
 
 class StagingStepStore(StepStore):
@@ -574,7 +609,7 @@ class RuntimeStepStore(StepStore):
         self._initialized = False
         self._preflight = False
         self._projection_offsets: dict[str, _ProjectionOffset] = {}
-        self._projection_lock = asyncio.Lock()
+        self._projection_locks = _PerRunProjectionLocks()
 
     async def initialize(self) -> None:
         await self._staging.initialize()
@@ -610,7 +645,7 @@ class RuntimeStepStore(StepStore):
 
     async def save_snapshot(self, snapshot: ContinuableSnapshot) -> None:
         await self._ensure_business()
-        async with self._projection_lock:
+        async with self._projection_locks.hold(snapshot.run_id):
             await self._staging.save_snapshot(snapshot)
             recovery = self._archives.get(RuntimeDomain.RECOVERY)
             if recovery is not None:
@@ -680,7 +715,7 @@ class RuntimeStepStore(StepStore):
         await _materialize_snapshot(destination, run, snapshot)
 
     async def flush_execution_projection(self, step_run_id: str) -> None:
-        async with self._projection_lock:
+        async with self._projection_locks.hold(step_run_id):
             await self._flush_execution_projection_locked(step_run_id)
 
     async def _flush_execution_projection_locked(self, step_run_id: str) -> None:
@@ -697,14 +732,18 @@ class RuntimeStepStore(StepStore):
         snapshot_suffix = tuple(snapshots[offset.snapshots:])
         if not event_suffix and not snapshot_suffix:
             return
+        started = monotonic()
         await _sync_projection(archive, run, event_suffix, snapshot_suffix)
         offset.events = len(events)
         offset.snapshots = len(snapshots)
         _logger.debug(
-            "step execution projection flushed: run=%s events=%s snapshots=%s",
+            "step projection flushed: domain=%s backend=%s run=%s events=%s snapshots=%s duration_ms=%.3f",
+            RuntimeDomain.EXECUTION.value,
+            type(archive).__name__,
             step_run_id,
             len(event_suffix),
             len(snapshot_suffix),
+            (monotonic() - started) * 1000,
         )
 
     async def verify_terminal_attempts(
@@ -726,8 +765,8 @@ class RuntimeStepStore(StepStore):
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     async def release_staging_many(self, *, candidate_step_run_ids: tuple[str, ...]) -> None:
-        async with self._projection_lock:
-            for run_id in dict.fromkeys(candidate_step_run_ids):
+        for run_id in dict.fromkeys(candidate_step_run_ids):
+            async with self._projection_locks.hold(run_id):
                 await self._staging.release_run(run_id)
                 self._projection_offsets.pop(run_id, None)
 
@@ -735,7 +774,7 @@ class RuntimeStepStore(StepStore):
         archive = self._archives.get(runtime_domain)
         if archive is None:
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        async with self._projection_lock:
+        async with self._projection_locks.hold(step_run_id):
             await archive.release_run(step_run_id)
             self._projection_offsets.pop(step_run_id, None)
 
@@ -803,15 +842,15 @@ async def _insert_facts(transaction: StateTransaction, facts: tuple[StoredFact, 
 
 
 async def _materialize_snapshot(target: StepStore, run: RunRecord, snapshot: ContinuableSnapshot) -> None:
+    if isinstance(target, _StepArchiveBatch):
+        await target.materialize_snapshot(run, snapshot)
+        return
     existing_run = await target.get_run(run_id=run.run_id)
     existing_snapshot = await target.latest_snapshot(
         run_id=run.run_id,
         include_interrupted=True,
     )
     if existing_run == run and existing_snapshot == snapshot:
-        return
-    if isinstance(target, _StepArchiveBatch):
-        await target.materialize_snapshot(run, snapshot)
         return
     await target.register_run(run)
     await target.save_snapshot(snapshot)
