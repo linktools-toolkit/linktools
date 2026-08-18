@@ -4,8 +4,8 @@
 
 from collections.abc import Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
-import sys
 from typing import TYPE_CHECKING, TypeVar
 
 from linktools.core import environ
@@ -14,7 +14,6 @@ from ...errors import AIError, ErrorCode
 from ...storage import (
     SqlStorageContext,
     create_sql_storage_context,
-    is_retryable_sql_transaction,
 )
 from ._schema import build_runtime_sql_metadata
 from ._plan import RuntimeDomain
@@ -29,10 +28,9 @@ from ._store import (
     StoredRecord,
     active_state_transaction,
     bind_state_transaction,
-    decode_sort_key,
-    encode_sort_key,
     reset_state_transaction,
     validate_record_identity,
+    validate_record_replacement,
 )
 
 if TYPE_CHECKING:
@@ -103,40 +101,23 @@ class SqlStateStore:
                 return await fn(active)
             finally:
                 self._active_depth -= 1
-        for attempt in range(8):
-            session = self._context.sessions()
-            transaction_context = session.begin()
-            token: object | None = None
-            callback_completed = False
+        async def execute(session: "AsyncSession") -> ValueT:
+            transaction = _SqlTransaction(session, self._metadata, self._context)
+            token = bind_state_transaction(self, transaction)
+            self._active_depth = 1
             try:
-                await transaction_context.__aenter__()
-                transaction = _SqlTransaction(session, self._metadata, self._context)
-                token = bind_state_transaction(self, transaction)
-                self._active_depth = 1
-                try:
-                    result = await fn(transaction)
-                    callback_completed = True
-                except BaseException:
-                    await transaction_context.__aexit__(*sys.exc_info())
-                    raise
-                await transaction_context.__aexit__(None, None, None)
-                _logger.debug("SQL StateStore mutation committed: attempt=%s", attempt + 1)
-                return result
-            except AIError:
-                raise
-            except BaseException as error:
-                if callback_completed:
-                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-                if is_retryable_sql_transaction(error) and not _connection_invalidated(error):
-                    _logger.warning("retrying transient SQL StateStore mutation: attempt=%s", attempt + 1)
-                    continue
-                await self._raise_storage_error(error)
+                return await fn(transaction)
             finally:
-                if token is not None:
-                    reset_state_transaction(token)
+                reset_state_transaction(token)
                 self._active_depth = 0
-                await session.close()
-        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+
+        try:
+            return await self._context.run_mutation(execute)
+        except AIError:
+            raise
+        except BaseException as error:
+            await self._raise_storage_error(error)
+            raise AssertionError("storage error mapping did not raise")
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -207,12 +188,6 @@ class SqlStateStore:
         raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
 
-def _connection_invalidated(error: BaseException) -> bool:
-    from sqlalchemy.exc import DBAPIError
-
-    return isinstance(error, DBAPIError) and error.connection_invalidated
-
-
 class _SqlTransaction:
     def __init__(
         self,
@@ -223,6 +198,8 @@ class _SqlTransaction:
         self._session = session
         self._metadata = metadata
         self._context = context
+        self._guarded_record_keys: set[bytes] = set()
+        self._record_cache: dict[bytes, StoredRecord] = {}
 
     async def now(self) -> datetime:
         return await self._context.dialect.database_now(self._session)
@@ -230,11 +207,17 @@ class _SqlTransaction:
     async def get_record(self, key: bytes) -> StoredRecord | None:
         from sqlalchemy import select
 
+        if key in self._record_cache:
+            return self._record_cache[key]
         table = self._table("ai_state_records")
         row = (
             (await self._session.execute(select(table).where(table.c.key_digest == _hex(key)))).mappings().one_or_none()
         )
-        return None if row is None else _record_from_row(row)
+        if row is None:
+            return None
+        value = _record_from_row(row)
+        self._record_cache[key] = value
+        return value
 
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]:
         if not keys:
@@ -248,16 +231,53 @@ class _SqlTransaction:
             .all()
         )
         values = tuple(_record_from_row(row) for row in rows)
+        self._record_cache.update({value.key_digest: value for value in values})
         return {value.key_digest: value for value in values}
 
     async def insert_record(self, record: StoredRecord) -> None:
         from sqlalchemy import insert
 
         await self._session.execute(insert(self._table("ai_state_records")).values(_record_values(record)))
+        self._guarded_record_keys.add(record.key_digest)
+        self._record_cache[record.key_digest] = record
+
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+    ) -> StoredRecord | None:
+        if key in self._guarded_record_keys:
+            return await self.get_record(key)
+        current = await self.get_record(key)
+        if current is None or current.storage_version != expected_storage_version:
+            return None
+        from sqlalchemy import update
+
+        table = self._table("ai_state_records")
+        result = await self._session.execute(
+            update(table)
+            .where(
+                table.c.key_digest == _hex(key),
+                table.c.storage_version == expected_storage_version,
+            )
+            .values(storage_version=expected_storage_version + 1)
+        )
+        if result.rowcount != 1:
+            return None
+        guarded = replace(current, storage_version=expected_storage_version + 1)
+        self._guarded_record_keys.add(key)
+        self._record_cache[key] = guarded
+        return guarded
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
         from sqlalchemy import update
 
+        current = await self.get_record(record.key_digest)
+        if current is None or current.storage_version != expected_storage_version:
+            return False
+        validate_record_identity(record)
+        validate_record_replacement(current, record)
         if record.storage_version != expected_storage_version + 1:
             raise ValueError("replacement must increment storage_version exactly once")
         result = await self._session.execute(
@@ -268,6 +288,9 @@ class _SqlTransaction:
             )
             .values(_record_values(record, updating=True))
         )
+        if result.rowcount == 1:
+            self._guarded_record_keys.add(record.key_digest)
+            self._record_cache[record.key_digest] = record
         return result.rowcount == 1
 
     async def update_record_lease(
@@ -281,6 +304,8 @@ class _SqlTransaction:
     ) -> bool:
         from sqlalchemy import func, update
 
+        if lease_fence < 0 or lease_expires_at is not None and lease_expires_at.tzinfo is None:
+            raise ValueError("record lease is invalid")
         table = self._table("ai_state_records")
         result = await self._session.execute(
             update(table)
@@ -296,27 +321,48 @@ class _SqlTransaction:
                 updated_at=func.current_timestamp(),
             )
         )
+        if result.rowcount == 1:
+            self._guarded_record_keys.add(key)
+            if key in self._record_cache:
+                self._record_cache[key] = replace(
+                    self._record_cache[key],
+                    lease_owner=lease_owner,
+                    lease_fence=lease_fence,
+                    lease_expires_at=lease_expires_at,
+                    storage_version=expected_storage_version + 1,
+                )
         return result.rowcount == 1
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
         from sqlalchemy import delete
 
-        table = self._table("ai_state_records")
-        statement = delete(table).where(table.c.key_digest == _hex(key))
-        if expected_storage_version is not None:
-            statement = statement.where(table.c.storage_version == expected_storage_version)
-        result = await self._session.execute(statement)
-        if result.rowcount != 1:
+        current = await self.get_record(key)
+        if current is None:
             return False
+        expected = current.storage_version if expected_storage_version is None else expected_storage_version
+        guarded = await self.guard_record(key, expected_storage_version=expected)
+        if guarded is None:
+            return False
+        table = self._table("ai_state_records")
+        statement = delete(table).where(
+            table.c.key_digest == _hex(key),
+            table.c.storage_version == guarded.storage_version,
+        )
         await self._session.execute(
             delete(self._table("ai_state_aliases")).where(
                 self._table("ai_state_aliases").c.record_key_digest == _hex(key)
             )
         )
         await self._session.execute(
-            delete(self._table("ai_state_facts")).where(self._table("ai_state_facts").c.owner_key_digest == _hex(key))
+            delete(self._table("ai_state_facts")).where(
+                self._table("ai_state_facts").c.owner_key_digest == _hex(key)
+            )
         )
-        return True
+        result = await self._session.execute(statement)
+        if result.rowcount == 1:
+            self._guarded_record_keys.discard(key)
+            self._record_cache.pop(key, None)
+        return result.rowcount == 1
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
         from sqlalchemy import and_, or_, select
@@ -334,9 +380,9 @@ class _SqlTransaction:
         if query.after_sort_key is not None and query.after_key_digest is not None:
             conditions.append(
                 or_(
-                    table.c.sort_key > encode_sort_key(query.after_sort_key),
+                    table.c.sort_key > query.after_sort_key,
                     and_(
-                        table.c.sort_key == encode_sort_key(query.after_sort_key),
+                        table.c.sort_key == query.after_sort_key,
                         table.c.key_digest > _hex(query.after_key_digest),
                     ),
                 )
@@ -358,31 +404,20 @@ class _SqlTransaction:
         from sqlalchemy import select
 
         table = self._table("ai_state_aliases")
-        records = self._table("ai_state_records")
         row = (
             await self._session.execute(
-                select(table.c.record_key_digest, records.c.id)
-                .select_from(table.outerjoin(records, table.c.record_key_digest == records.c.key_digest))
-                .where(table.c.alias_digest == _hex(alias))
+                select(table.c.record_key_digest).where(table.c.alias_digest == _hex(alias))
             )
         ).one_or_none()
         if row is None:
             return None
-        if row.id is None:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         return _hex_or_none(row.record_key_digest)
 
     async def insert_alias(self, alias: StoredAlias) -> None:
-        from sqlalchemy import insert, select
+        from sqlalchemy import insert
 
-        records = self._table("ai_state_records")
-        if (
-            await self._session.scalar(
-                select(records.c.id).where(records.c.key_digest == _hex(alias.record_key_digest))
-            )
-            is None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if alias.record_key_digest not in self._guarded_record_keys:
+            raise RuntimeError("alias owner must be guarded in the current transaction")
 
         await self._session.execute(
             insert(self._table("ai_state_aliases")).values(
@@ -444,21 +479,16 @@ class _SqlTransaction:
         )
 
     async def insert_fact(self, fact: StoredFact) -> None:
-        from sqlalchemy import insert, select
+        from sqlalchemy import insert
 
-        owner = self._table("ai_state_records")
-        if (
-            await self._session.scalar(select(owner.c.id).where(owner.c.key_digest == _hex(fact.owner_key_digest)))
-            is None
-        ):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if fact.owner_key_digest not in self._guarded_record_keys:
+            raise RuntimeError("fact owner must be guarded in the current transaction")
         await self._session.execute(insert(self._table("ai_state_facts")).values(_fact_values(fact)))
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         from sqlalchemy import func, select
 
         table = self._table("ai_state_facts")
-        owners = self._table("ai_state_records")
         conditions = [table.c.stream_digest == _hex(query.stream_digest)]
         if query.after_sequence is not None:
             conditions.append(table.c.sequence > query.after_sequence)
@@ -478,33 +508,14 @@ class _SqlTransaction:
                 .where(*conditions)
                 .subquery()
             )
-            statement = (
-                select(ranked, owners.c.id.label("_owner_id"))
-                .select_from(
-                    ranked.outerjoin(
-                        owners,
-                        ranked.c.owner_key_digest == owners.c.key_digest,
-                    )
-                )
-                .where(ranked.c._subject_rank == 1)
-                .order_by(ranked.c.sequence)
-            )
+            statement = select(ranked).where(ranked.c._subject_rank == 1).order_by(ranked.c.sequence)
         else:
-            statement = (
-                select(table, owners.c.id.label("_owner_id"))
-                .select_from(table.outerjoin(owners, table.c.owner_key_digest == owners.c.key_digest))
-                .where(*conditions)
-                .order_by(table.c.sequence)
-            )
+            if query.latest:
+                statement = select(table).where(*conditions).order_by(table.c.sequence.desc()).limit(1)
+            else:
+                statement = select(table).where(*conditions).order_by(table.c.sequence)
         rows = (await self._session.execute(statement)).mappings().all()
-        if any(row["_owner_id"] is None for row in rows):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         facts = tuple(_fact_from_row(row) for row in rows)
-        if query.latest_per_subject:
-            latest: dict[bytes | None, StoredFact] = {}
-            for fact in facts:
-                latest[fact.subject_digest] = fact
-            facts = tuple(sorted(latest.values(), key=lambda fact: fact.sequence))
         if query.limit is not None:
             facts = facts[: query.limit]
         return facts
@@ -588,7 +599,7 @@ def _record_values(record: StoredRecord, *, updating: bool = False) -> dict[str,
         "scope_digest": None if record.scope_digest is None else _hex(record.scope_digest),
         "parent_digest": None if record.parent_digest is None else _hex(record.parent_digest),
         "kind": record.kind,
-        "sort_key": encode_sort_key(record.sort_key),
+        "sort_key": record.sort_key,
         "state": record.state,
         "storage_version": record.storage_version,
         "lease_owner": record.lease_owner,
@@ -610,7 +621,7 @@ def _record_from_row(row: Mapping[str, object]) -> StoredRecord:
         _hex_or_none(row["scope_digest"]),
         _hex_or_none(row["parent_digest"]),
         str(row["kind"]),
-        decode_sort_key(str(row["sort_key"])),
+        str(row["sort_key"]),
         None if row["state"] is None else str(row["state"]),
         int(row["storage_version"]),
         None if row["lease_owner"] is None else str(row["lease_owner"]),

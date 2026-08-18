@@ -133,6 +133,7 @@ class _MemoryTransaction:
         self.sequences = sequences
         self.facts = facts
         self.operations = operations
+        self.guarded_record_keys: set[bytes] = set()
 
     async def now(self) -> datetime:
         return datetime.now(timezone.utc)
@@ -151,6 +152,23 @@ class _MemoryTransaction:
         if record.key_digest in self.records:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
         self.records[record.key_digest] = record
+        self.guarded_record_keys.add(record.key_digest)
+
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+    ) -> StoredRecord | None:
+        current = self.records.get(key)
+        if current is None or current.storage_version != expected_storage_version:
+            if key in self.guarded_record_keys and current is not None:
+                return current
+            return None
+        current = replace(current, storage_version=expected_storage_version + 1)
+        self.records[key] = current
+        self.guarded_record_keys.add(key)
+        return current
 
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool:
         current = self.records.get(record.key_digest)
@@ -161,6 +179,7 @@ class _MemoryTransaction:
         if record.storage_version != expected_storage_version + 1:
             raise ValueError("replacement must increment storage_version exactly once")
         self.records[record.key_digest] = record
+        self.guarded_record_keys.add(record.key_digest)
         return True
 
     async def update_record_lease(
@@ -184,21 +203,25 @@ class _MemoryTransaction:
             lease_fence=lease_fence,
             lease_expires_at=lease_expires_at,
         )
+        self.guarded_record_keys.add(key)
         return True
 
     async def delete_record(self, key: bytes, *, expected_storage_version: int | None = None) -> bool:
         current = self.records.get(key)
         if current is None:
             return False
-        if expected_storage_version is not None and current.storage_version != expected_storage_version:
+        expected = current.storage_version if expected_storage_version is None else expected_storage_version
+        guarded = await self.guard_record(key, expected_storage_version=expected)
+        if guarded is None:
             return False
-        del self.records[key]
         for alias, record_key in tuple(self.aliases.items()):
             if record_key == key:
                 del self.aliases[alias]
         for fact_key, fact in tuple(self.facts.items()):
             if fact.owner_key_digest == key:
                 del self.facts[fact_key]
+        del self.records[key]
+        self.guarded_record_keys.discard(key)
         return True
 
     async def list_records(self, query: RecordQuery) -> tuple[StoredRecord, ...]:
@@ -224,8 +247,8 @@ class _MemoryTransaction:
         current = self.aliases.get(alias.alias_digest)
         if current is not None and current != alias.record_key_digest:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if alias.record_key_digest not in self.records:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if alias.record_key_digest not in self.guarded_record_keys:
+            raise RuntimeError("alias owner must be guarded in the current transaction")
         self.aliases[alias.alias_digest] = alias.record_key_digest
 
     async def get_sequence(self, key: bytes) -> int:
@@ -252,19 +275,19 @@ class _MemoryTransaction:
         key = (fact.stream_digest, fact.sequence)
         if key in self.facts:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
-        if fact.owner_key_digest not in self.records:
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        if fact.owner_key_digest not in self.guarded_record_keys:
+            raise RuntimeError("fact owner must be guarded in the current transaction")
         self.facts[key] = fact
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         values = [fact for fact in self.facts.values() if fact.stream_digest == query.stream_digest]
-        if any(fact.owner_key_digest not in self.records for fact in values):
-            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         if query.after_sequence is not None:
             values = [fact for fact in values if fact.sequence > query.after_sequence]
         if query.subject_digest is not None:
             values = [fact for fact in values if fact.subject_digest == query.subject_digest]
         values.sort(key=lambda fact: fact.sequence)
+        if query.latest:
+            return () if not values else (values[-1],)
         if query.latest_per_subject:
             latest: dict[bytes | None, StoredFact] = {}
             for fact in values:

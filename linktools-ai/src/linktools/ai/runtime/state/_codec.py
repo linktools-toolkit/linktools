@@ -18,8 +18,6 @@ from ._store import (
     StoredFact,
     StoredOperation,
     StoredRecord,
-    decode_sort_key,
-    encode_sort_key,
     validate_record_identity,
 )
 
@@ -121,7 +119,7 @@ def encode_record(record: StoredRecord) -> dict[str, JsonValue]:
         "scope": None if record.scope_digest is None else record.scope_digest.hex(),
         "parent": None if record.parent_digest is None else record.parent_digest.hex(),
         "kind": record.kind,
-        "sort": encode_sort_key(record.sort_key),
+        "sort": record.sort_key,
         "state": record.state,
         "storage_version": record.storage_version,
         "lease": {
@@ -151,7 +149,7 @@ def decode_record(value: Mapping[str, JsonValue]) -> StoredRecord:
             _optional_digest(value.get("scope")),
             _optional_digest(value.get("parent")),
             _string(value, "kind"),
-            decode_sort_key(_string(value, "sort")),
+            _string(value, "sort"),
             _optional_string(value.get("state")),
             _integer(value, "storage_version"),
             _optional_string(lease.get("owner")),

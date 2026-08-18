@@ -75,7 +75,7 @@ from ._store import (
     record_key_digest,
     scope_digest,
     sequence_key,
-    sortable_id,
+    sortable_identity,
     stream_digest,
     subject_digest,
 )
@@ -130,7 +130,7 @@ class _RepositoryBase:
             scope,
             parent,
             kind,
-            sortable_id(str(identity)),
+            sortable_identity(identity),
             state,
             0,
             lease_owner,
@@ -140,6 +140,8 @@ class _RepositoryBase:
         )
 
     def _default_scope(self, kind: str, value: object) -> bytes | None:
+        if isinstance(value, SessionRecord):
+            return self._scope(kind, "owner", value.owner_principal_id)
         if isinstance(value, ExecutionRecord) and value.session_id is not None:
             return self._scope(kind, "session", value.session_id)
         if isinstance(value, IdempotencyRecord):
@@ -152,9 +154,13 @@ class _RepositoryBase:
             return self._scope(kind, "execution", value.execution_id)
         if isinstance(value, MemoryRecord):
             return self._scope(kind, "memory_scope", value.memory_scope_digest)
+        if isinstance(value, ToolOperationRecord):
+            return self._scope(kind, "step_run", value.step_run_id)
         return None
 
     def _default_parent(self, kind: str, value: object) -> bytes | None:
+        if isinstance(value, TaskNodeView):
+            return self._parent(kind, "graph", value.graph_id)
         if isinstance(value, ExecutionRecord) and value.parent_execution_id is not None:
             return self._parent(kind, "execution", value.parent_execution_id)
         return None
@@ -203,12 +209,7 @@ class _RepositoryBase:
         return value  # type: ignore[return-value]
 
     async def _replace_value(self, current: StoredRecord, value: object) -> None:
-        candidate = replace(
-            current,
-            storage_version=current.storage_version + 1,
-            state=_record_state(value),
-            data=_domain_data(value),
-        )
+        candidate = _projected_record(self, current, value)
         await self._store.mutate(lambda transaction: _replace_checked(transaction, candidate, current.storage_version))
 
     def _header(self, value: object, kind: ResourceKind, identity: str) -> ResourceRef:
@@ -241,7 +242,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
     async def initialize(self) -> None:
         return None
 
-    def _identity(self, value: object) -> str:
+    def _identity(self, value: object) -> object:
         if isinstance(value, SessionRecord):
             return value.session_id
         if isinstance(value, ExecutionRecord):
@@ -259,7 +260,7 @@ class _ResourceRepository(_RepositoryBase, Generic[ValueT]):
         if isinstance(value, ExternalCallRecord):
             return value.call_id
         if isinstance(value, IdempotencyRecord):
-            return value.idempotency_key_digest
+            return self._identity_key(value.scope, value.idempotency_key_digest)
         raise TypeError(f"unsupported repository value: {type(value).__name__}")
 
     async def create(self, value: ValueT) -> ValueT:
@@ -465,19 +466,22 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             identity_field="session_id",
         )
 
-    def _list_generation_key(self) -> bytes:
+    def _list_generation_key(self, owner_principal_id: str | None = None) -> bytes:
         return sequence_key(
             self._namespace,
             self._tenant_id,
             self._domain.value,
-            "session_list",
-            [],
+            "session_list_owner" if owner_principal_id is not None else "session_list_tenant",
+            owner_principal_id if owner_principal_id is not None else [],
         )
 
-    async def _bump_list_generation(self, transaction: StateTransaction) -> None:
+    async def _bump_list_generation(self, transaction: StateTransaction, owner_principal_id: str) -> None:
+        await transaction.next_sequence(self._list_generation_key(owner_principal_id))
         await transaction.next_sequence(self._list_generation_key())
 
     async def create(self, value: SessionRecord) -> SessionRecord:
+        _require_tenant(value, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             await transaction.insert_record(
                 self._stored(
@@ -488,7 +492,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     state=value.status.value,
                 )
             )
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, value.owner_principal_id)
             return value
 
         return await self._store.mutate(mutate)
@@ -496,6 +500,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     async def create_with_operation(
         self, record: SessionRecord, *, operation: OperationLedgerInput
     ) -> tuple[SessionRecord, bool]:
+        _require_tenant(record, self._tenant_id)
+        _require_tenant(operation, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
@@ -512,7 +519,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                     state=record.status.value,
                 )
             )
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, record.owner_principal_id)
             return record, False
 
         return await self._store.mutate(mutate)
@@ -523,7 +530,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         scope = None if owner_principal_id is None else self._scope("session", "owner", owner_principal_id)
 
         async def read(transaction: StateTransaction) -> tuple[SessionRecord, ...]:
-            await transaction.get_sequence(self._list_generation_key())
+            await transaction.get_sequence(self._list_generation_key(owner_principal_id))
             records = await transaction.list_records(
                 RecordQuery(
                     partition_digest=self._partition("session") if scope is None else None,
@@ -556,7 +563,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
         )
 
         async def read(transaction: StateTransaction) -> tuple[int, Page[SessionRecord]]:
-            generation = await transaction.get_sequence(self._list_generation_key())
+            generation = await transaction.get_sequence(self._list_generation_key(owner_principal_id))
             if snapshot is not None and snapshot != generation:
                 raise AIError(ErrorCode.CURSOR_INVALID)
             after_sort_key, after_key_digest = _decode_record_cursor(cursor)
@@ -586,6 +593,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     ) -> tuple[SessionRecord, bool]:
         if tenant_id != self._tenant_id:
             raise AIError(ErrorCode.STORAGE_OWNER_MISMATCH)
+        _require_tenant(next_record, self._tenant_id)
+        _require_tenant(operation, self._tenant_id)
 
         async def mutate(transaction: StateTransaction) -> tuple[SessionRecord, bool]:
             current = await transaction.get_record(self._key("session", session_id))
@@ -600,14 +609,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             _, replayed = await _append_operation(transaction, self, operation)
             if replayed:
                 return value, True
-            candidate = replace(
-                current,
-                storage_version=current.storage_version + 1,
-                state=proposed.status.value,
-                data=_domain_data(proposed),
-            )
+            candidate = _projected_record(self, current, proposed)
             await _replace_checked(transaction, candidate, current.storage_version)
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, value.owner_principal_id)
             return proposed, False
 
         return await self._store.mutate(mutate)
@@ -615,6 +619,9 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     async def compare_and_swap(
         self, session_id: str, *, tenant_id: str, expected_revision: int, next_record: SessionRecord
     ) -> SessionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+        _require_tenant(next_record, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             record = await transaction.get_record(self._key("session", session_id))
             if record is None:
@@ -627,15 +634,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 proposed = replace(proposed, active_execution_id=current.active_execution_id)
             await _replace_checked(
                 transaction,
-                replace(
-                    record,
-                    storage_version=record.storage_version + 1,
-                    state=proposed.status.value,
-                    data=_domain_data(proposed),
-                ),
+                _projected_record(self, record, proposed),
                 record.storage_version,
             )
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, current.owner_principal_id)
             return proposed
 
         return await self._store.mutate(mutate)
@@ -655,6 +657,8 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
     async def _admission(
         self, session_id: str, *, tenant_id: str, execution_id: str, expected: ConversationCursor | None, release: bool
     ) -> SessionRecord:
+        _require_repository_tenant(tenant_id, self._tenant_id)
+
         async def mutate(transaction: StateTransaction) -> SessionRecord:
             current = await transaction.get_record(self._key("session", session_id))
             if current is None:
@@ -664,7 +668,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 if value.active_execution_id is None:
                     return value
                 if value.active_execution_id != execution_id:
-                    raise AIError(ErrorCode.SESSION_BUSY)
+                    return value
                 next_value = replace(value, active_execution_id=None)
             else:
                 if value.active_execution_id == execution_id and value.continuation == expected:
@@ -674,12 +678,7 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
                 if value.active_execution_id is not None or value.continuation != expected:
                     raise AIError(ErrorCode.SESSION_BUSY)
                 next_value = replace(value, active_execution_id=execution_id)
-            candidate = replace(
-                current,
-                storage_version=current.storage_version + 1,
-                data=_domain_data(next_value),
-                state=next_value.status.value,
-            )
+            candidate = _projected_record(self, current, next_value)
             await _replace_checked(transaction, candidate, current.storage_version)
             return next_value
 
@@ -725,15 +724,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             await _replace_checked(
                 transaction,
-                replace(
-                    record,
-                    storage_version=record.storage_version + 1,
-                    state=next_status.value,
-                    data=_domain_data(next_value),
-                ),
+                _projected_record(self, record, next_value),
                 record.storage_version,
             )
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, current.owner_principal_id)
             return next_value
 
         return await self._store.mutate(mutate)
@@ -778,14 +772,10 @@ class SessionRepositoryImpl(_ResourceRepository[SessionRecord]):
             )
             await _replace_checked(
                 transaction,
-                replace(
-                    record,
-                    storage_version=record.storage_version + 1,
-                    data=_domain_data(next_value),
-                ),
+                _projected_record(self, record, next_value),
                 record.storage_version,
             )
-            await self._bump_list_generation(transaction)
+            await self._bump_list_generation(transaction, current.owner_principal_id)
             return next_value
 
         return await self._store.mutate(mutate)
@@ -804,8 +794,8 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
             identity_field="idempotency_key_digest",
         )
 
-    def _identity_key(self, scope: str, key: str) -> str:
-        return f"{scope}:{key}"
+    def _identity_key(self, scope: str, key: str) -> list[str]:
+        return [scope, key]
 
     async def reserve(self, record: IdempotencyRecord) -> IdempotencyRecord:
         _require_tenant(record, self._tenant_id)
@@ -821,7 +811,13 @@ class IdempotencyRepositoryImpl(_ResourceRepository[IdempotencyRecord]):
                 return existing
             raise AIError(ErrorCode.STORAGE_CONFLICT) from error
 
-    async def get(self, scope: str, idempotency_key_digest: str, *, tenant_id: str) -> IdempotencyRecord | None:  # type: ignore[override]
+    async def get(
+        self,
+        scope: str,
+        idempotency_key_digest: str,
+        *,
+        tenant_id: str,
+    ) -> IdempotencyRecord | None:  # type: ignore[override]
         return await super().get(self._identity_key(scope, idempotency_key_digest), tenant_id=tenant_id)
 
     async def list_by_resource(
@@ -968,11 +964,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             await _replace_checked(
                 transaction,
-                replace(
-                    record,
-                    storage_version=record.storage_version + 1,
-                    data=_domain_data(next_value),
-                ),
+                _projected_record(self, record, next_value),
                 record.storage_version,
             )
             return next_value
@@ -1027,11 +1019,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             )
             await _replace_checked(
                 transaction,
-                replace(
-                    record,
-                    storage_version=record.storage_version + 1,
-                    data=_domain_data(next_value),
-                ),
+                _projected_record(self, record, next_value),
                 record.storage_version,
             )
             return next_value
@@ -1062,12 +1050,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
             stored_value = await self._decode(stored, ExecutionRecord)
             if stored_value.revision != current.revision or stored_value.event_sequence != current.event_sequence:
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
-            candidate = replace(
-                stored,
-                storage_version=stored.storage_version + 1,
-                state=next_value.status.value,
-                data=_domain_data(next_value),
-            )
+            candidate = _projected_record(self, stored, next_value)
             await _replace_checked(transaction, candidate, stored.storage_version)
             await transaction.insert_fact(
                 StoredFact(
@@ -1107,12 +1090,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 event_sequence=stored_value.event_sequence + 1,
                 result=commit.result,
             )
-            candidate = replace(
-                stored,
-                storage_version=stored.storage_version + 1,
-                state=next_execution.status.value,
-                data=_domain_data(next_execution),
-            )
+            candidate = _projected_record(self, stored, next_execution)
             await _replace_checked(transaction, candidate, stored.storage_version)
             await transaction.insert_fact(
                 StoredFact(
@@ -1145,12 +1123,7 @@ class ExecutionRepositoryImpl(_ResourceRepository[ExecutionRecord]):
                 )
                 await _replace_checked(
                     transaction,
-                    replace(
-                        id_record,
-                        storage_version=id_record.storage_version + 1,
-                        state=next_id.status.value,
-                        data=_domain_data(next_id),
-                    ),
+                    _projected_record(self._idempotency, id_record, next_id),
                     id_record.storage_version,
                 )
             if commit.operation is not None:
@@ -1218,7 +1191,7 @@ class EventRepositoryImpl(_RepositoryBase):
                 revision=execution.revision + 1,
                 updated_at=await transaction.now(),
             )
-            candidate = replace(current, storage_version=current.storage_version + 1, data=_domain_data(next_execution))
+            candidate = _projected_record(self, current, next_execution)
             await _replace_checked(transaction, candidate, current.storage_version)
             data = payload if isinstance(payload, dict) else {"value": payload}
             await transaction.insert_fact(
@@ -1436,11 +1409,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await _replace_checked(
                 transaction,
-                replace(
-                    current,
-                    storage_version=current.storage_version + 1,
-                    data=_domain_data(record),
-                ),
+                _projected_record(self, current, record),
                 current.storage_version,
             )
             return record
@@ -1474,11 +1443,7 @@ class MemoryRepositoryImpl(_ResourceRepository[MemoryRecord]):
                 raise AIError(ErrorCode.STORAGE_CONFLICT)
             await _replace_checked(
                 transaction,
-                replace(
-                    current,
-                    storage_version=current.storage_version + 1,
-                    data=_domain_data(record),
-                ),
+                _projected_record(self, current, record),
                 current.storage_version,
             )
             return record, False
@@ -1607,7 +1572,7 @@ class TaskRepositoryImpl(_RepositoryBase):
         return self._key("task_graph", graph_id)
 
     def _node_key(self, graph_id: str, node_id: str) -> bytes:
-        return self._key("task_node", f"{graph_id}:{node_id}")
+        return self._key("task_node", [graph_id, node_id])
 
     async def get_header(self, graph_id: str, *, tenant_id: str) -> ResourceRef | None:
         return (
@@ -1631,7 +1596,7 @@ class TaskRepositoryImpl(_RepositoryBase):
                 await transaction.insert_record(
                     self._stored(
                         "task_node",
-                        f"{graph.graph_id}:{node.node_id}",
+                        [graph.graph_id, node.node_id],
                         node_view,
                         parent=self._parent("task_node", "graph", graph.graph_id),
                         state=status.value,
@@ -1653,47 +1618,118 @@ class TaskRepositoryImpl(_RepositoryBase):
 
     async def reconcile_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        graph_record = await self._record(self._graph_key(graph_id))
-        if graph_record is None:
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
-        graph = await self._decode(graph_record, TaskGraphView)
-        nodes = {node.node_id: node for node in await self.list_nodes(graph_id, tenant_id=tenant_id)}
-        changed = True
-        while changed:
-            changed = False
-            for node in tuple(nodes.values()):
-                if node.status in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.BLOCKED}:
-                    continue
-                dependencies = tuple(nodes[dependency] for dependency in node.dependencies)
-                if any(
-                    dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
-                    for dependency in dependencies
-                ):
-                    value = replace(
-                        node,
-                        status=TaskStatus.BLOCKED,
-                        error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
-                        error_digest=None,
-                    )
-                elif node.status is TaskStatus.PENDING and all(
-                    dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies
-                ):
-                    value = replace(node, status=TaskStatus.READY)
-                else:
-                    continue
-                await self._update_node(node, value)
-                nodes[node.node_id] = value
-                changed = True
-        return TaskGraphView(graph.graph_id, _graph_status(tuple(nodes.values())), graph.nodes)
+        async def mutate(transaction: StateTransaction) -> TaskGraphView:
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph = await self._decode(graph_record, TaskGraphView)
+            node_records = await transaction.list_records(
+                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+            )
+            current_nodes = {node.node_id: node for node in await self._decode_many(node_records)}
+            next_nodes = dict(current_nodes)
+            changed_nodes: list[tuple[TaskNodeView, TaskNodeView]] = []
+            changed = True
+            while changed:
+                changed = False
+                for node in tuple(next_nodes.values()):
+                    if node.status in {
+                        TaskStatus.SUCCEEDED,
+                        TaskStatus.FAILED,
+                        TaskStatus.CANCELLED,
+                        TaskStatus.BLOCKED,
+                    }:
+                        continue
+                    dependencies = tuple(next_nodes[dependency] for dependency in node.dependencies)
+                    if any(
+                        dependency.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED}
+                        for dependency in dependencies
+                    ):
+                        value = replace(
+                            node,
+                            status=TaskStatus.BLOCKED,
+                            error_code=ErrorCode.TASK_DEPENDENCY_FAILED.value,
+                            error_digest=None,
+                        )
+                    elif node.status is TaskStatus.PENDING and all(
+                        dependency.status is TaskStatus.SUCCEEDED for dependency in dependencies
+                    ):
+                        value = replace(node, status=TaskStatus.READY)
+                    else:
+                        continue
+                    next_nodes[node.node_id] = value
+                    changed_nodes.append((node, value))
+                    changed = True
+            if not changed_nodes:
+                return TaskGraphView(graph.graph_id, _graph_status(tuple(next_nodes.values())), graph.nodes)
+            next_graph = replace(graph, status=_graph_status(tuple(next_nodes.values())))
+            await _replace_checked(
+                transaction,
+                _projected_record(self, graph_record, next_graph),
+                graph_record.storage_version,
+            )
+            for current, value in changed_nodes:
+                node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
+                if node_record is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                stored_node = await self._decode(node_record, TaskNodeView)
+                if stored_node != current:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await _replace_checked(
+                    transaction,
+                    _projected_record(self, node_record, value),
+                    node_record.storage_version,
+                )
+            _logger.info(
+                "task graph reconciled atomically: graph_id=%s changed_nodes=%s",
+                graph_id,
+                len(changed_nodes),
+            )
+            return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
+
+        return await self._store.mutate(mutate)
 
     async def cancel_graph(self, graph_id: str, *, tenant_id: str) -> TaskGraphView:
         _require_repository_tenant(tenant_id, self._tenant_id)
-        for node in await self.list_nodes(graph_id, tenant_id=tenant_id):
-            if node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}:
-                await self._update_node(
-                    node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None)
+        async def mutate(transaction: StateTransaction) -> TaskGraphView:
+            graph_record = await transaction.get_record(self._graph_key(graph_id))
+            if graph_record is None:
+                raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+            graph = await self._decode(graph_record, TaskGraphView)
+            node_records = await transaction.list_records(
+                RecordQuery(parent_digest=self._parent("task_node", "graph", graph_id))
+            )
+            nodes = await self._decode_many(node_records)
+            changed = [
+                (node, replace(node, status=TaskStatus.CANCELLED, owner=None, lease_expires_at=None))
+                for node in nodes
+                if node.status not in {TaskStatus.SUCCEEDED, TaskStatus.FAILED, TaskStatus.CANCELLED}
+            ]
+            if not changed:
+                return TaskGraphView(graph.graph_id, _graph_status(tuple(nodes)), graph.nodes)
+            changed_ids = {current.node_id for current, _ in changed}
+            next_nodes = tuple(value for _, value in changed) + tuple(
+                node for node in nodes if node.node_id not in changed_ids
+            )
+            next_graph = replace(graph, status=_graph_status(next_nodes))
+            await _replace_checked(
+                transaction,
+                _projected_record(self, graph_record, next_graph),
+                graph_record.storage_version,
+            )
+            for current, value in changed:
+                node_record = await transaction.get_record(self._node_key(graph_id, current.node_id))
+                if node_record is None:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+                await _replace_checked(
+                    transaction,
+                    _projected_record(self, node_record, value),
+                    node_record.storage_version,
                 )
-        return await self.reconcile_graph(graph_id, tenant_id=tenant_id)
+            _logger.info("task graph cancelled atomically: graph_id=%s changed_nodes=%s", graph_id, len(changed))
+            return TaskGraphView(graph.graph_id, next_graph.status, graph.nodes)
+
+        return await self._store.mutate(mutate)
 
     async def claim(self, graph_id: str, node_id: str, *, tenant_id: str, owner: str, lease_seconds: int) -> TaskLease:
         if tenant_id != self._tenant_id:
@@ -1728,14 +1764,14 @@ class TaskRepositoryImpl(_RepositoryBase):
             if graph_record is None or node_record is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             node = await self._decode(node_record, TaskNodeView)
-            if node.owner != lease.owner or node.fence != lease.fence:
+            now = await transaction.now()
+            _require_live_task_lease(node, lease, now)
+            expires = now + timedelta(seconds=lease_seconds)
+            if await transaction.guard_record(
+                graph_record.key_digest,
+                expected_storage_version=graph_record.storage_version,
+            ) is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
-            expires = await transaction.now() + timedelta(seconds=lease_seconds)
-            graph_candidate = replace(
-                graph_record,
-                storage_version=graph_record.storage_version + 1,
-            )
-            await _replace_checked(transaction, graph_candidate, graph_record.storage_version)
             if not await transaction.update_record_lease(
                 node_record.key_digest,
                 expected_storage_version=node_record.storage_version,
@@ -1791,8 +1827,8 @@ class TaskRepositoryImpl(_RepositoryBase):
             if record is None:
                 raise AIError(ErrorCode.TASK_FENCE_STALE)
             node = await self._decode(record, TaskNodeView)
-            if node.owner != lease.owner or node.fence != lease.fence:
-                raise AIError(ErrorCode.TASK_FENCE_STALE)
+            now = await transaction.now()
+            _require_live_task_lease(node, lease, now)
             value = replace(
                 node,
                 status=status,
@@ -1821,6 +1857,9 @@ class TaskRepositoryImpl(_RepositoryBase):
         if tenant_id != self._tenant_id:
             return ()
         records = await self._records("task_node", parent=self._parent("task_node", "graph", graph_id))
+        return await self._decode_many(records)
+
+    async def _decode_many(self, records: tuple[StoredRecord, ...]) -> tuple[TaskNodeView, ...]:
         return tuple([await self._decode(record, TaskNodeView) for record in records])
 
     async def _node(self, graph_id: str, node_id: str, tenant_id: str) -> TaskNodeView:
@@ -1856,21 +1895,8 @@ class TaskRepositoryImpl(_RepositoryBase):
         node_values = [await self._decode(item, TaskNodeView) for item in node_records]
         node_values = [value if item.node_id == current.node_id else item for item in node_values]
         graph_value = replace(graph, status=_graph_status(tuple(node_values)))
-        graph_candidate = replace(
-            graph_record,
-            storage_version=graph_record.storage_version + 1,
-            state=graph_value.status.value,
-            data=_domain_data(graph_value),
-        )
-        node_candidate = replace(
-            node_record,
-            storage_version=node_record.storage_version + 1,
-            state=value.status.value,
-            lease_owner=value.owner,
-            lease_fence=value.fence,
-            lease_expires_at=value.lease_expires_at,
-            data=_domain_data(value),
-        )
+        graph_candidate = _projected_record(self, graph_record, graph_value)
+        node_candidate = _projected_record(self, node_record, value)
         await _replace_checked(transaction, graph_candidate, graph_record.storage_version)
         await _replace_checked(transaction, node_candidate, node_record.storage_version)
 
@@ -1897,11 +1923,19 @@ class ToolRepositoryImpl(_RepositoryBase):
             alias_key = await transaction.resolve_alias(replay_alias)
             existing_key = alias_key or key
             existing_record = await transaction.get_record(existing_key)
+            if alias_key is not None and existing_record is None:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             if existing_record is not None:
                 existing = await self._decode(existing_record, ToolOperationRecord)
                 if not _tool_replay_matches(existing, record):
                     raise AIError(ErrorCode.IDEMPOTENCY_CONFLICT)
                 if alias_key is None:
+                    guarded = await transaction.guard_record(
+                        existing_record.key_digest,
+                        expected_storage_version=existing_record.storage_version,
+                    )
+                    if guarded is None:
+                        raise AIError(ErrorCode.STORAGE_CONFLICT)
                     await transaction.insert_alias(StoredAlias(replay_alias, existing_key))
                 return existing
             stored = self._stored(
@@ -1978,9 +2012,8 @@ class ToolRepositoryImpl(_RepositoryBase):
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, ToolOperationRecord)
-            if current.owner != owner or current.fence != fence:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             now = await transaction.now()
+            _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
             expires = now + timedelta(seconds=lease_seconds)
             if not await transaction.update_record_lease(
                 record.key_digest,
@@ -2003,6 +2036,8 @@ class ToolRepositoryImpl(_RepositoryBase):
             tenant_id=tenant_id,
             owner=owner,
             fence=fence,
+            terminal_status=ToolOperationStatus.COMPLETED,
+            requested_result=result_object_ref,
             value=lambda current, now: replace(
                 current,
                 status=ToolOperationStatus.COMPLETED,
@@ -2016,10 +2051,23 @@ class ToolRepositoryImpl(_RepositoryBase):
         self, tool_operation_id: str, *, tenant_id: str, owner: str, fence: int, error_code: str
     ) -> ToolOperationRecord:
         def value(current: ToolOperationRecord, now: datetime) -> ToolOperationRecord:
-            status = ToolOperationStatus.EFFECT_UNKNOWN if current.replay_safe else ToolOperationStatus.FAILED
-            return replace(current, status=status, error_code=error_code, lease_expires_at=None, updated_at=now)
+            return replace(
+                current,
+                status=ToolOperationStatus.FAILED,
+                error_code=error_code,
+                lease_expires_at=None,
+                updated_at=now,
+            )
 
-        return await self._finish_tool(tool_operation_id, tenant_id=tenant_id, owner=owner, fence=fence, value=value)
+        return await self._finish_tool(
+            tool_operation_id,
+            tenant_id=tenant_id,
+            owner=owner,
+            fence=fence,
+            terminal_status=ToolOperationStatus.FAILED,
+            requested_error=error_code,
+            value=value,
+        )
 
     async def _required(self, identity: str, tenant_id: str) -> ToolOperationRecord:
         value = await self.get_operation(identity, tenant_id=tenant_id)
@@ -2034,6 +2082,9 @@ class ToolRepositoryImpl(_RepositoryBase):
         tenant_id: str,
         owner: str,
         fence: int,
+        terminal_status: ToolOperationStatus,
+        requested_result: ObjectRef | None = None,
+        requested_error: str | None = None,
         value: object,
     ) -> ToolOperationRecord:
         if tenant_id != self._tenant_id:
@@ -2044,9 +2095,23 @@ class ToolRepositoryImpl(_RepositoryBase):
             if record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             current = await self._decode(record, ToolOperationRecord)
-            if current.owner != owner or current.fence != fence:
-                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
             now = await transaction.now()
+            if current.status is ToolOperationStatus.COMPLETED:
+                if terminal_status is ToolOperationStatus.COMPLETED and current.result_object_ref == requested_result:
+                    return current
+                if terminal_status is ToolOperationStatus.COMPLETED:
+                    raise AIError(ErrorCode.TOOL_RESULT_CONFLICT)
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            if current.status is ToolOperationStatus.FAILED:
+                if terminal_status is ToolOperationStatus.FAILED and current.error_code == requested_error:
+                    return current
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            if current.status in {
+                ToolOperationStatus.EFFECT_UNKNOWN,
+                ToolOperationStatus.CANCELLED,
+            }:
+                raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+            _require_live_tool_lease(current, owner=owner, fence=fence, now=now)
             next_value = value(current, now)
             await self._replace_tool_in_transaction(transaction, record, next_value)
             return next_value
@@ -2059,15 +2124,7 @@ class ToolRepositoryImpl(_RepositoryBase):
         record: StoredRecord,
         value: ToolOperationRecord,
     ) -> None:
-        candidate = replace(
-            record,
-            storage_version=record.storage_version + 1,
-            state=value.status.value,
-            lease_owner=value.owner,
-            lease_fence=value.fence,
-            lease_expires_at=value.lease_expires_at,
-            data=_domain_data(value),
-        )
+        candidate = _projected_record(self, record, value)
         await _replace_checked(transaction, candidate, record.storage_version)
 
 
@@ -2105,6 +2162,34 @@ def build_repository_bundle(
             tools=ToolRepositoryImpl(store, namespace=namespace, tenant_id=tenant_id),
         )
     return values
+
+
+def _canonical_record_identity(kind: str, value: object) -> object:
+    if isinstance(value, IdempotencyRecord):
+        return [value.scope, value.idempotency_key_digest]
+    if isinstance(value, TaskGraphView):
+        return value.graph_id
+    if isinstance(value, TaskNodeView):
+        return [value.graph_id, value.node_id]
+    if isinstance(value, ToolOperationRecord):
+        return value.tool_operation_id
+    if isinstance(value, SessionRecord):
+        return value.session_id
+    if isinstance(value, ExecutionRecord):
+        return value.execution_id
+    if isinstance(value, MemoryRecord):
+        return value.memory_id
+    if isinstance(value, ArtifactRecord):
+        return value.artifact_id
+    if isinstance(value, EvaluationRecord):
+        return value.evaluation_id
+    if isinstance(value, RecoveryCheckpoint):
+        return value.execution_id
+    if isinstance(value, ApprovalRecord):
+        return value.approval_id
+    if isinstance(value, ExternalCallRecord):
+        return value.call_id
+    raise TypeError(f"unsupported record kind: {kind}")
 
 
 def _domain_data(value: object) -> dict[str, object]:
@@ -2210,6 +2295,17 @@ def _status_value(value: object) -> str | None:
 async def _replace_checked(transaction: StateTransaction, candidate: StoredRecord, expected: int) -> None:
     if not await transaction.replace_record(candidate, expected_storage_version=expected):
         raise AIError(ErrorCode.STORAGE_CONFLICT)
+
+
+def _projected_record(
+    repository: _RepositoryBase,
+    current: StoredRecord,
+    value: object,
+) -> StoredRecord:
+    _require_tenant(value, repository._tenant_id)
+    identity = _canonical_record_identity(current.kind, value)
+    projected = repository._stored(current.kind, identity, value, state=_record_state(value))
+    return replace(projected, storage_version=current.storage_version + 1)
 
 
 async def _cas_value(repository: _ResourceRepository[ValueT], identity: str, current: ValueT, value: ValueT) -> ValueT:
@@ -2343,6 +2439,34 @@ def _execution_replay_matches(left: ExecutionRecord, right: ExecutionRecord) -> 
     )
 
 
+def _require_live_task_lease(node: TaskNodeView, lease: TaskLease, now: datetime) -> None:
+    if (
+        node.status is not TaskStatus.RUNNING
+        or node.owner != lease.owner
+        or node.fence != lease.fence
+        or node.lease_expires_at is None
+        or node.lease_expires_at <= now
+    ):
+        raise AIError(ErrorCode.TASK_FENCE_STALE)
+
+
+def _require_live_tool_lease(
+    current: ToolOperationRecord,
+    *,
+    owner: str,
+    fence: int,
+    now: datetime,
+) -> None:
+    if (
+        current.status is not ToolOperationStatus.CLAIMED
+        or current.owner != owner
+        or current.fence != fence
+        or current.lease_expires_at is None
+        or current.lease_expires_at <= now
+    ):
+        raise AIError(ErrorCode.TOOL_OPERATION_CONFLICT)
+
+
 def _graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
     statuses = {node.status for node in nodes}
     if statuses and statuses <= {TaskStatus.SUCCEEDED}:
@@ -2358,19 +2482,19 @@ def _graph_status(nodes: tuple[TaskNodeView, ...]) -> TaskStatus:
 
 def _record_cursor(record: StoredRecord) -> str:
     payload = {
-        "sort_key": base64.urlsafe_b64encode(record.sort_key).decode("ascii"),
+        "sort_key": record.sort_key,
         "key_digest": record.key_digest.hex(),
     }
     return base64.urlsafe_b64encode(canonical_json_bytes(payload)).decode("ascii")
 
 
-def _decode_record_cursor(cursor: str | None) -> tuple[bytes | None, bytes | None]:
+def _decode_record_cursor(cursor: str | None) -> tuple[str | None, bytes | None]:
     if cursor is None:
         return None, None
     try:
         raw = base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4))
         value = json.loads(raw.decode("utf-8"))
-        sort_key = base64.urlsafe_b64decode(str(value["sort_key"]) + "=" * (-len(str(value["sort_key"])) % 4))
+        sort_key = str(value["sort_key"])
         key_digest = bytes.fromhex(str(value["key_digest"]))
         if not sort_key or len(key_digest) != 32:
             raise ValueError("cursor identity")

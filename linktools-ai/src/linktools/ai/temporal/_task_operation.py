@@ -265,6 +265,14 @@ class _RuntimeTaskOperation:
             request.graph_id,
             tenant_id=request.tenant_id,
         )
+        current = _find_node_view(
+            await self._repository.list_nodes(
+                request.graph_id,
+                tenant_id=request.tenant_id,
+            ),
+            node.node_id,
+        )
+        _validate_node_view(current, node, request.graph_id)
         _logger.info(
             "Temporal task node settled from durable state: graph=%s node=%s status=%s",
             request.graph_id,

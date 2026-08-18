@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import tempfile
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -28,7 +27,6 @@ from ._database import (
     sql_text_key,
     sql_unique,
 )
-from ._dialects import is_retryable_sql_transaction
 from ._files import sync_directory, write_json_atomic
 from ._lock import FilesystemMutationLock
 
@@ -215,10 +213,15 @@ class FilesystemObjectStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             destination, metadata = self._paths(key)
             async with FilesystemMutationLock(self._root / "object.lock"):
-                if destination.exists():
-                    current = await asyncio_to_thread(destination.read_bytes)
-                    if _digest(current) != expected_digest:
+                if destination.exists() or metadata.exists():
+                    current = await asyncio_to_thread(
+                        lambda: _read_filesystem_metadata(metadata, destination, key)
+                    )
+                    if current.digest != expected_digest or current.size != expected_size:
                         raise AIError(ErrorCode.STORAGE_CONFLICT)
+                    actual_size, actual_digest = await asyncio_to_thread(lambda: _hash_file(destination))
+                    if actual_size != current.size or actual_digest != current.digest:
+                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 else:
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(name, destination)
@@ -238,11 +241,10 @@ class FilesystemObjectStore:
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)
-        destination, _ = self._paths(key)
-        if not destination.exists():
+        destination, metadata = self._paths(key)
+        if not destination.exists() and not metadata.exists():
             return None
-        data = await asyncio_to_thread(destination.read_bytes)
-        return ObjectStat(key, _digest(data), len(data))
+        return await asyncio_to_thread(lambda: _read_filesystem_metadata(metadata, destination, key))
 
     async def validate_integrity(self) -> None:
         expected_files: set[Path] = set()
@@ -261,6 +263,9 @@ class FilesystemObjectStore:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
             if stat is None or stat.digest != expected_digest or stat.size != expected_size:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+            actual_size, actual_digest = await asyncio_to_thread(lambda: _hash_file(destination))
+            if actual_size != expected_size or actual_digest != expected_digest:
+                raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
             expected_files.update({metadata, destination})
         actual_files = {path for path in (self._root / "objects").rglob("*") if path.is_file()}
         if actual_files != expected_files:
@@ -268,9 +273,10 @@ class FilesystemObjectStore:
 
     async def _open(self, key: str) -> AsyncIterator[bytes]:
         _validate_key(key)
-        destination, _ = self._paths(key)
-        if not destination.exists():
-            raise AIError(ErrorCode.STORAGE_NOT_FOUND)
+        destination, metadata = self._paths(key)
+        expected = await asyncio_to_thread(
+            lambda: _read_filesystem_metadata(metadata, destination, key)
+        )
         digest = hashlib.sha256()
         size = 0
         with destination.open("rb") as handle:
@@ -278,8 +284,7 @@ class FilesystemObjectStore:
                 digest.update(chunk)
                 size += len(chunk)
                 yield chunk
-        current = await self.stat(key)
-        if current is None or current.size != size or current.digest != digest.hexdigest():
+        if expected.size != size or expected.digest != digest.hexdigest():
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
 
     def open(self, key: str) -> AsyncIterator[bytes]:
@@ -311,6 +316,8 @@ class SqlObjectStore:
     async def put(
         self, key: str, chunks: AsyncIterator[bytes], *, expected_size: int, expected_digest: str
     ) -> ObjectStat:
+        from sqlalchemy.exc import IntegrityError
+
         _validate_put(key, expected_size, expected_digest)
         temporary_root = Path(tempfile.mkdtemp(prefix="linktools-object-"))
         temporary = temporary_root / "payload"
@@ -318,35 +325,23 @@ class SqlObjectStore:
             size, digest = await _spool_file(chunks, -1, str(temporary), expected_size)
             if size != expected_size or digest != expected_digest:
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            for attempt in range(8):
-                try:
-                    await self._insert(key, temporary, size, digest)
-                    return ObjectStat(key, digest, size)
-                except BaseException as error:
-                    if not is_retryable_sql_transaction(error) or attempt == 7:
-                        if isinstance(error, AIError):
-                            raise
-                        raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
-                    _logger.warning(
-                        "retrying transient SQL ObjectStore mutation: attempt=%s",
-                        attempt + 1,
-                    )
-            raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
+            try:
+                await self._insert(key, temporary, size, digest)
+            except IntegrityError:
+                existing = await self.stat(key)
+                if existing is None or existing.digest != digest or existing.size != size:
+                    raise AIError(ErrorCode.STORAGE_CONFLICT)
+            return ObjectStat(key, digest, size)
         finally:
             shutil.rmtree(temporary_root, ignore_errors=True)
 
     async def _insert(self, key: str, path: Path, size: int, digest: str) -> None:
         from sqlalchemy import insert
-        from sqlalchemy.exc import IntegrityError
 
         table = self._metadata.tables["ai_objects"]
         chunks = self._metadata.tables["ai_object_chunks"]
         key_digest = _key_digest(self.store_id, key)
-        session = self._context.sessions()
-        transaction_context = session.begin()
-        try:
-            await transaction_context.__aenter__()
-            try:
+        async def execute(session) -> None:
                 await session.execute(
                     insert(table).values(
                         key_digest=key_digest.hex(),
@@ -367,21 +362,7 @@ class SqlObjectStore:
                             rows.clear()
                 if rows:
                     await session.execute(insert(chunks), rows)
-            except BaseException:
-                await transaction_context.__aexit__(*sys.exc_info())
-                raise
-            try:
-                await transaction_context.__aexit__(None, None, None)
-            except BaseException as error:
-                raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-        except IntegrityError:
-            existing = await self.stat(key)
-            if existing is None:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-            if existing.digest != digest or existing.size != size:
-                raise AIError(ErrorCode.STORAGE_CONFLICT)
-        finally:
-            await session.close()
+        await self._context.run_mutation(execute)
 
     async def stat(self, key: str) -> ObjectStat | None:
         _validate_key(key)
@@ -638,6 +619,35 @@ def _key_digest(store_id: str, key: str) -> bytes:
 
 def _digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _read_filesystem_metadata(metadata: Path, destination: Path, key: str) -> ObjectStat:
+    if not metadata.is_file() or not destination.is_file():
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    try:
+        value = json.loads(metadata.read_text(encoding="utf-8"))
+        if not isinstance(value, Mapping):
+            raise ValueError("object metadata must be an object")
+        if value.get("key") != key:
+            raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+        digest = str(value["digest"])
+        size = int(value["size"])
+    except (OSError, TypeError, ValueError, KeyError) as error:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR) from error
+    _validate_digest(digest)
+    if size < 0:
+        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+    return ObjectStat(key, digest, size)
+
+
+def _hash_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(_CHUNK_SIZE):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
 
 
 def _validate_store_id(value: str) -> None:

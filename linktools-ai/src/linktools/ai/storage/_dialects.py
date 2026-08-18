@@ -44,6 +44,17 @@ class SqlErrorKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class SqlTransactionPhase(StrEnum):
+    BODY = "body"
+    COMMIT = "commit"
+
+
+class SqlTransactionDisposition(StrEnum):
+    RETRYABLE_ABORTED = "retryable_aborted"
+    NONRETRYABLE_ABORTED = "nonretryable_aborted"
+    COMMIT_UNKNOWN = "commit_unknown"
+
+
 @runtime_checkable
 class SqlAlchemyDialect(Protocol):
     @property
@@ -110,6 +121,14 @@ class SqlAlchemyDialect(Protocol):
     ) -> "tuple[RowMapping, ...]": ...
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind: ...
+
+    def classify_transaction_error(
+        self,
+        error: BaseException,
+        *,
+        phase: SqlTransactionPhase,
+        connection_invalidated: bool,
+    ) -> SqlTransactionDisposition: ...
 
 
 class SQLiteDialect:
@@ -261,6 +280,15 @@ class SQLiteDialect:
 
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         return _classify_error(error, ("unique constraint", "unique failed"))
+
+    def classify_transaction_error(
+        self,
+        error: BaseException,
+        *,
+        phase: SqlTransactionPhase,
+        connection_invalidated: bool,
+    ) -> SqlTransactionDisposition:
+        return _classify_transaction_error(error, phase, connection_invalidated)
 
 
 class PostgreSQLDialect(SQLiteDialect):
@@ -525,6 +553,15 @@ class MySQLDialect(SQLiteDialect):
     def classify_integrity_error(self, error: BaseException) -> IntegrityViolationKind:
         return _classify_error(error, ("duplicate entry", "1062"))
 
+    def classify_transaction_error(
+        self,
+        error: BaseException,
+        *,
+        phase: SqlTransactionPhase,
+        connection_invalidated: bool,
+    ) -> SqlTransactionDisposition:
+        return _classify_transaction_error(error, phase, connection_invalidated)
+
 
 def dialect_for_name(name: str) -> SqlAlchemyDialect:
     if name == "sqlite":
@@ -579,6 +616,28 @@ def classify_sql_error(error: BaseException) -> SqlErrorKind:
 
 def is_retryable_sql_transaction(error: BaseException) -> bool:
     return classify_sql_error(error) is SqlErrorKind.RETRYABLE_TRANSACTION
+
+
+def _classify_transaction_error(
+    error: BaseException,
+    phase: SqlTransactionPhase,
+    connection_invalidated: bool,
+) -> SqlTransactionDisposition:
+    from sqlalchemy.exc import IntegrityError
+
+    if isinstance(error, AIError):
+        return SqlTransactionDisposition.NONRETRYABLE_ABORTED
+    if isinstance(error, IntegrityError):
+        return SqlTransactionDisposition.NONRETRYABLE_ABORTED
+    if classify_sql_error(error) is SqlErrorKind.RETRYABLE_TRANSACTION:
+        if phase is SqlTransactionPhase.BODY:
+            return SqlTransactionDisposition.RETRYABLE_ABORTED
+        if not connection_invalidated:
+            return SqlTransactionDisposition.RETRYABLE_ABORTED
+        return SqlTransactionDisposition.COMMIT_UNKNOWN
+    if phase is SqlTransactionPhase.COMMIT:
+        return SqlTransactionDisposition.COMMIT_UNKNOWN
+    return SqlTransactionDisposition.NONRETRYABLE_ABORTED
 
 
 def _is_sqlite_busy(error: BaseException) -> bool:
@@ -663,6 +722,8 @@ __all__ = [
     "SQLiteDialect",
     "SqlAlchemyDialect",
     "SqlErrorKind",
+    "SqlTransactionDisposition",
+    "SqlTransactionPhase",
     "SqlValue",
     "classify_integrity_error_by_message",
     "classify_sql_error",

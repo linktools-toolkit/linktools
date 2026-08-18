@@ -3,15 +3,18 @@
 """Domain-independent SQL context, metadata primitives, and validation."""
 
 import asyncio
-from collections.abc import Mapping
+import sys
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn, TypeVar
 
 from linktools.core import environ
 
 from ..errors import AIError, ErrorCode
 from ._dialects import (
     SqlAlchemyDialect,
+    SqlTransactionDisposition,
+    SqlTransactionPhase,
     dialect_for_name,
 )
 
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
 
 _logger = environ.get_logger("ai.storage.database")
 _PROVISION_LOCK = asyncio.Lock()
+ValueT = TypeVar("ValueT")
 
 
 @dataclass(slots=True)
@@ -64,6 +68,64 @@ class SqlStorageContext:
         self._closed = True
         if self.owns_engine:
             await self.engine.dispose()
+
+    async def run_mutation(
+        self,
+        callback: Callable[["AsyncSession"], Awaitable[ValueT]],
+        *,
+        retry_limit: int = 8,
+    ) -> ValueT:
+        if retry_limit < 1:
+            raise ValueError("retry_limit must be positive")
+        for attempt in range(retry_limit):
+            session = self.sessions()
+            transaction = session.begin()
+            entered = False
+            try:
+                await transaction.__aenter__()
+                entered = True
+                try:
+                    result = await callback(session)
+                except BaseException as error:
+                    disposition = self.dialect.classify_transaction_error(
+                        error,
+                        phase=SqlTransactionPhase.BODY,
+                        connection_invalidated=_connection_invalidated(error),
+                    )
+                    await transaction.__aexit__(*sys.exc_info())
+                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
+                        _logger.warning(
+                            "retrying SQL mutation after aborted body: dialect=%s attempt=%s",
+                            self.dialect.name,
+                            attempt + 1,
+                        )
+                        continue
+                    raise
+                try:
+                    await transaction.__aexit__(None, None, None)
+                except BaseException as error:
+                    disposition = self.dialect.classify_transaction_error(
+                        error,
+                        phase=SqlTransactionPhase.COMMIT,
+                        connection_invalidated=_connection_invalidated(error),
+                    )
+                    if disposition is SqlTransactionDisposition.RETRYABLE_ABORTED and attempt + 1 < retry_limit:
+                        _logger.warning(
+                            "retrying SQL mutation after aborted commit: dialect=%s attempt=%s",
+                            self.dialect.name,
+                            attempt + 1,
+                        )
+                        continue
+                    if disposition is SqlTransactionDisposition.COMMIT_UNKNOWN:
+                        raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
+                    raise
+                _logger.debug("SQL mutation committed: dialect=%s attempt=%s", self.dialect.name, attempt + 1)
+                return result
+            finally:
+                if not entered:
+                    await transaction.__aexit__(*sys.exc_info())
+                await session.close()
+        raise AIError(ErrorCode.STORAGE_UNAVAILABLE)
 
     @property
     def closed(self) -> bool:
@@ -747,6 +809,12 @@ def _configure_sqlite_connection(
         cursor.execute("PRAGMA busy_timeout=5000")
     finally:
         cursor.close()
+
+
+def _connection_invalidated(error: BaseException) -> bool:
+    from sqlalchemy.exc import DBAPIError
+
+    return isinstance(error, DBAPIError) and error.connection_invalidated
 
 
 __all__ = [

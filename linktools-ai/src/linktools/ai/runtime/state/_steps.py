@@ -116,19 +116,23 @@ class StagingStepStore(StepStore):
             raise AIError(ErrorCode.STORAGE_NOT_FOUND)
         async with self._lock:
             values = self._effects.setdefault(record.run_id, [])
-            for index, current in enumerate(values):
-                if current.tool_call_id == record.tool_call_id:
-                    values[index] = record
-                    return
+            if record in values:
+                return
             values.append(record)
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
         self._ensure_open()
-        return next((value for value in self._effects.get(run_id, ()) if value.tool_call_id == tool_call_id), None)
+        return next(
+            (value for value in reversed(self._effects.get(run_id, ())) if value.tool_call_id == tool_call_id),
+            None,
+        )
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         self._ensure_open()
-        return [value for value in self._effects.get(run_id, ()) if value.status != "completed"]
+        latest: dict[str, ToolEffectRecord] = {}
+        for value in self._effects.get(run_id, ()):
+            latest[value.tool_call_id] = value
+        return [value for value in latest.values() if value.status == "started"]
 
     async def release_run(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
@@ -296,13 +300,14 @@ class StateStepArchive(StepStore):
                 run_id,
                 "effect",
                 subject=subject_digest(["tool_call", tool_call_id]),
+                latest=True,
             )
         ]
-        return next((value for value in values if value.tool_call_id == tool_call_id), None)
+        return None if not values else values[0]
 
     async def list_unresolved_tool_effects(self, *, run_id: str) -> list[ToolEffectRecord]:
         values = [_decode_step(value.data) for value in await self._facts(run_id, "effect", latest_per_subject=True)]
-        return [value for value in values if value.status != "completed"]
+        return [value for value in values if value.status == "started"]
 
     async def release_run(self, run_id: str) -> None:
         async def mutate(transaction: StateTransaction) -> None:
@@ -324,16 +329,18 @@ class StateStepArchive(StepStore):
         data = _encode_step(value)
 
         async def mutate(transaction: StateTransaction) -> None:
-            if await transaction.get_record(owner) is None:
+            owner_record = await transaction.get_record(owner)
+            if owner_record is None:
                 raise AIError(ErrorCode.STORAGE_NOT_FOUND)
             if subject is not None:
                 existing = await transaction.list_facts(FactQuery(stream, subject_digest=subject))
-                if existing:
-                    latest = existing[-1]
-                    if latest.data == data and latest.state == kind:
-                        return
-                    if family == "event" or (family == "effect" and latest.state == kind):
-                        raise AIError(ErrorCode.STORAGE_CONFLICT)
+                if any(fact.data == data and fact.state == kind for fact in existing):
+                    return
+            if await transaction.guard_record(
+                owner,
+                expected_storage_version=owner_record.storage_version,
+            ) is None:
+                raise AIError(ErrorCode.STORAGE_CONFLICT)
             sequence = await transaction.next_sequence(self._sequence(run_id, family))
             await transaction.insert_fact(StoredFact(stream, sequence, owner, fact_kind, subject, kind, data))
 
@@ -553,9 +560,9 @@ def _step_subject(value: object) -> bytes | None:
     if isinstance(value, ToolEffectRecord):
         return subject_digest(["tool_call", value.tool_call_id])
     if isinstance(value, StepEvent):
-        return subject_digest(["event", _step_event_kind(value), value.step_index])
+        return subject_digest(["event_identity", _encode_step(value)])
     if isinstance(value, ContinuableSnapshot):
-        return subject_digest(["snapshot", value.step_index])
+        return subject_digest(["snapshot_identity", _encode_step(value)])
     return None
 
 

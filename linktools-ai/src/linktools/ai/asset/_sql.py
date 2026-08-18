@@ -3,7 +3,6 @@
 """Three-table SQL Asset backend with optimistic global revision CAS."""
 
 import hashlib
-import sys
 from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -38,7 +37,6 @@ from ..storage import (
     sql_sha256,
     sql_table_options,
     sql_unique,
-    is_retryable_sql_transaction,
 )
 from ._domain import AssetInfo, AssetKey, AssetRoot
 
@@ -108,7 +106,10 @@ def build_asset_sql_metadata(*, metadata: "MetaData | None" = None) -> "MetaData
             "payload_json",
             JSON,
             nullable=False,
-            comment="Versioned canonical current AssetInfo payload including status, metadata, content reference, and semantic timestamps.",
+            comment=(
+                "Versioned canonical current AssetInfo payload including status, metadata, "
+                "content reference, and semantic timestamps."
+            ),
         ),
         *sql_audit_columns(
             "Database audit time of the latest current-projection update.",
@@ -198,23 +199,22 @@ class SqlAssetBackend:
     async def initialize(self) -> None:
         await self._context.initialize(metadata=self._metadata)
         table = self._metadata.tables["ai_asset_heads"]
-        session = self._context.sessions()
-        try:
-            async with session.begin():
-                from sqlalchemy import insert, select
 
-                existing = await session.scalar(
-                    select(table.c.namespace_digest).where(table.c.namespace_digest == self._namespace_digest.hex())
-                )
-                if existing is None:
-                    await session.execute(
-                        insert(table).values(
-                            namespace_digest=self._namespace_digest.hex(),
-                            store_revision=0,
-                        )
+        async def initialize_head(session) -> None:
+            from sqlalchemy import insert, select
+
+            existing = await session.scalar(
+                select(table.c.namespace_digest).where(table.c.namespace_digest == self._namespace_digest.hex())
+            )
+            if existing is None:
+                await session.execute(
+                    insert(table).values(
+                        namespace_digest=self._namespace_digest.hex(),
+                        store_revision=0,
                     )
-        finally:
-            await session.close()
+                )
+
+        await self._context.run_mutation(initialize_head)
         self._ready = True
         _logger.info("SQL Asset backend initialized: namespace=%s", self._root.digest[:16])
 
@@ -352,9 +352,6 @@ class SqlAssetBackend:
         except AIError:
             raise
         except BaseException as error:
-            if is_retryable_sql_transaction(error):
-                _logger.warning("retrying transient SQL Asset mutation")
-                return None
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
 
     async def _apply_once_transaction(
@@ -402,81 +399,61 @@ class SqlAssetBackend:
         entries = self._metadata.tables["ai_asset_entries"]
         history = self._metadata.tables["ai_asset_changes"]
         heads = self._metadata.tables["ai_asset_heads"]
-        session = self._context.sessions()
         values: list[object] = []
-        transaction_context = session.begin()
-        callback_completed = False
-        try:
-            await transaction_context.__aenter__()
-            try:
-                from sqlalchemy import func, update
+        async def execute(session) -> StorageBatchResult[AssetInfo, AssetKey] | None:
+            from sqlalchemy import func, update
 
-                head_result = await session.execute(
-                    update(heads)
-                    .where(
-                        heads.c.namespace_digest == self._namespace_digest.hex(),
-                        heads.c.store_revision == current_revision,
-                    )
-                    .values(
+            head_result = await session.execute(
+                update(heads)
+                .where(
+                    heads.c.namespace_digest == self._namespace_digest.hex(),
+                    heads.c.store_revision == current_revision,
+                )
+                .values(
+                    store_revision=next_revision,
+                    updated_at=func.current_timestamp(),
+                )
+            )
+            if head_result.rowcount != 1:
+                return None
+            for change, info in prepared:
+                data = _info_data(info)
+                key_digest = _asset_key_digest(self._namespace_digest, change.key).hex()
+                await session.execute(
+                    history.insert().values(
+                        key_digest=key_digest,
+                        entry_revision=info.revision.value,
+                        namespace_digest=self._namespace_digest.hex(),
                         store_revision=next_revision,
-                        updated_at=func.current_timestamp(),
+                        payload_json=data,
                     )
                 )
-                if head_result.rowcount != 1:
-                    await transaction_context.__aexit__(None, None, None)
-                    return None
-                for change, info in prepared:
-                    data = _info_data(info)
-                    key_digest = _asset_key_digest(
-                        self._namespace_digest,
-                        change.key,
-                    ).hex()
-                    await session.execute(
-                        history.insert().values(
-                            key_digest=key_digest,
-                            entry_revision=info.revision.value,
-                            namespace_digest=self._namespace_digest.hex(),
-                            store_revision=next_revision,
-                            payload_json=data,
-                        )
-                    )
-                    await self._context.dialect.upsert(
-                        session,
-                        table=entries,
-                        values={
-                            "key_digest": key_digest,
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                        },
-                        set_values={
-                            "namespace_digest": self._namespace_digest.hex(),
-                            "entry_revision": info.revision.value,
-                            "store_revision": next_revision,
-                            "payload_json": data,
-                            "updated_at": func.current_timestamp(),
-                        },
-                        index_elements=("key_digest",),
-                    )
-                    values.append(_result(change, info, next_revision))
-                callback_completed = True
-            except BaseException:
-                await transaction_context.__aexit__(*sys.exc_info())
-                raise
-            try:
-                await transaction_context.__aexit__(None, None, None)
-            except BaseException as error:
-                if callback_completed:
-                    raise AIError(ErrorCode.STORAGE_COMMIT_UNKNOWN) from error
-                raise
-        finally:
-            await session.close()
-        return StorageBatchResult(
-            StorageRevision(str(next_revision)),
-            True,
-            tuple(values),
-        )
+                await self._context.dialect.upsert(
+                    session,
+                    table=entries,
+                    values={
+                        "key_digest": key_digest,
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                    },
+                    set_values={
+                        "namespace_digest": self._namespace_digest.hex(),
+                        "entry_revision": info.revision.value,
+                        "store_revision": next_revision,
+                        "payload_json": data,
+                        "updated_at": func.current_timestamp(),
+                    },
+                    index_elements=("key_digest",),
+                )
+                values.append(_result(change, info, next_revision))
+            return StorageBatchResult(StorageRevision(str(next_revision)), True, tuple(values))
+
+        result = await self._context.run_mutation(execute)
+        if result is None:
+            return None
+        return result
 
     async def _load_current(self, keys: Sequence[AssetKey]) -> dict[AssetKey, AssetInfo | None]:
         entries = self._metadata.tables["ai_asset_entries"]

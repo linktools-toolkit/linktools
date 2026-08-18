@@ -7,9 +7,7 @@ small physical contract shared by memory, filesystem, and SQL stores.
 """
 
 import asyncio
-import base64
 import hashlib
-import struct
 from contextvars import ContextVar, Token
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -71,7 +69,7 @@ class StoredRecord:
     scope_digest: bytes | None
     parent_digest: bytes | None
     kind: str
-    sort_key: bytes
+    sort_key: str
     state: str | None
     storage_version: int
     lease_owner: str | None
@@ -90,8 +88,12 @@ class StoredRecord:
             raise ValueError("record kind must contain at most 32 characters")
         if self.kind in {".", ".."} or any(character in self.kind for character in "/\\"):
             raise ValueError("record kind contains a path separator")
-        if not isinstance(self.sort_key, bytes) or not 0 < len(self.sort_key) <= 1024:
-            raise ValueError("record sort_key must contain 1..1024 bytes")
+        if (
+            not isinstance(self.sort_key, str)
+            or not 0 < len(self.sort_key) <= 128
+            or self.sort_key.isascii() is False
+        ):
+            raise ValueError("record sort_key must contain 1..128 ASCII characters")
         if not isinstance(self.storage_version, int) or self.storage_version < 0:
             raise ValueError("storage_version must be non-negative")
         if not isinstance(self.lease_fence, int) or self.lease_fence < 0:
@@ -169,7 +171,7 @@ class RecordQuery:
     scope_digest: bytes | None = None
     parent_digest: bytes | None = None
     states: frozenset[str] | None = None
-    after_sort_key: bytes | None = None
+    after_sort_key: str | None = None
     after_key_digest: bytes | None = None
     limit: int | None = None
 
@@ -196,6 +198,7 @@ class FactQuery:
     after_sequence: int | None = None
     limit: int | None = None
     subject_digest: bytes | None = None
+    latest: bool = False
     latest_per_subject: bool = False
 
     def __post_init__(self) -> None:
@@ -204,6 +207,8 @@ class FactQuery:
             raise ValueError("after_sequence must be non-negative")
         if self.subject_digest is not None:
             _require_digest(self.subject_digest, "subject_digest")
+        if self.latest and self.latest_per_subject:
+            raise ValueError("latest and latest_per_subject cannot both be true")
         if self.latest_per_subject and self.subject_digest is not None:
             raise ValueError("latest_per_subject cannot be combined with subject_digest")
         _validate_limit(self.limit)
@@ -230,6 +235,12 @@ class StateTransaction(Protocol):
     async def get_record(self, key: bytes) -> StoredRecord | None: ...
     async def get_records(self, keys: Sequence[bytes]) -> Mapping[bytes, StoredRecord]: ...
     async def insert_record(self, record: StoredRecord) -> None: ...
+    async def guard_record(
+        self,
+        key: bytes,
+        *,
+        expected_storage_version: int,
+    ) -> StoredRecord | None: ...
     async def replace_record(self, record: StoredRecord, *, expected_storage_version: int) -> bool: ...
     async def update_record_lease(
         self,
@@ -350,13 +361,13 @@ def subject_digest(identity: JsonValue) -> bytes:
     return _digest(["subject", identity])
 
 
-def sortable_id(value: str) -> bytes:
+def sortable_id(value: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("sortable id must be non-empty")
-    return encode_sort_key(value.encode("utf-8")).encode("ascii")
+    return "i:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def sortable_timestamp(value: datetime, suffix: str) -> bytes:
+def sortable_timestamp(value: datetime, suffix: str) -> str:
     if value.tzinfo is None:
         raise ValueError("sortable timestamp must be timezone-aware")
     micros = int(value.astimezone(timezone.utc).timestamp() * 1_000_000)
@@ -364,32 +375,23 @@ def sortable_timestamp(value: datetime, suffix: str) -> bytes:
         raise ValueError("sortable timestamp is outside the supported range")
     if not suffix:
         raise ValueError("sortable timestamp suffix is required")
-    return encode_sort_key(
-        struct.pack(">Q", micros) + suffix.encode("utf-8")
-    ).encode("ascii")
+    return "t:" + f"{micros:016x}" + ":" + hashlib.sha256(suffix.encode("utf-8")).hexdigest()
 
 
-def encode_sort_key(value: bytes) -> str:
-    if not isinstance(value, bytes) or not 0 < len(value) <= 1024:
-        raise ValueError("sort key must contain 1..1024 bytes")
-    if value.startswith(b"~"):
-        try:
-            token = value.decode("ascii")
-        except UnicodeDecodeError:
-            token = ""
-        if token and len(token) <= 128:
-            return token
-    if len(value) > 96:
-        return "~" + base64.urlsafe_b64encode(value[:32]).decode("ascii").rstrip("=") + "-" + hashlib.sha256(value).hexdigest()
-    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+def sortable_identity(identity: JsonValue) -> str:
+    return "i:" + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
 
-def decode_sort_key(value: str) -> bytes:
+def encode_sort_key(value: str) -> str:
     if not isinstance(value, str) or not value:
-        raise ValueError("encoded sort key is required")
-    if value.startswith("~"):
-        return value.encode("ascii")
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+        raise ValueError("sort key is required")
+    if len(value) > 128 or not value.isascii():
+        raise ValueError("sort key must contain 1..128 ASCII characters")
+    return value
+
+
+def decode_sort_key(value: str) -> str:
+    return encode_sort_key(value)
 
 
 def validate_record_identity(record: StoredRecord) -> None:
@@ -403,8 +405,7 @@ def validate_record_identity(record: StoredRecord) -> None:
     for name, value in values:
         if value is not None and (not isinstance(value, bytes) or len(value) != 32):
             raise ValueError(f"record {name} is invalid")
-    if len(encode_sort_key(record.sort_key)) > 128:
-        raise ValueError("record sort_key exceeds SQL capacity")
+    encode_sort_key(record.sort_key)
     try:
         canonical_json_bytes(record.data)
     except (TypeError, ValueError) as error:
@@ -419,6 +420,7 @@ def validate_record_replacement(current: StoredRecord, candidate: StoredRecord) 
         or current.scope_digest != candidate.scope_digest
         or current.parent_digest != candidate.parent_digest
         or current.kind != candidate.kind
+        or current.sort_key != candidate.sort_key
     ):
         raise ValueError("record physical identity cannot change")
 
@@ -449,6 +451,7 @@ __all__ = [
     "scope_digest",
     "sequence_key",
     "sortable_id",
+    "sortable_identity",
     "sortable_timestamp",
     "stream_digest",
     "subject_digest",
