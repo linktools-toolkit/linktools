@@ -8,8 +8,8 @@ small physical contract shared by memory, filesystem, and SQL stores.
 
 import asyncio
 import hashlib
-from contextvars import ContextVar, Token
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Generic, Protocol, TypeVar
@@ -274,6 +274,12 @@ StateCallback = Callable[[StateTransaction], Awaitable[ValueT]]
 
 
 class StateStore(Protocol):
+    """Physical StateStore contract with retry-safe, transaction-local callbacks.
+
+    Mutation callbacks must not perform external side effects outside the
+    supplied StateTransaction.
+    """
+
     async def initialize(self) -> None: ...
     async def close(self) -> None: ...
     async def read(self, fn: StateCallback[ValueT]) -> ValueT: ...

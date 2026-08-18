@@ -16,11 +16,11 @@ from ._store import (
     OperationQuery,
     RecordQuery,
     StateCallback,
+    StateTransaction,
     StoredAlias,
     StoredFact,
     StoredOperation,
     StoredRecord,
-    StateTransaction,
     active_state_transaction,
     bind_state_transaction,
     reset_state_transaction,
@@ -262,6 +262,13 @@ class _MemoryTransaction:
         self.sequences[key] = value
         return value
 
+    async def reserve_sequence(self, key: bytes, count: int) -> int:
+        if count < 1:
+            raise ValueError("sequence reservation count must be positive")
+        value = self.sequences.get(key, 0) + count
+        self.sequences[key] = value
+        return value
+
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         current = self.sequences.get(key, 0)
         if current != expected:
@@ -278,6 +285,10 @@ class _MemoryTransaction:
         if fact.owner_key_digest not in self.guarded_record_keys:
             raise RuntimeError("fact owner must be guarded in the current transaction")
         self.facts[key] = fact
+
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        for fact in facts:
+            await self.insert_fact(fact)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         values = [fact for fact in self.facts.values() if fact.stream_digest == query.stream_digest]

@@ -5,6 +5,7 @@
 import asyncio
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from typing import Protocol, cast
 
 from linktools.core import environ
 
@@ -39,11 +40,11 @@ from .service_api import (
     EvaluationHandle,
     EvaluationService,
     EventService,
-    ExecutionStreamEvent,
     ExecutionHandle,
     ExecutionRequest,
     ExecutionResult,
     ExecutionService,
+    ExecutionStreamEvent,
     ReplayEvaluationRequest,
     ResumeSessionRequest,
     RunEvaluationRequest,
@@ -54,6 +55,29 @@ from .service_api import (
 
 _logger = environ.get_logger("ai.runtime")
 _AGENT_TASK_FIELDS = frozenset({"type", "version", "agent_id", "user_prompt"})
+
+
+class _GatedExecutionService(Protocol):
+    async def _run_with_launch_gate(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        gate: Callable[[str], Awaitable[None]],
+    ) -> ExecutionHandle: ...
+
+
+class _GatedSessionService(Protocol):
+    async def _resume_with_launch_gate(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+        gate: Callable[[str], Awaitable[None]],
+    ) -> ExecutionHandle: ...
+
+
+class _PreparedEventService(Protocol):
+    async def _prepare_local_stream(self, execution_id: str) -> None: ...
 
 
 class Runtime:
@@ -143,6 +167,7 @@ class Runtime:
         session_id: "str | None",
         idempotency_key: "str | None",
         memory_scope: "str | None",
+        launch_gate: "Callable[[str], Awaitable[None]] | None" = None,
     ) -> ExecutionHandle:
         self._ensure_open()
         principal = self._resolve_principal(principal)
@@ -157,7 +182,11 @@ class Runtime:
             definition = await self._compile_and_register(
                 "default" if agent_id is None else agent_id
             )
-            handle = await self.execution.run(definition.digest, request)
+            if launch_gate is None:
+                handle = await self.execution.run(definition.digest, request)
+            else:
+                gated = cast(_GatedExecutionService, self.execution)
+                handle = await gated._run_with_launch_gate(definition.digest, request, launch_gate)
         else:
             if not session_id.strip():
                 raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -169,16 +198,22 @@ class Runtime:
             if agent_id is not None and definition.spec.id != agent_id:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
             await self._ensure_session(definition, session_id, principal)
-            handle = await self.session.resume(
-                definition.digest,
-                session_id,
-                ResumeSessionRequest(
-                    principal,
-                    user_prompt,
-                    request.idempotency_key or "",
-                    request.memory_scope,
-                ),
+            resume_request = ResumeSessionRequest(
+                principal,
+                user_prompt,
+                request.idempotency_key or "",
+                request.memory_scope,
             )
+            if launch_gate is None:
+                handle = await self.session.resume(definition.digest, session_id, resume_request)
+            else:
+                gated = cast(_GatedSessionService, self.session)
+                handle = await gated._resume_with_launch_gate(
+                    definition.digest,
+                    session_id,
+                    resume_request,
+                    launch_gate,
+                )
         _logger.info(
             "runtime execution admitted: execution=%s agent=%s session=%s",
             handle.execution_id,
@@ -308,6 +343,7 @@ class Runtime:
         idempotency_key: "str | None",
         memory_scope: "str | None",
     ) -> AsyncIterator[ExecutionStreamEvent]:
+        prepared_events = cast(_PreparedEventService, self.event)
         handle = await self._start_for_agent(
             agent_id,
             user_prompt,
@@ -315,6 +351,7 @@ class Runtime:
             session_id=session_id,
             idempotency_key=idempotency_key,
             memory_scope=memory_scope,
+            launch_gate=prepared_events._prepare_local_stream,
         )
         async for event in self.event.stream(handle.execution_id, principal=principal):
             yield event

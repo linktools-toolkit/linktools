@@ -9,7 +9,7 @@ from binascii import Error as Base64Error
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Protocol, cast
 
 from linktools.core import environ
 
@@ -61,6 +61,20 @@ _logger = environ.get_logger("ai.runtime.session")
 
 class _SessionReleaseCallback(Protocol):
     async def __call__(self, session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None: ...
+
+
+class _LaunchGate(Protocol):
+    async def __call__(self, execution_id: str) -> None: ...
+
+
+class _GatedExecutionService(Protocol):
+    async def _run_for_session_with_launch_gate(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+        gate: _LaunchGate,
+    ) -> ExecutionHandle: ...
 
 
 async def _no_release_terminal(session_id: str, *, tenant_id: str, continuation: ConversationCursor | None) -> None:
@@ -238,6 +252,25 @@ class DefaultSessionService:
             return LoadedSession(await self._view(record, principal), active)
 
     async def resume(self, binding_digest: str, session_id: str, request: ResumeSessionRequest) -> ExecutionHandle:
+        return await self._resume(binding_digest, session_id, request, launch_gate=None)
+
+    async def _resume_with_launch_gate(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+        gate: _LaunchGate,
+    ) -> ExecutionHandle:
+        return await self._resume(binding_digest, session_id, request, launch_gate=gate)
+
+    async def _resume(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ResumeSessionRequest,
+        *,
+        launch_gate: _LaunchGate | None,
+    ) -> ExecutionHandle:
         async with self._session_consumer(session_id, request.principal.tenant_id):
             record = await self._authorized(session_id, request.principal, AuthorizationAction.SESSION_READ)
             record = await self._reconcile_terminal_admission(record)
@@ -248,15 +281,24 @@ class DefaultSessionService:
             )
             if record.binding_digest != binding_digest:
                 raise AIError(ErrorCode.SESSION_BINDING_MISMATCH)
-            return await self._execution.run_for_session(
+            execution_request = ExecutionRequest(
+                user_prompt=request.user_prompt,
+                principal=request.principal,
+                idempotency_key=request.idempotency_key,
+                memory_scope=request.memory_scope,
+            )
+            if launch_gate is None:
+                return await self._execution.run_for_session(
+                    binding_digest,
+                    session_id,
+                    execution_request,
+                )
+            gated = cast(_GatedExecutionService, self._execution)
+            return await gated._run_for_session_with_launch_gate(
                 binding_digest,
                 session_id,
-                ExecutionRequest(
-                    user_prompt=request.user_prompt,
-                    principal=request.principal,
-                    idempotency_key=request.idempotency_key,
-                    memory_scope=request.memory_scope,
-                ),
+                execution_request,
+                launch_gate,
             )
 
     async def fork(self, binding_digest: str, session_id: str, request: ForkSessionRequest) -> SessionView:

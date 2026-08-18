@@ -136,7 +136,8 @@ class FilesystemStateStore:
         else:
             if not self._root.is_dir():
                 raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-            if not any(self._root.iterdir()):
+            entries = tuple(self._root.iterdir())
+            if not entries:
                 self._set_empty_index()
                 self._initialized = True
                 _logger.info(
@@ -145,6 +146,18 @@ class FilesystemStateStore:
                     self._root,
                 )
                 return
+            if all(path.name == "state.lock" for path in entries):
+                async with self._lock:
+                    entries = tuple(self._root.iterdir())
+                    if all(path.name == "state.lock" for path in entries):
+                        self._set_empty_index()
+                        self._initialized = True
+                        _logger.info(
+                            "filesystem StateStore found unprovisioned root: domain=%s root=%s",
+                            self._runtime_domain,
+                            self._root,
+                        )
+                        return
             self._validate_existing_root()
             if (self._root / ".txn").exists():
                 async with self._lock:
@@ -193,12 +206,18 @@ class FilesystemStateStore:
             await self._lock.__aexit__(None, None, None)
 
     async def mutate(self, fn: StateCallback[ValueT]) -> ValueT:
+        """Run a retry-safe callback inside one speculative transaction.
+
+        The callback must keep effects inside the supplied transaction. It can
+        run a second time only after a concurrent generation change.
+        """
         self._ensure_ready()
         active = active_state_transaction(self)
         if active is not None:
             return await fn(active)
         if self._lock.path.exists() or (self._root / ".txn").exists():
             return await self._mutate_locked(fn)
+        generation = self._generation()
         transaction = _FilesystemTransaction(self._root, self._refresh_index())
         token = bind_state_transaction(self, transaction)
         try:
@@ -207,7 +226,12 @@ class FilesystemStateStore:
             reset_state_transaction(token)
         if not transaction.has_changes:
             return result
-        return await self._mutate_locked(fn)
+        return await self._mutate_locked(
+            fn,
+            speculative=transaction,
+            speculative_generation=generation,
+            speculative_result=result,
+        )
 
     async def validate_integrity(self) -> None:
         self._ensure_ready()
@@ -225,6 +249,8 @@ class FilesystemStateStore:
             return 0
         if self._root.is_dir() and not any(self._root.iterdir()):
             return 0
+        if self._root.is_dir() and all(path.name == "state.lock" for path in self._root.iterdir()):
+            return 0
         try:
             return int((self._root / "generation").read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -237,7 +263,14 @@ class FilesystemStateStore:
             self._index_generation = generation
         return self._index
 
-    async def _mutate_locked(self, fn: StateCallback[ValueT]) -> ValueT:
+    async def _mutate_locked(
+        self,
+        fn: StateCallback[ValueT],
+        *,
+        speculative: "_FilesystemTransaction | None" = None,
+        speculative_generation: int | None = None,
+        speculative_result: ValueT | None = None,
+    ) -> ValueT:
         await self._lock.__aenter__()
         token = None
         try:
@@ -245,9 +278,14 @@ class FilesystemStateStore:
             await self._recover()
             self._index = self._load_index()
             self._index_generation = self._generation()
-            transaction = _FilesystemTransaction(self._root, self._index)
-            token = bind_state_transaction(self, transaction)
-            result = await fn(transaction)
+            generation = self._index_generation
+            if speculative is not None and generation == speculative_generation:
+                transaction = speculative
+                result = speculative_result
+            else:
+                transaction = _FilesystemTransaction(self._root, self._index)
+                token = bind_state_transaction(self, transaction)
+                result = await fn(transaction)
             await self._commit(transaction)
             return result
         finally:
@@ -651,6 +689,14 @@ class _FilesystemTransaction:
         self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
         return value
 
+    async def reserve_sequence(self, key: bytes, count: int) -> int:
+        if count < 1:
+            raise ValueError("sequence reservation count must be positive")
+        value = self.sequences.get(key, 0) + count
+        self.sequences[key] = value
+        self._write(_sequence_path(self._root, key), {"key": key.hex(), "value": value})
+        return value
+
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         if self.sequences.get(key, 0) != expected:
             raise AIError(ErrorCode.STORAGE_CONFLICT)
@@ -680,6 +726,10 @@ class _FilesystemTransaction:
         self._facts[key] = fact
         self._write(_fact_item_path(self._root, fact.stream_digest, fact.sequence), encode_fact(fact))
         self._sync_fact_stream(info, subject=fact.subject_digest, sequence=fact.sequence)
+
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        for fact in facts:
+            await self.insert_fact(fact)
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         info = self.fact_streams.get(query.stream_digest)

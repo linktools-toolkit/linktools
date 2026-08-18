@@ -44,9 +44,15 @@ from ..core import (
     validate_tenant_id,
 )
 from ..errors import AIError, ErrorCode
-from ..storage import ObjectStore, PayloadPolicy, StorageMetrics, StoredPayload, payload_fits_inline
-from ._execution import CancelEffectOutcome, ExecutionStartIdentity
+from ..storage import (
+    ObjectStore,
+    PayloadPolicy,
+    StorageMetrics,
+    StoredPayload,
+    payload_fits_inline,
+)
 from ._event import ExecutionDelta, LiveExecutionEventBroker
+from ._execution import CancelEffectOutcome, ExecutionStartIdentity
 from ._object import RuntimeObjectKeyFactory, put_runtime_object, read_runtime_object
 from .service_api import ExecutionRequest
 from .state import ConversationState, ExecutionState, RecoveryState
@@ -68,6 +74,7 @@ from .state._contracts import (
     ResultRecord,
 )
 from .state._plan import RuntimeDomain
+
 
 class _SubagentDispatcher(Protocol):
     def delegate_for(
@@ -1436,12 +1443,33 @@ class LocalExecutionBackend:
                     recovery_history_run_id = checkpoint.step_run_id
                     if recovery_history_run_id is None:
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    snapshot = await self._step_store(RuntimeDomain.RECOVERY).latest_snapshot(
+                    recovery_store = self._step_store(RuntimeDomain.RECOVERY)
+                    recovery_run = await recovery_store.get_run(run_id=recovery_history_run_id)
+                    snapshot = await recovery_store.latest_snapshot(
                         run_id=recovery_history_run_id,
                         include_interrupted=True,
                     )
+                    unresolved = await recovery_store.list_unresolved_tool_effects(
+                        run_id=recovery_history_run_id,
+                    )
                     if snapshot is None:
-                        raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
+                        if recovery_run is None:
+                            _logger.info(
+                                "recovery attempt has no durable step progress: execution=%s run=%s",
+                                execution_id,
+                                recovery_history_run_id,
+                            )
+                            recovery_history_run_id = None
+                        else:
+                            raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
+                    elif unresolved:
+                        _logger.error(
+                            "recovery attempt has unresolved tool effects: execution=%s run=%s count=%s",
+                            execution_id,
+                            recovery_history_run_id,
+                            len(unresolved),
+                        )
+                        raise AIError(ErrorCode.TOOL_EFFECT_UNKNOWN)
                 else:
                     raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
                 checkpoint = await self._activate_recovery_attempt(
@@ -1730,6 +1758,7 @@ class LocalExecutionBackend:
         }:
             await self._release_session_admission_best_effort(current)
             return
+        await self._step_lifecycle.flush_execution_projection(step_run_id=run_id)
         if self._recovery_enabled:
             await self._commit_terminal(
                 current,
@@ -1954,6 +1983,8 @@ class LocalExecutionBackend:
         }:
             await self._release_session_admission_best_effort(current)
             return
+        if run_id is not None:
+            await self._step_lifecycle.flush_execution_projection(step_run_id=run_id)
         now = datetime.now(timezone.utc)
         captured_usage = usage or self._captured_usage.get(execution.execution_id, UsageMetrics())
         if definition is None:

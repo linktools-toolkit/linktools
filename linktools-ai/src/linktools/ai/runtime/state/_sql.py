@@ -15,8 +15,8 @@ from ...storage import (
     SqlStorageContext,
     create_sql_storage_context,
 )
-from ._schema import build_runtime_sql_metadata
 from ._plan import RuntimeDomain
+from ._schema import build_runtime_sql_metadata
 from ._store import (
     FactQuery,
     OperationQuery,
@@ -458,6 +458,19 @@ class _SqlTransaction:
             index_elements=("key_digest",),
         )
 
+    async def reserve_sequence(self, key: bytes, count: int) -> int:
+        if count < 1:
+            raise ValueError("sequence reservation count must be positive")
+        table = self._table("ai_state_sequences")
+        return await self._context.dialect.upsert_increment(
+            self._session,
+            table=table,
+            values={"key_digest": _hex(key), "value": count},
+            column="value",
+            index_elements=("key_digest",),
+            step=count,
+        )
+
     async def advance_sequence(self, key: bytes, expected: int) -> int:
         from sqlalchemy import func, update
 
@@ -484,6 +497,17 @@ class _SqlTransaction:
         if fact.owner_key_digest not in self._guarded_record_keys:
             raise RuntimeError("fact owner must be guarded in the current transaction")
         await self._session.execute(insert(self._table("ai_state_facts")).values(_fact_values(fact)))
+
+    async def insert_facts(self, facts: Sequence[StoredFact]) -> None:
+        if not facts:
+            return
+        if any(fact.owner_key_digest not in self._guarded_record_keys for fact in facts):
+            raise RuntimeError("fact owner must be guarded in the current transaction")
+        from sqlalchemy import insert
+
+        await self._session.execute(
+            insert(self._table("ai_state_facts")).values([_fact_values(fact) for fact in facts])
+        )
 
     async def list_facts(self, query: FactQuery) -> tuple[StoredFact, ...]:
         from sqlalchemy import func, select

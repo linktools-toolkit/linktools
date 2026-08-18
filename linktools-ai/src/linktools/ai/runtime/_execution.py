@@ -32,8 +32,10 @@ from ..core import (
     StopReason,
     UsageMetrics,
     canonical_sha256,
-    idempotency_key_digest as compute_idempotency_key_digest,
     principal_identity_payload,
+)
+from ..core import (
+    idempotency_key_digest as compute_idempotency_key_digest,
 )
 from ..errors import AIError, ErrorCode
 from ..storage import ObjectStore, read_object
@@ -102,6 +104,10 @@ class _ExecutionTerminalVerifier(Protocol):
 
 class _SubagentCancellation(Protocol):
     async def cancel_children(self, parent_execution_id: str, principal: Principal) -> None: ...
+
+
+class _LaunchGate(Protocol):
+    async def __call__(self, execution_id: str) -> None: ...
 
 
 async def _no_release_terminal(execution_id: str, *, tenant_id: str) -> None:
@@ -309,6 +315,31 @@ class DefaultExecutionService:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
         return await self._start(binding_digest, request, session_id=session_id, scope="session.resume")
 
+    async def _run_with_launch_gate(
+        self,
+        binding_digest: str,
+        request: ExecutionRequest,
+        gate: _LaunchGate,
+    ) -> ExecutionHandle:
+        return await self._start(binding_digest, request, scope="execution.run", launch_gate=gate)
+
+    async def _run_for_session_with_launch_gate(
+        self,
+        binding_digest: str,
+        session_id: str,
+        request: ExecutionRequest,
+        gate: _LaunchGate,
+    ) -> ExecutionHandle:
+        if not session_id.strip():
+            raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
+        return await self._start(
+            binding_digest,
+            request,
+            session_id=session_id,
+            scope="session.resume",
+            launch_gate=gate,
+        )
+
     async def start_subagent(
         self,
         binding_digest: str,
@@ -348,6 +379,7 @@ class DefaultExecutionService:
         root_execution_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
+        launch_gate: _LaunchGate | None = None,
     ) -> ExecutionHandle:
         if session_id is None:
             return await self._start_unlocked(
@@ -361,6 +393,7 @@ class DefaultExecutionService:
                 root_execution_id=root_execution_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
+                launch_gate=launch_gate,
             )
         async with self._session_guard(request.principal.tenant_id, session_id):
             return await self._start_unlocked(
@@ -374,6 +407,7 @@ class DefaultExecutionService:
                 root_execution_id=root_execution_id,
                 lineage_kind=lineage_kind,
                 scope=scope,
+                launch_gate=launch_gate,
             )
 
     async def _start_unlocked(
@@ -389,6 +423,7 @@ class DefaultExecutionService:
         root_execution_id: "str | None" = None,
         lineage_kind: ExecutionLineageKind = ExecutionLineageKind.RUN,
         scope: str = "execution.run",
+        launch_gate: _LaunchGate | None = None,
     ) -> ExecutionHandle:
         if re.fullmatch(r"[0-9a-f]{64}", binding_digest) is None:
             raise AIError(ErrorCode.REQUEST_FIELD_INVALID)
@@ -427,6 +462,7 @@ class DefaultExecutionService:
                         pending,
                         scope=scope,
                         idempotency_key_digest=idempotency_key_digest,
+                        launch_gate=launch_gate,
                     )
                     return ExecutionHandle(existing.resource_id)
                 if pending is None or pending.status is not ExecutionStatus.PENDING_START:
@@ -437,6 +473,7 @@ class DefaultExecutionService:
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
+                    launch_gate=launch_gate,
                 )
                 return ExecutionHandle(existing.resource_id)
             if existing.status is IdempotencyStatus.FAILED:
@@ -459,6 +496,7 @@ class DefaultExecutionService:
                 started,
                 scope=scope,
                 idempotency_key_digest=idempotency_key_digest,
+                launch_gate=launch_gate,
             )
             return ExecutionHandle(existing.resource_id)
         now = datetime.now(timezone.utc)
@@ -512,6 +550,7 @@ class DefaultExecutionService:
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
                     request_digest=request_digest,
+                    launch_gate=launch_gate,
                 )
             elif reservation.idempotency.status is IdempotencyStatus.STARTED and reservation.execution.status in {
                 ExecutionStatus.STARTED,
@@ -525,6 +564,7 @@ class DefaultExecutionService:
                     reservation.execution,
                     scope=scope,
                     idempotency_key_digest=idempotency_key_digest,
+                    launch_gate=launch_gate,
                 )
             elif reservation.execution.status is ExecutionStatus.START_UNKNOWN or reservation.idempotency.status is IdempotencyStatus.START_UNKNOWN:
                 raise AIError(ErrorCode.EXECUTION_START_UNKNOWN)
@@ -538,6 +578,7 @@ class DefaultExecutionService:
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
             request_digest=request_digest,
+            launch_gate=launch_gate,
         )
         _logger.info("execution started: execution=%s scope=%s", execution_id, scope)
         return ExecutionHandle(execution_id)
@@ -572,6 +613,7 @@ class DefaultExecutionService:
         scope: str,
         idempotency_key_digest: str,
         request_digest: str,
+        launch_gate: _LaunchGate | None = None,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -623,6 +665,7 @@ class DefaultExecutionService:
             started,
             scope=scope,
             idempotency_key_digest=idempotency_key_digest,
+            launch_gate=launch_gate,
         )
 
     async def _reject_pending_start(
@@ -754,6 +797,7 @@ class DefaultExecutionService:
         *,
         scope: str,
         idempotency_key_digest: str,
+        launch_gate: _LaunchGate | None = None,
     ) -> None:
         if self._backend is None:
             raise AIError(ErrorCode.RUNTIME_DEPENDENCY_NOT_READY)
@@ -776,6 +820,8 @@ class DefaultExecutionService:
         if launch_record.status is not ExecutionStatus.STARTED:
             raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
         try:
+            if launch_gate is not None:
+                await launch_gate(launch_record.execution_id)
             await self._backend.launch(request, launch_record)
         except asyncio.CancelledError:
             raise

@@ -152,6 +152,8 @@ class LiveExecutionEventBroker:
         self._activity: dict[str, asyncio.Event] = {}
         self._completed: set[str] = set()
         self._durable_sequences: dict[str, int] = {}
+        self._prepared: dict[str, _LiveSubscription] = {}
+        self._local_producers: dict[str, str] = {}
 
     def publish(self, delta: ExecutionDelta) -> None:
         if not delta.content:
@@ -226,11 +228,9 @@ class LiveExecutionEventBroker:
         self._signal(execution_id)
 
     def subscribe(self, execution_id: str) -> _LiveSubscription:
-        subscription = _LiveSubscription(
-            self,
-            execution_id,
-            self._max_bytes,
-        )
+        subscription = self._prepared.pop(execution_id, None)
+        if subscription is None:
+            subscription = _LiveSubscription(self, execution_id, self._max_bytes)
         self._subscriptions.setdefault(execution_id, set()).add(subscription)
         for item in self._buffers.get(execution_id, ()):
             if isinstance(item, ExecutionDelta):
@@ -248,6 +248,17 @@ class LiveExecutionEventBroker:
             subscription.finish()
         return subscription
 
+    def prepare_local_producer(self, execution_id: str) -> None:
+        if execution_id in self._prepared:
+            return
+        subscription = _LiveSubscription(self, execution_id, self._max_bytes)
+        self._prepared[execution_id] = subscription
+        self._local_producers[execution_id] = "active"
+        _logger.debug("local event stream prepared: execution=%s", execution_id)
+
+    def is_local_producer(self, execution_id: str) -> bool:
+        return execution_id in self._local_producers
+
     async def wait_for_activity(self, execution_id: str) -> None:
         event = self._activity.setdefault(execution_id, asyncio.Event())
         await event.wait()
@@ -255,11 +266,16 @@ class LiveExecutionEventBroker:
 
     def complete(self, execution_id: str) -> None:
         self._completed.add(execution_id)
+        if execution_id in self._local_producers:
+            self._local_producers[execution_id] = "completed"
+        prepared = self._prepared.get(execution_id)
+        if prepared is not None:
+            prepared.finish()
         subscriptions = tuple(self._subscriptions.get(execution_id, ()))
         for subscription in subscriptions:
             subscription.finish()
         self._signal(execution_id)
-        if not subscriptions:
+        if not subscriptions and prepared is None:
             self._release_execution(execution_id)
 
     def _signal(self, execution_id: str) -> None:
@@ -294,6 +310,8 @@ class LiveExecutionEventBroker:
         self._completed.discard(execution_id)
         self._durable_sequences.pop(execution_id, None)
         self._activity.pop(execution_id, None)
+        self._prepared.pop(execution_id, None)
+        self._local_producers.pop(execution_id, None)
 
 
 def _bounded_delta(delta: ExecutionDelta, max_bytes: int) -> ExecutionDelta:
@@ -355,6 +373,9 @@ class DefaultEventService:
     def live_broker(self) -> LiveExecutionEventBroker:
         return self._live
 
+    async def _prepare_local_stream(self, execution_id: str) -> None:
+        self._live.prepare_local_producer(execution_id)
+
     async def list(self, execution_id: str, *, principal: Principal, after_sequence: int = 0, limit: int = 100) -> Page[ExecutionEvent]:
         header = await self._executions.get_header(execution_id, tenant_id=principal.tenant_id)
         if header is None:
@@ -384,6 +405,7 @@ class DefaultEventService:
     ) -> AsyncIterator[ExecutionStreamEvent]:
         cursor = after_sequence
         live = self._live.subscribe(execution_id)
+        local_producer = self._live.is_local_producer(execution_id)
         live_task: asyncio.Task[_OrderedItem] | None = None
         activity_task: asyncio.Task[None] | None = None
         try:
@@ -427,11 +449,12 @@ class DefaultEventService:
             while True:
                 if live_task is None:
                     live_task = asyncio.create_task(live.__anext__())
-                if activity_task is None:
+                if not local_producer and activity_task is None:
                     activity_task = asyncio.create_task(self._live.wait_for_activity(execution_id))
+                wait_tasks = (live_task,) if local_producer else (live_task, activity_task)
                 done, _ = await asyncio.wait(
-                    (live_task, activity_task),
-                    timeout=1.0,
+                    wait_tasks,
+                    timeout=None if local_producer else 1.0,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 if not done:

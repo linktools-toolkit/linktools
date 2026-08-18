@@ -101,20 +101,31 @@ class FilesystemAssetBackend:
                 else:
                     if not self._directory.is_dir():
                         raise AIError(ErrorCode.STORAGE_INTEGRITY_ERROR)
-                    if not any(self._directory.iterdir()):
+                    entries = tuple(self._directory.iterdir())
+                    if not entries:
                         self._set_empty_state()
+                    elif all(path.name == "asset.lock" for path in entries):
+                        async with FilesystemMutationLock(self._lock_path):
+                            entries = tuple(self._directory.iterdir())
+                            if all(path.name == "asset.lock" for path in entries):
+                                self._set_empty_state()
+                            else:
+                                await self._load_existing_root()
                     else:
-                        self._validate_existing_root()
-                        if (self._directory / ".txn").exists() and not self._writable:
-                            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
-                        if (self._directory / ".txn").exists():
-                            async with FilesystemMutationLock(self._lock_path):
-                                await self._recover()
-                        await self._load_state()
+                        await self._load_existing_root()
         except OSError as error:
             raise AIError(ErrorCode.STORAGE_UNAVAILABLE) from error
         self._ready = True
         _logger.debug("filesystem Asset backend initialized: root=%s revision=%s", self._directory, self._revision)
+
+    async def _load_existing_root(self) -> None:
+        self._validate_existing_root()
+        if (self._directory / ".txn").exists() and not self._writable:
+            raise AIError(ErrorCode.STORAGE_RECOVERY_REQUIRED)
+        if (self._directory / ".txn").exists():
+            async with FilesystemMutationLock(self._lock_path):
+                await self._recover()
+        await self._load_state()
 
     async def close(self) -> None:
         self._ready = False
